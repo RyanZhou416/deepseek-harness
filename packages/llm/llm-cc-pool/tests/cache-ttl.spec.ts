@@ -1,8 +1,8 @@
 /**
  * Prompt-cache policy: the route's default three-marker one-hour layout, the
- * identity block it forwards, its exact placement, the loud refusal of
- * impossible combinations at load, and the guarantee that no other provider
- * route changes.
+ * identity block it forwards, its exact placement and field order, the loud
+ * refusal of impossible combinations at load, and the guarantee that no other
+ * provider route changes.
  */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -143,10 +143,14 @@ describe('pool prompt-cache policy', () => {
     const request = await probe()
 
     // PROBE has a system prompt, two tools, and one user turn, so the policy
-    // places the identity block, the harness system marker, and the last-user
-    // marker; no tool declaration is marked.
+    // marks the identity block, the harness system block, and the last-user
+    // block; no tool declaration is marked.
     expect(request.body['system']).toEqual([
-      { type: 'text', text: IDENTITY },
+      {
+        type: 'text',
+        text: IDENTITY,
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      },
       {
         type: 'text',
         text: 'You are the pool test assistant.',
@@ -155,8 +159,10 @@ describe('pool prompt-cache policy', () => {
     ])
     expect(markersOf(request.body)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
+    expect(JSON.stringify(request.body).match(/"cache_control"/gu)).toHaveLength(3)
     const tools = request.body['tools'] as Record<string, unknown>[]
     expect(tools.every(tool => !('cache_control' in tool))).toBe(true)
     expect(betasOf(request)).toEqual([EXTENDED_CACHE_TTL_BETA])
@@ -165,7 +171,29 @@ describe('pool prompt-cache policy', () => {
     expect(JSON.stringify(request.body)).not.toContain(CACHE_SCOPE_BETA)
   })
 
-  it('marks the previous message whatever its role when the conversation has one', async () => {
+  it('writes the pinned client field order with metadata in its canonical slot', async () => {
+    const request = await probe()
+
+    // The payload follows the pinned client's order rather than pi-ai's
+    // construction order, with `stream` last.
+    expect(Object.keys(request.body)).toEqual([
+      'model',
+      'messages',
+      'system',
+      'tools',
+      'metadata',
+      'max_tokens',
+      'thinking',
+      'output_config',
+      'stream',
+    ])
+    // The empty placeholder is what keeps the pool's spliced `metadata.user_id`
+    // in the canonical slot: its forward-body editor writes the member into an
+    // existing metadata object instead of appending a second top-level one.
+    expect(request.body['metadata']).toEqual({})
+  })
+
+  it('does not mark the message before the last user turn', async () => {
     const request = await probe({}, {
       messages: [
         user('hello'),
@@ -174,11 +202,14 @@ describe('pool prompt-cache policy', () => {
       ],
     })
 
+    // The assistant turn is not a slot: the policy marks only the identity and
+    // harness system blocks and the last user block.
     expect(markersOf(request.body)).toEqual([
-      ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
+    expect(JSON.stringify(request.body).match(/"cache_control"/gu)).toHaveLength(3)
   })
 
   it('no longer declares a tool-cache switch or a tool marker', async () => {
@@ -229,6 +260,7 @@ describe('pool prompt-cache policy', () => {
     expect(capture.calls[1]?.url.startsWith('https://other.example')).toBe(true)
     expect(markersOf(capture.calls[0]?.body ?? {})).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
     expect(markersOf(capture.calls[1]?.body ?? {})).toEqual([
@@ -238,12 +270,18 @@ describe('pool prompt-cache policy', () => {
     ])
     const other = capture.calls[1]
     if (other === undefined) throw new Error('the second route sent no request')
+    // The other route keeps pi-ai's construction order and gains no metadata
+    // placeholder.
+    expect(Object.keys(other.body)).toEqual(['model', 'messages', 'max_tokens', 'stream', 'system', 'tools'])
+    expect(other.body['metadata']).toBeUndefined()
     expect(JSON.stringify(other.body)).not.toContain('"ttl"')
     expect(JSON.stringify(other.body)).not.toContain(IDENTITY)
     expect(betasOf(other)).toEqual([])
-    // The pool route's beta and marker policy reached only the pool route.
+    // The pool route's beta, marker policy, and field order reached only the pool
+    // route.
     const pool = capture.calls[0]
     if (pool === undefined) throw new Error('the pool route sent no request')
+    expect(Object.keys(pool.body).at(-1)).toBe('stream')
     expect(JSON.stringify(pool.body)).toContain(IDENTITY)
     expect(betasOf(pool)).toEqual([EXTENDED_CACHE_TTL_BETA])
   })

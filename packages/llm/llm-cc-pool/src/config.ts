@@ -58,15 +58,15 @@ export interface Config {
   /**
    * Prompt-cache marker placement this route asks pi-ai to perform. The
    * default `cc3` places the Claude Code 2.1.288 layout — the client identity
-   * system block, the harness system block, the last cacheable user content
-   * block, and the previous cacheable message — with
-   * `{type: "ephemeral", ttl: "1h"}` on each system and message slot, and no
-   * marker on any tool declaration. The policy owns placement, so it takes
-   * precedence over the lifetime {@link cacheTtl} selects, and a request with a
-   * single message carries only the system and last-user slots. It requires
-   * `cacheTtl: "1h"` and {@link extendedCacheBeta}: an impossible combination is
-   * refused at load and on a settings write, never at request time. No other
-   * provider route reads this value.
+   * system block, the harness system block, and the last cacheable user content
+   * block — with `{type: "ephemeral", ttl: "1h"}` on each slot, and no marker on
+   * any tool declaration or on a message before the last user turn. The policy
+   * owns placement, so it takes precedence over the lifetime {@link cacheTtl}
+   * selects, and it also writes the pinned client's top-level field order with
+   * an empty `metadata` placeholder in its canonical slot for the pool's
+   * `user_id` splice. It requires `cacheTtl: "1h"` and {@link extendedCacheBeta}:
+   * an impossible combination is refused at load and on a settings write, never
+   * at request time. No other provider route reads this value.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**

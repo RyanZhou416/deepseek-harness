@@ -1,8 +1,8 @@
 /**
  * Route-scoped Anthropic prompt-cache policy: the explicit extended-beta
  * opt-in, its independence from the retention tier, the opt-in Claude Code
- * three-marker layout, and the guarantee that a second pi-ai route and the
- * DeepSeek route stay as they were.
+ * three-marker layout, its pinned field order, and the guarantee that a second
+ * pi-ai route and the DeepSeek route stay as they were.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -237,7 +237,7 @@ describe('Anthropic extended cache TTL beta', () => {
   })
 })
 
-/** An assistant turn whose only content is a tool call, so it is a tool-only previous message. */
+/** An assistant turn whose only content is a tool call, so it is a tool-only message. */
 function assistantToolCall(provider: string) {
   return createAssistantMessage({
     content: [{ type: 'tool-call', id: ToolCallId('call-1'), name: 'echo', arguments: '{}' }],
@@ -313,18 +313,20 @@ describe('Anthropic cc3 marker policy', () => {
     const plain = plainServer.requests[0] as Record<string, unknown>
 
     // The system array opens with the byte-exact Claude Code identity line and
-    // then the harness prompt; only the harness block carries a marker.
+    // then the harness prompt; both carry the one-hour marker.
     expect(cc3['system']).toEqual([
-      { type: 'text', text: IDENTITY },
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
       { type: 'text', text: PROBE.system, cache_control: { type: 'ephemeral', ttl: '1h' } },
     ])
-    // Exactly three slots: the harness system block, the previous assistant
-    // message, and the last user block. No tool declaration is marked.
+    // Exactly three slots: the identity block, the harness system block, and the
+    // last user block. The assistant turn before it is not marked, and no tool
+    // declaration is marked.
     expect(markersOf(cc3)).toEqual([
-      ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
+    expect(JSON.stringify(cc3).match(/"cache_control"/gu)).toHaveLength(3)
     const tools = cc3['tools'] as Record<string, unknown>[]
     expect(tools.every(tool => !('cache_control' in tool))).toBe(true)
     expect(JSON.stringify(cc3)).not.toContain('"scope"')
@@ -332,8 +334,16 @@ describe('Anthropic cc3 marker policy', () => {
     expect(betasOf(cc3Server.headers[0] ?? {})).toEqual([EXTENDED_CACHE_TTL_BETA])
     expect(betasOf(cc3Server.headers[0] ?? {})).not.toContain(CACHE_SCOPE_BETA)
 
-    // The unconfigured route is untouched: pi-ai's three default markers, no
-    // identity block, no one-hour value, and no beta.
+    // The cc3 route writes the pinned client's top-level key order, with the
+    // empty metadata placeholder the pool's user_id splice fills in place, and
+    // stream last.
+    expect(Object.keys(cc3)).toEqual(['model', 'messages', 'system', 'tools', 'metadata', 'max_tokens', 'stream'])
+    expect(cc3['metadata']).toEqual({})
+
+    // The unconfigured route is untouched: pi-ai's own key order, three default
+    // markers, no identity block, no one-hour value, no metadata placeholder,
+    // and no beta.
+    expect(Object.keys(plain)).toEqual(['model', 'messages', 'max_tokens', 'stream', 'system', 'tools'])
     expect(markersOf(plain)).toEqual([
       ['.messages[2].content[0].cache_control', { type: 'ephemeral' }],
       ['.system[0].cache_control', { type: 'ephemeral' }],
@@ -341,10 +351,11 @@ describe('Anthropic cc3 marker policy', () => {
     ])
     expect(JSON.stringify(plain)).not.toContain(IDENTITY)
     expect(JSON.stringify(plain)).not.toContain('"ttl"')
+    expect(plain['metadata']).toBeUndefined()
     expect(betasOf(plainServer.headers[0] ?? {})).toEqual([])
   })
 
-  it('skips a tool-only previous message and marks the earlier cacheable one', async () => {
+  it('leaves the assistant turn before the last user block unmarked', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const server = await mockServer([{ events: anthropicTextEvents }])
     const ctx = new Context()
@@ -375,16 +386,17 @@ describe('Anthropic cc3 marker policy', () => {
     // and nothing else.
     expect(messages[1]?.content.map(block => block.type)).toEqual(['tool_use'])
     expect(messages[2]?.content.map(block => block.type)).toEqual(['tool_result'])
-    // Both tool-only messages are skipped, and the user turn before them is the
-    // previous slot instead.
+    // The policy marks only the last user turn, which is the continue prompt;
+    // the tool-only messages stay unmarked along with every other earlier turn.
     expect(markersOf(body)).toEqual([
-      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.messages[3].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
+    expect(JSON.stringify(body).match(/"cache_control"/gu)).toHaveLength(3)
   })
 
-  it('skips a thinking-tailed previous message and marks the earlier cacheable one', async () => {
+  it('leaves a thinking-tailed assistant turn unmarked', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const server = await mockServer([{ events: anthropicTextEvents }])
     const ctx = new Context()
@@ -412,14 +424,18 @@ describe('Anthropic cc3 marker policy', () => {
     const messages = body['messages'] as { role: string; content: { type: string }[] }[]
     // The setup is real: the assistant message ends with the thinking block.
     expect(messages[1]?.content.at(-1)?.type).toBe('thinking')
+    // The policy marks only the last user turn, so the thinking-tailed assistant
+    // turn stays unmarked; the identity, harness, and continue turn carry the
+    // markers.
     expect(markersOf(body)).toEqual([
-      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
+    expect(JSON.stringify(body).match(/"cache_control"/gu)).toHaveLength(3)
   })
 
-  it('marks only the system and last-user slots when the request has a single message', async () => {
+  it('marks the identity, harness, and last-user slots when the request has a single message', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const server = await mockServer([{ events: anthropicTextEvents }])
     const ctx = new Context()
@@ -446,18 +462,21 @@ describe('Anthropic cc3 marker policy', () => {
 
     const body = server.requests[0] as Record<string, unknown>
     expect(body['system']).toEqual([
-      { type: 'text', text: IDENTITY },
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
       { type: 'text', text: 'You are the three-marker assistant.', cache_control: { type: 'ephemeral', ttl: '1h' } },
     ])
-    // One message has no previous message, and no tool was sent.
+    // One message still carries the identity, harness, and last-user slots, and
+    // no tool was sent.
     expect(markersOf(body)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
+    expect(JSON.stringify(body).match(/"cache_control"/gu)).toHaveLength(3)
     expect(body['tools']).toBeUndefined()
   })
 
-  it('marks only the last-user slot when the request has no system prompt', async () => {
+  it('marks the identity and last-user slots when the request has no system prompt', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const server = await mockServer([{ events: anthropicTextEvents }])
     const ctx = new Context()
@@ -482,12 +501,16 @@ describe('Anthropic cc3 marker policy', () => {
     })
 
     const body = server.requests[0] as Record<string, unknown>
-    // The identity block is the only system block, so it is forwarded unmarked.
-    expect(body['system']).toEqual([{ type: 'text', text: IDENTITY }])
-    expect(markersOf(body)).toEqual([
-      ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    // The identity block is the only system block, so it is the whole system
+    // slot; the last user turn is the message slot.
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
     ])
+    expect(markersOf(body)).toEqual([
+      ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expect(JSON.stringify(body).match(/"cache_control"/gu)).toHaveLength(2)
   })
 
   it('leaves another Anthropic route and the DeepSeek route unchanged', async () => {
@@ -530,10 +553,11 @@ describe('Anthropic cc3 marker policy', () => {
     await assemble(ctx, { ...PROBE, provider: 'cache-plain' })
     await assemble(ctx, { ...PROBE, provider: 'deepseek-official', model: 'deepseek-model' })
 
-    // The cc3 route marks the two slots this request has, while the other
+    // The cc3 route marks the three slots this request has, while the other
     // routes keep their own placement and declare no beta.
     expect(markersOf(cc3Server.requests[0] as Record<string, unknown>)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
     expect(markersOf(plainServer.requests[0] as Record<string, unknown>)).toEqual([

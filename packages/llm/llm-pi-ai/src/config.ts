@@ -74,10 +74,10 @@ export const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
  *
  * Omission leaves placement to pi-ai's `cacheRetention` handling. `cc3` is the
  * Claude Code 2.1.288 layout: the client's identity system block, the harness
- * system block, the last cacheable user content block, and the previous
- * cacheable message. The policy owns the complete marker set and the identity
- * block on the route, so it removes every marker pi-ai or a caller placed
- * first, and it never marks a tool declaration.
+ * system block, and the last cacheable user content block. The policy owns the
+ * complete marker set, the identity block, and the top-level field order on the
+ * route, so it removes every marker pi-ai or a caller placed first, marks no
+ * message before the last user turn, and never marks a tool declaration.
  */
 export const CACHE_MARKER_POLICIES = ['cc3'] as const
 
@@ -201,17 +201,19 @@ export interface PiAiProviderProfile {
    * Prompt-cache marker placement this route's adapter performs on an Anthropic
    * Messages request. Omission keeps pi-ai's placement from
    * {@link cacheRetention}. `cc3` places the Claude Code 2.1.288 layout — the
-   * client's identity system block, the harness system block, the last cacheable
-   * user content block, and the previous cacheable message — with
-   * `{type: "ephemeral", ttl: "1h"}` on each system and message slot, and
-   * discards every other marker on the route. It marks no tool declaration, and
-   * the identity and billing system blocks stay unmarked. It owns placement
-   * outright, so it takes precedence over `cacheRetention` and over
-   * `compat.supportsCacheControlOnTools`; a request with a single message carries
-   * the system and last-user slots only, and a request with no caller system
-   * prompt carries the identity block alone. The policy adds no `scope` field and
-   * no scope beta, and {@link extendedCacheBeta} stays a separate explicit
-   * opt-in. Refused when no model on the route speaks `anthropic-messages`.
+   * client's identity system block, the harness system block, and the last
+   * cacheable user content block — with `{type: "ephemeral", ttl: "1h"}` on
+   * each slot, and discards every other marker on the route. It marks no tool
+   * declaration and no message before the last user turn, and the billing block
+   * the pool places ahead of the identity block stays unmarked too. It owns
+   * placement outright, so it takes precedence over `cacheRetention` and over
+   * `compat.supportsCacheControlOnTools`; a request with no caller system prompt
+   * marks the identity and last-user slots. The policy also writes the pinned
+   * client's top-level field order with `stream` last, and an absent `metadata`
+   * gains the empty object a pool's `user_id` splice fills in its canonical
+   * slot. It adds no `scope` field and no scope beta, and
+   * {@link extendedCacheBeta} stays a separate explicit opt-in. Refused when no
+   * model on the route speaks `anthropic-messages`.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /** Streaming transport preference. */

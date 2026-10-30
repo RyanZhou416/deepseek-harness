@@ -397,24 +397,6 @@ function cc3CacheControl(): Record<string, string> {
 }
 
 /**
- * Content types that end a message with no place for a breakpoint.
- *
- * A marker on either would cache no reasoning content, and the policy does not
- * search earlier blocks: a message whose trailing block is one of these is not
- * a candidate for the last-user slot and is skipped entirely for the previous
- * slot.
- */
-const UNCACHEABLE_BLOCK_TYPES: ReadonlySet<string> = new Set(['thinking', 'redacted_thinking'])
-
-/**
- * Content types that make a message tool traffic only.
- *
- * The client's last-and-previous planner does not select a tool-only message for
- * the previous slot, so one is skipped and the search continues backward.
- */
-const TOOL_BLOCK_TYPES: ReadonlySet<string> = new Set(['tool_use', 'tool_result'])
-
-/**
  * Whether provider payload data can carry request fields.
  * @param value - any value pi-ai hands an `onPayload` hook.
  * @returns whether the value is a plain JSON object.
@@ -487,14 +469,13 @@ function isIdentityBlock(value: unknown): boolean {
 }
 
 /**
- * Mark the trailing content block of one message, when it can carry a marker.
+ * Mark the trailing content block of one message.
  *
  * A text-only message may be serialized as a bare string; placing the marker
  * expands it to the one-block array the transport already uses for marked
- * messages. A trailing `thinking` or `redacted_thinking` block makes the
- * message uncacheable rather than a reason to search earlier blocks.
+ * messages.
  * @param message - one message pi-ai built.
- * @returns the marked message, or undefined when its trailing block is skipped.
+ * @returns the marked message, or undefined when it has no content block.
  */
 function markMessageTail(message: Record<string, unknown>): Record<string, unknown> | undefined {
   const content = message['content']
@@ -507,46 +488,77 @@ function markMessageTail(message: Record<string, unknown>): Record<string, unkno
   const last = blocks[blocks.length - 1]
   /* v8 ignore next -- pi-ai builds every content block as an object */
   if (!isRequestPayload(last)) return undefined
-  if (UNCACHEABLE_BLOCK_TYPES.has(String(last['type']))) return undefined
   return { ...message, content: [...blocks.slice(0, -1), withCc3Marker(last)] }
 }
 
 /**
- * Whether one message carries tool traffic and nothing else.
- * @param message - one message pi-ai built.
- * @returns whether every content block is a `tool_use` or `tool_result`.
- */
-function isToolOnlyMessage(message: Record<string, unknown>): boolean {
-  const blocks = arrayOf(message['content'])
-  if (blocks === undefined) return false
-  return blocks.every(block => isRequestPayload(block) && TOOL_BLOCK_TYPES.has(String(block['type'])))
-}
-
-/**
- * The index of the message the previous-message slot marks.
+ * The top-level request-field order the pinned Claude Code 2.1.288 emits.
  *
- * The search walks backward from the slot's upper bound, skips a message whose
- * content is tool traffic only, and skips a message whose trailing block cannot
- * carry a marker. Role is deliberately not a filter: the client's planner marks
- * the previous message whatever its role.
- * @param messages - the request's messages in wire order.
- * @param before - exclusive upper bound; the last user message's index.
- * @returns the index of the message to mark, or undefined when none qualifies.
+ * A field outside this list keeps its relative order between the known fields
+ * and `stream`, so a transport member the policy does not name is forwarded
+ * rather than dropped. `stream` is always written last.
  */
-function previousCacheableIndex(messages: readonly unknown[], before: number): number | undefined {
-  for (let index = before - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    /* v8 ignore next -- pi-ai builds every message as an object */
-    if (!isRequestPayload(message)) continue
-    if (isToolOnlyMessage(message)) continue
-    if (markMessageTail(message) === undefined) continue
-    return index
+const CLAUDE_CODE_FIELD_ORDER: readonly string[] = [
+  'model',
+  'messages',
+  'system',
+  'tools',
+  'tool_choice',
+  'metadata',
+  'max_tokens',
+  'thinking',
+  'temperature',
+  'top_p',
+  'top_k',
+  'stop_sequences',
+  'context_management',
+  'cache_control',
+  'safeguards',
+  'output_config',
+  'service_tier',
+  'output_format',
+  'speed',
+  'thread',
+  'diagnostics',
+  'context_hint',
+]
+
+/**
+ * Reorder one request's top-level fields into the pinned client's order.
+ *
+ * The canonical order determines the prefix Anthropic caches, so the `cc3`
+ * route reproduces it instead of pi-ai's construction order. A request without
+ * `metadata` gains an empty object in the canonical slot: the shared-account
+ * pool's forward-body editor splices `metadata.user_id` into an existing
+ * metadata object in place and appends the member only when metadata is
+ * absent, so the placeholder is what keeps the forwarded position canonical
+ * without a duplicate member.
+ * @param payload - the Anthropic Messages request fields the policy marked.
+ * @returns the same fields in the pinned client's order, with `stream` last.
+ */
+function withClaudeCodeFieldOrder(payload: Record<string, unknown>): Record<string, unknown> {
+  const ordered: Record<string, unknown> = {}
+  for (const key of CLAUDE_CODE_FIELD_ORDER) {
+    if (key === 'metadata') {
+      // pi-ai writes metadata only from a caller's `user_id`, which this adapter
+      // never passes, so the placeholder is the path every request takes.
+      /* v8 ignore next -- the request carries no caller metadata */
+      ordered[key] = Object.hasOwn(payload, key) ? payload[key] : {}
+      continue
+    }
+    if (Object.hasOwn(payload, key)) ordered[key] = payload[key]
   }
-  return undefined
+  // Fields the policy does not name keep their relative order; assigning a key
+  // the canonical pass already placed updates that entry in place.
+  for (const [key, value] of Object.entries(payload)) {
+    if (key !== 'stream') ordered[key] = value
+  }
+  ordered['stream'] = payload['stream']
+  return ordered
 }
 
 /**
- * Place the Claude Code 2.1.288 system blocks and its two message markers on one
+ * Place the Claude Code 2.1.288 system blocks and its three markers on one
  * Anthropic Messages request.
  *
  * The policy owns placement: every `cache_control` the transport or a caller
@@ -554,11 +566,16 @@ function previousCacheableIndex(messages: readonly unknown[], before: number): n
  * the slots present are marked with `{type: "ephemeral", ttl: "1h"}`. The
  * identity block opens the system array this route builds and the caller's
  * prompt blocks follow, so a request that already carries the mac pool's billing
- * block forwards it as billing, identity, harness. Only the harness block is
- * marked: the identity and billing blocks belong to the static prefix the pool
- * owns. The two message slots are the last user content block and the previous
- * cacheable message; a request with a single message carries only the first, and
- * no tool declaration is ever marked.
+ * block forwards it as billing, identity, harness. The three slots are the
+ * identity block, the harness block, and the last user content block: the two
+ * system blocks are the cached static prefix, a single-message request carries
+ * the same three, and a request with no caller system prompt marks the identity
+ * and last-user slots. No other message is marked — the previous-message
+ * breakpoint belongs to a different prompt branch — and no tool declaration is
+ * ever marked.
+ *
+ * The edits finish by restoring the pinned client's top-level field order; see
+ * {@link withClaudeCodeFieldOrder}.
  * @param payload - the Anthropic Messages request fields pi-ai built.
  * @returns the fields with the policy's identity block and markers in place.
  */
@@ -573,7 +590,7 @@ function withCc3Markers(payload: Record<string, unknown>): Record<string, unknow
   // The client emits the identity line at most once, so a caller block equal to
   // it is dropped before the policy's own block opens the array.
   const callerSystem = (systemBlocks ?? []).filter(block => !isIdentityBlock(block))
-  const system: unknown[] = [{ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }, ...callerSystem]
+  const system: unknown[] = [withCc3Marker({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }), ...callerSystem]
   const harnessIndex = system.length - 1
   if (harnessIndex > 0) {
     const harness = system[harnessIndex]
@@ -589,7 +606,7 @@ function withCc3Markers(payload: Record<string, unknown>): Record<string, unknow
   }
   const messages = arrayOf(stripped['messages'])
   /* v8 ignore next -- an Anthropic Messages request always carries its messages */
-  if (messages === undefined) return stripped
+  if (messages === undefined) return withClaudeCodeFieldOrder(stripped)
   const marked: unknown[] = [...messages]
   const lastUser = messages.findLastIndex(message => isRequestPayload(message) && message['role'] === 'user')
   /* v8 ignore next -- every converted transcript carries a user turn */
@@ -601,19 +618,8 @@ function withCc3Markers(payload: Record<string, unknown>): Record<string, unknow
       if (userMarked !== undefined) marked[lastUser] = userMarked
     }
   }
-  /* v8 ignore next -- every converted transcript carries a user turn */
-  const previous = previousCacheableIndex(messages, lastUser >= 0 ? lastUser : messages.length)
-  if (previous !== undefined) {
-    const message = messages[previous]
-    /* v8 ignore next -- previousCacheableIndex only returns a message object */
-    if (isRequestPayload(message)) {
-      const previousMarked = markMessageTail(message)
-      /* v8 ignore next -- previousCacheableIndex only returns a markable message */
-      if (previousMarked !== undefined) marked[previous] = previousMarked
-    }
-  }
   stripped['messages'] = marked
-  return stripped
+  return withClaudeCodeFieldOrder(stripped)
 }
 
 /**

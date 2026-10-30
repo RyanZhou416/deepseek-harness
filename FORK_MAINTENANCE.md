@@ -1318,41 +1318,54 @@ The three-marker policy is the route's only placement by configuration. The same
 from `system`, `tools`, and `messages`, opens the system array with the pinned
 identity line `You are Claude Code, Anthropic's official CLI for Claude.`
 (dropping a caller block equal to it so the line appears once), and marks exactly
-three slots with `{type: "ephemeral", ttl: "1h"}`: the harness system block, the
-last user message's trailing cacheable block, and the previous cacheable
-message. Only the harness block is marked; the identity and the billing block the
-mac pool sends ahead of it stay unmarked, so the forwarded order is identity then
-harness and the final order is billing, identity, harness. The previous slot is
-role-agnostic and walks backward past a tool-only message or a message whose
-trailing block is `thinking` or `redacted_thinking`. A request with a single
-message carries only the harness and last-user markers and never gains an
-invented block. Other Anthropic pi-ai routes keep their explicitly configured
-retention and betas.
+three slots with `{type: "ephemeral", ttl: "1h"}`: the identity block, the harness
+system block, and the last user message's trailing cacheable block. The billing
+block the mac pool sends ahead of them stays unmarked, so the forwarded order is
+identity then harness and the final order is billing, identity, harness. No
+message before the last user turn is marked — the client's previous-message
+breakpoint belongs to a different prompt branch — and no tool declaration is
+ever marked. A request with no caller system prompt marks the identity and
+last-user slots; a single-message request carries all three. The same hook then
+writes the pinned client's top-level field order — `model`, `messages`, `system`,
+`tools`, `tool_choice`, `metadata`, `max_tokens`, `thinking`, the remaining
+fields, then `stream` last — and an absent `metadata` gains an empty object in
+its canonical slot. That placeholder is what keeps the pool's spliced
+`metadata.user_id` in place: the pool's forward-body editor writes the member
+into an existing metadata object and appends a top-level `metadata` only when
+the body has none, so the forwarded body keeps one metadata member in the
+canonical position instead of a duplicate after `stream`. Other Anthropic pi-ai
+routes keep pi-ai's construction order, their explicitly configured retention,
+and their betas.
 
-**Preservation rule.** Keep the three-marker defaults, the identity block, and
-the loud cross-field validation: do not weaken them into a request-time failure
-or a silent fallback, and do not restore a tool marker or a
+**Preservation rule.** Keep the three markers on the identity block, the harness
+system block, and the last user block, keep the pinned field order and the
+`metadata` placeholder, and keep the loud cross-field validation: do not weaken
+them into a request-time failure or a silent fallback, do not restore the
+previous-message marker, a tool marker, or a
 `toolCacheBreakpoint`/`supportsCacheControlOnTools` switch. Keep the policy
-route-scoped: no default outside `llm-cc-pool`, no identity block or default
-marker policy outside the `cc3` opt-in, no beta from the retention tier, no
-`scope` field, no scope beta, and no change to another pi-ai Anthropic route,
-`llm-deepseek`, or the subscription routes. Keep every other pi-ai Anthropic
-route's `cacheRetention` explicit; do not add a global payload or header hook, a
-`fetch` rewrite, or a mac-pool branch to `llm-pi-ai`. Keep both transformations
-on the one `onPayload` assignment; a second assignment on the same route would
-silently drop the other policy. The layout deliberately stops at the three
-authentic markers: do not reproduce CC's `markerIndices` fork/compaction planner,
-its static/dynamic prompt split, or infer one hour from a subscription.
+route-scoped: no default outside `llm-cc-pool`, no identity block, field order,
+or default marker policy outside the `cc3` opt-in, no beta from the retention
+tier, no `scope` field, no scope beta, and no change to another pi-ai Anthropic
+route, `llm-deepseek`, or the subscription routes. Keep every other pi-ai
+Anthropic route's `cacheRetention` explicit; do not add a global payload or
+header hook, a `fetch` rewrite, or a mac-pool branch to `llm-pi-ai`. Keep both
+transformations on the one `onPayload` assignment; a second assignment on the
+same route would silently drop the other policy. The layout deliberately stops
+at the three authentic markers: do not reproduce CC's `markerIndices`
+fork/compaction planner, its previous-message planning, its static/dynamic
+prompt split, or infer one hour from a subscription.
 
 **Focused verification.**
 `pnpm exec vitest run packages/llm/llm-cc-pool packages/llm/llm-pi-ai/tests/cache-policy.spec.ts`
-covers the default three-marker body with the identity block, the role-agnostic
-previous message, the skipped tool-only and thinking-tailed previous messages,
-the single-message request, the absence of a tool marker and of the removed
-field, the load-time refusal of `5m`/`none`/missing-beta combinations, the beta
-header only on the pool route, a second Anthropic route's unchanged retention
-and absent identity block, DeepSeek with no marker or cache beta, the refusal of
-`cc3` on a non-Anthropic route, and the Loader composition.
+covers the default three-marker body with a marked identity block and harness
+system block, the unmarked assistant turn before the last user block, the
+single-message and no-system-prompt requests, the pinned top-level field order,
+the empty `metadata` placeholder in its canonical slot, the absence of a tool
+marker and of the removed field, the load-time refusal of
+`5m`/`none`/missing-beta combinations, the beta header only on the pool route, a
+second Anthropic route's unchanged pi-ai field order and retention and absent
+identity block, DeepSeek with no marker or cache beta, the refusal of `cc3` on a
+non-Anthropic route, and the Loader composition.
 
 ## CC subscription pool settings page (fork)
 

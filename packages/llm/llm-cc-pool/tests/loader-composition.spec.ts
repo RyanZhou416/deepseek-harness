@@ -211,21 +211,25 @@ it('enables the three-marker one-hour layout by default through a real profile',
   const call = capture.calls[0]
   if (call === undefined) throw new Error('the pool route sent no request')
   const body = call.body
-  // The identity block opens the system array; only the harness block behind it
-  // carries a marker, and no tool declaration does.
+  // The identity block opens the system array and both system blocks carry a
+  // marker; no tool declaration does.
   expect(body).toMatchObject({
     system: [
-      { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
+      {
+        type: 'text',
+        text: "You are Claude Code, Anthropic's official CLI for Claude.",
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      },
       { type: 'text', text: 'You are the composed pool assistant.', cache_control: { type: 'ephemeral', ttl: '1h' } },
     ],
     tools: [{ name: 'echo' }],
   })
   const tools = body['tools'] as Record<string, unknown>[]
   expect(tools.every(tool => !('cache_control' in tool))).toBe(true)
-  // The default policy marks the two slots this request has: the harness system
-  // block and the last user block, each for one hour. The body carries no scope
-  // field and the header no scope beta.
-  expect(JSON.stringify(body).match(/"ttl":"1h"/gu)).toHaveLength(2)
+  // The default policy marks the three slots this request has: the identity
+  // block, the harness system block, and the last user block, each for one hour.
+  // The body carries no scope field and the header no scope beta.
+  expect(JSON.stringify(body).match(/"ttl":"1h"/gu)).toHaveLength(3)
   expect(JSON.stringify(body)).not.toContain('"scope"')
   expect(call.headers.get('anthropic-beta')).toBe('extended-cache-ttl-2025-04-11')
   expect(call.headers.get('anthropic-beta')).not.toContain('prompt-caching-scope')

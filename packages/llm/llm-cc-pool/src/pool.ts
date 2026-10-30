@@ -23,8 +23,9 @@
  * combination that cannot serve a request. The profile resolver carries these
  * as the route's pi-ai `cacheRetention`, `extendedCacheBeta`, and
  * `cacheMarkerPolicy`; pi-ai builds the `cache_control` markers, the identity
- * system block, and the beta from them, and nothing here rewrites a request
- * body. No other route reads these values.
+ * system block, the beta, and the pinned client's top-level field order from
+ * them, and nothing here rewrites a request body. No other route reads these
+ * values.
  *
  * @module dsh-llm-cc-pool/pool
  */
@@ -99,12 +100,13 @@ export interface CcPoolCachePolicy {
   /**
    * Prompt-cache marker placement pi-ai performs for this route, or omission
    * for the transport's own placement. `cc3` places the Claude Code 2.1.288
-   * layout — the client identity system block, the harness system block, the
-   * last cacheable user content block, and the previous cacheable message — and
-   * takes precedence over the marker field on this route: it discards the
-   * markers {@link cacheTtl} selects and writes
-   * `{type: "ephemeral", ttl: "1h"}` on the system and message slots it owns. It
-   * marks no tool declaration and requires `cacheTtl: "1h"` and
+   * layout — the client identity system block, the harness system block, and
+   * the last cacheable user content block — and takes precedence over the
+   * marker field on this route: it discards the markers {@link cacheTtl}
+   * selects and writes `{type: "ephemeral", ttl: "1h"}` on the slots it owns. It
+   * marks no tool declaration and no message before the last user turn, writes
+   * the pinned client's top-level field order with an empty `metadata` in its
+   * canonical slot, and requires `cacheTtl: "1h"` and
    * `extendedCacheBeta: true`.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy

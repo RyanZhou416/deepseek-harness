@@ -1791,15 +1791,15 @@ export interface Config {
   /**
    * Prompt-cache marker placement this route asks pi-ai to perform. The
    * default `cc3` places the Claude Code 2.1.288 layout — the client identity
-   * system block, the harness system block, the last cacheable user content
-   * block, and the previous cacheable message — with
-   * `{type: "ephemeral", ttl: "1h"}` on each system and message slot, and no
-   * marker on any tool declaration. The policy owns placement, so it takes
-   * precedence over the lifetime {@link cacheTtl} selects, and a request with a
-   * single message carries only the system and last-user slots. It requires
-   * `cacheTtl: "1h"` and {@link extendedCacheBeta}: an impossible combination is
-   * refused at load and on a settings write, never at request time. No other
-   * provider route reads this value.
+   * system block, the harness system block, and the last cacheable user content
+   * block — with `{type: "ephemeral", ttl: "1h"}` on each slot, and no marker on
+   * any tool declaration or on a message before the last user turn. The policy
+   * owns placement, so it takes precedence over the lifetime {@link cacheTtl}
+   * selects, and it also writes the pinned client's top-level field order with
+   * an empty `metadata` placeholder in its canonical slot for the pool's
+   * `user_id` splice. It requires `cacheTtl: "1h"` and {@link extendedCacheBeta}:
+   * an impossible combination is refused at load and on a settings write, never
+   * at request time. No other provider route reads this value.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**
@@ -1896,7 +1896,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:291`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:293`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2029,17 +2029,19 @@ export interface PiAiProviderProfile {
    * Prompt-cache marker placement this route's adapter performs on an Anthropic
    * Messages request. Omission keeps pi-ai's placement from
    * {@link cacheRetention}. `cc3` places the Claude Code 2.1.288 layout — the
-   * client's identity system block, the harness system block, the last cacheable
-   * user content block, and the previous cacheable message — with
-   * `{type: "ephemeral", ttl: "1h"}` on each system and message slot, and
-   * discards every other marker on the route. It marks no tool declaration, and
-   * the identity and billing system blocks stay unmarked. It owns placement
-   * outright, so it takes precedence over `cacheRetention` and over
-   * `compat.supportsCacheControlOnTools`; a request with a single message carries
-   * the system and last-user slots only, and a request with no caller system
-   * prompt carries the identity block alone. The policy adds no `scope` field and
-   * no scope beta, and {@link extendedCacheBeta} stays a separate explicit
-   * opt-in. Refused when no model on the route speaks `anthropic-messages`.
+   * client's identity system block, the harness system block, and the last
+   * cacheable user content block — with `{type: "ephemeral", ttl: "1h"}` on
+   * each slot, and discards every other marker on the route. It marks no tool
+   * declaration and no message before the last user turn, and the billing block
+   * the pool places ahead of the identity block stays unmarked too. It owns
+   * placement outright, so it takes precedence over `cacheRetention` and over
+   * `compat.supportsCacheControlOnTools`; a request with no caller system prompt
+   * marks the identity and last-user slots. The policy also writes the pinned
+   * client's top-level field order with `stream` last, and an absent `metadata`
+   * gains the empty object a pool's `user_id` splice fills in its canonical
+   * slot. It adds no `scope` field and no scope beta, and
+   * {@link extendedCacheBeta} stays a separate explicit opt-in. Refused when no
+   * model on the route speaks `anthropic-messages`.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /** Streaming transport preference. */
