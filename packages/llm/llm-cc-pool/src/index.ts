@@ -30,10 +30,12 @@
  * intent, which the profile carries: `cacheTtl: none` — this route's
  * caching-disabled state — makes a main or subagent wire-parity request declare
  * `off`, so the worker writes no marker, no TTL, and no cache beta, and every
- * other lifetime declares `main` for the worker's own cache plan. A `503` on a
- * wire-parity-on request is evidence against that proof, so it immediately
- * falls back to the three-marker wire instead of re-probing; only a profile
- * load or a replaced `CC_POOL_API_KEY` asks the endpoint again. All of them reach the wire only through this route's profile;
+ * other lifetime declares `main` for the worker's own cache plan. Only a `503`
+ * the endpoint marks with `x-cc-wire-parity-unavailable: 1` on a wire-parity-on
+ * request is evidence against that proof, so only that refusal immediately
+ * falls back to the three-marker wire instead of re-probing; every other `503`
+ * is an ordinary failure and leaves the proof in place. Only a profile load or
+ * a replaced `CC_POOL_API_KEY` asks the endpoint again. All of them reach the wire only through this route's profile;
  * no other provider's request is touched. The durable request log is opt-in: a
  * request carrying the session identity does not write a file by itself,
  * `requestLog` turns it on, and its default path is the pool's own so the pi-ai
@@ -72,7 +74,7 @@ import {
 } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { PiAiAdapterOptions, PiAiRequestDiagnostic, ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import { Config } from './config.ts'
-import { CAPABILITIES_URL, DISCOVERY_NAMESPACE, discoverPoolModels, probePoolCapabilities } from './discovery.ts'
+import { DISCOVERY_NAMESPACE, discoverPoolModels, probePoolCapabilities } from './discovery.ts'
 import type { PoolCapabilityProof } from './discovery.ts'
 import { API_KEY_REF, MODEL_INPUT, PROVIDER, resolvePoolCachePolicy, resolvePoolModels, resolvePoolProfiles } from './pool.ts'
 import type { CcPoolCachePolicy, CcPoolModel } from './pool.ts'
@@ -299,19 +301,17 @@ export function apply(ctx: Context, config: Config): void {
   /**
    * The stored proof when it may enable the wire parity flag on this route.
    *
-   * A proof is valid only for the endpoint and pool build that answered: it is
-   * bound to the fixed capability endpoint and to the `buildId` it carries, and
-   * nothing else can substitute for it. {@link current} resolves the profiles
-   * from exactly the proof returned here, so a probe that answers for a
-   * different build — or proves nothing — replaces this value and the next
-   * resolution builds a new profile instead of reusing the previous build's.
+   * A proof is valid only for the endpoint and pool build that answered:
+   * {@link probePoolCapabilities} scopes it to the fixed capability endpoint, and
+   * its `buildId` names the build. {@link current} resolves the profiles from
+   * exactly the proof returned here, so a probe that answers for a different
+   * build — or proves nothing — replaces this value and the next resolution
+   * builds a new profile instead of reusing the previous build's.
    * @returns the current proof, or `undefined` when wire parity is off.
    */
   const wireParityProof = (): PoolCapabilityProof | undefined => {
     if (!config.ccWireParity) return undefined
-    const proof = capabilityProof
-    if (proof === undefined || proof.endpoint !== CAPABILITIES_URL) return undefined
-    return proof
+    return capabilityProof
   }
   /** Whether the route profile currently carries the wire parity flag. */
   const wireParity = (): boolean => wireParityProof() !== undefined

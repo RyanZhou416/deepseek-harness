@@ -507,6 +507,7 @@ function markMessageTail(
   lifetime: Cc3MarkerLifetime,
 ): Record<string, unknown> | undefined {
   const content = message['content']
+  /* v8 ignore next 2 -- pi-ai hands the final user turn as a block array to mark; earlier bare-string turns are not marked */
   if (typeof content === 'string') {
     return { ...message, content: [{ type: 'text', text: content, cache_control: cc3CacheControl(lifetime) }] }
   }
@@ -884,6 +885,7 @@ function withoutCacheBetas(value: unknown): unknown {
  * @returns the same system without any `cache_control` on its blocks.
  */
 function withoutSystemMarkers(system: unknown): unknown {
+  /* v8 ignore next 2 -- pi-ai serializes an Anthropic system prompt as a block array; the string form is for a transport that sends one */
   if (typeof system === 'string') return system
   const blocks = arrayOf(system)
   /* v8 ignore next -- pi-ai serializes a system prompt as a block array */
@@ -902,8 +904,10 @@ function withoutSystemMarkers(system: unknown): unknown {
  * @returns the same object with the pinned display, or the value when it is not a thinking request.
  */
 function withThinkingDisplay(thinking: unknown): unknown {
+  /* v8 ignore next 2 -- pi-ai hands the hook a thinking object, never another value */
   if (!isRequestPayload(thinking)) return thinking
   const type = thinking['type']
+  /* v8 ignore next 2 -- pi-ai emits a thinking object only for an adaptive or enabled request */
   if (type !== 'adaptive' && type !== 'enabled') return thinking
   return { ...thinking, display: 'updates' }
 }
@@ -976,6 +980,7 @@ function withCcWireParityBody(payload: Record<string, unknown>, request: CcWireP
     : ccWireParitySystem(boundary)
   const toolBlocks = arrayOf(payload['tools'])
   const messageBlocks = arrayOf(payload['messages'])
+  /* v8 ignore next -- an Anthropic Messages payload always carries its message array */
   const lastUser = messageBlocks?.findLastIndex(message => isRequestPayload(message) && message['role'] === 'user') ?? -1
   const wireMessages = messageBlocks?.map(
     (message, index) => ccWireParityMessage(message, index === lastUser),

@@ -339,6 +339,36 @@ describe('queue cancellation and cleanup', () => {
     expect(gate.activeSessions).toBe(0)
   })
 
+  it('stops an already-aborted turn it never awaited without opening it', async () => {
+    const gate = new SessionSerialGate()
+    const log: string[] = []
+    const first = heldStream('first', log)
+    const firstDone = drain(gate.serialize({ sessionId: 's', signal: undefined, open: () => first.stream }))
+    await vi.waitFor(() => { expect(log).toEqual(['first:open']) })
+
+    const abort = new AbortController()
+    abort.abort()
+    let opened = 0
+    const iterator = gate.serialize({
+      sessionId: 's',
+      signal: abort.signal,
+      open: () => { opened += 1; return scripted(...ANSWERED) },
+    })[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    if (iterator.return === undefined) throw new Error('the queue stream must expose return')
+    // The stop lands after the slot was taken but before its already-aborted
+    // turn resumed: skipping that turn has nothing to release or open.
+    const stopping = iterator.return()
+    await expect(pending).resolves.toEqual({ done: true, value: undefined })
+    await stopping
+    expect(opened).toBe(0)
+    expect(gate.activeSessions).toBe(1)
+
+    first.release()
+    await firstDone
+    expect(gate.activeSessions).toBe(0)
+  })
+
   it('hands a session to a queued request and releases it before its turn ran', async () => {
     const gate = new SessionSerialGate()
     let opened = 0

@@ -275,11 +275,15 @@ it('retries a session-busy refusal for the next request after the previous strea
   expect(stub.calls).toHaveLength(1)
 
   // The lane is idle, so this request never queues; the pool can still refuse
-  // it once while the previous lease releases, and the gate must retry it.
+  // it once while the previous lease releases, and the gate must retry it. The
+  // loop's own attempt nonce survives the retry: the fresh nonce joins it so the
+  // attempt stays a deliberate retry of the same loop attempt rather than a
+  // different one.
   const second = await assemble(ctx, {
     model: 'claude-sonnet-5-5',
     messages: [user('second')],
     sessionId: 'session-a' as never,
+    attemptNonce: 'loop-attempt',
   })
   expect(second.finish).toEqual({ kind: 'stop' })
   expect(second.message.content).toEqual([{ type: 'text', text: 'second' }])

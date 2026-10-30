@@ -93,11 +93,12 @@ export interface PoolFetchCapture {
  * @param respond - produces the response for one recorded request; defaults to
  *   a minimal success SSE. A case that mounts the plugin with wire parity
  *   enabled must route by URL, because the capability probe reaches the same
- *   fetch before the first model request.
+ *   fetch before the first model request. A promise holds the answer open so a
+ *   case can settle a probe after its generation was superseded or disposed.
  * @returns the captured request list and the fetch implementation to stub.
  */
 export function capturePoolFetch(
-  respond: (request: CapturedRequest) => Response = () => anthropicSuccessResponse(),
+  respond: (request: CapturedRequest) => Response | Promise<Response> = () => anthropicSuccessResponse(),
 ): PoolFetchCapture {
   const calls: CapturedRequest[] = []
   return {

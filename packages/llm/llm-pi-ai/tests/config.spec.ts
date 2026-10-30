@@ -306,6 +306,27 @@ const wireParityRoute = (
     },
   }, 'strict', proofs).get('pool')
 
+describe('CC wire parity member headers', () => {
+  it.each([
+    'x-cc-request-class',
+    'x-cc-system-layout',
+    'x-cc-cache-intent',
+    'X-CC-System-Layout',
+  ])('refuses a profile header spelled %s on every route', (header) => {
+    // The adapter composes all three member headers or none, so a profile value
+    // would race its set or leave a partial one; resolution refuses it even on a
+    // route that never enables wire parity.
+    expect(() => resolveProfiles({
+      route: {
+        api: 'anthropic-messages',
+        baseURL: 'https://pool.test',
+        models: [{ id: 'm' }],
+        headers: { [header]: 'main' },
+      },
+    })).toThrow(new RegExp(`sets header "${header.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}", which this adapter owns`))
+  })
+})
+
 describe('CC wire parity capability proof', () => {
   it('refuses the flag on a configured profile, which carries no proof', () => {
     // The generic plugin resolves loader configuration without any probe result,
@@ -340,6 +361,12 @@ describe('CC wire parity capability proof', () => {
       endpoint: 'not a url?token=secret',
       buildId: 'test-build',
     }]]))).toThrow(/not an absolute URL: "not a url"/u)
+  })
+
+  it('refuses ccWireParity without an absolute baseURL a proof could cover', () => {
+    expect(() => resolveProfiles({
+      pool: { api: 'anthropic-messages', ccWireParity: true, models: [{ id: 'm' }] },
+    }, 'strict', POOL_PROOFS)).toThrow(/names no absolute baseURL a capability proof could cover/)
   })
 
   it('refuses a proof for a route that does not request the wire', () => {

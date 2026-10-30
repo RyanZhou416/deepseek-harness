@@ -179,6 +179,36 @@ describe('Anthropic extended cache TTL beta', () => {
     expect(JSON.stringify(none)).not.toContain('cache_control')
   })
 
+  it('keeps a payload that already declares the extended beta byte-identical', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-extended': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheRetention: 'long',
+          extendedCacheBeta: true,
+          // The transport derives the request's betas from this header, so the
+          // payload already carries the beta the policy would append.
+          headers: { 'anthropic-beta': EXTENDED_CACHE_TTL_BETA },
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, { ...PROBE, provider: 'cache-extended' })
+
+    // The policy finds its beta and leaves the payload as pi-ai built it: no
+    // duplicate member and no second ordering pass.
+    expect(betasOf(server.headers[0] ?? {})).toEqual([EXTENDED_CACHE_TTL_BETA])
+    expect(JSON.stringify(server.requests[0]).match(/"ttl":"1h"/gu)).toHaveLength(3)
+  })
+
   it('leaves the DeepSeek route without cache_control markers and cache betas', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     vi.stubEnv('DEEPSEEK_ROUTE_KEY', 'deepseek-key')
@@ -566,6 +596,44 @@ describe('Anthropic cc3 marker policy', () => {
     expect(JSON.stringify(body).match(/"cache_control"/gu)).toHaveLength(2)
   })
 
+  it('drops a caller system block equal to the pinned identity line', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      model: 'model',
+      system: IDENTITY,
+      messages: [userText('hello')],
+      provider: 'cache-cc3',
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    // The caller's block is the pinned line, which the policy emits itself; the
+    // duplicate is dropped rather than sent as a second system block.
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expect(JSON.stringify(body).match(/"cache_control"/gu)).toHaveLength(2)
+  })
+
   it('leaves another Anthropic route and the DeepSeek route unchanged', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     vi.stubEnv('DEEPSEEK_ROUTE_KEY', 'deepseek-key')
@@ -789,6 +857,43 @@ describe('CC wire parity body', () => {
     expect(messages[0]?.['content']).toBe('first turn')
     expect(messages[1]?.['content']).toEqual([{ type: 'text', text: 'hi' }])
     expect(messages[2]?.['content']).toEqual([{ type: 'text', text: 'last turn' }])
+    expect(markersOf(body)).toEqual([])
+  })
+
+  it('forwards a helper without a system prompt and without a boundary', async () => {
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        ccWireParity: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'parity-main',
+      purpose: 'compaction',
+      messages: [userText('compact this')],
+    })
+
+    const headers = server.headers[0] ?? {}
+    const body = server.requests[0] as Record<string, unknown>
+    expect(headers['x-cc-request-class']).toBe('compaction')
+    expect(headers['x-cc-system-layout']).toBe('none')
+    expect(headers['x-cc-cache-intent']).toBe('helper')
+    // The helper carries the caller's (absent) system untouched: no identity
+    // block replaces a prompt it does not have.
+    expect(body['system']).toBeUndefined()
     expect(markersOf(body)).toEqual([])
   })
 })

@@ -319,6 +319,23 @@ describe('mac-pool wire contract', () => {
     expect(capture.calls).toHaveLength(0)
   })
 
+  it('loads with wire parity off when the member credential is missing', async () => {
+    vi.stubEnv('CC_POOL_API_KEY', '')
+    const capture = capturePoolFetch()
+    vi.stubGlobal('fetch', capture.fetch)
+    const ctx = await mount({ ccWireParity: true })
+    // The load probe waits for the member credential; the route still loads and
+    // sends no capability request instead of failing.
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    expect(capture.calls).toHaveLength(0)
+    expect(ctx.llm.listProviders()).toContainEqual(expect.objectContaining({ id: PROVIDER }))
+
+    const result = await assemble(ctx, { model: 'claude-sonnet-5-5', messages: [user('no key')] })
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'MISSING_CREDENTIAL' } })
+    // Even a request that would have carried the wire stays wire-parity off.
+    expect(capture.calls).toHaveLength(0)
+  })
+
   it('persists pool request diagnostics to the configured durable sink', async () => {
     vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
     const root = await temporaryDirectory()

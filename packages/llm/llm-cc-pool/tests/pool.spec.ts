@@ -345,9 +345,27 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
+/** The pinned identity line wire parity emits first, byte-exact. */
+const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+
 /** Stable and session-specific prompt text a main-class request splits at its boundary. */
 const WIRE_PARITY_SECTIONS = [
   { name: 'app:instructions', text: 'Stable route instructions.', stable: true },
+  { name: 'session:state', text: 'Current session state.', stable: false },
+]
+
+/**
+ * The real harness-owned sections a request carries beside its boundary: the
+ * identity line the parity body replaces, the two process-describing sections it
+ * never forwards, a caller block holding the pinned identity text, and the
+ * static/dynamic pair the body splits at.
+ */
+const HARNESS_SECTIONS = [
+  { name: 'harness:identity', text: 'You are an AI agent powered by DeepSeek Harness.', stable: true },
+  { name: 'harness:source', text: 'The runtime context names the DeepSeek Harness implementation checkout.', stable: true },
+  { name: 'app:web-surface', text: 'You are interacting with the user through the DeepSeek Harness Web GUI.', stable: true },
+  { name: 'app:instructions', text: 'Stable route instructions.', stable: true },
+  { name: 'caller:identity', text: IDENTITY, stable: true },
   { name: 'session:state', text: 'Current session state.', stable: false },
 ]
 
@@ -434,10 +452,12 @@ function expectCc3Wire(request: CapturedRequest): void {
  * Mount the real LLM service and the plugin with the fetch stand-in installed
  * before mount, so the load probe is the one under test answers.
  * @param respond - the response for one recorded request, routed by URL.
+ * @param config - extra loader configuration layered over the wire-parity mount.
  * @returns the isolated context and the recorded requests.
  */
 async function mountProbed(
-  respond: (request: CapturedRequest) => Response,
+  respond: (request: CapturedRequest) => Response | Promise<Response>,
+  config: Record<string, unknown> = {},
 ): Promise<{ ctx: Context; capture: PoolFetchCapture }> {
   vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
   const capture = capturePoolFetch(respond)
@@ -445,7 +465,7 @@ async function mountProbed(
   const ctx = new Context()
   context = ctx
   await ctx.plugin(LlmRuntime)
-  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ccWireParity: true })
+  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ccWireParity: true, ...config })
   return { ctx, capture }
 }
 
@@ -467,6 +487,113 @@ async function awaitWireParity(ctx: Context, capture: PoolFetchCapture): Promise
 }
 
 describe('CC wire parity capability proof', () => {
+  it('drops the harness-describing sections and emits one pinned identity line', async () => {
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? capabilityReply('pool-build-1')
+      : anthropicSuccessResponse())
+    await awaitWireParity(ctx, capture)
+
+    await assemble(ctx, {
+      ...WIRE_PARITY_PROBE,
+      system: HARNESS_SECTIONS.map(section => section.text).join('\n\n'),
+      systemSections: HARNESS_SECTIONS,
+    })
+
+    const call = modelCalls(capture).at(-1) as CapturedRequest
+    expect(call?.headers.get('x-cc-system-layout')).toBe('boundary:1')
+    // The harness identity section is replaced by the pinned line, the two
+    // process-describing sections are dropped, and a caller block equal to the
+    // pinned line is removed rather than repeated.
+    expect(call?.body['system']).toEqual([
+      { type: 'text', text: IDENTITY },
+      { type: 'text', text: 'Stable route instructions.' },
+      { type: 'text', text: 'Current session state.' },
+    ])
+    const wire = JSON.stringify(call?.body)
+    expect(wire).not.toContain('You are an AI agent powered by DeepSeek Harness.')
+    expect(wire).not.toContain('The runtime context names the DeepSeek Harness implementation checkout.')
+    expect(wire).not.toContain('You are interacting with the user through the DeepSeek Harness Web GUI.')
+    expect(wire.match(/You are Claude Code, Anthropic's official CLI for Claude\./gu)).toHaveLength(1)
+  })
+
+  it('declares cache intent off and sends the parity body for the caching-disabled lifetime', async () => {
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? capabilityReply('pool-build-1')
+      : anthropicSuccessResponse(), { cacheTtl: 'none' })
+    await awaitWireParity(ctx, capture)
+
+    const call = modelCalls(capture).at(-1) as CapturedRequest
+    expect(call?.headers.get('x-cc-request-class')).toBe('main')
+    expect(call?.headers.get('x-cc-system-layout')).toBe('boundary:1')
+    expect(call?.headers.get('x-cc-cache-intent')).toBe('off')
+    // `off` withholds the worker's cache plan, not the member body: the same
+    // pinned identity and boundary go out with no marker, no TTL, and no beta.
+    expect(call?.body['system']).toEqual([
+      { type: 'text', text: IDENTITY },
+      { type: 'text', text: 'Stable route instructions.' },
+      { type: 'text', text: 'Current session state.' },
+    ])
+    expect(JSON.stringify(call?.body)).not.toContain('cache_control')
+    expect(call?.headers.get('anthropic-beta')).toBeNull()
+    expect(call?.body['metadata']).toEqual({})
+  })
+
+  it('ignores a superseded probe answer that arrives after the newer probe settled', async () => {
+    const lateAnswer = Promise.withResolvers<Response>()
+    let probes = 0
+    const { ctx, capture } = await mountProbed((request) => {
+      if (request.url !== CAPABILITIES_URL) return anthropicSuccessResponse()
+      probes += 1
+      return probes === 1 ? lateAnswer.promise : capabilityReply(undefined)
+    })
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
+
+    // A replaced credential starts a newer probe, which proves nothing; the
+    // superseded probe answers later and must not bind the proof it names.
+    ctx.emit('credentials/reference-updated', credentialRef(API_KEY_REF))
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(2) })
+    lateAnswer.resolve(capabilityReply('late-build'))
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    const after = modelCalls(capture).at(-1) as CapturedRequest
+    expect(declaresWireParity(after)).toBe(false)
+    expect(JSON.stringify(after.body).match(/"cache_control"/gu)).toHaveLength(3)
+    expect(capabilityCalls(capture)).toHaveLength(2)
+  })
+
+  it('ignores a probe answer that arrives after the route was disposed', async () => {
+    const lateAnswer = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? lateAnswer.promise
+      : anthropicSuccessResponse())
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
+
+    await ctx.fiber.dispose()
+    context = undefined
+    lateAnswer.resolve(capabilityReply('late-build'))
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+
+    // Disposal aborted the probe generation: its late answer neither sends a
+    // request nor re-registers a route for the proof it names.
+    expect(capabilityCalls(capture)).toHaveLength(1)
+    expect(modelCalls(capture)).toHaveLength(0)
+  })
+
+  it('leaves the proof in place when another credential reference changes', async () => {
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? capabilityReply('pool-build-1')
+      : anthropicSuccessResponse())
+    await awaitWireParity(ctx, capture)
+    const probes = capabilityCalls(capture).length
+
+    ctx.emit('credentials/reference-updated', credentialRef('OTHER_API_KEY'))
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    expect(capabilityCalls(capture)).toHaveLength(probes)
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+  })
+
   it('serves the wire parity member headers after the endpoint proves a build', async () => {
     const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
       ? capabilityReply('pool-build-1')
