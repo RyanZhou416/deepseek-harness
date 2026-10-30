@@ -11,8 +11,13 @@
  * ranges converted to the versions a profile install can resolve. Staged
  * packages live under the ignored `.build/fork-plugins/` directory, are
  * installed with `dsh plugin --profile web add <absolute staged directory>` (a
- * pnpm `link:` dependency), and profile configuration is rewritten only after
- * backing up `package.json` and `cordis.patch.yml`.
+ * pnpm `link:` dependency).
+ *
+ * The build targets the current profile format only. Legacy profile
+ * conversion lives in the standalone `scripts/migrate-legacy-cc-pool-profile.ts`
+ * one-time script, which the operator runs before `build.cmd`. Staging is
+ * written through a temporary directory and swapped into place, so a failed
+ * build leaves the previous staging generation intact.
  *
  * The tracked plugin `lib/` directories are never a build input: a clean clone
  * needs no prebuilt output. Isolated builds install their pinned plugin-local
@@ -36,7 +41,7 @@ import { connect } from 'node:net'
 import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { seedPortableProfile } from './fork-profile-seed.ts'
+import { seedPortableProfile, type SeedResult } from './fork-profile-seed.ts'
 
 const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const BUILD_ROOT = join(REPOSITORY_ROOT, '.build', 'fork-plugins')
@@ -48,7 +53,7 @@ const PROFILE_NAME = 'web'
 const HOST_PORT = 3080
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
-const SCRIPT_VERSION = 6
+const SCRIPT_VERSION = 7
 const WORK_MARKER_FILE = '.fork-plugin-build.json'
 const DEPENDENCY_MARKER_FILE = '.fork-plugin-deps.json'
 
@@ -404,10 +409,23 @@ function rootTypeScript(): string {
   return entry
 }
 
-/** Run the built dsh CLI against one Harness home with the repository pnpm on PATH. */
-function runDsh(args: readonly string[], home: string): void {
+/**
+ * Run the built dsh CLI against one Harness home with the repository pnpm on PATH.
+ * @param args - CLI arguments.
+ * @param home - Harness home the command must target.
+ */
+export function runProfileCommand(args: readonly string[], home: string): void {
   const environment = addPath({ ...process.env, DSH_HOME: home }, join(REPOSITORY_ROOT, 'node_modules', '.bin'))
   run(process.execPath, [cliEntry(), ...args], { cwd: REPOSITORY_ROOT, env: environment })
+}
+
+/**
+ * Directory where one plugin is staged for the profile link.
+ * @param plugin - plugin definition.
+ * @returns the absolute staging directory.
+ */
+export function stagedPluginDirectory(plugin: PluginDefinition): string {
+  return join(BUILD_ROOT, plugin.id)
 }
 
 /** Directory names never treated as build inputs for a source hash. */
@@ -634,17 +652,71 @@ export async function stagedWorkspaceManifest(
  * @param stagingDirectory - staging root to replace.
  */
 export async function stageWorkspacePlugin(plugin: PluginDefinition, stagingDirectory: string): Promise<void> {
-  assertStagedArtifacts(plugin, plugin.directory, 'root build')
-  await rm(stagingDirectory, { recursive: true, force: true })
-  await mkdir(stagingDirectory, { recursive: true })
-  const source = await readJson<PluginManifest>(join(plugin.directory, 'package.json'))
-  await writeJson(join(stagingDirectory, 'package.json'), await stagedWorkspaceManifest(source))
-  for (const entry of plugin.stage) {
-    const path = join(plugin.directory, entry)
-    if (!existsSync(path)) fail(`${plugin.name} is missing its staged entry ${entry} in ${plugin.directory}`)
-    await cp(path, join(stagingDirectory, entry), { recursive: true, filter: candidate => !candidate.endsWith('.map') })
+  await replaceStagingDirectory(stagingDirectory, async (temporary) => {
+    assertStagedArtifacts(plugin, plugin.directory, 'root build')
+    const source = await readJson<PluginManifest>(join(plugin.directory, 'package.json'))
+    await writeJson(join(temporary, 'package.json'), await stagedWorkspaceManifest(source))
+    for (const entry of plugin.stage) {
+      const path = join(plugin.directory, entry)
+      if (!existsSync(path)) fail(`${plugin.name} is missing its staged entry ${entry} in ${plugin.directory}`)
+      await cp(path, join(temporary, entry), { recursive: true, filter: candidate => !candidate.endsWith('.map') })
+    }
+    assertStagedArtifacts(plugin, temporary)
+  })
+}
+
+/** A unique sibling path for an atomic staging replacement. */
+function stagingSibling(stagingDirectory: string, kind: 'partial' | 'retired'): string {
+  return `${stagingDirectory}.${kind}-${process.pid}-${Date.now().toString(36)}`
+}
+
+/**
+ * Populate a temporary sibling and swap it into the staging path.
+ *
+ * The previous generation is retired only after the replacement is complete, so
+ * a failed build removes only the partial directory and leaves the last usable
+ * staging output in place for the profile link and the next incremental run.
+ * @param stagingDirectory - final staging directory.
+ * @param populate - writes the complete staged package into the given directory.
+ */
+async function replaceStagingDirectory(
+  stagingDirectory: string,
+  populate: (temporaryDirectory: string) => Promise<void>,
+): Promise<void> {
+  const temporary = stagingSibling(stagingDirectory, 'partial')
+  const retired = stagingSibling(stagingDirectory, 'retired')
+  await rm(temporary, { recursive: true, force: true })
+  await mkdir(temporary, { recursive: true })
+  try {
+    await populate(temporary)
+    const previous = existsSync(stagingDirectory)
+    if (previous) await rename(stagingDirectory, retired)
+    try {
+      await rename(temporary, stagingDirectory)
+    } catch (error) {
+      if (!previous) throw error
+      try {
+        await rename(retired, stagingDirectory)
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `could not replace ${stagingDirectory} and could not restore it from ${retired}`,
+        )
+      }
+      throw error
+    }
+    if (previous) {
+      try {
+        await rm(retired, { recursive: true, force: true })
+      } catch (error) {
+        // The replacement is in place; a leftover retired copy only occupies space.
+        warn(`could not remove retired staging directory ${retired}: ${String(error)}`)
+      }
+    }
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true })
+    throw error
   }
-  assertStagedArtifacts(plugin, stagingDirectory)
 }
 
 interface WorkspacePackage {
@@ -1302,22 +1374,22 @@ async function buildPlugin(
   key: string,
   force: boolean,
 ): Promise<void> {
-  await rm(stagingDirectory, { recursive: true, force: true })
-  await mkdir(stagingDirectory, { recursive: true })
-  if (plugin.builder === 'isolated') {
-    const workDirectory = await ensureIsolatedBuild(plugin, key, force)
-    await copyStagedEntries(plugin, workDirectory, stagingDirectory)
-  } else {
-    const config = plugin.builder === 'subscriptions'
-      ? await subscriptionsConfig(stagingDirectory, dependencies.wireEntry, dependencies.undiciEntry)
-      : await aetherConfig(stagingDirectory)
-    log(`building ${plugin.name} from source`)
-    run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
-    if (plugin.builder === 'subscriptions') buildSubscriptionsTransport(plugin.directory, stagingDirectory)
-    await copyStagedEntries(plugin, plugin.directory, stagingDirectory)
-  }
-  await stagePackage(plugin, stagingDirectory, dependencies)
-  assertStagedArtifacts(plugin, stagingDirectory)
+  await replaceStagingDirectory(stagingDirectory, async (temporary) => {
+    if (plugin.builder === 'isolated') {
+      const workDirectory = await ensureIsolatedBuild(plugin, key, force)
+      await copyStagedEntries(plugin, workDirectory, temporary)
+    } else {
+      const config = plugin.builder === 'subscriptions'
+        ? await subscriptionsConfig(temporary, dependencies.wireEntry, dependencies.undiciEntry)
+        : await aetherConfig(temporary)
+      log(`building ${plugin.name} from source`)
+      run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
+      if (plugin.builder === 'subscriptions') buildSubscriptionsTransport(plugin.directory, temporary)
+      await copyStagedEntries(plugin, plugin.directory, temporary)
+    }
+    await stagePackage(plugin, temporary, dependencies)
+    assertStagedArtifacts(plugin, temporary)
+  })
 }
 
 /** Whether a previous staging still matches the current source and expected files. */
@@ -1343,62 +1415,113 @@ export async function stagingIsCurrent(
   return true
 }
 
-/** Back up the profile files this script may change. */
-async function backupProfile(profileDirectory: string, created: boolean): Promise<string> {
-  const stamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')
-  const destination = join(BUILD_ROOT, 'backups', `${PROFILE_NAME}-${stamp}`)
-  await mkdir(destination, { recursive: true })
-  for (const file of ['package.json', 'cordis.patch.yml', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'compatibility.json']) {
-    await copyIfPresent(join(profileDirectory, file), join(destination, file))
-  }
-  await writeFile(join(destination, 'profile-path.txt'), `${profileDirectory}\n`)
-  if (created) await writeFile(join(destination, 'profile-created-by-build.txt'), 'The profile did not exist before this run; no prior configuration existed to back up.\n')
-  return destination
+/** Profile manifest fields the bundle reconciliation owns. */
+interface ProfileManifest extends PluginManifest {
+  dsh?: { profile?: { bundles?: string[] } }
 }
 
 /**
- * Whether a profile patch still declares the generic `llm-pi-ai` provider for
- * the pool route.
- *
- * The dedicated bundle owns `cc-pool`; a profile that keeps both declarations
- * makes two adapters claim the same route and plugin loading fails. The
- * dedicated row's `- id: llm-cc-pool` never matches this provider-key pattern.
- * @param patch - profile patch text.
- * @returns whether an `llm-pi-ai` provider keyed `cc-pool` remains.
+ * Add missing bundle-layer entries to an installed profile manifest.
+ * @param profileDirectory - profile whose manifest records the bundle order.
+ * @param names - bundle package names that must contribute a layer.
  */
-export function declaresLegacyPoolProvider(patch: string): boolean {
-  return /^\s+cc-pool:\s*(?:#.*)?$/m.test(patch)
+export async function ensureProfileBundles(profileDirectory: string, names: readonly string[]): Promise<void> {
+  const manifestPath = join(profileDirectory, 'package.json')
+  if (!existsSync(manifestPath)) fail(`cannot add profile bundle entries: ${manifestPath} is missing`)
+  const manifest = await readJson<ProfileManifest>(manifestPath)
+  const bundles = manifest.dsh?.profile?.bundles ?? []
+  const missing = names.filter(name => !bundles.includes(name))
+  if (missing.length === 0) return
+  manifest.dsh = { ...manifest.dsh, profile: { ...manifest.dsh?.profile, bundles: [...bundles, ...missing] } }
+  await writeJson(manifestPath, manifest)
+  log(`added profile bundle entr${missing.length === 1 ? 'y' : 'ies'} ${missing.join(', ')}`)
 }
 
-/** Why the profile still does not resolve one staged plugin, if that is the case. */
-async function profileProblem(plugin: StagedPlugin, profileDirectory: string): Promise<string | undefined> {
+/** One install-then-seed pass for the selected profile. */
+export interface ProfileInstallAndSeedOptions {
+  /** Harness home that owns the profile. */
+  readonly home: string
+  /** Profile directory being installed into. */
+  readonly profileDirectory: string
+  /** Bundle-layer names the installed packages must contribute. */
+  readonly bundleNames: readonly string[]
+  /** Runs the package installation; omitted when the profile already resolves. */
+  readonly install?: () => void | Promise<void>
+  /** Seed override for tests; defaults to the portable profile kit. */
+  readonly seed?: () => Promise<SeedResult>
+}
+
+/**
+ * Ensure the installed profile's bundle entries, then seed it.
+ *
+ * Seeding happens only after the install callback returns, so a failed install
+ * cannot leave a freshly seeded profile behind.
+ * @param options - install callback, bundle names, and optional seed override.
+ * @returns the seed result.
+ */
+export async function installAndSeedProfile(options: ProfileInstallAndSeedOptions): Promise<SeedResult> {
+  await options.install?.()
+  await ensureProfileBundles(options.profileDirectory, options.bundleNames)
+  return options.seed === undefined
+    ? seedPortableProfile({ dshHome: options.home })
+    : options.seed()
+}
+
+/**
+ * Why the profile still does not resolve one staged plugin, if that is the case.
+ * @param definition - plugin whose link and installed artifacts are checked.
+ * @param profileDirectory - profile directory that must resolve the plugin.
+ * @param stagedDirectory - staging directory the profile link must point at.
+ * @returns the first problem, or undefined when the plugin resolves.
+ */
+export async function pluginProfileProblem(
+  definition: PluginDefinition,
+  profileDirectory: string,
+  stagedDirectory: string,
+): Promise<string | undefined> {
   const manifestPath = join(profileDirectory, 'package.json')
   if (!existsSync(manifestPath)) return `${manifestPath} is missing`
-  const manifest = await readJson<PluginManifest & { dsh?: { profile?: { bundles?: string[] } } }>(manifestPath)
-  const recorded = manifest.dependencies?.[plugin.definition.name]
-  if (recorded === undefined) return `the profile does not declare ${plugin.definition.name}`
+  const manifest = await readJson<ProfileManifest>(manifestPath)
+  const recorded = manifest.dependencies?.[definition.name]
+  if (recorded === undefined) return `the profile does not declare ${definition.name}`
   const recordedPath = localDependencyPath(recorded, profileDirectory)
-  if (recordedPath === undefined) return `the profile records ${plugin.definition.name} as ${recorded}, not a local link`
-  if (!samePath(recordedPath, plugin.directory)) return `the profile link for ${plugin.definition.name} points at ${recordedPath}, not ${plugin.directory}`
-  const installed = join(profileDirectory, 'node_modules', plugin.definition.name)
-  if (!existsSync(join(installed, 'package.json'))) return `the profile has no installed node_modules entry for ${plugin.definition.name}`
-  for (const output of pluginArtifacts(plugin.definition)) {
+  if (recordedPath === undefined) return `the profile records ${definition.name} as ${recorded}, not a local link`
+  if (!samePath(recordedPath, stagedDirectory)) return `the profile link for ${definition.name} points at ${recordedPath}, not ${stagedDirectory}`
+  const installed = join(profileDirectory, 'node_modules', definition.name)
+  if (!existsSync(join(installed, 'package.json'))) return `the profile has no installed node_modules entry for ${definition.name}`
+  for (const output of pluginArtifacts(definition)) {
     if (!existsSync(join(installed, output))) return `${installed} does not expose ${output}`
   }
-  if (!(manifest.dsh?.profile?.bundles ?? []).includes(plugin.definition.name)) {
-    return `the profile bundle list does not include ${plugin.definition.name}`
+  if (!(manifest.dsh?.profile?.bundles ?? []).includes(definition.name)) {
+    return `the profile bundle list does not include ${definition.name}`
   }
   return undefined
 }
 
+/** Why the profile still does not resolve one staged plugin, if that is the case. */
+async function profileProblem(plugin: StagedPlugin, profileDirectory: string): Promise<string | undefined> {
+  return pluginProfileProblem(plugin.definition, profileDirectory, plugin.directory)
+}
+
 /** Print the staged and installed result for the operator. */
-function report(staged: readonly StagedPlugin[], profileDirectory: string, backup: string | undefined): void {
+function report(staged: readonly StagedPlugin[], profileDirectory: string): void {
   for (const plugin of staged) {
     log(`${plugin.definition.name}@${plugin.version} -> ${plugin.directory}${plugin.changed ? ' (rebuilt)' : ' (unchanged)'}`)
   }
   log(`profile: ${profileDirectory}`)
-  if (backup !== undefined) log(`profile configuration backup: ${backup}`)
   log('restart the Host with run.cmd to load the staged packages')
+}
+
+/** Verify the installed profile resolves every staged package. */
+async function verifyInstalledProfile(staged: readonly StagedPlugin[], profileDirectory: string): Promise<void> {
+  const problems: string[] = []
+  for (const plugin of staged) {
+    const problem = await profileProblem(plugin, profileDirectory)
+    if (problem !== undefined) problems.push(problem)
+  }
+  if (problems.length > 0) {
+    throw new Error(`the profile does not resolve the staged plugins after installation:\n  ${problems.join('\n  ')}`)
+  }
 }
 
 /**
@@ -1433,7 +1556,7 @@ export async function main(options: BuildOptions): Promise<void> {
   let changed = false
   const toolchain = await toolchainVersions()
   for (const plugin of PLUGINS) {
-    const stagingDirectory = join(BUILD_ROOT, plugin.id)
+    const stagingDirectory = stagedPluginDirectory(plugin)
     const version = (await sourceManifest(plugin)).version
     if (version === undefined) fail(`${plugin.name} source manifest has no version`)
     const keyParts = [String(SCRIPT_VERSION), await sourceHash(plugin), version, toolchain]
@@ -1455,7 +1578,7 @@ export async function main(options: BuildOptions): Promise<void> {
     staged.push({ definition: plugin, directory: stagingDirectory, version, changed: !current })
   }
   for (const plugin of WORKSPACE_PLUGINS) {
-    const stagingDirectory = join(BUILD_ROOT, plugin.id)
+    const stagingDirectory = stagedPluginDirectory(plugin)
     const version = (await sourceManifest(plugin)).version
     if (version === undefined) fail(`${plugin.name} source manifest has no version`)
     await stageWorkspacePlugin(plugin, stagingDirectory)
@@ -1463,45 +1586,34 @@ export async function main(options: BuildOptions): Promise<void> {
     staged.push({ definition: plugin, directory: stagingDirectory, version, changed: false })
   }
 
-  let profileCreated = false
-  if (!existsSync(join(profileDirectory, 'package.json'))) {
-    log(`initializing profile ${PROFILE_NAME} at ${profileDirectory}`)
-    runDsh(['plugin', '--profile', PROFILE_NAME, 'install', '--ignore-scripts'], home)
-    profileCreated = true
-  }
-  const seeded = await seedPortableProfile({ dshHome: home })
-  if (seeded.patchSeeded) {
-    log(`seeded portable profile configuration from ${join(REPOSITORY_ROOT, 'fork-runtime', 'web', 'portable-profile.patch.yml')}`)
-  }
-  for (const path of seeded.copied) log(`seeded profile file ${path}`)
-  const profilePatchPath = join(profileDirectory, 'cordis.patch.yml')
-  if (existsSync(profilePatchPath) && declaresLegacyPoolProvider(await readFile(profilePatchPath, 'utf8'))) {
-    fail(`the profile patch at ${profilePatchPath} still declares an llm-pi-ai "providers.cc-pool" route; `
-      + 'remove that block before installing @deepseek-ai/dsh-llm-cc-pool, or both adapters claim the cc-pool route')
-  }
   const problems: string[] = []
   for (const plugin of staged) {
     const problem = await profileProblem(plugin, profileDirectory)
     if (problem !== undefined) problems.push(problem)
   }
-  if (problems.length === 0 && !changed) {
-    log('profile already resolves all staged plugins; nothing to install')
-    report(staged, profileDirectory, undefined)
-    return
+  const install = !existsSync(join(profileDirectory, 'package.json'))
+    || problems.length > 0
+    || changed
+  if (install) {
+    log(`installing ${staged.map(plugin => plugin.definition.name).join(' and ')} into profile ${PROFILE_NAME}`)
+  } else {
+    log('profile already resolves all staged plugins; reconciling bundle entries only')
   }
-  const backup = await backupProfile(profileDirectory, profileCreated)
-  log(`installing ${staged.map(plugin => plugin.definition.name).join(' and ')} into profile ${PROFILE_NAME}`)
-  runDsh(['plugin', '--profile', PROFILE_NAME, 'add', ...staged.map(plugin => plugin.directory)], home)
-  const remaining: string[] = []
-  for (const plugin of staged) {
-    const problem = await profileProblem(plugin, profileDirectory)
-    if (problem !== undefined) remaining.push(problem)
+  const optionsForInstall: ProfileInstallAndSeedOptions = {
+    home,
+    profileDirectory,
+    bundleNames: staged.map(plugin => plugin.definition.name),
+    ...install
+      ? { install: () => { runProfileCommand(['plugin', '--profile', PROFILE_NAME, 'add', ...staged.map(plugin => plugin.directory)], home) } }
+      : {},
   }
-  if (remaining.length > 0) {
-    fail(`the profile does not resolve the staged plugins after installation:\n  ${remaining.join('\n  ')}\n`
-      + `Backup: ${backup}. Do not start the Host until this is repaired.`)
+  const seeded = await installAndSeedProfile(optionsForInstall)
+  if (seeded.patchSeeded) {
+    log(`seeded portable profile configuration from ${join(REPOSITORY_ROOT, 'fork-runtime', 'web', 'portable-profile.patch.yml')}`)
   }
-  report(staged, profileDirectory, backup)
+  for (const path of seeded.copied) log(`seeded profile file ${path}`)
+  await verifyInstalledProfile(staged, profileDirectory)
+  report(staged, profileDirectory)
 }
 
 if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

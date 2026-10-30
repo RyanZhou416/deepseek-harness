@@ -1,21 +1,28 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, lstatSync } from 'node:fs'
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   assertStagedArtifacts, assertStagedManifest, buildSubscriptionsTransport, bunPlatformRuntime,
-  copyStagedEntries, declaresLegacyPoolProvider, dependencyPreparationError, ensurePluginDependencies, lockfileAutoInstallPeers,
-  localDependencyPath, lockedDependencyVersion, lockedUndiciVersion, parseArguments, PLUGINS,
+  copyStagedEntries, dependencyPreparationError, ensurePluginDependencies, installAndSeedProfile,
+  lockfileAutoInstallPeers, localDependencyPath, lockedDependencyVersion, lockedUndiciVersion, parseArguments, PLUGINS,
   pluginInstallArguments, privateDependencySpecs, registryPeerRange, resolveHome, sourceHash, sourcePaths,
   stageBunRuntime, stagedManifest, stagedWorkspaceManifest, stageWorkspacePlugin, stagingIsCurrent,
   subscriptionsRuntimeArtifacts, SUBSCRIPTIONS_TRANSPORT_MODULES, WORKSPACE_PLUGINS, writeStagedManifest,
   type BuildState, type PluginCommandRunner, type PluginDefinition, type PluginManifest,
 } from './fork-plugins-build.ts'
+import type { SeedResult } from './fork-profile-seed.ts'
 
 const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const subscriptionsDirectory = join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-plugin-subscriptions')
+
+/** Write one patch file, creating its directories. */
+async function writePatch(path: string, source: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, source)
+}
 
 /** Look up one staged plugin definition by id. */
 function plugin(id: PluginDefinition['id']): PluginDefinition {
@@ -374,10 +381,15 @@ describe('fork plugin profile install helpers', () => {
       forceRebuild: true,
       dshHome: 'C:\\home',
     })
-    expect(parseArguments(['--dsh-home=C:\\home'])).toEqual({ allowRunningHost: false, forceRebuild: false, dshHome: 'C:\\home' })
+    expect(parseArguments(['--dsh-home=C:\\home'])).toEqual({
+      allowRunningHost: false,
+      forceRebuild: false,
+      dshHome: 'C:\\home',
+    })
     expect(parseArguments(['--help'])).toBeUndefined()
     expect(() => parseArguments(['--unknown'])).toThrow(/unknown argument/)
     expect(() => parseArguments(['--dsh-home'])).toThrow(/requires a path/)
+    expect(() => parseArguments(['--patch', 'legacy.yml'])).toThrow(/unknown argument/)
   })
 })
 
@@ -490,13 +502,6 @@ describe('subscriptions transport staging', () => {
 })
 
 describe('workspace plugin staging', () => {
-  it('detects a legacy llm-pi-ai pool provider without matching the dedicated row', () => {
-    expect(declaresLegacyPoolProvider('    providers:\n      cc-pool:\n        api: anthropic-messages\n')).toBe(true)
-    expect(declaresLegacyPoolProvider('  cc-pool: # stale\n')).toBe(true)
-    expect(declaresLegacyPoolProvider('- insert:\n    - id: llm-cc-pool\n      name: \'@deepseek-ai/dsh-llm-cc-pool\'\n')).toBe(false)
-    expect(declaresLegacyPoolProvider('# providers.cc-pool was removed\n')).toBe(false)
-  })
-
   it('links the llm-cc-pool workspace package into the profile', () => {
     expect(WORKSPACE_PLUGINS.map(entry => entry.name)).toEqual(['@deepseek-ai/dsh-llm-cc-pool'])
     const entry = WORKSPACE_PLUGINS[0]
@@ -543,6 +548,28 @@ describe('workspace plugin staging', () => {
     }
   })
 
+  it('leaves the previous staging generation intact when the new build fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-staging-transaction-'))
+    try {
+      const source = join(root, 'source')
+      const staging = join(root, 'staging')
+      await mkdir(source, { recursive: true })
+      await mkdir(staging, { recursive: true })
+      await writeFile(join(source, 'package.json'), `${JSON.stringify({
+        name: '@deepseek-ai/dsh-llm-cc-pool',
+        version: '0.2.1-rc.2',
+      }, undefined, 2)}\n`)
+      await writeFile(join(staging, 'previous.txt'), 'usable previous staging\n')
+      const definition: PluginDefinition = { ...WORKSPACE_PLUGINS[0]!, directory: source }
+
+      await expect(stageWorkspacePlugin(definition, staging)).rejects.toThrow(/did not produce lib\/index\.js/)
+      expect(await readFile(join(staging, 'previous.txt'), 'utf8')).toBe('usable previous staging\n')
+      expect((await readdir(root)).filter(name => name.includes('.partial-'))).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('copies the root build output and the bundle patch into staging', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-fork-workspace-stage-'))
     try {
@@ -565,6 +592,97 @@ describe('workspace plugin staging', () => {
       expect(await readFile(join(staging, 'cordis.patch.yml'), 'utf8')).toBe('- insert: []\n')
       const staged = JSON.parse(await readFile(join(staging, 'package.json'), 'utf8')) as PluginManifest
       expect(staged.peerDependencies).toEqual({ '@deepseek-ai/dsh-llm': '0.2.1-rc.2' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('profile install and seed ordering', () => {
+  it('seeds only after a successful install', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-install-seed-'))
+    try {
+      const home = join(root, 'home')
+      const profile = join(home, 'profiles', 'web')
+      await writePatch(join(profile, 'package.json'), `${JSON.stringify({
+        name: 'dsh-profile-web',
+        private: true,
+        dependencies: {},
+        dsh: { profile: { bundles: [] } },
+      }, undefined, 2)}\n`)
+      const order: string[] = []
+      const seeded: SeedResult = { profileDirectory: profile, patchSeeded: false, copied: [], kept: [] }
+      await installAndSeedProfile({
+        home,
+        profileDirectory: profile,
+        bundleNames: ['@deepseek-ai/dsh-llm-cc-pool'],
+        install: async () => {
+          order.push('install')
+          const manifest = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8')) as {
+            dependencies?: Record<string, string>
+            dsh: { profile: { bundles: string[] } }
+          }
+          manifest.dependencies = { '@deepseek-ai/dsh-llm-cc-pool': 'link:C:/staged/llm-cc-pool' }
+          await writePatch(join(profile, 'package.json'), `${JSON.stringify(manifest, undefined, 2)}\n`)
+        },
+        seed: async () => {
+          order.push('seed')
+          return seeded
+        },
+      })
+      expect(order).toEqual(['install', 'seed'])
+      const manifest = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8')) as {
+        dsh: { profile: { bundles: string[] } }
+      }
+      expect(manifest.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-llm-cc-pool'])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not special-case a legacy-looking profile patch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-current-format-'))
+    try {
+      const home = join(root, 'home')
+      const profile = join(home, 'profiles', 'web')
+      await writePatch(join(profile, 'package.json'), '{"name":"dsh-profile-web"}\n')
+      await writePatch(join(profile, 'cordis.patch.yml'), '- id: llm-pi-ai\n  config:\n    providers:\n      cc-pool:\n        api: anthropic\n')
+      const order: string[] = []
+      await installAndSeedProfile({
+        home,
+        profileDirectory: profile,
+        bundleNames: [],
+        install: () => { order.push('install') },
+        seed: async () => {
+          order.push('seed')
+          return { profileDirectory: profile, patchSeeded: false, copied: [], kept: [] }
+        },
+      })
+      expect(order).toEqual(['install', 'seed'])
+      expect(await readFile(join(profile, 'cordis.patch.yml'), 'utf8')).toContain('cc-pool')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not seed after a failed install', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-install-fail-'))
+    try {
+      const home = join(root, 'home')
+      const profile = join(home, 'profiles', 'web')
+      await writePatch(join(profile, 'package.json'), '{"name":"dsh-profile-web"}\n')
+      let seeded = false
+      await expect(installAndSeedProfile({
+        home,
+        profileDirectory: profile,
+        bundleNames: [],
+        install: () => { throw new Error('install failed') },
+        seed: async () => {
+          seeded = true
+          return { profileDirectory: profile, patchSeeded: false, copied: [], kept: [] }
+        },
+      })).rejects.toThrow(/install failed/)
+      expect(seeded).toBe(false)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
