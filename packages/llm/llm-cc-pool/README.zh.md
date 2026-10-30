@@ -25,6 +25,8 @@ kind: "package-bundle"
 <a id="use-this-package"></a>
 ## 使用此包
 
+本包为 `private: true`：它从本检出链接进 profile，从不发布；发布序列与 npm baseline 都会跳过所有私有包。
+
 把本包安装进某个 profile，或在 profile patch 中挂载它的一行：
 
 ```yaml
@@ -100,9 +102,9 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 ### 请求诊断
 
-每次尝试在开始时写一条结构化日志记录，在结束时再写一条：路由、模型、端点、session id、本次尝试的 ledger id、该逻辑请求内的尝试序号、响应状态、响应带有的池 `x-cc-pool-request-id`，以及失败的稳定 code；进程 logger 另带失败的 message 与 cause 链。ledger 身份只在会发送或持久化它的路由上派生，门外的路由不支付消息哈希与尝试记账的开销。排过队的请求若在池释放上一租约时被拒绝，会作为同一逻辑请求的下一次尝试重试：尝试序号推进，且重试发送新的 ledger id，因此它是池中新的 ledger 条目而不是 replay。记录绝不包含消息、请求体、凭据、token 数或会话标题。
+每次尝试在开始时写一条结构化日志记录，在结束时再写一条：路由、模型、端点、session id、本次尝试的 ledger id、该逻辑请求内的尝试序号、响应状态、响应带有的池 `x-cc-pool-request-id`，以及失败的稳定 code。本路由的进程日志正是持久 sink 保留的那些行，因此端点缩减为 origin 与 path，并略去 provider 失败的 message 与 cause 链；诊断依赖稳定 code、状态与池 request id。ledger 身份只在会发送或持久化它的路由上派生，门外的路由不支付消息哈希与尝试记账的开销。排过队的请求若在池释放上一租约时被拒绝，会作为同一逻辑请求的下一次尝试重试：尝试序号推进，且重试发送新的 ledger id，因此它是池中新的 ledger 条目而不是 replay。记录绝不包含消息、请求体、凭据、token 数或会话标题。
 
-`requestLog` 把同样的记录持久化为 NDJSON。它默认关闭：池路由携带会话身份并不等于要求写文件。配置 `requestLog`——`enabled: true`，或 `path` 等任一字段——才会启用，`enabled: false` 保持关闭。未配置 `path` 时池路由写入 `$DSH_HOME/logs/llm-cc-pool-requests.jsonl`；这个独立文件保证启用后的 `llm-pi-ai` sink 不会在其默认路径上出现第二个写入者。持久记录把端点缩减为 origin 与 path，因此 userinfo 与 query 秘密不会进入文件，并且完全不持久化 provider 失败文本。`path` 移动文件，`maxFileBytes`（默认 16 MiB）设定轮转点，`maxFiles`（默认 8）设定保留数量；轮转先删除最旧文件，保留集合不超过 128 MiB。写入排在请求路径之外，首次失败经插件 logger 报告一次，且不会使请求失败。
+`requestLog` 把同样的记录持久化为 NDJSON。它默认关闭：池路由携带会话身份并不等于要求写文件。配置 `requestLog`——`enabled: true`，或 `path` 等任一字段——才会启用，`enabled: false` 保持关闭。未配置 `path` 时池路由写入 `$DSH_HOME/logs/llm-cc-pool-requests.jsonl`；这个独立文件保证启用后的 `llm-pi-ai` sink 不会在其默认路径上出现第二个写入者。持久记录把端点缩减为 origin 与 path，因此 userinfo 与 query 秘密不会进入文件，并且完全不持久化 provider 失败文本。`path` 移动文件，`maxFileBytes`（默认 16 MiB）设定轮转点，`maxFiles`（默认 8）设定保留数量；轮转先删除最旧文件，保留集合不超过 128 MiB。在 POSIX 上，文件与写入器创建的目录都是 owner-private（`0600` 与 `0700`）；已存在活动文件的 group/other 位会在下次追加前修复为 `0600`，进程无法完成的修复会拒绝这次写入并报告一次。Windows 没有 POSIX mode 位，写入器在那里继承文件的 ACL。写入排在请求路径之外，首次失败经插件 logger 报告一次，且不会使请求失败。
 
 <a id="understand-the-implementation"></a>
 ## 理解实现

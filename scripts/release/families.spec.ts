@@ -127,6 +127,23 @@ describe('release families', () => {
     ])
   })
 
+  it('excludes a private package under packages/ from the publish set', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-release-private-package-'))
+    roots.push(root)
+    write(join(root, 'packages/llm/llm-cc-pool/package.json'), '{"name":"@deepseek-ai/dsh-llm-cc-pool","version":"0.0.1","private":true}\n')
+    write(join(root, 'packages/llm/llm-pi-ai/package.json'), '{"name":"@deepseek-ai/dsh-llm-pi-ai","version":"0.0.1"}\n')
+
+    expect(releaseFamily('dsh').members(root).map(entry => entry.name)).toEqual(['@deepseek-ai/dsh-llm-pi-ai'])
+  })
+
+  it('keeps the fork-only packages out of the current dsh publish set', () => {
+    const members = releaseFamily('dsh').members(resolve(import.meta.dirname, '../..'))
+    const names = members.map(member => member.name)
+
+    expect(names).not.toContain('@deepseek-ai/dsh-llm-cc-pool')
+    expect(names).not.toContain('@deepseek-ai/dsh-client-ui-settings-cc-pool')
+  })
+
   it('bumps private dsh workspaces without adding release tags', () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-release-version-'))
     roots.push(root)

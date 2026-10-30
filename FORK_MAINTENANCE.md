@@ -177,9 +177,9 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 ### Shared-account pool failure classification
 
-共享账号池（`cc_pool_*`）把稳定错误放回 Anthropic 风格 error envelope；`llm-pi-ai` 在请求级 fetch 捕获失败响应的 HTTP status 与 `Retry-After`，解析 envelope 后发出 `POOL_CAPACITY`、`POOL_RATE_LIMITED`、`POOL_SESSION_BUSY`、`POOL_NO_ACCOUNT`、`POOL_REQUEST_CLOSED`、`POOL_TRANSIENT` 或 `POOL_ERROR`，而不是把池拒绝误分类为 Claude `RATE_LIMIT`。`POOL_SESSION_BUSY` 与不可重试的池失败带 `retryDisposition: 'forbid'`；`POOL_REQUEST_CLOSED` 不禁止重发，因为每次有意尝试都携带新的 `x-client-request-id`，重发是新的 ledger 条目而不是 replay——池的 `terminal` 标记只拒绝同一 request id 的 replay，不否决目录中 `retry_same` 且池仍标 `retryable: true` 的动作；`retryable: false` 仍然禁止，且该标记对其余已知与无法识别的失败保持权威。池 origin 只是分类依据，账号选择、冷却和 session 绑仍由池负责。池的就绪拒绝不带 `cc_pool_*` code 与 `origin`：响应体顶层给出 `pool_request_id`、`error.retryable` 为 `false`，详情说明租约的出口路径尚未验证（`capability_not_ready`）。由于池现在把 `pool_request_id` 也写进原生 provider 错误 body，仅凭该 id、`retryable: false` 与 `5xx` 不再识别 readiness 拒绝；只有详情文本（`capability_not_ready` 或未验证 egress）才把它归为不可重试的 `POOL_ERROR`（`retryDisposition: 'forbid'`），只有标记的 `5xx` 保持原有文本分类与措辞。分类器在没有捕获响应且消息没有状态前缀时读取 `error.status`。重发会重复池已经记账的 ledger id（池以 409 回应），因此真正的 readiness 拒绝不能变回可重试的文本分类。失败行显示池返回的 `error.message`，先压成单行、限制为 1,024 个字符并拒绝标记、实体与凭据样式文本；缺失或不安全时使用带失败码的通用回退。默认 pi-ai `retryPolicy` 只在部署没有显式 `retryableCodes` 时追加池可重试码；显式列表必须逐字使用。生成目录 `pool-error-catalog.generated.ts` 只提供机器语义（canonical code 与 client action），绑定上游 catalog SHA（当前 1.1.0），不能手工编辑；不得把 `messageKey` 或 `clientGuidance` 恢复为显示文案。该行为不改变 Session 格式，也不改变 Claude-native 错误的原有分类。
+共享账号池（`cc_pool_*`）把稳定错误放回 Anthropic 风格 error envelope；`llm-pi-ai` 在请求级 fetch 捕获失败响应的 HTTP status 与 `Retry-After`，解析 envelope 后发出 `POOL_CAPACITY`、`POOL_RATE_LIMITED`、`POOL_SESSION_BUSY`、`POOL_NO_ACCOUNT`、`POOL_REQUEST_CLOSED`、`POOL_TRANSIENT` 或 `POOL_ERROR`，而不是把池拒绝误分类为 Claude `RATE_LIMIT`。`POOL_SESSION_BUSY` 与不可重试的池失败带 `retryDisposition: 'forbid'`；`POOL_REQUEST_CLOSED` 不禁止重发，因为每次有意尝试都携带新的 `x-client-request-id`，重发是新的 ledger 条目而不是 replay——池的 `terminal` 标记只拒绝同一 request id 的 replay，不否决目录中 `retry_same` 且池仍标 `retryable: true` 的动作；`retryable: false` 无论 `terminal` 是否出现都禁止该动作，且该标记对其余已知与无法识别的失败保持权威。池 origin 只是分类依据，账号选择、冷却和 session 绑仍由池负责。池的就绪拒绝不带 `cc_pool_*` code 与 `origin`：响应体顶层给出 `pool_request_id`、`error.retryable` 为 `false`，详情说明租约的出口路径尚未验证（`capability_not_ready`）。由于池现在把 `pool_request_id` 也写进原生 provider 错误 body，仅凭该 id 不再识别 readiness 拒绝，只有详情文本（`capability_not_ready` 或未验证 egress）才把它归为 readiness 拒绝；但池自述的 `retryable: false` 本身就是撤回重试：带 `pool_request_id` 或 `origin: pool` 的 body 即使看起来是原生 `5xx` 也归为不可重试的 `POOL_ERROR`（`retryDisposition: 'forbid'`），不再交给文本分类按 5xx 重试，没有池标记的 body 保持原分类与措辞。分类器在没有捕获响应且消息没有状态前缀时读取 `error.status`。重发会重复池已经记账的 ledger id（池以 409 回应），因此真正的 readiness 拒绝不能变回可重试的文本分类。失败行显示池返回的 `error.message`，先压成单行、限制为 1,024 个字符并拒绝标记、实体与凭据样式文本（池自己的 `[redacted]` 占位符除外：`api_key=[redacted]`、`?token=[redacted]` 照常显示）；缺失或不安全时使用带失败码的通用回退。默认 pi-ai `retryPolicy` 只在部署没有显式 `retryableCodes` 时追加池可重试码；显式列表必须逐字使用。生成目录 `pool-error-catalog.generated.ts` 只提供机器语义（canonical code 与 client action），绑定上游 catalog SHA（当前 1.1.0），不能手工编辑；不得把 `messageKey` 或 `clientGuidance` 恢复为显示文案。该行为不改变 Session 格式，也不改变 Claude-native 错误的原有分类。
 
-**Preservation rule.** 保留 fetch 捕获的协议范围（`anthropic-messages`、`openai-completions`、`openai-responses`）；Google 拒绝自定义 fetch，必须继续走文本分类。不得把 `POOL_SESSION_BUSY` 加进默认可重试码，不得让 `claude` origin 走池分类，也不得把显式 `retryableCodes` 与默认列表合并。保留 `POOL_REQUEST_CLOSED` 的可重试映射与 cc-pool 路由的显式列表项；它的前提是每次有意尝试使用新的 ledger id，若恢复重复 id 就必须同时把它移出可重试码。保留 `terminal` 只终结同一 id replay 的语义：不得让它重新覆盖 `retry_same` 且 `retryable: true` 的 `POOL_REQUEST_CLOSED`，也不得让 `retryable: false` 变成可重试。readiness 识别必须要求池自己的 `capability_not_ready`/未验证 egress 详情；仅凭 `pool_request_id`、`retryable: false` 与 `5xx` 不得改判，因为该 id 现在出现在每个错误 body（含原生 provider 错误）上，只有该详情能把它与原生失败区分开。保留 `error.status` 兜底：没有捕获响应且消息没有状态前缀时读取 `error.status`。更新 catalog 时必须同时更新上游 `swift/contracts/error-catalog.json`、生成文件、SHA 断言和分类测试。
+**Preservation rule.** 保留 fetch 捕获的协议范围（`anthropic-messages`、`openai-completions`、`openai-responses`）；Google 拒绝自定义 fetch，必须继续走文本分类。不得把 `POOL_SESSION_BUSY` 加进默认可重试码，不得让 `claude` origin 走池分类，也不得把显式 `retryableCodes` 与默认列表合并。保留 `POOL_REQUEST_CLOSED` 的可重试映射与 cc-pool 路由的显式列表项；它的前提是每次有意尝试使用新的 ledger id，若恢复重复 id 就必须同时把它移出可重试码。保留 `terminal` 只终结同一 id replay 的语义：不得让它重新覆盖 `retry_same` 且 `retryable: true` 的 `POOL_REQUEST_CLOSED`，也不得让 `retryable: false` 变成可重试。readiness 识别（归为 readiness 拒绝）必须要求池自己的 `capability_not_ready`/未验证 egress 详情；但池自述的 `retryable: false`（带 `pool_request_id` 或 `origin: pool`）必须直接禁止重试，不得退回文本分类的 5xx 重试；没有池标记的 body 保持原分类。保留 `error.status` 兜底：没有捕获响应且消息没有状态前缀时读取 `error.status`。更新 catalog 时必须同时更新上游 `swift/contracts/error-catalog.json`、生成文件、SHA 断言和分类测试。
 
 **Focused verification.** `pnpm exec vitest run packages/llm/llm-pi-ai/tests packages/llm/llm/tests packages/llm/llm-retry/tests` 覆盖 envelope、fetch 捕获、默认/显式重试策略、适配器分类与 retry executor；`pnpm run verify-config-catalog` 校验配置目录与 JSDoc 同步。
 
@@ -1059,13 +1059,14 @@ U+FEFF), and the reserved placeholder names `空闲`/`未知` (after trimming) a
 refused by the pool, so the first two classes are dropped from the name and a
 name left blank or reserved is not sent. The encoder itself only percent-encodes
 the sanitized value. Each attempt also reports structured logger records on
-start and settlement (route, model,
-endpoint URL, session id, attempt ledger id, attempt number, response status,
-the response's `x-cc-pool-request-id`, a failure's code and message, and the
-cause chain of a rejected fetch); the records never carry messages, request
-bodies, credentials, token counts, or session titles. Routes named by
-`sessionHeaders` log at INFO, where a deployment's default sink retains them;
-other routes stay at DEBUG.
+start and settlement (route, model, endpoint URL, session id, attempt ledger id,
+attempt number, response status, and the response's `x-cc-pool-request-id`).
+Routes named by `sessionHeaders` log at INFO, where a deployment's default sink
+retains them; those lines reuse the durable record's endpoint reduction (origin
+and path only) and omit a failure's provider message and cause chain, because
+either can echo a credential or request content. Other routes stay at DEBUG, and
+a failure there still warns with the live provider text and cause chain. No line
+carries request bodies, credentials, token counts, or session titles.
 
 The mac-pool route is the only consumer: the pool binds its persistent
 conversation key and its prompt identity, so every turn and tool continuation
@@ -1122,7 +1123,11 @@ request id, and failure code — never messages, request bodies, credentials,
 tokens, session titles, or provider failure text; the writer projects onto that
 field list, so a later adapter field cannot leak content. The endpoint is
 reduced to its origin and path, dropping userinfo and query secrets. Files are
-created `0600` and directories `0700`. Writes are queued off the request path;
+created `0600` and directories `0700`; an existing active file whose group or
+other permission bits are set is repaired to `0600` before the next append, and
+a repair this process cannot perform refuses the write rather than appending to a
+file others may read. Windows exposes no POSIX mode bits, so there the sink
+inherits the file's ACL and cannot narrow an existing file. Writes are queued off the request path;
 the first failure warns once through the plugin logger and later records keep
 trying. The plugin mount reads loader configuration, so a profile change takes
 effect at the next DSH start. The ledger identity (`clientRequestId` and attempt
@@ -1138,7 +1143,9 @@ default path.
 write below the harness home), keep the cc-pool sink opt-in, and keep the record
 projection free of messages, request bodies, credentials, token counts, session
 titles, and provider failure text. Keep the endpoint redaction: a durable record
-must never carry userinfo or a query string. Keep the ledger identity lazy: a
+must never carry userinfo or a query string. Keep the owner-only repair: a
+pre-existing `0644` file must not keep a credential-bearing record readable
+beyond its owner. Keep the ledger identity lazy: a
 route outside `sessionHeaders` and `ledgerRoutes` must not hash messages or touch
 the attempt map. Keep writes off the synchronous request path and keep the
 one-warning failure behavior: a full disk or read-only path must not fail a model
@@ -1147,9 +1154,12 @@ bounds, and do not give both plugins one default file.
 
 **Focused verification.**
 `pnpm exec vitest run packages/llm/llm-pi-ai/tests/request-log.spec.ts packages/llm/llm-pi-ai/tests/adapter.spec.ts packages/llm/llm-pi-ai/tests/loader-composition.spec.ts packages/llm/llm-cc-pool`
-covers temporary-directory writes, owner-private modes, size rotation and
+covers temporary-directory writes, owner-private modes including repair of an
+existing broader file, size rotation and
 oldest-file eviction, the exact NDJSON field set and excluded content, endpoint
-redaction including a non-URL fallback, the non-blocking one-warning write
+redaction including a non-URL fallback, the process log's retained-route
+redaction (endpoint and dropped failure text) beside the unredacted DEBUG and
+WARN lines, the non-blocking one-warning write
 failure, disabled and enabled switches, the lazy identity gate, the real Loader
 composition, the cc-pool default-off and distinct-default-path behavior, and
 per-file 100% coverage of `src/request-log.ts`.
@@ -1238,6 +1248,9 @@ read-only candidate listing: it must not adopt models, write the profile, or
 fall back to the catalogue when the pool cannot be read. Keep the discovery
 endpoint (`GET /v1/models` on the fixed route base URL) and its bearer
 credential tied to the route's fixed facts.
+Keep the package `private: true`: no release family or npm baseline publishes
+it, and `scripts/check-workspace-constraints.ts` keeps its directory out of the
+release-member rules together with `packages/client/ui-settings-cc-pool`.
 Keep pool failure classification in the generic adapter until a
 dedicated move lands; do not add mac-pool-only branches to `llm-pi-ai`, and do
 not duplicate its HTTP/SSE transport, context conversion, or stream projection.
@@ -1417,7 +1430,9 @@ Keep `src/client/contract.ts` in step with `packages/llm/llm-cc-pool`'s
 `pool.ts` and `config.ts` (entry id `llm-cc-pool`, provider `cc-pool`,
 `CC_POOL_API_KEY`, the five efforts, the `CcPoolModel` fields); a browser bundle
 cannot import those Host values, so the mirror is intentional and must change
-with them.
+with them. Keep the package `private: true` like `packages/llm/llm-cc-pool`: the
+web-app bundle composes it from this checkout, and no release family or npm
+baseline publishes it.
 
 **Focused verification.**
 `pnpm exec vitest run packages/client/ui-settings-cc-pool` covers the draft

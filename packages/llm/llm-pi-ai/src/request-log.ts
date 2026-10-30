@@ -16,12 +16,26 @@
  * through the supplied warning channel, and later records keep trying so a
  * transient failure recovers on its own.
  *
+ * On POSIX the active file is owner-only. A file created here uses mode `0600`;
+ * an existing file whose group or other permission bits are set is repaired
+ * with `chmod` before the next append, and a repair this process cannot perform
+ * refuses the write and reports it through the same warning channel instead of
+ * appending to a file others may read. Windows has no POSIX mode bits to
+ * inspect, so the sink inherits the file's existing ACL there and cannot narrow
+ * it; protect that directory through Windows permissions.
+ *
  * @module dsh-llm-pi-ai/request-log
  */
-import { appendFile, mkdir, rename, stat, unlink } from 'node:fs/promises'
+import { appendFile, chmod, mkdir, rename, stat, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { PiAiRequestDiagnostic } from './adapter.ts'
+
+/** Owner read/write only: the mode this sink creates and repairs files with. */
+const OWNER_ONLY_MODE = 0o600
+
+/** Permission bits that only the owner may hold on a request-log file. */
+const GROUP_OR_OTHER_BITS = 0o077
 
 /** Bytes one request-log file holds before it rotates (16 MiB). */
 export const DEFAULT_REQUEST_LOG_MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -205,12 +219,33 @@ export class RequestDiagnosticLog {
         await this.rotate()
       }
       await mkdir(dirname(this.config.path), { recursive: true, mode: 0o700 })
-      await appendFile(this.config.path, line, { mode: 0o600 })
+      await this.enforceOwnerOnly()
+      await appendFile(this.config.path, line, { mode: OWNER_ONLY_MODE })
       this.bytes += bytes
     } catch (error: unknown) {
       if (this.warned) return
       this.warned = true
       this.warn(`llm-pi-ai: request log "${this.config.path}" cannot be written (${String(error)})`)
+    }
+  }
+
+  /**
+   * Repair an existing file whose group or other bits are set, before appending.
+   *
+   * A file this process cannot narrow is left alone and the caller refuses the
+   * write: appending would keep a credential-bearing record readable beyond its
+   * owner. A file that does not exist yet is created owner-only by the append.
+   */
+  private async enforceOwnerOnly(): Promise<void> {
+    /* v8 ignore next 2 -- Windows has no POSIX mode bits; its ACLs are inherited */
+    if (process.platform === 'win32') return
+    try {
+      const info = await stat(this.config.path)
+      if ((info.mode & GROUP_OR_OTHER_BITS) === 0) return
+      await chmod(this.config.path, OWNER_ONLY_MODE)
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') return
+      throw error
     }
   }
 

@@ -2,9 +2,7 @@
   "name": "@deepseek-ai/dsh-client-ui-settings-cc-pool",
   "description": "CC subscription pool settings page on the dsh web client: the pool credential and the model catalogue override of the llm-cc-pool entry",
   "version": "0.2.1-rc.2",
-  "publishConfig": {
-    "access": "public"
-  },
+  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/deepseek-ai/deepseek-harness.git",

@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { PiAiRequestDiagnostic } from '../src/adapter.ts'
 import { resolveRequestLog } from '../src/config.ts'
 import type { PiAiRequestLogProfile } from '../src/config.ts'
@@ -15,7 +15,7 @@ import {
   RequestDiagnosticLog,
 } from '../src/request-log.ts'
 import type { ResolvedRequestLogConfig } from '../src/request-log.ts'
-import { createPiAiRequestLog } from '../src/reuse.ts'
+import { createPiAiRequestLog, piAiDiagnosticHooks } from '../src/reuse.ts'
 
 /** A complete request record; optional response facts are added by each case. */
 function request(clientRequestId: string): PiAiRequestDiagnostic {
@@ -234,6 +234,110 @@ describe('fixed-route request log', () => {
   })
 })
 
+describe('retained-route process log', () => {
+  /** A logger double; the hooks only write through it. */
+  function logger(): {
+    debug: Mock<(line: string, fields: object) => void>
+    info: Mock<(line: string, fields: object) => void>
+    warn: Mock<(line: string, fields?: object) => void>
+  } {
+    return { debug: vi.fn(), info: vi.fn(), warn: vi.fn() }
+  }
+
+  it('redacts the endpoint and drops provider failure text for a retained route', () => {
+    const sink = logger()
+    const appended: PiAiRequestDiagnostic[] = []
+    const hooks = piAiDiagnosticHooks({
+      label: 'llm-cc-pool',
+      retainedRoutes: new Set(['cc-pool']),
+      logger: sink,
+      append: (event) => { appended.push(event) },
+    })
+    const event: PiAiRequestDiagnostic = {
+      kind: 'response',
+      provider: 'cc-pool',
+      model: 'claude-sonnet-4-6',
+      endpoint: 'https://member:pool-secret@ccpool.test/v1/messages?api_key=query-secret',
+      stream: true,
+      status: 529,
+      poolRequestId: 'pool-request-1',
+      code: 'POOL_ERROR',
+      message: 'provider echoed member:pool-secret',
+      cause: 'Error: connect ECONNREFUSED',
+    }
+
+    hooks.onRequestDiagnostic?.(event)
+
+    expect(sink.warn).toHaveBeenCalledTimes(1)
+    const [line, fields] = sink.warn.mock.calls[0] as [string, Record<string, unknown>]
+    expect(line).toContain('model request failed')
+    expect(fields).toMatchObject({
+      endpoint: 'https://ccpool.test/v1/messages',
+      status: 529,
+      poolRequestId: 'pool-request-1',
+      code: 'POOL_ERROR',
+    })
+    expect(fields).not.toHaveProperty('message')
+    expect(fields).not.toHaveProperty('cause')
+    const text = JSON.stringify(fields)
+    for (const secret of ['member', 'pool-secret', 'api_key', 'query-secret', 'provider echoed', 'ECONNREFUSED']) {
+      expect(text).not.toContain(secret)
+    }
+    // The durable sink owns its own projection; the process log is the only copy redacted here.
+    expect(appended[0]).toBe(event)
+  })
+
+  it('redacts a retained request line and keeps it at INFO', () => {
+    const sink = logger()
+    const hooks = piAiDiagnosticHooks({ label: 'llm-cc-pool', retainedRoutes: new Set(['cc-pool']), logger: sink })
+
+    hooks.onRequestDiagnostic?.({
+      kind: 'request',
+      provider: 'cc-pool',
+      model: 'claude-sonnet-4-6',
+      endpoint: 'https://user:secret@ccpool.test/v1?token=secret',
+      sessionId: 'session-1',
+      clientRequestId: 'ledger-1',
+      stream: true,
+      attempt: 1,
+    })
+
+    expect(sink.info).toHaveBeenCalledTimes(1)
+    const [line, fields] = sink.info.mock.calls[0] as [string, Record<string, unknown>]
+    expect(line).toContain('model request')
+    expect(fields).toMatchObject({ endpoint: 'https://ccpool.test/v1', sessionId: 'session-1', attempt: 1 })
+    expect(JSON.stringify(fields)).not.toContain('secret')
+  })
+
+  it('keeps the live failure text and endpoint on a route the durable sink does not retain', () => {
+    const sink = logger()
+    const hooks = piAiDiagnosticHooks({ label: 'llm-pi-ai', retainedRoutes: new Set(['cc-pool']), logger: sink })
+
+    hooks.onRequestDiagnostic?.({
+      kind: 'response',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      endpoint: 'https://member:secret@api.test/v1',
+      stream: true,
+      code: 'SERVER',
+      message: 'overloaded',
+      cause: 'Error: connect',
+    })
+    hooks.onRequestDiagnostic?.({
+      kind: 'request',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      endpoint: 'https://member:secret@api.test/v1',
+      stream: true,
+    })
+
+    const [, failureFields] = sink.warn.mock.calls[0] as [string, Record<string, unknown>]
+    expect(failureFields).toMatchObject({ message: 'overloaded', cause: 'Error: connect' })
+    const [, requestFields] = sink.debug.mock.calls[0] as [string, Record<string, unknown>]
+    expect(requestFields['endpoint']).toBe('https://member:secret@api.test/v1')
+  })
+})
+
 describe('request log resolution', () => {
   it('persists session-header routes by default below the harness home', async () => {
     const home = await temporaryRoot()
@@ -302,6 +406,21 @@ describe('request log resolution', () => {
 })
 
 describe('request log files', () => {
+  it.skipIf(process.platform === 'win32')('repairs an existing file whose permissions reach beyond its owner', async () => {
+    const home = await temporaryRoot()
+    const path = join(home, 'logs', 'requests.jsonl')
+    await mkdir(join(home, 'logs'), { recursive: true })
+    await writeFile(path, '')
+    await chmod(path, 0o644)
+
+    const log = new RequestDiagnosticLog(settings(path), vi.fn())
+    log.append(request('ledger-1'))
+    await log.close()
+
+    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect((await lines(path)).map(record => record['clientRequestId'])).toEqual(['ledger-1'])
+  })
+
   it('appends one NDJSON line per record and protects the file', async () => {
     const home = await temporaryRoot()
     const path = join(home, 'logs', 'requests.jsonl')

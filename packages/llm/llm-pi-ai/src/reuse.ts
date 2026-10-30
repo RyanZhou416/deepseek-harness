@@ -18,7 +18,7 @@ import type { PiAiAdapterOptions, PiAiAuthInjection, PiAiRequestDiagnostic } fro
 import { authContextFrom, credentialStoreFrom } from './auth.ts'
 import { resolveProfiles, resolveRequestLog } from './config.ts'
 import type { PiAiProviderProfile, PiAiRequestLogProfile, ResolvedPiAiProviderProfile } from './config.ts'
-import { RequestDiagnosticLog } from './request-log.ts'
+import { redactEndpoint, RequestDiagnosticLog } from './request-log.ts'
 
 /**
  * Resolve one fixed provider-profile map with full validation.
@@ -137,6 +137,37 @@ export interface PiAiDiagnosticChannel {
 }
 
 /**
+ * The process-log fields one retained route may report.
+ *
+ * A retained route is the one a durable sink records, so its process line is
+ * read beside that file and carries the same facts: the endpoint is reduced to
+ * its origin and path exactly as the durable record reduces it, and the
+ * provider's own failure text stays out, because either can echo a credential
+ * or request content. `code`, `status`, and the pool request id stay, because
+ * they are the facts diagnosis needs.
+ * @param event - the request or settled-response diagnostic.
+ * @returns the fields to hand to the logger.
+ */
+function retainedRouteLogFields(event: PiAiRequestDiagnostic): Record<string, unknown> {
+  const fields: Record<string, unknown> = {
+    provider: event.provider,
+    model: event.model,
+    endpoint: redactEndpoint(event.endpoint),
+    stream: event.stream,
+    ...event.sessionId === undefined ? {} : { sessionId: event.sessionId },
+    ...event.clientRequestId === undefined ? {} : { clientRequestId: event.clientRequestId },
+    ...event.attempt === undefined ? {} : { attempt: event.attempt },
+  }
+  if (event.kind !== 'response') return fields
+  return {
+    ...fields,
+    ...event.status === undefined ? {} : { status: event.status },
+    ...event.poolRequestId === undefined ? {} : { poolRequestId: event.poolRequestId },
+    ...event.code === undefined ? {} : { code: event.code },
+  }
+}
+
+/**
  * Build the adapter diagnostic callbacks for one plugin.
  *
  * The rule is the same for any pi-ai-backed route set: a failure logs at WARN,
@@ -160,13 +191,17 @@ export function piAiDiagnosticHooks(channel: PiAiDiagnosticChannel): Pick<
     },
     onRequestDiagnostic: (event) => {
       const { kind, ...fields } = event
+      const retained = channel.retainedRoutes.has(event.provider)
       if (kind === 'response' && event.code !== undefined) {
-        channel.logger.warn(`${channel.label}: model request failed %o`, fields)
+        channel.logger.warn(
+          `${channel.label}: model request failed %o`,
+          retained ? retainedRouteLogFields(event) : fields,
+        )
       } else {
         const line = kind === 'request'
           ? `${channel.label}: model request %o`
           : `${channel.label}: model request response %o`
-        if (channel.retainedRoutes.has(event.provider)) channel.logger.info(line, fields)
+        if (retained) channel.logger.info(line, retainedRouteLogFields(event))
         else channel.logger.debug(line, fields)
       }
       channel.append?.(event)

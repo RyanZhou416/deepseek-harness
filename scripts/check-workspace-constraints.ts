@@ -57,6 +57,16 @@ const publicationSourceAllowlist: Readonly<Record<string, readonly string[]>> = 
 const publishedRepositoryUrl = 'git+https://github.com/deepseek-ai/deepseek-harness.git'
 /** Packages that participate in the experimental policy. */
 const experimentalPackageDirectory = /^packages\/experimental\/[^/]+$/
+/**
+ * Fork-only packages the maintained fork profile installs but no release
+ * sequence publishes: the cc-pool provider and its settings page exist only for
+ * this checkout, so both stay `private` and outside every release family and npm
+ * baseline.
+ */
+const forkOnlyPackageDirectories = new Set([
+  'packages/llm/llm-cc-pool',
+  'packages/client/ui-settings-cc-pool',
+])
 /** Private reference tool run from the repository; it publishes no files. */
 const pluginMarketGeneratorDirectory = 'apps/plugin-market-generator'
 /**
@@ -401,6 +411,8 @@ export function checkExperimentalNameExceptions(manifests: readonly WorkspaceMan
 function isReleaseMemberDirectory(dir: string): boolean {
   // The SSH carrier is distributed as executable archives, never as an npm application.
   if (dir === 'packages/ssh/ssh-helper-runtime') return false
+  // Fork-only packages are installed into the maintained profile, never published.
+  if (forkOnlyPackageDirectories.has(dir)) return false
   return standardReleaseMemberDirectory.test(dir) || isPublicExperimentalPackageDirectory(dir)
 }
 

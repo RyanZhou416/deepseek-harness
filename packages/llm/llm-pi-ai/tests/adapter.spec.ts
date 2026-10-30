@@ -571,7 +571,7 @@ describe('PiAiAdapter provider routing', () => {
     expect(failure?.message).toBe('this client request id is already closed')
   })
 
-  it('keeps a native provider 5xx carrying the pool request id in text classification', async () => {
+  it('forbids a pool-withdrawn native provider 5xx instead of retrying it', async () => {
     const server = await mockServer([{
       status: 503,
       body: JSON.stringify({
@@ -595,13 +595,13 @@ describe('PiAiAdapter provider routing', () => {
 
     const result = await assemble(ctx, { provider: 'cc-pool', model: 'claude-sonnet-4-6', messages: [] })
 
+    // The pool echoes its request id on native failures and withdrew the retry
+    // there; the text classifier's retryable 5xx default must not override it.
     expect(server.paths).toHaveLength(1)
     expect(result.finish).toMatchObject({
       kind: 'error',
-      failure: { code: 'SERVER' },
+      failure: { code: 'POOL_ERROR', retryDisposition: 'forbid' },
     })
-    const failure = result.finish.kind === 'error' ? result.finish.failure : undefined
-    expect(failure?.retryDisposition).toBeUndefined()
   })
 
   it('keeps text classification on a protocol that rejects a custom fetch', async () => {
@@ -1380,7 +1380,10 @@ describe('request diagnostics', () => {
     const failures = logged.filter(entry => entry.args[0] === 'llm-pi-ai: model request failed %o')
     expect(failures.map(entry => entry.type)).toEqual(['warn'])
     expect(failures[0]?.args[1]).toMatchObject({ provider: 'cc-pool', status: 429, code: 'RATE_LIMIT', attempt: 1 })
-    expect(failures[0]?.args[1]).toHaveProperty('message', expect.stringContaining('slow down'))
+    // The retained route's process line carries the facts, not the provider text
+    // or the endpoint's secrets: the durable sink records the same route.
+    expect(failures[0]?.args[1]).not.toHaveProperty('message')
+    expect(failures[0]?.args[1]).not.toHaveProperty('cause')
   })
 })
 

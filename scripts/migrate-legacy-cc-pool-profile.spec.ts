@@ -33,7 +33,7 @@ async function listen(): Promise<{ server: Server; port: number }> {
 
 /** Stop a listener and wait for its handle to close. */
 async function stop(server: Server): Promise<void> {
-  await new Promise<void>((settle) => { server.close(() => settle()) })
+  await new Promise<void>((settle) => { server.close(() => { settle() }) })
 }
 
 /** A block-form legacy profile patch with a kept comment and `!!js`. */

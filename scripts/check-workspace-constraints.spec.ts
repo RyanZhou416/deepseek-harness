@@ -357,6 +357,17 @@ describe('package payload constraints', () => {
     expect(checkWorkspaceManifest({ dir: 'apps/other-tool', manifest })).not.toEqual([])
   })
 
+  it.each(['packages/llm/llm-cc-pool', 'packages/client/ui-settings-cc-pool'])(
+    'keeps %s private and outside the release-member rules',
+    (dir) => {
+      const manifest = JSON.parse(readFileSync(new URL(`../${dir}/package.json`, import.meta.url), 'utf8')) as WorkspaceManifest['manifest']
+      expect(manifest.private).toBe(true)
+      expect(checkWorkspaceManifest({ dir, manifest })).toEqual([])
+      expect(checkWorkspaceManifest({ dir, manifest: { ...manifest, private: false } }))
+        .toEqual([expect.stringContaining('package.json must set "private": true')])
+    },
+  )
+
   it('rejects locale publication entries without their resource exports', () => {
     const dir = 'packages/experimental/auto-review'
     const manifest = JSON.parse(readFileSync(new URL(`../${dir}/package.json`, import.meta.url), 'utf8')) as WorkspaceManifest['manifest']

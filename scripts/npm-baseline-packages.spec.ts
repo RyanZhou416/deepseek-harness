@@ -67,6 +67,16 @@ describe('npm baseline package discovery', () => {
     expect(discoverNpmBaselineManifests(fixture(manifests), [])).toEqual(manifests)
   })
 
+  it('excludes a private package even when its directory is not on the denylist', () => {
+    const root = fixture([
+      'packages/client/ui-settings-cc-pool/package.json',
+      'packages/llm/llm-cc-pool/package.json',
+    ])
+    writeFileSync(join(root, 'packages/llm/llm-cc-pool/package.json'), '{"private":true}\n')
+
+    expect(discoverNpmBaselineManifests(root)).toEqual(['packages/client/ui-settings-cc-pool/package.json'])
+  })
+
   it('leaves an empty package set for the baseline caller to reject', () => {
     expect(discoverNpmBaselineManifests(fixture([]))).toEqual([])
   })
