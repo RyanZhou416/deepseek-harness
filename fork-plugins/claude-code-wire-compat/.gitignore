@@ -150,3 +150,9 @@ vite.config.ts.timestamp-*
 
 # Generated coverage output
 coverage-*/
+
+# The DSH checkout ignores generic `lib/` build output repository-wide. This
+# package keeps the pack-output parser at scripts/lib/pack-json.mjs as source,
+# so re-include that directory inside the imported tree.
+!scripts/lib/
+!scripts/lib/**
