@@ -5648,7 +5648,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'GenerateOptions',
-    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    systemSections?: readonly SystemPromptSection[];\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    sessionName?: string;\n    purpose?: \'compaction\' | \'session-title\';\n    attemptNonce?: string;\n}',
+    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    systemSections?: readonly SystemPromptSection[];\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    sessionName?: string;\n    requestClass?: \'main\' | \'compaction\' | \'auxiliary\' | \'subagent\';\n    purpose?: \'compaction\' | \'session-title\';\n    attemptNonce?: string;\n}',
   },
   {
     name: 'GenericCallView',

@@ -1162,6 +1162,27 @@ describe('request diagnostics', () => {
     expect(Object.keys(response).sort()).toEqual([...RESPONSE_KEYS, 'code', 'message', 'poolRequestId'].sort())
   })
 
+  it('reports the pool A-unavailable marker on the refusal that carries it', async () => {
+    const server = await mockServer([{
+      status: 503,
+      headers: { 'x-cc-wire-parity-unavailable': '1' },
+      body: JSON.stringify({
+        type: 'error',
+        error: { type: 'cc_wire_parity_unavailable', message: 'the selected worker does not advertise ccWireParity' },
+      }),
+    }])
+    const events: LlmPiAi.PiAiRequestDiagnostic[] = []
+    const adapter = diagnosticAdapter(server.url, events)
+
+    await drain(adapter, {
+      provider: 'cc-pool', model: MODEL, messages: [user('hello')], sessionId: 'session-parity-a' as never,
+    })
+
+    const response = eventAt(events, 1)
+    expect(response).toMatchObject({ kind: 'response', attempt: 1, status: 503, wireParityUnavailable: true })
+    expect(Object.keys(response).sort()).toEqual([...RESPONSE_KEYS, 'code', 'message', 'wireParityUnavailable'].sort())
+  })
+
   it('reports a failed attempt with the response it observed and the thrown cause', async () => {
     const server = await mockServer([{ holdOpen: true }])
     const events: LlmPiAi.PiAiRequestDiagnostic[] = []

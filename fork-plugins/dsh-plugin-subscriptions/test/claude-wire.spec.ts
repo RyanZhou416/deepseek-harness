@@ -12,13 +12,10 @@ import { createHash } from 'node:crypto'
 import {
   CLAUDE_CODE_2_1_288_PROFILE,
   ClaudeCodeWireError,
-  BETA_REGISTRY_2_1_288,
 } from '@tormentalabs/claude-code-wire-compat'
-import type { ContextManagementConfig } from '@tormentalabs/claude-code-wire-compat'
 import { IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
-  assertContextManagementBeta,
   boundedTwoLevelMap,
   buildClaudeWireRequest as buildClaudeWireRequestWithContinuation,
   CLAUDE_USER_AGENT,
@@ -44,15 +41,14 @@ function buildClaudeWireRequest(
   account: string,
   continuation: { readonly atisPin?: string; readonly previousRequestId?: string } = {},
   identityLine?: Parameters<typeof buildClaudeWireRequestWithContinuation>[8],
-  contextManagement?: ContextManagementConfig,
   fast = false,
-  policy?: Parameters<typeof buildClaudeWireRequestWithContinuation>[11],
+  policy?: Parameters<typeof buildClaudeWireRequestWithContinuation>[10],
 ): ReturnType<typeof buildClaudeWireRequestWithContinuation> {
   return buildClaudeWireRequestWithContinuation(options, session, messages, maxTokens, thinking, effort, {
     sessionId,
     atisPin: continuation.atisPin,
     previousRequestId: continuation.previousRequestId,
-  }, account, identityLine, contextManagement, fast, policy)
+  }, account, identityLine, fast, policy)
 }
 import { oversizeWireError } from '../src/providers/claude-images.js'
 import {
@@ -252,28 +248,49 @@ test('the request class follows the call kind the caller stated', async () => {
   assert.equal(claudeRequestClass(undefined), 'main')
 })
 
-test('the context-management field and the beta that declares it travel together', async () => {
-  const plan: ContextManagementConfig = { edits: [{ type: 'clear_thinking_20251015', keep: 'all' }] }
-  const built = await buildClaudeWireRequest(
-    options({ model: 'claude-opus-5' }),
-    session(), history(), 32_000, { type: 'adaptive' }, undefined,
-    wireSessionId('sess-context-management'), ACCOUNT, {}, undefined, plan,
-  )
-  assert.deepEqual(parseBody(built).context_management, plan)
-  const beta = headerMap(built).get('anthropic-beta') ?? ''
-  assert.ok(
-    beta.split(',').map(value => value.trim()).includes(BETA_REGISTRY_2_1_288.CONTEXT_MANAGEMENT.header),
-    'the field is declared by its beta',
-  )
-  // The assertion is what holds the two together: a built request whose body states the field
-  // and whose header has lost the beta is refused rather than sent.
-  const withoutBeta = { ...built, headers: built.headers.filter(([name]) => name.toLowerCase() !== 'anthropic-beta') }
-  assert.throws(
-    () => { assertContextManagementBeta(withoutBeta, true) },
-    /context_management without the context-management-2025-06-27 beta header/,
-  )
-  // A request that states no edits is not required to carry the beta, so its absence is no fault.
-  assert.doesNotThrow(() => { assertContextManagementBeta(withoutBeta, false) })
+test('the body states no context-management field on any model', async () => {
+  // The route applies no server-side context edits: it states no clear_tool_uses and no
+  // clear_thinking policy. The beta that declares the feature may still ride with the model's
+  // capabilities, but the body field the caller would have to supply must never appear.
+  for (const model of ['claude-opus-5', 'claude-sonnet-4-5']) {
+    const built = await buildClaudeWireRequest(
+      options({ model }), session(), history(), 32_000, undefined, undefined,
+      wireSessionId(`sess-no-context-management-${model}`), ACCOUNT,
+    )
+    assert.equal('context_management' in parseBody(built), false, `${model} states no context-management policy`)
+    assert.equal(String(built.body).includes('clear_tool_uses'), false)
+    assert.equal(String(built.body).includes('clear_thinking'), false)
+  }
+})
+
+test('thinking and a long tool-result history state no context-management field', async () => {
+  // The two conditions a context-edit planner would react to: thinking on the request, and a
+  // run of tool results large enough to be worth clearing. Neither states the field, and
+  // neither do both together.
+  const messages: TranslatableMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }]
+  for (let index = 0; index < 30; index += 1) {
+    messages.push({
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: ToolCallId(`c${String(index)}`), name: 'bash', arguments: '{}' }],
+    })
+    messages.push({
+      role: 'user',
+      content: [{
+        type: 'tool-result',
+        toolCallId: ToolCallId(`c${String(index)}`),
+        content: [{ type: 'text', text: 'x'.repeat(400) }],
+      }],
+    })
+  }
+  for (const thinking of [undefined, { type: 'adaptive' } as const]) {
+    const built = await buildClaudeWireRequest(
+      options({ messages: messages as never }), session(), messages, 32_000,
+      thinking, 'high', wireSessionId(`sess-no-context-management-${thinking === undefined ? 'plain' : 'thinking'}`), ACCOUNT,
+    )
+    assert.equal('context_management' in parseBody(built), false)
+    assert.equal(String(built.body).includes('clear_tool_uses'), false)
+    assert.equal(String(built.body).includes('clear_thinking'), false)
+  }
 })
 
 test('body carries stream, cache breakpoints, name-ordered tools, thinking and effort', async () => {

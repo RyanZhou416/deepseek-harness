@@ -584,3 +584,96 @@ describe('Anthropic cc3 marker policy', () => {
     })).toThrow(/cacheMarkerPolicy.*anthropic-messages/)
   })
 })
+
+/** The stable and session-specific prompt text a parity A boundary splits. */
+const WIRE_PARITY_SECTIONS = [
+  { name: 'app:instructions', text: 'Stable route instructions.', stable: true },
+  { name: 'session:state', text: 'Current session state.', stable: false },
+]
+
+/** A main-class request whose sections state the boundary the adapter sends. */
+const WIRE_PARITY_PROBE = {
+  ...PROBE,
+  system: WIRE_PARITY_SECTIONS.map(section => section.text).join('\n\n'),
+  systemSections: WIRE_PARITY_SECTIONS,
+  requestClass: 'main' as const,
+}
+
+describe('CC wire parity cache intent', () => {
+  it('declares the route cache intent in the headers and sends one A body', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const [mainServer, offServer] = await Promise.all([
+      mockServer([{ events: anthropicTextEvents }]),
+      // The off route answers its main request and its helper request.
+      mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }]),
+    ])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'parity-main': {
+          api: 'anthropic-messages',
+          baseURL: mainServer.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          ccWireParity: true,
+          models: [{ id: 'model' }],
+        },
+        'parity-off': {
+          api: 'anthropic-messages',
+          baseURL: offServer.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          ccWireParity: true,
+          ccWireParityCache: 'off',
+          // The route also declares the extended beta; an A request must send
+          // no cache beta even so.
+          extendedCacheBeta: true,
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, { ...WIRE_PARITY_PROBE, provider: 'parity-main' })
+    await assemble(ctx, { ...WIRE_PARITY_PROBE, provider: 'parity-off' })
+    await assemble(ctx, { ...PROBE, provider: 'parity-off', purpose: 'compaction' })
+
+    const main = mainServer.requests[0] as Record<string, unknown>
+    const off = offServer.requests[0] as Record<string, unknown>
+    const helper = offServer.requests[1] as Record<string, unknown>
+
+    // The class and layout are the same either way; the cache intent is the one
+    // decision the route's profile makes.
+    expect(mainServer.headers[0]?.['x-cc-request-class']).toBe('main')
+    expect(mainServer.headers[0]?.['x-cc-system-layout']).toBe('boundary:1')
+    expect(mainServer.headers[0]?.['x-cc-cache-intent']).toBe('main')
+    expect(offServer.headers[0]?.['x-cc-request-class']).toBe('main')
+    expect(offServer.headers[0]?.['x-cc-system-layout']).toBe('boundary:1')
+    expect(offServer.headers[0]?.['x-cc-cache-intent']).toBe('off')
+
+    // `off` withholds the worker's cache plan only: the member body is the same
+    // body, with no marker, no TTL, and no cache beta on either route.
+    expect(off).toEqual(main)
+    expect(off['system']).toEqual([
+      { type: 'text', text: IDENTITY },
+      { type: 'text', text: 'Stable route instructions.' },
+      { type: 'text', text: 'Current session state.' },
+    ])
+    expect(markersOf(off)).toEqual([])
+    expect(JSON.stringify(off)).not.toContain('"ttl"')
+    // No cache beta survives, including the extended beta this route declares.
+    const offBetas = betasOf(offServer.headers[0] ?? {})
+    expect(offBetas).not.toContain(EXTENDED_CACHE_TTL_BETA)
+    expect(offBetas).not.toContain(CACHE_SCOPE_BETA)
+    expect(offBetas.filter(beta => beta.startsWith('cache-diagnosis-'))).toEqual([])
+    // The pinned field order keeps the pool's `metadata` splice slot.
+    expect(off['metadata']).toEqual({})
+
+    // A helper keeps its own intent and its caller's system; helpers are
+    // marker-free in both route modes.
+    expect(offServer.headers[1]?.['x-cc-request-class']).toBe('compaction')
+    expect(offServer.headers[1]?.['x-cc-system-layout']).toBe('none')
+    expect(offServer.headers[1]?.['x-cc-cache-intent']).toBe('helper')
+    expect(markersOf(helper)).toEqual([])
+    expect(JSON.stringify(helper)).not.toContain('"ttl"')
+  })
+})

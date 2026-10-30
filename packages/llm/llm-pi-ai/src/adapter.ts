@@ -62,7 +62,8 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
-import type { ResolvedPiAiProviderProfile } from './config.ts'
+import { CC_WIRE_PARITY_MEMBER_HEADERS } from './config.ts'
+import type { PiAiCcWireParityCache, ResolvedPiAiProviderProfile } from './config.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
 import { ProviderErrorCapture } from './pool-error.ts'
@@ -276,6 +277,12 @@ export interface PiAiResponseDiagnostic extends PiAiRequestIdentity {
   readonly status?: number
   /** Pool-issued request id echoed by the response, when the pool issued one. */
   readonly poolRequestId?: string
+  /**
+   * Whether the pool answered with its `cc_wire_parity_unavailable` refusal, which
+   * it marks on that response alone. Present only when the pool stated it, so a
+   * reader never infers the refusal from the status.
+   */
+  readonly wireParityUnavailable?: boolean
   /** Stable harness failure code, when the attempt failed. */
   readonly code?: string
   /** Provider or transport failure message, when the attempt failed. */
@@ -385,9 +392,11 @@ const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
  * The Claude Code 2.1.288 identity line, byte-exact.
  *
  * The pinned client emits it as a system block of its own, after its billing
- * block and before the caller's prompt, and the `cc3` policy reproduces that
- * sequence for the route that opts in. The text is also what the client matches
- * caller blocks against so an identity line never appears twice.
+ * block and before the caller's prompt. The `cc3` policy reproduces that
+ * sequence for the route that opts in, and the wire-parity builder opens its
+ * `[identity, static, dynamic]` system array with the same line. The text is
+ * also what the client matches caller blocks against so an identity line never
+ * appears twice.
  */
 const CLAUDE_CODE_IDENTITY_TEXT = "You are Claude Code, Anthropic's official CLI for Claude."
 
@@ -526,8 +535,9 @@ const CLAUDE_CODE_FIELD_ORDER: readonly string[] = [
 /**
  * Reorder one request's top-level fields into the pinned client's order.
  *
- * The canonical order determines the prefix Anthropic caches, so the `cc3`
- * route reproduces it instead of pi-ai's construction order. A request without
+ * The canonical order determines the prefix Anthropic caches, so a route with
+ * the `cc3` policy or wire parity reproduces it instead of pi-ai's construction
+ * order. A request without
  * `metadata` gains an empty object in the canonical slot: the shared-account
  * pool's forward-body editor splices `metadata.user_id` into an existing
  * metadata object in place and appends the member only when metadata is
@@ -641,22 +651,349 @@ function withExtendedCacheBeta(payload: Record<string, unknown>): Record<string,
   return { ...payload, betas: [...betas, EXTENDED_CACHE_TTL_BETA] }
 }
 
+/** One member request class a wire-parity request declares; the same typed vocabulary a request states. */
+type CcWireParityRequestClass = NonNullable<GenerateOptions['requestClass']>
+
+/**
+ * Prompt sections wire parity never forwards: they describe this harness process,
+ * not the pinned client's prompt, so the shared cache prefix cannot hold them.
+ */
+const CC_WIRE_PARITY_DROPPED_SECTIONS: ReadonlySet<string> = new Set(['harness:source', 'app:web-surface'])
+
+/**
+ * The prompt section the pinned identity line replaces. Wire parity emits one
+ * identity line, first and unmarked, so the section's own text is dropped
+ * rather than following it as a second line.
+ */
+const CC_WIRE_PARITY_IDENTITY_SECTION = 'harness:identity'
+
+/**
+ * One wire-parity request's member-side decisions.
+ *
+ * The per-request headers and the payload transformation both read this one
+ * value, so a request never announces a class or layout its body does not send.
+ */
+interface CcWireParityRequest {
+  /** Class the member headers declare. */
+  readonly requestClass: CcWireParityRequestClass
+  /**
+   * Cache intent the member headers declare: the route's main or off choice for
+   * a main or subagent request, and always `helper` for a helper.
+   */
+  readonly cacheIntent: PiAiCcWireParityCache | 'helper'
+  /** `none` for a helper; otherwise `boundary:<static block count>`. */
+  readonly systemLayout: string
+  /**
+   * The static and dynamic system text of a main or subagent boundary. Absent
+   * for a helper, which forwards the caller's system without a split.
+   */
+  readonly boundary?: { readonly staticText: string; readonly dynamicText: string }
+}
+
+/**
+ * The member request class one request states, or undefined when it states none.
+ *
+ * The class is read from the typed `requestClass` of {@link GenerateOptions} by a
+ * switch over its closed union: no `in` probe and no scan over a literal list.
+ * The caller's `purpose` then classifies the two helpers, because a compaction or
+ * title request carries no agent-loop request to classify. A request that states
+ * neither is wire-parity off — it never falls through to `main`, which would put
+ * an unclassified one-shot on the conversation's own wire.
+ * @param options - the assembled request.
+ * @returns the declared class, or undefined when the request declares none.
+ */
+function ccWireParityRequestClass(options: GenerateOptions): CcWireParityRequestClass | undefined {
+  switch (options.requestClass) {
+    case 'main':
+    case 'compaction':
+    case 'auxiliary':
+    case 'subagent':
+      return options.requestClass
+    default:
+      break
+  }
+  if (options.purpose === 'compaction') return 'compaction'
+  if (options.purpose === 'session-title') return 'auxiliary'
+  return undefined
+}
+
+/**
+ * The effective leading system text of one request.
+ *
+ * The request-level text and every leading system-role message join the way the
+ * pi-ai context split joins them, which is the text the transport would send as
+ * the system prompt.
+ * @param options - the assembled request.
+ * @returns the system prompt text, or the empty string when the request has none.
+ */
+function leadingSystemText(options: GenerateOptions): string {
+  const parts: string[] = []
+  if (options.system !== undefined && options.system.length > 0) parts.push(options.system)
+  for (const message of options.messages) {
+    if (message.role !== 'system') break
+    const text = message.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join('')
+    if (text.length > 0) parts.push(text)
+  }
+  return parts.join('\n\n')
+}
+
+/**
+ * Resolve one request's wire-parity decisions.
+ *
+ * A main or subagent request needs a real boundary: the assembled sections,
+ * rejoined, must equal the system text the request already carries, and their
+ * partition into the stable prefix and the session-specific remainder must
+ * leave both non-empty. That equality check runs before the harness-describing
+ * sections are dropped and before the identity line replaces its section, so a
+ * prompt committed in history — whose leading system text no longer describes
+ * the current assembly — is wire-parity off rather than rewritten from
+ * unrelated text. A helper (`compaction`, `auxiliary`) has no boundary: it
+ * forwards the system its caller built, with layout `none` and no markers. Only
+ * a main or subagent request reads the route's cache intent; a helper always
+ * declares `helper`, whose body carries no marker either way. Everything the
+ * contract cannot state exactly is wire-parity off instead of a partial rewrite.
+ * @param options - the assembled request.
+ * @param mainCacheIntent - the cache intent this route's profile declares for a
+ *   `main` or `subagent` request: `main` asks the worker for its cache plan, and
+ *   `off` asks for none.
+ * @returns the request's decisions, or undefined when the request is
+ *   wire-parity off.
+ */
+function resolveCcWireParityRequest(
+  options: GenerateOptions,
+  mainCacheIntent: PiAiCcWireParityCache,
+): CcWireParityRequest | undefined {
+  const requestClass = ccWireParityRequestClass(options)
+  if (requestClass === undefined) return undefined
+  if (requestClass === 'compaction' || requestClass === 'auxiliary') {
+    return { requestClass, cacheIntent: 'helper', systemLayout: 'none' }
+  }
+  const sections = options.systemSections
+  if (sections === undefined || sections.length === 0) return undefined
+  if (sections.map(section => section.text).join('\n\n') !== leadingSystemText(options)) return undefined
+  const stable: string[] = []
+  const session: string[] = []
+  for (const section of sections) {
+    if (CC_WIRE_PARITY_DROPPED_SECTIONS.has(section.name)) continue
+    if (section.name === CC_WIRE_PARITY_IDENTITY_SECTION) continue
+    // The pinned client emits the identity line at most once, so text equal to
+    // it is dropped before the identity block claims the leading slot.
+    if (section.text === CLAUDE_CODE_IDENTITY_TEXT) continue
+    const region = section.stable ? stable : session
+    region.push(section.text)
+  }
+  const staticText = stable.join('\n\n')
+  const dynamicText = session.join('\n\n')
+  if (staticText.length === 0 || dynamicText.length === 0) return undefined
+  return {
+    requestClass,
+    cacheIntent: mainCacheIntent,
+    // One static block: the boundary is the partition between the stable
+    // prefix and the session-specific remainder, not each section.
+    systemLayout: 'boundary:1',
+    boundary: { staticText, dynamicText },
+  }
+}
+
+/**
+ * The three member headers one wire-parity request declares.
+ *
+ * The cache intent is the route's main or off choice for a main or subagent
+ * request and `helper` for a helper; a helper body is marker-free in both modes,
+ * so it never carries the route's intent.
+ * @param request - the request's resolved decisions.
+ * @returns the headers, always all three.
+ */
+function ccWireParityHeaders(request: CcWireParityRequest): Record<string, string> {
+  return {
+    [CC_WIRE_PARITY_MEMBER_HEADERS.requestClass]: request.requestClass,
+    [CC_WIRE_PARITY_MEMBER_HEADERS.systemLayout]: request.systemLayout,
+    [CC_WIRE_PARITY_MEMBER_HEADERS.cacheIntent]: request.cacheIntent,
+  }
+}
+
+/**
+ * Copy one tool declaration without a caller cache marker.
+ *
+ * The marker set is the worker's, so a declaration carries no caller
+ * `cache_control`. Tool streaming is unrelated to cache ownership and keeps the
+ * transport's `eager_input_streaming` flag.
+ * @param value - one tool declaration pi-ai built.
+ * @returns the declaration without the caller cache marker.
+ */
+function withoutToolExtras(value: unknown): unknown {
+  /* v8 ignore next -- pi-ai builds every tool declaration as an object */
+  if (!isRequestPayload(value)) return value
+  const { cache_control: _cacheControl, ...rest } = value
+  return rest
+}
+
+/** Beta identifiers whose behaviour the pool's worker owns on a wire-parity request. */
+const CACHE_BETA_PREFIXES = [
+  'extended-cache-ttl-',
+  'prompt-caching-scope-',
+  'cache-diagnosis-',
+  'context-hint-',
+  'prompt-caching-evict-',
+  'cache-keepalive-',
+  'message-threads-',
+] as const
+
+/**
+ * Remove the cache betas the worker plans from a wire-parity request.
+ *
+ * Every other beta stays: context-window and tool-streaming betas are not cache
+ * policy, and wire parity must not disable them.
+ * @param value - the request's `betas` value.
+ * @returns the remaining betas, or undefined when none remain.
+ */
+function withoutCacheBetas(value: unknown): unknown {
+  const betas = arrayOf(value)
+  if (betas === undefined) return value
+  const kept = betas.filter(beta => typeof beta !== 'string'
+    || !CACHE_BETA_PREFIXES.some(prefix => beta.startsWith(prefix)))
+  return kept.length === 0 ? undefined : kept
+}
+
+/**
+ * Copy one request's system value without marker fields.
+ * @param system - the system value pi-ai built: a block array, or text for a transport that sends one.
+ * @returns the same system without any `cache_control` on its blocks.
+ */
+function withoutSystemMarkers(system: unknown): unknown {
+  if (typeof system === 'string') return system
+  const blocks = arrayOf(system)
+  /* v8 ignore next -- pi-ai serializes a system prompt as a block array */
+  if (blocks === undefined) return system
+  return blocks.map(stripBlock)
+}
+
+/**
+ * Apply wire parity's thinking display to one request.
+ *
+ * The pinned client asks for `display: "updates"` on the thinking object it
+ * enables; pi-ai builds that object with its own display default, so the
+ * adapter rewrites only the display member and only when a thinking object is
+ * present. A request that thinks not at all keeps no thinking field.
+ * @param thinking - the request's thinking object, when it has one.
+ * @returns the same object with the pinned display, or the value when it is not a thinking request.
+ */
+function withThinkingDisplay(thinking: unknown): unknown {
+  if (!isRequestPayload(thinking)) return thinking
+  const type = thinking['type']
+  if (type !== 'adaptive' && type !== 'enabled') return thinking
+  return { ...thinking, display: 'updates' }
+}
+
+/**
+ * The three system blocks a wire-parity boundary sends, in wire order.
+ *
+ * The identity line is first and unmarked; the stable prefix and the
+ * session-specific remainder follow as one block each, which is the
+ * static/dynamic boundary the worker marks and counts.
+ * @param boundary - the request's static and dynamic text.
+ * @returns the identity block followed by the static and dynamic blocks.
+ */
+function ccWireParitySystem(boundary: { readonly staticText: string; readonly dynamicText: string }): unknown[] {
+  return [
+    { type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT },
+    { type: 'text', text: boundary.staticText },
+    { type: 'text', text: boundary.dynamicText },
+  ]
+}
+
+/**
+ * Copy one wire-parity message without markers, expanding plain text content.
+ *
+ * The worker marks the trailing content block of the last user message, and the
+ * transport serializes a text-only user message as a bare string — which has no
+ * block to mark, so an ordinary text turn would lose the last-user marker.
+ * Wire parity therefore sends every non-empty text-only user message in the
+ * one-block array the marker writer expects. Content that is already a block
+ * array, or any other role, is only stripped of its markers.
+ * @param value - one message pi-ai built for the request.
+ * @returns the message with markers stripped and string user content expanded.
+ */
+function ccWireParityMessage(value: unknown): unknown {
+  /* v8 ignore next -- pi-ai builds every message as an object */
+  if (!isRequestPayload(value)) return value
+  if (value['role'] !== 'user') return stripMessage(value)
+  const content = value['content']
+  if (typeof content !== 'string' || content.length === 0) return stripMessage(value)
+  return { ...value, content: [{ type: 'text', text: content }] }
+}
+
+/**
+ * Apply wire parity to one Anthropic Messages request.
+ *
+ * A main or subagent request replaces the system array with exactly the pinned
+ * identity line and the two boundary regions, so the pool's worker can insert
+ * its billing block ahead of them and own every marker. A helper keeps the
+ * system its caller built. Both strip every marker the transport or a caller
+ * placed — on system blocks, tool declarations, and message content — and
+ * remove only the cache betas the worker plans, leaving context-window and
+ * tool-streaming betas intact. A text-only user
+ * message travels as a content block array rather than a bare string, because
+ * the worker's marker writer can only mark a block. The edits finish by writing
+ * the pinned client's top-level field order, whose `metadata` placeholder keeps
+ * the pool's `user_id` splice in its canonical slot. A request whose decisions
+ * declare cache intent `off` sends this same body: every marker and cache beta
+ * is already stripped, so the off form only withholds the worker's plan.
+ * @param payload - the Anthropic Messages request fields pi-ai built.
+ * @param request - the request's resolved wire-parity decisions.
+ * @returns the replacement fields.
+ */
+function withCcWireParityBody(payload: Record<string, unknown>, request: CcWireParityRequest): Record<string, unknown> {
+  const boundary = request.boundary
+  const system = boundary === undefined
+    ? withoutSystemMarkers(payload['system'])
+    : ccWireParitySystem(boundary)
+  const toolBlocks = arrayOf(payload['tools'])
+  const messageBlocks = arrayOf(payload['messages'])
+  const stripped: Record<string, unknown> = {
+    ...payload,
+    ...system === undefined ? {} : { system },
+    ...toolBlocks === undefined ? {} : { tools: toolBlocks.map(withoutToolExtras) },
+    /* v8 ignore next -- every Anthropic Messages request carries its messages */
+    ...messageBlocks === undefined ? {} : { messages: messageBlocks.map(ccWireParityMessage) },
+  }
+  const betas = withoutCacheBetas(stripped['betas'])
+  if (betas === undefined) delete stripped['betas']
+  else stripped['betas'] = betas
+  delete stripped['cache_control']
+  if (Object.hasOwn(stripped, 'thinking')) {
+    stripped['thinking'] = withThinkingDisplay(stripped['thinking'])
+  }
+  return withClaudeCodeFieldOrder(stripped)
+}
+
 /**
  * Apply one route's Anthropic payload policy.
  *
- * One hook owns both transformations, so a route never installs two
- * `onPayload` assignments: the beta alone preserves pi-ai's own markers, while
- * the `cc3` policy replaces them and adds the identity system block.
+ * One hook owns every transformation, so a route never installs two
+ * `onPayload` assignments. A `ccWireParity` route uses the wire-parity branch
+ * when the request resolved decisions for it, and otherwise keeps the
+ * non-wire-parity policy the same profile declares — a wire-parity-off request
+ * is the current non-wire-parity request, never half of each. Every other route
+ * keeps the previous behavior: the beta alone preserves pi-ai's own markers,
+ * while the `cc3` policy replaces them and adds the identity system block.
  * @param payload - the Anthropic Messages request fields pi-ai built.
  * @param profile - the resolved route whose payload policy applies.
+ * @param ccWireParity - the request's wire-parity decisions, absent when the
+ *   request is wire-parity off.
  * @returns replacement fields, or undefined to leave them as built.
  */
 function withAnthropicPayloadPolicy(
   payload: unknown,
   profile: ResolvedPiAiProviderProfile,
+  ccWireParity: CcWireParityRequest | undefined,
 ): Record<string, unknown> | undefined {
   /* v8 ignore next -- pi-ai hands the hook the request fields it built, always an object */
   if (!isRequestPayload(payload)) return undefined
+  if (profile.ccWireParity === true && ccWireParity !== undefined) return withCcWireParityBody(payload, ccWireParity)
   let next = profile.cacheMarkerPolicy === 'cc3' ? withCc3Markers(payload) : payload
   if (profile.extendedCacheBeta === true) next = withExtendedCacheBeta(next)
   return next === payload ? undefined : next
@@ -761,6 +1098,18 @@ const ADAPTER_SESSION_HEADERS: ReadonlySet<string> = Object.freeze(new Set([
   CLIENT_REQUEST_ID_HEADER,
 ].map(name => name.toLowerCase())))
 
+/** Lower-cased wire-parity member header names this adapter owns on every route. */
+const ADAPTER_CC_WIRE_PARITY_HEADERS: ReadonlySet<string> = Object.freeze(new Set(
+  Object.values(CC_WIRE_PARITY_MEMBER_HEADERS).map(name => name.toLowerCase()),
+))
+
+/** Remove every header whose case-insensitive name is one of `owned`. */
+function withoutHeaders(headers: Record<string, string>, owned: ReadonlySet<string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => !owned.has(name.toLowerCase())),
+  )
+}
+
 /**
  * Remove adapter-owned session headers from deployment headers.
  *
@@ -773,9 +1122,7 @@ const ADAPTER_SESSION_HEADERS: ReadonlySet<string> = Object.freeze(new Set([
  * @returns the headers without any adapter-owned session header.
  */
 function withoutSessionHeaders(headers: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(headers).filter(([name]) => !ADAPTER_SESSION_HEADERS.has(name.toLowerCase())),
-  )
+  return withoutHeaders(headers, ADAPTER_SESSION_HEADERS)
 }
 
 /**
@@ -1002,6 +1349,7 @@ export class PiAiAdapter extends LlmAdapter {
         ...identity,
         ...status === undefined ? {} : { status },
         ...observed?.poolRequestId === undefined ? {} : { poolRequestId: observed.poolRequestId },
+        ...observed?.wireParityUnavailable === undefined ? {} : { wireParityUnavailable: observed.wireParityUnavailable },
         ...failure === undefined ? {} : { code: failure.code, message: failure.message },
         ...cause === undefined ? {} : { cause },
       })
@@ -1055,6 +1403,15 @@ export class PiAiAdapter extends LlmAdapter {
       const request = needsPlaceholder
         ? { ...options, tools: [ANTHROPIC_TOOL_UPDATE_PLACEHOLDER, ...tools] }
         : options
+      // Wire parity is one decision for the whole request: the headers and the
+      // body both read this value, so a request never declares a class, layout,
+      // or boundary its payload does not send. A route that opted in but cannot
+      // state this request's boundary keeps the profile's non-wire-parity body.
+      // The route's cache intent decides only what the worker writes, so a
+      // caching-disabled route still declares its class and layout.
+      const ccWireParity = profile.ccWireParity === true && model.api === 'anthropic-messages'
+        ? resolveCcWireParityRequest(request, profile.ccWireParityCache)
+        : undefined
       const reasoning = resolveReasoningLevel(
         model,
         options.reasoningEffort ?? profile.reasoning,
@@ -1089,19 +1446,26 @@ export class PiAiAdapter extends LlmAdapter {
           },
         }, onReplayDegrade)
       // Profile headers are deployment-owned; attribution names are
-      // Harness-owned and therefore win collisions. The session identity is
-      // adapter-owned and replaces a profile header of the same name in any
-      // casing, so one field never carries two conflicting values.
-      const deploymentHeaders = requestHeaders(profile.headers)
+      // Harness-owned and therefore win collisions. The session identity and the
+      // wire-parity member headers are adapter-owned and replace a profile header
+      // of the same name in any casing on every route, so one field never carries
+      // two conflicting values, a non-wire-parity route cannot inject a partial
+      // wire-parity header set, and wire parity never sends one either.
+      const profileHeaders = requestHeaders(profile.headers)
+      const deploymentHeaders = withoutHeaders(profileHeaders, ADAPTER_CC_WIRE_PARITY_HEADERS)
       const headers = {
         ...sessionHeaders === undefined ? deploymentHeaders : withoutSessionHeaders(deploymentHeaders),
         ...sessionHeaders,
+        ...ccWireParity === undefined ? {} : ccWireParityHeaders(ccWireParity),
       }
+      const declaresPayloadPolicy = profile.ccWireParity === true
+        || profile.extendedCacheBeta === true
+        || profile.cacheMarkerPolicy === 'cc3'
+      const payloadPolicy = model.api === 'anthropic-messages' && declaresPayloadPolicy
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
-        ...(profile.extendedCacheBeta === true || profile.cacheMarkerPolicy === 'cc3')
-          && model.api === 'anthropic-messages'
-          ? { onPayload: (payload: unknown) => withAnthropicPayloadPolicy(payload, profile) }
+        ...payloadPolicy
+          ? { onPayload: (payload: unknown) => withAnthropicPayloadPolicy(payload, profile, ccWireParity) }
           : {},
         ...supportsFetchCapture(model.api) ? { fetch: providerError.fetch } : {},
         ...options.temperature === undefined ? {} : { temperature: options.temperature },

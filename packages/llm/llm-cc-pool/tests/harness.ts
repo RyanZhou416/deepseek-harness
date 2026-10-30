@@ -87,13 +87,18 @@ export interface PoolFetchCapture {
 }
 
 /**
- * Replace the transport's fetch with a recorder that answers with a fixed
- * response. `ProviderErrorCapture` delegates to `globalThis.fetch` per call, so
- * a stub installed before the request is the one the transport uses.
- * @param respond - produces the response for every attempt; defaults to a minimal success SSE.
+ * Replace the transport's fetch with a recorder that answers per request.
+ * `ProviderErrorCapture` delegates to `globalThis.fetch` per call, so a stub
+ * installed before the request is the one the transport uses.
+ * @param respond - produces the response for one recorded request; defaults to
+ *   a minimal success SSE. A case that mounts the plugin with wire parity
+ *   enabled must route by URL, because the capability probe reaches the same
+ *   fetch before the first model request.
  * @returns the captured request list and the fetch implementation to stub.
  */
-export function capturePoolFetch(respond: () => Response = anthropicSuccessResponse): PoolFetchCapture {
+export function capturePoolFetch(
+  respond: (request: CapturedRequest) => Response = () => anthropicSuccessResponse(),
+): PoolFetchCapture {
   const calls: CapturedRequest[] = []
   return {
     calls,
@@ -106,13 +111,14 @@ export function capturePoolFetch(respond: () => Response = anthropicSuccessRespo
       const raw = init?.body === undefined
         ? request === undefined ? undefined : await request.clone().text()
         : typeof init.body === 'string' ? init.body : undefined
-      calls.push({
+      const captured: CapturedRequest = {
         url,
         method: init?.method ?? request?.method ?? 'GET',
         headers,
         body: raw === undefined || raw.length === 0 ? {} : JSON.parse(raw) as Record<string, unknown>,
-      })
-      return respond()
+      }
+      calls.push(captured)
+      return respond(captured)
     },
   }
 }

@@ -702,6 +702,19 @@ interface GenerateOptions {
    */
   sessionName?: string
   /**
+   * Explicit provider-neutral class of this model call, for routes that
+   * distinguish the first-party caller's request families. The conversation
+   * owner stamps `main` or `subagent` from the session's delegation state;
+   * helper producers stamp `compaction` or `auxiliary` here, or leave it to
+   * {@link purpose}. An adapter reads it only to select a wire form: it is
+   * model-hidden and never serialized into a provider body or log, though a
+   * route adapter may map it to model-hidden transport metadata such as an
+   * `x-cc-request-class` header. A route that does not classify requests ignores
+   * it. Absent leaves the class to {@link purpose} and then to the adapter's
+   * conservative fallback.
+   */
+  requestClass?: 'main' | 'compaction' | 'auxiliary' | 'subagent'
+  /**
    * Provider-neutral classification for an auxiliary model call. Adapters may
    * map the purpose to model-hidden transport metadata. Ordinary conversation
    * requests leave it unset.

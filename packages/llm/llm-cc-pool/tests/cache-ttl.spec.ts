@@ -11,9 +11,10 @@ import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import * as PiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Config } from '../src/config.ts'
+import { CAPABILITIES_URL } from '../src/discovery.ts'
 import * as CcPool from '../src/index.ts'
 import { PROVIDER, resolvePoolProfiles } from '../src/pool.ts'
-import { assemble, capturePoolFetch, user } from './harness.ts'
+import { anthropicSuccessResponse, assemble, capturePoolFetch, user } from './harness.ts'
 import type { CapturedRequest } from './harness.ts'
 
 /** The Anthropic beta a one-hour prompt-cache lifetime declares. */
@@ -110,24 +111,40 @@ function betasOf(request: CapturedRequest): string[] {
 
 /**
  * Send the probe through a fresh mount and return the captured request.
+ *
+ * The fetch stand-in is installed before mount because a route configured for
+ * wire parity probes the capability endpoint at load; the captured model request
+ * is the first request that is not that probe.
  * @param config - loader configuration for the pool plugin.
  * @param options - request fields overriding the default probe.
+ * @param respond - produces the response for one recorded request; defaults to
+ *   the minimal success SSE.
  * @returns the request the pool route built.
  */
 async function probe(
   config: Record<string, unknown> = {},
   options: Partial<typeof PROBE> = {},
+  respond?: (request: CapturedRequest) => Response,
 ): Promise<CapturedRequest> {
   vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
-  const ctx = await mount(config)
-  const capture = capturePoolFetch()
+  const capture = capturePoolFetch(respond)
   vi.stubGlobal('fetch', capture.fetch)
+  const ctx = await mount(config)
   await assemble(ctx, { ...PROBE, ...options })
-  const call = capture.calls[0]
+  const call = capture.calls.find(request => request.url !== CAPABILITIES_URL)
   if (call === undefined) throw new Error('the pool route sent no request')
   await ctx.fiber.dispose()
   context = undefined
   return call
+}
+
+/**
+ * Whether one captured request declares the wire parity member headers.
+ * @param request - the captured provider request.
+ * @returns whether its member header set is present.
+ */
+function declaresWireParity(request: CapturedRequest): boolean {
+  return request.headers.has('x-cc-request-class')
 }
 
 /** An assistant turn whose content is plain text, so a request carries an assistant block. */
@@ -289,7 +306,6 @@ describe('pool prompt-cache policy', () => {
   it('refuses an impossible cache policy at load, before registering the route', async () => {
     const cases: readonly [label: string, config: Record<string, unknown>, error: RegExp][] = [
       ['five-minute lifetime', { cacheTtl: '5m' }, /cacheMarkerPolicy "cc3" requires cacheTtl "1h"/],
-      ['no lifetime', { cacheTtl: 'none' }, /cacheMarkerPolicy "cc3" requires cacheTtl "1h"/],
       ['one hour without the beta', { cacheTtl: '1h', extendedCacheBeta: false }, /cacheMarkerPolicy "cc3" requires extendedCacheBeta: true/],
     ]
     for (const [label, config, error] of cases) {
@@ -303,6 +319,16 @@ describe('pool prompt-cache policy', () => {
     }
   })
 
+  it('accepts the caching-disabled lifetime and drops the marker policy', async () => {
+    const ctx = new Context()
+    context = ctx
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: 'none' })
+    expect(ctx.llm.listProviders()).toContainEqual(expect.objectContaining({ id: 'cc-pool' }))
+    await ctx.fiber.dispose()
+    context = undefined
+  })
+
   it('refuses a lifetime the route does not offer before it registers', async () => {
     const ctx = new Context()
     context = ctx
@@ -310,5 +336,23 @@ describe('pool prompt-cache policy', () => {
     await expect(ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: '24h' } as never))
       .rejects.toThrow(/cacheTtl/)
     expect(ctx.llm.listProviders()).toEqual([])
+  })
+
+  it('keeps the three-marker bytes when the wire parity probe answers no proof', async () => {
+    const baseline = await probe()
+    const unproven = await probe({ ccWireParity: true }, {}, (request) => {
+      if (request.url !== CAPABILITIES_URL) return anthropicSuccessResponse()
+      // The endpoint answered with the pair, but no build identity binds it.
+      return new Response(JSON.stringify({ protocol: 2, ccWireParity: 1 }), { status: 200 })
+    })
+
+    // A route that asked for the wire and did not get proof for a build is
+    // byte-identical to a route that never asked: the probe cannot alter the
+    // wire-parity-off request.
+    expect(declaresWireParity(unproven)).toBe(false)
+    expect(unproven.body).toEqual(baseline.body)
+    expect(markersOf(unproven.body)).toEqual(markersOf(baseline.body))
+    expect(markersOf(unproven.body)).toHaveLength(3)
+    expect(betasOf(unproven)).toEqual([EXTENDED_CACHE_TTL_BETA])
   })
 })

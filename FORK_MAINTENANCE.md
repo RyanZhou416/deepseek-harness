@@ -1386,11 +1386,14 @@ route, `llm-deepseek`, or the subscription routes. Keep every other pi-ai
 Anthropic route's `cacheRetention` explicit; do not add a global payload or
 header hook, a `fetch` rewrite, or a mac-pool branch to `llm-pi-ai`. Keep both
 transformations on the one `onPayload` assignment; a second assignment on the
-same route would silently drop the other policy. This layout is the current
-behavior; the accepted A parity design below replaces it, but is not implemented
-yet. Until A lands, keep the three markers, pinned order and current
-route-scoped behavior: do not reproduce CC's `markerIndices` fork/compaction
-planner or infer one hour from a subscription.
+same route would silently drop the other policy. This layout is the route's
+default wire, served whenever `ccWireParity` is false — the default — and
+whenever the capability probe has not proved the wire; it is also what a
+request that carries the wire falls back to. Keep the three markers, pinned
+order and route-scoped behavior on that default wire: do not reproduce CC's
+`markerIndices` fork/compaction planner or infer one hour from a subscription.
+The opt-in wire parity section below replaces the body only on a request the
+member endpoint proved the capability for.
 
 **Focused verification.**
 `pnpm exec vitest run packages/llm/llm-cc-pool packages/llm/llm-pi-ai/tests/cache-policy.spec.ts`
@@ -1404,68 +1407,95 @@ second Anthropic route's unchanged pi-ai field order and retention and absent
 identity block, DeepSeek with no marker or cache beta, the refusal of `cc3` on a
 non-Anthropic route, and the Loader composition.
 
-## CC parity A (accepted final design, not implemented)
+## CC wire parity (implemented, off by default)
 
-**Status.** A is the accepted final target for the cc-pool route: reproduce the
-genuine Claude Code 2.1.288 first-party desktop wire. It replaces every earlier
-A draft and is not staged. The authoritative evidence, body/header rules, code
-delta, corpus and exclusions live in
-`mac-pool:development/CC-PARITY-A-DESIGN.md` (v6); this section is the DSH-side
-summary and must stay consistent with it.
+**Status.** CC wire parity is implemented on the cc-pool route and off by
+default: `llm-cc-pool`'s `ccWireParity` defaults to `false`, and the route serves
+the default three-marker wire until the member endpoint proves the capability
+for the pool build that answered. It reproduces the genuine Claude Code
+2.1.288 first-party desktop wire. The authoritative evidence, body/header rules,
+code delta, corpus and exclusions live in
+`mac-pool:development/CC-WIRE-PARITY-DESIGN.md` (v7); this section is the
+DSH-side summary and must stay consistent with it. The DSH writer is
+`packages/llm/llm-pi-ai/src/adapter.ts` (`resolveCcWireParityRequest`,
+`ccWireParityHeaders`, `withCcWireParityBody`, `withAnthropicPayloadPolicy`);
+the profile fields and the owned header names are in
+`packages/llm/llm-pi-ai/src/config.ts`; the route flag, capability probe and
+503 fallback are in `packages/llm/llm-cc-pool/src/{config,discovery,index,pool}.ts`;
+the response marker is read in `packages/llm/llm-pi-ai/src/pool-error.ts`; and
+`GenerateOptions.requestClass` is declared in `packages/llm/llm/src/types.ts`.
 
 **Anchor rule.** Emit the carved behavior, with a less-emitting fallback only
-where a gate is genuinely unavailable. The 1h TTL mirrors `loe`: OAuth +
+where a gate is genuinely unavailable. DSH never sends a `cache_control`
+marker, a TTL, or a cache beta on the wire: the member headers state the cache
+intent and the worker owns the plan. The worker's 1h TTL mirrors `loe`: OAuth +
 `user:inference`, overage not explicitly true, allowlisted source, no force-5m
 override. Absent overage is the client default (not using), not unknown.
 Scope, extended beta and cache-diagnosis keep their own gates. Server acceptance
 is not a design input; a rejection removes a token or fails, never adds one.
 
-**Scope.** A covers `main` and `subagent` with a real static/dynamic boundary,
-and helpers (compaction/auxiliary) only in the conservative form: no billing, no
-identity insertion, no markers. A main/subagent request with no boundary, an
-empty static/dynamic run, an in-history prompt mismatch, an unclassified
-one-shot or no-system is A-off for that request (current non-A body/headers),
-not a 400. Custom base URL, gateway, non-firstParty and experimental off mean A
-is not enabled at all; current behavior is retained and not claimed as parity.
-HIPAA tainted/unknown and prompt caching disabled (`enablePromptCaching=false`)
-stay A-on. HIPAA suppresses scope, extended beta and cache-diagnosis but does not
-force 5m; body TTL follows the `loe` decision. Caching disabled means no markers.
-A-off would retain cc3's 1h and is wrong for these states. The rejected
-`disabled` token is a header/intent value, not the "caching disabled" deployment
-state; they are distinct. `workflow`, agent-type and the `disabled` token are
-outside A.
+**Scope.** The wire covers `main` and `subagent` with a real static/dynamic
+boundary, and helpers (compaction/auxiliary) only in the conservative form: no
+billing, no identity insertion, no markers. A main/subagent request with no
+boundary, an empty static/dynamic run, an in-history prompt mismatch, an
+unclassified one-shot or no-system is served the default non-parity
+body/headers for that request, not a 400. Custom base URL, gateway,
+non-firstParty and experimental off keep the route on that default wire and
+claim no parity. HIPAA tainted/unknown and prompt caching disabled
+(`enablePromptCaching=false`) stay on the wire. HIPAA suppresses scope, extended
+beta and cache-diagnosis but does not force 5m; body TTL follows the `loe`
+decision. Caching disabled means no markers. The default wire would retain
+cc3's 1h and is wrong for these states. The rejected `disabled` token is a
+header/intent value, not the "caching disabled" deployment state; they are
+distinct. `workflow`, agent-type and the `disabled` token are outside the wire.
 
 **Capability and ownership.** The worker is the executable cache-policy owner;
-the Swift pool is transport and member validation. Add member
+the Swift pool is transport and member validation. The member endpoint serves
 `GET /v1/capabilities` (same member auth) returning
-`{protocol:2,ccParityA:1}`; any 404/timeout/malformed/absent value means A-off
-in DSH. The server accepts A headers only when the selected worker advertises
-`ccParityA` in the separate `wire_profile_capabilities` frame, not `hello_ok`;
-otherwise return `503 cc_parity_a_unavailable` before forwarding bytes. Old
-pool + new DSH is A-off; new pool + old worker is 503; rollback disables DSH A
-and invalidates the positive probe before rolling back the pool. A positive
-probe is cached only for the same endpoint and pool build.
+`{protocol:2,ccWireParity:1,buildId}`, and only a `200` answer carrying that
+exact triple proves the capability. `buildId` is the packaged app's stable build
+identity (`MacPoolBuildId` in `Info.plist`, the same value `/health` reports,
+not a generated id) and is absent on an unpackaged run, which therefore proves
+nothing. Every other outcome — a 404 or other non-200 status, timeout, malformed
+reply, or absent `protocol`/`ccWireParity`/`buildId` — leaves the route on its
+default wire. The server accepts the three member headers only when the selected
+worker advertises `ccWireParity` in the separate `wire_profile_capabilities`
+frame, not `hello_ok`; otherwise the pool returns
+`503 cc_wire_parity_unavailable` with `x-cc-wire-parity-unavailable: 1` before
+forwarding bytes, and DSH treats only that marked 503 on a request that carries
+the wire as evidence against the proof: it drops the proof and immediately
+serves the default wire. Old pool + new DSH keeps the default wire; new pool +
+old worker is the marked 503; rollback disables DSH `ccWireParity` and
+invalidates the positive probe before rolling back the pool. A positive probe is
+cached only for the same endpoint and pool build: DSH re-probes at profile load
+and on a replaced `CC_POOL_API_KEY` and never polls, so no reconnect seam exists
+in `llm-cc-pool`/`dsh-llm` to re-probe a pool restart at a new build.
 
 **Member contract.** Three headers, all present or all absent:
 `x-cc-request-class` (`main|compaction|auxiliary|subagent`; `workflow`
 rejected), `x-cc-system-layout` (`none|boundary:<n>`), `x-cc-cache-intent`
-(`main|helper`; no `disabled`). Values are exact lower-case tokens, 1-32
-printable ASCII bytes, no trim/case folding, exactly one occurrence;
-repeated/empty/oversize/unknown/non-printable is a typed 400 after session-name
-validation and before body decode. `boundary:<n>` is exactly decimal 1-8, no
-leading zero/sign/space; a bare boundary, 0, 08, +1, padded or 9 is a 400.
+(`main|helper|off`, the v7 intent set; no `disabled`). Values are exact
+lower-case tokens, 1-32 printable ASCII bytes, no trim/case folding, exactly one
+occurrence; repeated/empty/oversize/unknown/non-printable is a typed 400 after
+session-name validation and before body decode. `boundary:<n>` is exactly
+decimal 1-8, no leading zero/sign/space; a bare boundary, 0, 08, +1, padded or 9
+is a 400.
 
 The v2 request frame adds `requestClass`, `systemLayout`, `cacheIntent`,
 `staticBlockCount`. Presence is counted from raw keys; explicit null,
 partial/all-null, empty or unknown is invalid; absent keeps the frame
 byte-identical. `staticBlockCount` is an integer 0-8. The total table is:
-main/main/boundary:n/n; subagent/main/boundary:n/n; compaction/helper/none/0;
-auxiliary/helper/none/0. Any other combination is a typed member 400 and a
-worker frame rejection before forwarding. `cacheIntent` is the TTL-family
-selector; class selects billing/identity and marker form. v1 refusal is three
-layers: member API 400, pool encoder, worker parser; v1 bytes/goldens stay
-unchanged. A-off keeps today's upstream `x-claude-code-request-class: main`
-only when the caller supplied none; A-on replaces it with the frame class.
+main/main/boundary:n/n; main/off/boundary:n/n; subagent/main/boundary:n/n;
+subagent/off/boundary:n/n; compaction/helper/none/0; auxiliary/helper/none/0. Any
+other combination is a typed member 400 and a worker frame rejection before
+forwarding. `cacheIntent` is the complete cache-behaviour selector — `main`
+writes the worker's cache plan, `off` writes no marker, no TTL, and no cache beta
+on the same class and layout, `helper` is the conservative helper form (a helper
+never declares `off`) — while class selects billing/identity and the body form.
+v1 refusal is three layers: member API 400, pool encoder, worker parser; v1
+bytes/goldens stay unchanged. The off wire keeps today's upstream
+`x-claude-code-request-class: main` only when the caller supplied none; the on
+wire replaces it with the frame class.
 
 **Body.** Member-side main/subagent: `[identity, static, dynamic]` only when
 the pre-transform section join equals the effective leading system text;
@@ -1473,12 +1503,12 @@ identity is the exact interactive CLI line `Gw`, first and unmarked; static is
 the reordered set of all `stable:true` sections except identity (drop
 `harness:source`/`app:web-surface`, replace `harness:identity`); dynamic is the
 non-stable remainder. Do not reuse the subscription route's single-shared block
-or `DEFAULT_CLAUDE_IDENTITY_LINE`; A has its own builder. Final pool-side
+or `DEFAULT_CLAUDE_IDENTITY_LINE`; the wire has its own builder. Final pool-side
 system is `[billing, identity, static, dynamic]`: the worker inserts the
 existing billing block at `system[0]` with its existing bytes before computing
 indices; DSH does not send billing. In-history mismatch, empty static/dynamic,
-no-system or unknown class is A-off. Helpers send the existing member system
-with no identity/billing, layout none, no markers. DSH sends no
+no-system or unknown class is served the default wire. Helpers send the existing
+member system with no identity/billing, layout none, no markers. DSH sends no
 `cache_control`; the worker strips member markers and writes identity unmarked,
 static/dynamic/last-user with one TTL decision. Static scope only when the body
 scope gate (`Tse` + boundary/static) holds; 5m static is
@@ -1486,14 +1516,15 @@ scope gate (`Tse` + boundary/static) holds; 5m static is
 Billing/identity are main/subagent only; helpers get neither. The worker uses
 `staticBlockCount` and the identity text, not a leading-prefix guess.
 
-**TTL and facts.** 1h mirrors `loe`: first-party OAuth/committed token with
-`user:inference` (pro/max included), overage not explicitly true (absent/false
-is the client default; a last-observed true fact suppresses 1h until a non-true
-observation), the source is allowlisted by the `XNe` fallback
-(`repl_main_thread*`, `sdk`, `auto_mode`, `memdir_relevance`) or an optional
-explicit config, and no force-5m/env/settings/frontmatter override. `XNe` is
-used, not rejected. 1h is the default for a subscriber main request; 5m only
-for non-subscriber/non-allowlisted/true overage/force-5m. HIPAA is
+**TTL and facts.** The worker owns this decision; DSH declares only the cache
+intent and sends no TTL of its own. 1h mirrors `loe`: first-party
+OAuth/committed token with `user:inference` (pro/max included), overage not
+explicitly true (absent/false is the client default; a last-observed true fact
+suppresses 1h until a non-true observation), the source is allowlisted by the
+`XNe` fallback (`repl_main_thread*`, `sdk`, `auto_mode`, `memdir_relevance`) or
+an optional explicit config, and no force-5m/env/settings/frontmatter override.
+`XNe` is used, not rejected. 1h is the default for a subscriber main request; 5m
+only for non-subscriber/non-allowlisted/true overage/force-5m. HIPAA is
 tainted/clear/unknown/not-applicable: clear is a fresh accepted document with no
 hipaa taint, not `settled`; not-applicable is pro/max policy-read-ineligible;
 scope/extended/diagnosis only for clear/not-applicable, but body TTL still
@@ -1506,14 +1537,16 @@ only when the session latch is armed; suppress context-hint always; omit evict,
 keepalive and message-threads (declared deviation). Ignore member cache tokens
 and body `betas`; never append a member token. Thread a typed worker cache plan
 into the sealed engine via a new `cacheTtl` input; this needs a `vendor/engine`
-patch and re-seal. DSH sets `thinking.display:"updates"` only under the
-capability/summaries gate; the worker probe keeps `{type,budget_tokens}` and
-drops only `display`, so site 16 fires; forwarded body keeps `updates`. Strip
-`eager_input_streaming`; do not flip the compat flag. Delete `payload.betas`
-instead of sending an empty `anthropic-beta`. `rejectedBeta` is v2-only with the
-three A cache identifiers, set only for an upstream 400 naming a forwarded token
-with `issued=true`; v1 must not send/receive it; latch only cache-diagnosis per
-`sessionKey`; first cut is fact+latch, not transparent replay.
+patch and re-seal. DSH writes `thinking.display:"updates"` on a request that
+enables thinking; the worker probe keeps `{type,budget_tokens}` and drops only
+`display`, so site 16 fires; the forwarded body keeps `updates`. Strip
+`eager_input_streaming`; do not flip the compat flag. Remove the cache betas the
+worker plans from `payload.betas` and drop the member when none remain, instead
+of sending an empty `anthropic-beta`. `rejectedBeta` is v2-only with the three
+wire-parity cache identifiers, set only for an upstream 400 naming a forwarded
+token with `issued=true`; v1 must not send/receive it; latch only
+cache-diagnosis per `sessionKey`; first cut is fact+latch, not transparent
+replay.
 
 **Engine/pins.** The digest covers only `index.ts`; changing
 `request.ts`/`request-policy.ts` is invisible and "bump expectedEngineBuild"
@@ -1523,85 +1556,102 @@ written/remote-worker-src/artifact manifests, update `dependency-pins.json`,
 `version-matrix.json`, `ServiceManifestHealthTests`, installed
 `direct-config.json` and the runbook in the same release.
 
-**DSH implementation.** A is implemented once in `llm-pi-ai`, gated by
-`PiAiProviderProfile.ccParityA` default false; only `llm-cc-pool` sets it.
-`llm-cc-pool` remains a `PiAiAdapter` subclass for profile/catalogue/session
-ordering and does not rewrite body or headers. Add
-`GenerateOptions.requestClass` (`main|compaction|auxiliary|subagent`). Resolve
-explicit class, then `purpose` (compaction/session-title), then session
-origin/delegationDepth -> subagent, then named one-shots -> auxiliary, otherwise
-A-off; never fall through to main. Add producers for auto-review/one-shots. In
-`withAnthropicPayloadPolicy`, the A branch uses `options.systemSections`, builds
-`[identity, static, dynamic]`, strips every `cache_control`, applies the A
-field order/metadata/thinking/eager/beta rules, and adds no markers; if sections
-or class are absent, A-off. The three `x-cc-*` headers are added in the
-adapter's existing per-request header construction; they are adapter-owned and
-stripped from profile headers. `llm-cc-pool` only adds the profile field and
-capability probe. The probe is a member HTTP request at load/reconnect, not a
-model/account request. Non-A routes and other providers keep their current
-bytes. Record the A body/section plan in the pool-route request log or a
-prepared-request record.
+**DSH implementation.** The wire is implemented once in `llm-pi-ai`, gated by
+`PiAiProviderProfile.ccWireParity` (default false); only `llm-cc-pool` sets it,
+and only after `config.ccWireParity` is true and a live capability proof exists
+(`packages/llm/llm-cc-pool/src/index.ts`). `PiAiProviderProfile.ccWireParityCache`
+(`main|off`, default `main`, refused without `ccWireParity`) is the cache intent
+a main or subagent wire request declares; `llm-cc-pool` maps `cacheTtl: none` —
+the route's caching-disabled state — to `off` and every other lifetime to
+`main`, and helpers always declare `helper`. `off` sends the same wire body with
+no markers, no TTL, and no cache beta, so the wire does not require `cc3`,
+`cacheTtl: 1h`, or `extendedCacheBeta`; a caching-disabled route stays on the
+wire. `llm-cc-pool` remains a `PiAiAdapter` subclass for profile/catalogue/session
+ordering and does not rewrite body or headers. `GenerateOptions.requestClass`
+(`main|compaction|auxiliary|subagent`, declared in `packages/llm/llm/src/types.ts`)
+is stamped by the conversation owner for main/subagent and by helper producers
+for compaction/auxiliary; the adapter's `ccWireParityRequestClass` reads the
+explicit class, then `purpose` (compaction/session-title), and serves a request
+that states neither as the default non-parity request — it never falls through
+to main. In `withAnthropicPayloadPolicy`, the parity branch uses
+`options.systemSections`, builds `[identity, static, dynamic]`, strips every
+`cache_control`, applies the field order/metadata/thinking/eager/beta rules, and
+adds no markers; if sections or class are absent, the request is served the
+default wire. The three `x-cc-*` headers are added in the adapter's existing
+per-request header construction; they are adapter-owned on every route, a
+profile that spells one is refused at resolution, and the request construction
+also strips it. `llm-cc-pool` only adds the profile field and the capability
+probe. The probe is a member HTTP request at profile load and on a replaced
+member credential, not a model/account request; it requires the pool's build
+identity and never polls. A marked `503` on a request that carries the wire
+drops the proof and the next request serves the default wire without
+re-probing. Routes without the wire and other providers keep their current
+bytes. The request log records the attempt's route, model, endpoint, status and
+pool request id; it never carries the body, the headers, or the section plan.
 
-**Acceptance.** The A change commits
-`mac-pool:development/cc-parity-a-corpus/` with cases, pinned identities,
+**Acceptance.** The wire parity change commits
+`mac-pool:development/CC-WIRE-PARITY-corpus/` with cases, pinned identities,
 injected facts, expected raw body SHA/headers/order/markers, baseline raw bytes,
 runner and matrix. `run.py` CLI is `--case <id>|--all`, `--boundary
 member|frame|upstream|response|all`, `--matrix`, `--capture-baseline`,
 `--compare-bytes`, `--reset-capability`, `--report json`; exit 0 pass, 1
 mismatch, 2 invalid. Pinned identity makes `metadata.user_id` deterministic.
-Baseline comes from pre-A pool `0ae553a` and DSH `ec1877b3e1`; old worker is
-that bundle; new artefacts are the A commit.
+Baseline comes from pre-wire-parity pool `0ae553a` and DSH `ec1877b3e1`; old
+worker is that bundle; new artefacts are the wire parity commit.
 
-The matrix is one expected outcome per cell:
+The matrix is one expected outcome per cell. The DSH column names the build
+under test: `old` is the pre-wire-parity build, and `off`/`on` are this build
+with `ccWireParity` false or true.
 
 | DSH | pool | worker | expected |
 | --- | --- | --- | --- |
-| old | old | old | non-A success |
-| old | old | new | non-A success |
-| old | new | old | non-A success |
-| old | new | new | non-A success |
-| A-off | old | old | non-A success |
-| A-off | old | new | non-A success |
-| A-off | new | old | non-A success |
-| A-off | new | new | non-A success |
-| A-on | old | old | non-A success (probe absent) |
-| A-on | old | new | non-A success (probe absent) |
-| A-on | new | old | 503 `cc_parity_a_unavailable` |
-| A-on | new | new | A success |
+| old | old | old | default-wire success |
+| old | old | new | default-wire success |
+| old | new | old | default-wire success |
+| old | new | new | default-wire success |
+| off | old | old | default-wire success |
+| off | old | new | default-wire success |
+| off | new | old | default-wire success |
+| off | new | new | default-wire success |
+| on | old | old | default-wire success (probe absent) |
+| on | old | new | default-wire success (probe absent) |
+| on | new | old | 503 `cc_wire_parity_unavailable` |
+| on | new | new | wire parity success |
 
-Rollback sets `ccParityA=false`, reloads, resets the probe, verifies no
-`ccParityA:1`, then installs the old pool.
+Rollback sets `ccWireParity=false`, reloads, resets the probe, verifies no
+`ccWireParity:1`, then installs the old pool.
 
 Gates: DSH `pnpm run typecheck`, `build`, `doc-sync`,
 `verify-config-catalog`, and `pnpm exec vitest run packages/llm/llm/tests
 packages/llm/llm-pi-ai/tests packages/llm/llm-cc-pool/tests
 packages/experimental/auto-review/tests packages/experimental/translator/tests`
 (exit 0); worker `node development/direct-worker/scripts/run-tests.mjs
---summary /tmp/cc-parity-a-worker-tests.json --require-no-skips` (0 failed/
+--summary /tmp/CC-WIRE-PARITY-worker-tests.json --require-no-skips` (0 failed/
 0 skipped, updated counts); Mac
 `development/scripts/change-gate.sh --stage development/swift --only-testing
 <affected suites>` plus `xcodebuild test -scheme MacPool -testPlan MacPoolTests`
-(0 failures, updated 2893/16). Simulation adds `testCCParityAOn` and
-`testCCParityAOff` to `MacPoolSimulationTests`; run
-`development/scripts/simulate-dsh.sh --case testCCParityAOn` and
-`--case testCCParityAOff` (exit 0; tests assert their own bodies/headers/hashes;
+(0 failures, updated 2893/16). Simulation adds `testCCWireParityOn` and
+`testCCWireParityOff` to `MacPoolSimulationTests`; run
+`development/scripts/simulate-dsh.sh --case testCCWireParityOn` and
+`--case testCCWireParityOff` (exit 0; tests assert their own bodies/headers/hashes;
 there is no `--json`). Real v2 goldens via `v2-golden.test.ts` and
 `CrossLanguageGoldenTests` after fixing the known drift; `verify-goldens.py`
 for v1; installed acceptance
 `xcodebuild test -scheme MacPool -testPlan MacPoolTests -only-testing:
-InstalledAppAcceptanceTests/testInstalledArtifactWithCcParityAHeaders` (0
+InstalledAppAcceptanceTests/testInstalledArtifactWithCcWireParityHeaders` (0
 failures, expected SSE); manifest commands `regenerate-source-manifest.py`,
 `worker-parity.py refresh`, `artifact-manifest.py refresh` then verify; security
-review at `development/cc-parity-a-corpus/SECURITY-REVIEW.md`, gated by
+review at `development/CC-WIRE-PARITY-corpus/SECURITY-REVIEW.md`, gated by
 `test -s` and a checklist. No install until all pass.
 
 **Explicit exclusions.** Helpers under-emit billing/identity versus the carve
 title/compaction; evict/keepalive/message-threads/context-hint are omitted;
-`workflow`, agent-type and the `disabled` token are not A; prompt caching
-disabled is still A-on but emits no markers; no live capture. `XNe` is used as
-the fallback, 1h is the default for a subscriber main request, absent overage is
-not overage, and HIPAA suppresses scope/extended/diagnosis without forcing 5m.
-The current three-marker/no-scope behavior remains shipped until A lands.
+`workflow`, agent-type and the `disabled` token are outside the wire; prompt
+caching disabled still carries the wire but emits no markers; no live capture.
+`XNe` is used as the fallback, 1h is the default for a subscriber main request,
+absent overage is not overage, and HIPAA suppresses scope/extended/diagnosis
+without forcing 5m. The default three-marker/no-scope wire remains the shipped
+wire while `ccWireParity` is false or the endpoint has not proved the capability.
 
 ## CC subscription pool settings page (fork)
 

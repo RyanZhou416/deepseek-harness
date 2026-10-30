@@ -84,6 +84,36 @@ export const CACHE_MARKER_POLICIES = ['cc3'] as const
 /** One placement policy from {@link CACHE_MARKER_POLICIES}. */
 export type PiAiCacheMarkerPolicy = (typeof CACHE_MARKER_POLICIES)[number]
 
+/**
+ * Member header names this adapter owns: the class, system layout, and cache
+ * intent of one wire-parity request. On a wire-parity request the adapter writes
+ * all three or none, and on every route it strips a profile header spelled the
+ * same way in any casing, so a profile can neither race the adapter's values nor
+ * inject a partial wire-parity header set on a route that never enables wire
+ * parity. Resolution refuses such a header instead of allowing either outcome.
+ */
+export const CC_WIRE_PARITY_MEMBER_HEADERS = Object.freeze({
+  requestClass: 'x-cc-request-class',
+  systemLayout: 'x-cc-system-layout',
+  cacheIntent: 'x-cc-cache-intent',
+} as const)
+
+/**
+ * Cache intents a CC wire parity route may declare for a main or subagent request.
+ *
+ * `main` leaves the pool's main cache plan in place: the worker marks the
+ * static, dynamic, and last-user slots under its own TTL and beta decisions.
+ * `off` is the wire-parity-on form of a deployment that turned prompt caching
+ * off: the same member body, class, and layout, but cache intent `off`, so the
+ * worker writes no marker, no TTL, and no cache beta. Helpers (`compaction`,
+ * `auxiliary`) always declare `helper`, which is already marker-free, so this
+ * choice never applies to them.
+ */
+export const CC_WIRE_PARITY_CACHE_MODES = ['main', 'off'] as const
+
+/** One wire-parity cache intent from {@link CC_WIRE_PARITY_CACHE_MODES}. */
+export type PiAiCcWireParityCache = (typeof CC_WIRE_PARITY_CACHE_MODES)[number]
+
 /** Context capacity assumed for a model neither configuration nor the catalog sizes. */
 export const DEFAULT_CONTEXT_WINDOW = 262_144
 
@@ -216,6 +246,39 @@ export interface PiAiProviderProfile {
    * model on the route speaks `anthropic-messages`.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
+  /**
+   * Claude Code wire parity on this route's Anthropic Messages requests (default
+   * `false`): the member body and the three `x-cc-*` headers a wire-parity
+   * endpoint reads. The adapter builds `[identity, static, dynamic]` from the
+   * request's `systemSections` — the pinned interactive identity line, the
+   * reordered `stable` sections, then the session-specific remainder — and
+   * applies the pinned top-level field order, the `updates` thinking display,
+   * and the eager-streaming and beta removals, with no `cache_control` of its
+   * own. A helper class (`compaction`, `auxiliary`) keeps the caller's system,
+   * layout `none`, and no markers; a main or subagent request that cannot state
+   * a real boundary, or that names no class at all, is served as the current
+   * non-wire-parity request instead of a partial wire-parity body. The three
+   * header names are adapter-owned on every route, and the flag replaces
+   * {@link cacheMarkerPolicy} `cc3` on a wire-parity request while a
+   * wire-parity-off request keeps that policy's body. {@link ccWireParityCache}
+   * selects the cache intent a main or subagent request declares. Refused when
+   * no model on the route speaks `anthropic-messages`.
+   */
+  ccWireParity?: boolean
+  /**
+   * Cache intent a wire-parity route's `main` and `subagent` requests declare
+   * (default `main`), and with it whether the pool's worker writes cache
+   * markers: `main` keeps the worker's main cache plan, while `off` is the
+   * wire-parity-on form of a deployment that disabled prompt caching — the same
+   * member body, class, and layout with `x-cc-cache-intent: off`, so the worker
+   * writes no marker, no TTL, and no cache beta. Both modes already send a body
+   * with no `cache_control` and no caller cache beta; `off` withholds the
+   * worker's plan instead of adding anything. Helpers always declare `helper`.
+   * The field is only meaningful with {@link ccWireParity}: resolution refuses
+   * it on a route that does not send the wire-parity headers, because no request
+   * would read it.
+   */
+  ccWireParityCache?: PiAiCcWireParityCache
   /** Streaming transport preference. */
   transport?: Transport
   /** HTTP/provider SDK timeout in milliseconds. */
@@ -249,13 +312,20 @@ export interface PiAiProviderProfile {
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName'> {
+  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'ccWireParityCache'> {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
   displayName: string
   /** Validated credential reference, when one is configured. */
   apiKeyEnv?: CredentialRef
+  /**
+   * Cache intent this route's main and subagent wire-parity requests declare,
+   * defaulted to `main`. Read only when {@link PiAiProviderProfile.ccWireParity}
+   * is enabled; the value is resolved here so a request never invents a
+   * configuration default.
+   */
+  ccWireParityCache: PiAiCcWireParityCache
   /** Positive finite provider-idle interval after defaulting. */
   streamIdleTimeoutMs: number
   /** Positive request-level base64 image payload bound after defaulting. */
@@ -461,6 +531,8 @@ const profile = z.object({
   cacheRetention: z.union(['none', 'short', 'long']),
   extendedCacheBeta: z.boolean(),
   cacheMarkerPolicy: z.union(CACHE_MARKER_POLICIES),
+  ccWireParity: z.boolean(),
+  ccWireParityCache: z.union(CC_WIRE_PARITY_CACHE_MODES),
   transport: z.union(['sse', 'websocket', 'websocket-cached', 'auto']),
   timeoutMs: z.natural(),
   websocketConnectTimeoutMs: z.natural(),
@@ -603,6 +675,30 @@ function assertValidHeaders(provider: string, headers: Readonly<Record<string, s
 }
 
 /**
+ * Reject a profile header this adapter owns on every route.
+ *
+ * The three member headers travel as one set the adapter composes for each
+ * wire-parity request and strips from every route's deployment headers. A
+ * profile value would either send another spelling beside the adapter's or
+ * leave a partial set once the adapter writes its own, so the profile is
+ * refused rather than silently overridden — including on a route whose profile
+ * never enables wire parity.
+ * @param provider - route the profile names, for diagnostics.
+ * @param headers - the profile's configured request headers.
+ * @throws Error naming the adapter-owned header.
+ */
+function assertNoCcWireParityHeaders(provider: string, headers: Readonly<Record<string, string>> | undefined): void {
+  const owned: ReadonlySet<string> = new Set<string>(Object.values(CC_WIRE_PARITY_MEMBER_HEADERS))
+  for (const name of Object.keys(headers ?? {})) {
+    if (owned.has(name.toLowerCase())) {
+      throw new Error(
+        `llm-pi-ai: provider "${provider}" sets header "${name}", which this adapter owns on every route`,
+      )
+    }
+  }
+}
+
+/**
  * Resolve one route's immutable retry policy.
  *
  * A route that names no `retryableCodes` — by omitting the policy or by setting
@@ -635,6 +731,24 @@ function resolveProfileRetryPolicy(config: RetryPolicyConfig | undefined, path: 
 }
 
 /**
+ * The profile field that makes a route Anthropic Messages-only, if one does.
+ *
+ * Each of these options edits the Anthropic Messages wire, so a route none of
+ * whose models speaks that protocol could not serve it; strict validation
+ * refuses the combination and names one of the fields the profile set.
+ * @param source - the configured profile.
+ * @returns the first such field the profile sets, in declaration order.
+ */
+function anthropicOnlyProfileField(
+  source: PiAiProviderProfile,
+): 'ccWireParity' | 'cacheMarkerPolicy' | 'extendedCacheBeta' | undefined {
+  if (source.ccWireParity === true) return 'ccWireParity'
+  if (source.cacheMarkerPolicy !== undefined) return 'cacheMarkerPolicy'
+  if (source.extendedCacheBeta === true) return 'extendedCacheBeta'
+  return undefined
+}
+
+/**
  * Resolve scalar defaults and materialize each route's serviceable models.
  * Deferred catalog validation retains diagnostics without deleting configured
  * routes. An omitted dict resolves to the empty, dormant route set.
@@ -661,6 +775,13 @@ export function resolveProfiles(
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty displayName`)
     }
     assertValidHeaders(provider, source.headers)
+    assertNoCcWireParityHeaders(provider, source.headers)
+    if (source.ccWireParityCache !== undefined && source.ccWireParity !== true) {
+      throw new Error(
+        `llm-pi-ai: provider "${provider}" sets ccWireParityCache, which is only meaningful with ccWireParity: true;`
+        + ' a route that sends no wire-parity headers declares no cache intent',
+      )
+    }
     const streamIdleTimeoutMs = source.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
     if (!Number.isFinite(streamIdleTimeoutMs)
       || streamIdleTimeoutMs <= 0
@@ -722,12 +843,13 @@ export function resolveProfiles(
       if (validation === 'strict' || !(error instanceof PiAiCatalogError)) throw error
       catalogError ??= error.message
     }
+    const anthropicOnlyField = anthropicOnlyProfileField(source)
     if (validation === 'strict'
-      && (source.extendedCacheBeta === true || source.cacheMarkerPolicy !== undefined)
+      && anthropicOnlyField !== undefined
       && !catalog?.models.some(model => model.api === 'anthropic-messages')) {
-      const field = source.cacheMarkerPolicy === undefined ? 'extendedCacheBeta' : 'cacheMarkerPolicy'
       throw new Error(
-        `llm-pi-ai: provider "${provider}" sets ${field}, but no model on the route speaks anthropic-messages`,
+        `llm-pi-ai: provider "${provider}" sets ${anthropicOnlyField},`
+        + ' but no model on the route speaks anthropic-messages',
       )
     }
     const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, ...rest } = source
@@ -735,6 +857,11 @@ export function resolveProfiles(
       ...rest,
       provider,
       displayName,
+      // The one cache intent a main or subagent wire-parity request can declare;
+      // resolved here so the adapter reads a decided value instead of defaulting
+      // per request. A route that never enables wire parity still carries it,
+      // unread.
+      ccWireParityCache: source.ccWireParityCache ?? 'main',
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
       streamIdleTimeoutMs,
       maxRequestImageBytes,

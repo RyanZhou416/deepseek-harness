@@ -27,6 +27,22 @@ The source-level runs below used injected transports, synthetic responses and a 
 
 The user reports a successful Claude Messages request through the installed build. This confirms that particular request succeeded, not every account, maintenance branch or upstream policy. It is user-observed use rather than an assistant-run network test and establishes no risk-control equivalence.
 
+## Current investigation — context-management cache loss
+
+The 2026-10-30 Claude-only window showed that the per-session `clearedForIdle` latch made
+`clear_tool_uses_20250919` fire on every later request of a session after one 65-minute
+gap. Server-reported `applied_edits` confirmed the latch on the wire: 129 requests carried
+a clear while every inter-request gap stayed under 12 minutes. 86 of 96 cold reads are
+context-edit-confirmed; the remaining colds are TTL, compaction/prune, and one unexplained
+request.
+
+The route now states no server-side context edit and performs no provider-local prune.
+Keeping the conversation under the model window belongs to DSH compaction. The evidence,
+the decision and the rejected alternatives are in
+[claude-context-management-cache-fix.md](claude-context-management-cache-fix.md). The
+plugin's focused suite ran 1919 tests with 0 failures and 0 skips; no provider request,
+build, or restart was performed.
+
 ## Remaining limits
 
 - The full Claude Code permission and control catalog is not implemented. An unmapped or unsupported restriction is refused conservatively, the two known `enforce_`/`require_` controls are observed and warned about without being enforced, and the complete managed-policy consumer set stays out of scope.

@@ -9,8 +9,8 @@
   en: 7dc8f9480ed9352e
   zh: f799f0917a984588
 /deepseek-ai-dsh-llm-cc-pool/summary:
-  en: c279c63205ed579f
-  zh: aac5d131bc387b33
+  en: 59dbff0e643873b1
+  zh: ef4f5c0872d83356
 /deepseek-ai-dsh-llm-cc-pool/table-of-contents:
   en: d152484eb41ac6b4
   zh: 364c80ee00a374ff
@@ -23,6 +23,9 @@
 /deepseek-ai-dsh-llm-cc-pool/use-this-package/prompt-cache-policy:
   en: 09c957fe7100ef6e
   zh: 211b62b2269994cd
+/deepseek-ai-dsh-llm-cc-pool/use-this-package/cc-wire-parity:
+  en: 94123af148191a04
+  zh: 6c4cb7b6831e4142
 /deepseek-ai-dsh-llm-cc-pool/use-this-package/model-catalogue:
   en: 2ee818fb19948b02
   zh: 8ce427ea0411251d
@@ -33,8 +36,8 @@
   en: 83b73396130d03ce
   zh: 1adaa8ee0e040069
 /deepseek-ai-dsh-llm-cc-pool/understand-the-implementation:
-  en: 1d063e21d31113f0
-  zh: 722607fff22ea6ac
+  en: 5135a9879d4f92c7
+  zh: 5042291d691d359b
 /deepseek-ai-dsh-llm-cc-pool/further-exploration:
   en: 3d804c80f0c0afdb
   zh: 73938cc25b3c01c8
@@ -51,11 +54,11 @@
   en: 82ac0d562e2e1a77
   zh: ff0efad0e929efc7
 /deepseek-ai-dsh-llm-cc-pool/model-experience/provider-request-through-the-mac-pool/kv-cache-effect:
-  en: 783cf0b1fd541d0c
-  zh: 322c217453b685a9
+  en: 234bb93d9e878905
+  zh: e7529a9d1aa45584
 /deepseek-ai-dsh-llm-cc-pool/known-limitations-and-deferred-work:
-  en: 8d08fe422f25e67a
-  zh: 88c3915eb8b3853f
+  en: b81bf0f1b095c0b6
+  zh: 6ce13cb795cb458d
 /deepseek-ai-dsh-llm-cc-pool/known-limitations-and-deferred-work/dev-note:
-  en: 1c2745f7f5b47010
-  zh: 7d221ac4e3b10304
+  en: d93dc220f2d2d2c3
+  zh: 086c7289fab15929

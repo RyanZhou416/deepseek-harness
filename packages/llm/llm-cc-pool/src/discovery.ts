@@ -1,5 +1,6 @@
 /**
- * Reading the pool's own model list for an explicit "sync models" action.
+ * Reading the pool's own model list for an explicit "sync models" action, and
+ * asking it whether this member may use the CC wire parity wire.
  *
  * The route's catalogue is configuration, and nothing here writes it: a
  * listing is candidate metadata an editing surface may offer for adoption. A
@@ -12,7 +13,13 @@
  * request's `baseURL`, `api`, and one-shot `apiKey` are not consulted. The
  * listing endpoint is the pool's own registry, reached with the member
  * credential as a bearer token; it is not the Anthropic Messages endpoint and
- * carries none of that protocol's headers.
+ * carries none of that protocol's headers. The capability probe uses the same
+ * member authentication and answers only with the pool's proof or nothing,
+ * because wire parity is enabled on positive proof and never inferred from an
+ * absent answer. That proof is the exact `{protocol: 2, ccWireParity: 1, buildId}` triple
+ * for the endpoint and pool build that answered: a reply without the build
+ * cannot bind the capability, and a proof is never carried to another endpoint
+ * or a different build.
  *
  * @module dsh-llm-cc-pool/discovery
  */
@@ -29,6 +36,53 @@ export const DISCOVERY_NAMESPACE = 'llm-cc-pool'
 
 /** The pool endpoint that lists the models the deployment serves. */
 export const MODELS_URL = `${BASE_URL}/v1/models`
+
+/** The pool endpoint that advertises this member's wire capabilities. */
+export const CAPABILITIES_URL = `${BASE_URL}/v1/capabilities`
+
+/**
+ * Security bound on one capability probe, in milliseconds. The probe decides
+ * whether a request may carry wire parity, so an endpoint that stops answering
+ * answering must prove nothing instead of holding that decision open. It bounds
+ * a single probe; it is not a polling interval, because the plugin asks only at
+ * profile load and on a member credential change.
+ */
+const CAPABILITY_PROBE_TIMEOUT_MS = 5_000
+
+/**
+ * The longest pool build identity this reader accepts, in characters. The pool's
+ * own bound on the `MacPoolBuildId` it publishes is 128 printable ASCII
+ * characters, and a `sha256:` build-manifest digest is 71; a longer value cannot
+ * be that identity.
+ */
+const CAPABILITY_BUILD_MAX_CHARACTERS = 128
+
+/**
+ * The capability fields wire parity requires, as far as this reader trusts them.
+ * `buildId` binds the capability to the pool build that answered; a reply without it
+ * proves nothing, because the proof could not be scoped.
+ */
+interface PoolCapabilities {
+  protocol?: unknown
+  ccWireParity?: unknown
+  buildId?: unknown
+}
+
+/**
+ * The positive capability proof for one endpoint and pool build.
+ *
+ * The build identity is the pool's own stable value: the packaged build
+ * manifest digest it reports as `buildId`, the same identity its `/health`
+ * publishes. A proof describes the endpoint and build that answered, so a
+ * caller uses it only while both still apply and drops it rather than carrying
+ * it to another endpoint or a different build.
+ */
+export interface PoolCapabilityProof {
+  /** The member endpoint that returned this proof. */
+  readonly endpoint: string
+  /** The pool build identity that returned this proof. */
+  readonly buildId: string
+}
 
 /** One entry of the pool's listing, as far as this reader trusts it. */
 interface PoolListingEntry {
@@ -123,4 +177,103 @@ export async function discoverPoolModels(
     throw new LlmError(`${MODELS_URL} did not answer with JSON`, 'DISCOVERY_FAILED', { cause: error })
   }
   return readPoolListing(body, MODELS_URL)
+}
+
+/**
+ * Read one usable pool build identity from a capability reply.
+ *
+ * The value must be non-empty printable ASCII of at most
+ * {@link CAPABILITY_BUILD_MAX_CHARACTERS} characters: it is the pool's
+ * `MacPoolBuildId`, which that endpoint restricts the same way before publishing
+ * it. Anything else is not a build identity, so a reply carrying it cannot bind
+ * the capability and proves nothing.
+ * @param raw - the reply's `buildId` member.
+ * @returns the build identity, or `undefined` when the reply does not carry a usable one.
+ */
+function readBuildId(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > CAPABILITY_BUILD_MAX_CHARACTERS) {
+    return undefined
+  }
+  for (let index = 0; index < raw.length; index += 1) {
+    const code = raw.charCodeAt(index)
+    if (code <= 0x20 || code >= 0x7f) return undefined
+  }
+  return raw
+}
+
+/**
+ * Read one parsed capability reply as the proof wire parity requires.
+ *
+ * Only the exact triple the member contract states counts: protocol version 2,
+ * `ccWireParity: 1`, and a usable pool `buildId`. Any other value, a missing
+ * member, or a non-object reply is not a partial grant.
+ * @param body - the parsed JSON reply.
+ * @param endpoint - the endpoint that returned the reply; the proof is scoped to it.
+ * @returns the proof scoped to that endpoint and the answering pool build, or
+ *   `undefined` when the reply proves nothing.
+ */
+function readCapabilityProof(body: unknown, endpoint: string): PoolCapabilityProof | undefined {
+  if (body === null || typeof body !== 'object') return undefined
+  const capabilities = body as PoolCapabilities
+  if (capabilities.protocol !== 2 || capabilities.ccWireParity !== 1) return undefined
+  const buildId = readBuildId(capabilities.buildId)
+  if (buildId === undefined) return undefined
+  return { endpoint, buildId }
+}
+
+/**
+ * Ask the deployed pool whether this member may use the CC wire parity wire.
+ *
+ * A single authenticated read, bounded by {@link CAPABILITY_PROBE_TIMEOUT_MS}.
+ * Only a `200` reply carrying `{protocol: 2, ccWireParity: 1, buildId}` answers with
+ * a proof; every other outcome — a different status, an unreadable or malformed
+ * body, a missing or unusable build identity, an unreachable endpoint, the
+ * deadline, or caller cancellation — answers `undefined`, so the caller keeps
+ * the route's current wire instead of enabling wire parity on an endpoint that never
+ * proved it for a build. The probe is neither retried nor polled: the caller
+ * owns its triggers, and each trigger asks exactly once.
+ * @param apiKey - the resolved `CC_POOL_API_KEY` member credential.
+ * @param signal - caller cancellation, for fiber disposal or a superseding probe.
+ * @returns the proof for this endpoint and pool build, or `undefined` when the
+ *   endpoint proved no wire parity.
+ */
+export async function probePoolCapabilities(
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<PoolCapabilityProof | undefined> {
+  const abort = signal === undefined
+    ? AbortSignal.timeout(CAPABILITY_PROBE_TIMEOUT_MS)
+    : AbortSignal.any([signal, AbortSignal.timeout(CAPABILITY_PROBE_TIMEOUT_MS)])
+  let response: Response
+  try {
+    response = await fetch(CAPABILITIES_URL, {
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${apiKey}`,
+      },
+      signal: abort,
+    })
+  } catch {
+    // Unreachable, timed out, or cancelled: the probe proves nothing.
+    return undefined
+  }
+  // Exactly 200, not `ok`: other 2xx statuses (a 204, for example) carry no
+  // capability body, so they cannot prove the wire.
+  if (response.status !== 200) return undefined
+  let text: string
+  try {
+    text = await response.text()
+  } catch {
+    // A body the connection dropped mid-read is not a capability answer.
+    return undefined
+  }
+  let body: unknown
+  try {
+    body = JSON.parse(text)
+  } catch {
+    // A non-JSON reply is not a capability answer.
+    return undefined
+  }
+  return readCapabilityProof(body, CAPABILITIES_URL)
 }

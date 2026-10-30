@@ -1,4 +1,3 @@
-import type { ContextManagementConfig } from '@tormentalabs/claude-code-wire-compat'
 /**
  * Claude Code 2.1.288 wire construction for the claude provider, presenting the
  * Windows desktop identity.
@@ -14,12 +13,10 @@ import type { ContextManagementConfig } from '@tormentalabs/claude-code-wire-com
 
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  BETA_REGISTRY_2_1_288,
   CLAUDE_CODE_2_1_288_PROFILE,
   ClaudeCodeWireError,
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   buildClaudeCodeRequest,
-  supportsContextManagement,
   supportsMidConversationSystem,
 } from '@tormentalabs/claude-code-wire-compat'
 import { desktopClientHeaders } from './claude-desktop.js'
@@ -385,31 +382,6 @@ export function claudeRequestClass(
 }
 
 /**
- * Refuse a request whose body states `context_management` without the beta that declares it.
- *
- * The client emits the field only from the same composed beta list that carries
- * `context-management-2025-06-27`, so the two never travel apart. The builder decides the beta
- * from the model's capability while this route decides the field from its planned edits, so the
- * relationship is asserted here rather than left to two independent gates agreeing.
- *
- * @param built - the request the builder returned.
- * @param statesContextManagement - whether this route asked for the body field.
- */
-export function assertContextManagementBeta(
-  built: BuiltClaudeCodeRequest,
-  statesContextManagement: boolean,
-): void {
-  if (!statesContextManagement) return
-  const header = built.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? ''
-  const identifier = BETA_REGISTRY_2_1_288.CONTEXT_MANAGEMENT.header
-  if (header.split(',').some(value => value.trim() === identifier)) return
-  throw new LlmError(
-    `claude request assembly failed: the body states context_management without the ${identifier} beta header`,
-    'INVALID_REQUEST',
-  )
-}
-
-/**
  * Refuse a conversation shape that a withholding policy cannot express.
  *
  * The mid-conversation betas are what carry a system role inside the conversation. When a policy
@@ -448,7 +420,6 @@ export function assertPolicyRequestShape(messages: readonly TranslatableMessage[
  *   owner prepared for this request; each is used exactly as given.
  * @param account - the account the request is billed to.
  * @param identityLine - the deployment's own identity line, when it configured one.
- * @param contextManagement - the planned context edits, when the model accepts them.
  * @param fast - whether this session selected the fast tier.
  * @param policy - the caller's resolved policy, when it stated one.
  * @returns the built request: pinned URL, header plan, and serialized body.
@@ -463,7 +434,6 @@ export async function buildClaudeWireRequest(
   continuation: ClaudeWireContinuation,
   account: string,
   identityLine?: string,
-  contextManagement?: ContextManagementConfig,
   fast = false,
   policy?: ClaudeEnginePolicy,
 ): Promise<BuiltClaudeCodeRequest> {
@@ -553,7 +523,6 @@ export async function buildClaudeWireRequest(
   // change what this span sends.
   const atis = continuation.atisPin
   const suppressBetas = resolveSuppressBetas(policy)
-  const statesContextManagement = contextManagement !== undefined && supportsContextManagement(options.model)
   const built = await buildClaudeCodeRequest({
     accessToken: session.accessToken,
     model: options.model,
@@ -571,10 +540,6 @@ export async function buildClaudeWireRequest(
         && resolveSuppressBetas(policy) === undefined,
     ),
     system,
-    // The edits go out only where the catalogue gives the model context management, so the
-    // request never states a policy the API would reject and the beta header follows the same
-    // fact. Absent, the body is byte-identical to one built without this parameter.
-    ...statesContextManagement ? { contextManagement } : {},
     ...tools === undefined ? {} : { tools },
     // Caching on, with a marker on the system block and on the newest message. No tool
     // marker: the client's only tool-marker seam is an option its main-loop tool builder
@@ -639,6 +604,5 @@ export async function buildClaudeWireRequest(
       ...atis === undefined ? [] : [['x-cc-atis', atis] as [string, string]],
     ],
   }, CLAUDE_CODE_2_1_288_PROFILE)
-  assertContextManagementBeta(built, statesContextManagement)
   return built
 }

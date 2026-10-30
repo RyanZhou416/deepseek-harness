@@ -1,13 +1,18 @@
 /** The mac-pool provider facts and catalogue resolved through the generic pi-ai resolver. */
 
-import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
 import {
   POOL_CAPACITY_CODE,
   POOL_RATE_LIMITED_CODE,
   POOL_REQUEST_CLOSED_CODE,
   POOL_SESSION_BUSY_CODE,
 } from '@deepseek-ai/dsh-llm'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Config } from '../src/config.ts'
+import { CAPABILITIES_URL } from '../src/discovery.ts'
+import * as CcPool from '../src/index.ts'
 import type { CcPoolCachePolicy, CcPoolCacheTtl, CcPoolModel, CcPoolReasoningLevel } from '../src/pool.ts'
 import {
   API_KEY_REF,
@@ -24,6 +29,8 @@ import {
   resolvePoolModels,
   resolvePoolProfiles,
 } from '../src/pool.ts'
+import { anthropicSuccessResponse, assemble, capturePoolFetch, user } from './harness.ts'
+import type { CapturedRequest, PoolFetchCapture } from './harness.ts'
 
 /**
  * One policy without the three-marker opt-in, for the transport placement cases.
@@ -270,21 +277,262 @@ describe('prompt-cache policy', () => {
     const explicit: CcPoolCachePolicy = { cacheTtl: '1h', extendedCacheBeta: true }
     expect(() => resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc3', cacheTtl: '5m' }))
       .toThrow(/cacheMarkerPolicy "cc3" requires cacheTtl "1h"/)
-    expect(() => resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc3', cacheTtl: 'none' }))
-      .toThrow(/cacheMarkerPolicy "cc3" requires cacheTtl "1h"/)
     expect(() => resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc3', extendedCacheBeta: false }))
       .toThrow(/cacheMarkerPolicy "cc3" requires extendedCacheBeta: true/)
     expect(() => resolvePoolCachePolicy({ ...explicit, extendedCacheBeta: false }))
       .toThrow(/cacheTtl "1h" requires extendedCacheBeta: true/)
-    // Valid combinations: the default three-marker policy, and a non-policy layout.
+    // Valid combinations: the default three-marker policy, a non-policy layout,
+    // and the caching-disabled lifetime, where the marker policy is not applicable.
     expect(resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc3' }))
       .toMatchObject({ cacheMarkerPolicy: 'cc3' })
     expect(resolvePoolCachePolicy(legacyPolicy('5m'))).toMatchObject({ cacheTtl: '5m' })
+    expect(resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc3', cacheTtl: 'none' }))
+      .toMatchObject({ cacheTtl: 'none', extendedCacheBeta: false })
+    expect(resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc3', cacheTtl: 'none' }))
+      .not.toHaveProperty('cacheMarkerPolicy')
     expect(resolvePoolCachePolicy(legacyPolicy('none'))).toMatchObject({ cacheTtl: 'none' })
     // Profile and profile-set resolution reject the same combination.
     expect(() => poolProviderProfile(MODELS, { ...explicit, cacheMarkerPolicy: 'cc3', cacheTtl: '5m' }))
       .toThrow(/requires cacheTtl "1h"/)
     expect(() => resolvePoolProfiles(MODELS, { ...explicit, cacheMarkerPolicy: 'cc3', extendedCacheBeta: false }))
       .toThrow(/requires extendedCacheBeta: true/)
+  })
+
+  it('declares the parity A cache intent the policy disables or keeps', () => {
+    // A writes no marker of its own, so its profile accepts every policy the
+    // route's own rules admit; only the declared intent follows the policy.
+    expect(poolProviderProfile(MODELS, legacyPolicy('none'), true)).toMatchObject({
+      ccWireParity: true,
+      ccWireParityCache: 'off',
+    })
+    expect(poolProviderProfile(MODELS, legacyPolicy('5m'), true)).toMatchObject({
+      ccWireParity: true,
+      ccWireParityCache: 'main',
+    })
+    expect(poolProviderProfile(MODELS, DEFAULT_CACHE_POLICY, true)).toMatchObject({
+      ccWireParity: true,
+      ccWireParityCache: 'main',
+    })
+    // The resolved profile carries the same mapping, so the plugin's raw profile
+    // and the one the adapter reads agree on the intent.
+    expect(resolvePoolProfiles(MODELS, legacyPolicy('none'), true).get(PROVIDER)?.ccWireParityCache).toBe('off')
+    // A route that does not ask for A declares no intent at all.
+    expect(poolProviderProfile(MODELS, legacyPolicy('none')).ccWireParityCache).toBeUndefined()
+  })
+})
+
+let context: Context | undefined
+
+afterEach(async () => {
+  await context?.fiber.dispose()
+  context = undefined
+  vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
+})
+
+/** Stable and session-specific prompt text a main-class request splits at its boundary. */
+const WIRE_PARITY_SECTIONS = [
+  { name: 'app:instructions', text: 'Stable route instructions.', stable: true },
+  { name: 'session:state', text: 'Current session state.', stable: false },
+]
+
+/** A main-class request that states the boundary the wire parity body requires. */
+const WIRE_PARITY_PROBE = {
+  model: 'claude-sonnet-5-5',
+  system: WIRE_PARITY_SECTIONS.map(section => section.text).join('\n\n'),
+  systemSections: WIRE_PARITY_SECTIONS,
+  messages: [user('hello')],
+  requestClass: 'main' as const,
+}
+
+/**
+ * A capability reply in the pool's exact `{protocol, ccWireParity, buildId}`
+ * form.
+ * @param buildId - the pool build identity to report; `undefined` omits it.
+ * @returns the HTTP reply the capability probe parses.
+ */
+function capabilityReply(buildId?: string): Response {
+  return new Response(JSON.stringify({ protocol: 2, ccWireParity: 1, buildId }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+/**
+ * The pool's marked refusal of a wire parity request: a `503` carrying the
+ * `x-cc-wire-parity-unavailable` marker and its error envelope.
+ * @returns the marked refusal response.
+ */
+function wireParityRefusal(): Response {
+  return new Response(JSON.stringify({
+    type: 'error',
+    error: {
+      type: 'cc_wire_parity_unavailable',
+      message: 'the selected worker does not advertise ccWireParity',
+    },
+  }), {
+    status: 503,
+    headers: { 'content-type': 'application/json', 'x-cc-wire-parity-unavailable': '1' },
+  })
+}
+
+/**
+ * A `503` carrying no wire parity marker, as an upstream or proxy failure would.
+ * @returns the bare failure response.
+ */
+function bareServerError(): Response {
+  return new Response('upstream failed', { status: 503 })
+}
+
+/** The capability probe requests one capture observed. */
+function capabilityCalls(capture: PoolFetchCapture): CapturedRequest[] {
+  return capture.calls.filter(call => call.url === CAPABILITIES_URL)
+}
+
+/** The model requests one capture observed, in dispatch order. */
+function modelCalls(capture: PoolFetchCapture): CapturedRequest[] {
+  return capture.calls.filter(call => call.url !== CAPABILITIES_URL)
+}
+
+/** Whether one captured request declares the wire parity member headers. */
+function declaresWireParity(request: CapturedRequest): boolean {
+  return request.headers.has('x-cc-request-class')
+}
+
+/**
+ * Mount the real LLM service and the plugin with the fetch stand-in installed
+ * before mount, so the load probe is the one under test answers.
+ * @param respond - the response for one recorded request, routed by URL.
+ * @returns the isolated context and the recorded requests.
+ */
+async function mountProbed(
+  respond: (request: CapturedRequest) => Response,
+): Promise<{ ctx: Context; capture: PoolFetchCapture }> {
+  vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+  const capture = capturePoolFetch(respond)
+  vi.stubGlobal('fetch', capture.fetch)
+  const ctx = new Context()
+  context = ctx
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ccWireParity: true })
+  return { ctx, capture }
+}
+
+/**
+ * Wait until the route declares the wire parity member headers.
+ *
+ * The load probe is a fire-and-forget request, so its proof lands at an
+ * unspecified microtask after mount. Sending the probe until one request
+ * declares the wire waits for the proof through the route's own answer instead
+ * of a timer; every attempt is a normal request the capture records.
+ * @param ctx - the mounted context.
+ * @param capture - the requests the probe and the attempts were recorded into.
+ */
+async function awaitWireParity(ctx: Context, capture: PoolFetchCapture): Promise<void> {
+  await vi.waitFor(async () => {
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+  }, { timeout: 5_000 })
+}
+
+describe('CC wire parity capability proof', () => {
+  it('serves the wire parity member headers after the endpoint proves a build', async () => {
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? capabilityReply('pool-build-1')
+      : anthropicSuccessResponse())
+    await awaitWireParity(ctx, capture)
+
+    const call = modelCalls(capture).at(-1) as CapturedRequest
+    expect(call).toBeDefined()
+    expect(call?.headers.get('x-cc-request-class')).toBe('main')
+    expect(call?.headers.get('x-cc-system-layout')).toBe('boundary:1')
+    expect(call?.headers.get('x-cc-cache-intent')).toBe('main')
+    // One load probe; a request never asks the endpoint again.
+    expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('drops the proof when the pool marks a 503 as wire parity unavailable', async () => {
+    let refuse = false
+    const { ctx, capture } = await mountProbed((request) => {
+      if (request.url === CAPABILITIES_URL) return capabilityReply('pool-build-1')
+      return refuse ? wireParityRefusal() : anthropicSuccessResponse()
+    })
+    await awaitWireParity(ctx, capture)
+
+    // The A-on request the pool refuses with its marked 503.
+    refuse = true
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+
+    // The next request is back on the three-marker wire without asking the
+    // endpoint again: the marked refusal is evidence against the proof, not a
+    // trigger for another probe.
+    refuse = false
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    const after = modelCalls(capture).at(-1) as CapturedRequest
+    expect(declaresWireParity(after)).toBe(false)
+    const body = JSON.stringify(after.body)
+    expect(body.match(/"cache_control"/gu)).toHaveLength(3)
+    expect(body).toContain('"ttl":"1h"')
+    expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('keeps the proof on a 503 that carries no wire parity marker', async () => {
+    let fail = false
+    const { ctx, capture } = await mountProbed((request) => {
+      if (request.url === CAPABILITIES_URL) return capabilityReply('pool-build-1')
+      return fail ? bareServerError() : anthropicSuccessResponse()
+    })
+    await awaitWireParity(ctx, capture)
+
+    // A bare 503 is some other failure; it leaves the proof and the next request
+    // on the wire parity form.
+    fail = true
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+    fail = false
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+    expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('replaces the proof and keeps the wire when a later probe answers a different build', async () => {
+    let probes = 0
+    const { ctx, capture } = await mountProbed((request) => {
+      if (request.url !== CAPABILITIES_URL) return anthropicSuccessResponse()
+      probes += 1
+      return capabilityReply(probes === 1 ? 'pool-build-1' : 'pool-build-2')
+    })
+    await awaitWireParity(ctx, capture)
+
+    // A replaced member credential reopens the question; the new build proves
+    // the wire too, and the route serves it from the replaced proof.
+    ctx.emit('credentials/reference-updated', credentialRef(API_KEY_REF))
+    await awaitWireParity(ctx, capture)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+    expect(capabilityCalls(capture)).toHaveLength(2)
+  })
+
+  it('does not carry the old build proof to a replacement probe that proves nothing', async () => {
+    let probes = 0
+    const { ctx, capture } = await mountProbed((request) => {
+      if (request.url !== CAPABILITIES_URL) return anthropicSuccessResponse()
+      probes += 1
+      // The replacement build answers without a build identity, so it binds
+      // nothing and the previous build's proof must not survive it.
+      return probes === 1 ? capabilityReply('pool-build-1') : capabilityReply(undefined)
+    })
+    await awaitWireParity(ctx, capture)
+
+    ctx.emit('credentials/reference-updated', credentialRef(API_KEY_REF))
+    await vi.waitFor(() => {
+      expect(capabilityCalls(capture)).toHaveLength(2)
+    }, { timeout: 5_000 })
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    const after = modelCalls(capture).at(-1) as CapturedRequest
+    expect(declaresWireParity(after)).toBe(false)
+    // The fallback is the route's own three-marker bytes, not a partial wire.
+    expect(JSON.stringify(after.body).match(/"cache_control"/gu)).toHaveLength(3)
+    expect(capabilityCalls(capture)).toHaveLength(2)
   })
 })

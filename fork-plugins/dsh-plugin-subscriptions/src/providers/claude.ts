@@ -58,7 +58,6 @@ import type {
   ClaudeContinuationState,
 } from './claude-continuation-state.js'
 import type { ClaudeCaptureTicket, ClaudeSpanPin } from './claude-span-store.js'
-import { STALE_TOOL_RESULT_IDLE_MS, planContextManagement } from './context-management.js'
 import type { ClaudeWireThinking } from './claude-wire.js'
 import { claudeCatalogueListing } from './claude-catalogue.js'
 import type { ClaudeCatalogueOption } from './claude-catalogue.js'
@@ -1987,9 +1986,6 @@ function claudeStreamRefusalProbe(response: Response): AnthropicRefusalProbe {
 const UNBOUND_REQUEST_RECORD = new ClaudeRequestRecordPort()
 
 /** Claude wire adapter: one instance serves the `claude` provider route. */
-/** Sessions whose request clock is kept; the client bounds its own table the same way. */
-const REQUEST_CLOCK_LIMIT = 64
-
 export class ClaudeAdapter extends PoolBackedAdapter {
   protected readonly catalogs: ProviderCatalog
   /** The frozen compatibility profile this route builds every request from. */
@@ -2664,36 +2660,6 @@ export class ClaudeAdapter extends PoolBackedAdapter {
   }
 
   /**
-   * When each session last issued a request, and whether its latest break was acted on.
-   *
-   * Silence cannot be observed from the request itself: the history carries no timestamps. It
-   * does not need to be, because no request is issued during silence — the gap between a
-   * session's consecutive requests is the gap between its consecutive transcript messages. A
-   * decision is remembered so the same break keeps being acted on, which is what the client
-   * does, and the table is bounded the way the client bounds its own.
-   */
-  private readonly requestClock = new Map<string, { lastRequestAt: number; clearedForIdle: boolean }>()
-
-  /**
-   * Measures the silence before this request, remembering a break that was already acted on.
-   *
-   * @param sessionId - the session issuing the request.
-   * @returns the silence in milliseconds, or the threshold when this break was already acted on.
-   */
-  private idleBeforeRequest(sessionId: string): number | undefined {
-    const now = Date.now()
-    const prior = this.requestClock.get(sessionId)
-    const idle = prior === undefined ? undefined : now - prior.lastRequestAt
-    const clearedForIdle = (idle !== undefined && idle >= STALE_TOOL_RESULT_IDLE_MS) || prior?.clearedForIdle === true
-    if (this.requestClock.size >= REQUEST_CLOCK_LIMIT && prior === undefined) {
-      const oldest = this.requestClock.keys().next().value
-      if (oldest !== undefined) this.requestClock.delete(oldest)
-    }
-    this.requestClock.set(sessionId, { lastRequestAt: now, clearedForIdle })
-    return clearedForIdle ? STALE_TOOL_RESULT_IDLE_MS : idle
-  }
-
-  /**
    * Build and issue one Messages request.
    * @param options - the request being served.
    * @param account - the account the identity read addresses.
@@ -2778,11 +2744,6 @@ export class ClaudeAdapter extends PoolBackedAdapter {
     }
     let built: BuiltClaudeCodeRequest
     try {
-      const contextManagement = planContextManagement({
-        hasThinking: thinking !== undefined,
-        idleBeforeRequestMs: this.idleBeforeRequest(sessionId),
-        messages,
-      })
       // Every continuation fact is explicit: the wire session this span committed, the pin it
       // froze, and the id the retained history's selector chose. The builder decides none of them.
       const wire: ClaudeWireContinuation = {
@@ -2792,7 +2753,7 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       }
       built = await buildClaudeWireRequest(
         options, identitySession, messages, maxTokens, thinking, effort, wire, chainAccount,
-        this.options.identityLine, contextManagement, fast, requestPolicy,
+        this.options.identityLine, fast, requestPolicy,
       )
     } catch (error: unknown) {
       const mapped = mapClaudeWireError(error, messages)

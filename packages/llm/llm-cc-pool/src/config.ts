@@ -7,10 +7,17 @@
  * bounds differ per installation, the model catalogue, because a pool
  * deployment may serve a different model set than the built-in one, and the
  * prompt-cache policy, because how long a cached prefix must survive and which
- * markers carry it are the deployment's cost decision. The catalogue is a live
- * field: the settings service projects it, and an edit reaches the next request
- * and the next model listing without remounting the plugin. The cache policy is
- * loader configuration read when the plugin mounts.
+ * markers carry it are the deployment's cost decision, and whether the route
+ * asks for the CC wire parity wire, because only a deployment whose member
+ * endpoint serves it can use it. The catalogue is a live field: the settings
+ * service projects it, and an edit reaches the next request and the next model
+ * listing without remounting the plugin. The cache policy and the wire parity
+ * opt-in are loader configuration read when the plugin mounts. The wire-parity
+ * wire declares its own cache intent, so it accepts any policy this route's own
+ * rules admit: a `cacheTtl` of `none` — the deployment's caching-disabled state
+ * — becomes cache intent `off`, and every other lifetime becomes `main`. Wire
+ * parity writes no cache marker itself, so the marker policy does not have to
+ * be `cc3` for it.
  *
  * @module dsh-llm-cc-pool/config
  */
@@ -42,10 +49,13 @@ export interface Config {
    * Prompt-cache TTL this route declares for a request's `cache_control`
    * markers: `5m` keeps the API's default five-minute lifetime, `1h` asks for
    * the extended one, and `none` sends no marker. The default `1h` is the
-   * lifetime the route serves now; `5m` and `none` are refused while
+   * lifetime the route serves now; `5m` is refused while
    * {@link cacheMarkerPolicy} is `cc3`, because that policy writes one-hour
-   * markers on its own. The value reaches the wire only through this route's
-   * profile, so no other provider's request changes.
+   * markers on its own. `none` is this route's caching-disabled state: it has no
+   * marker placement, so the configured marker policy is not applicable and is
+   * dropped during resolution; with {@link ccWireParity} it declares cache intent
+   * `off` instead of the worker's main plan. The value reaches the wire only
+   * through this route's profile, so no other provider's request changes.
    */
   cacheTtl: CcPoolCacheTtl
   /**
@@ -70,6 +80,29 @@ export interface Config {
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**
+   * Ask this route for the CC wire parity wire. The request is a preference, not a
+   * grant: the route advertises wire parity on its profile only after the deployed
+   * pool's member endpoint answers `GET /v1/capabilities` with
+   * `{protocol: 2, ccWireParity: 1, buildId}` using this route's member credential.
+   * `buildId` is the pool build's own stable identity; the proof is kept only
+   * for the endpoint and build that answered, so an old pool or an unpackaged
+   * build that reports none binds nothing and leaves the route on the default
+   * wire. A missing credential, a refused or malformed answer, a timeout, or an
+   * unreachable endpoint leaves the route on its current three-marker bytes.
+   * Wire parity changes what the pi-ai adapter writes; this plugin only publishes
+   * the proved capability on the profile and never rewrites a request body or
+   * header. The profile keeps the configured cache policy alongside the flag,
+   * because a wire-parity-off request keeps that wire, and it also declares the
+   * cache intent the wire-parity-on request sends: {@link cacheTtl} `none` — the
+   * route's caching-disabled state — becomes intent `off`, so the worker writes
+   * no marker, no TTL, and no cache beta, while every other lifetime becomes
+   * intent `main`, the worker's own cache plan. The wire-parity body itself
+   * carries no marker in either case, so wire parity does not constrain which
+   * policy the route may configure. The default `false` keeps the current wire
+   * exactly and sends no probe request.
+   */
+  ccWireParity: boolean
+  /**
    * The catalogue selector surfaces offer, replacing the built-in four-model
    * catalogue wholesale. Absent, or reset through the settings service, serves
    * the built-in catalogue. A provided list resolves through this package's
@@ -87,6 +120,7 @@ export type Options = {
   cacheTtl?: CcPoolCacheTtl
   extendedCacheBeta?: boolean
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
+  ccWireParity?: boolean
   models?: CcPoolModel[]
 }
 
@@ -108,5 +142,6 @@ export const Config = z.object({
   cacheTtl: z.union(CACHE_TTLS).default('1h'),
   extendedCacheBeta: z.boolean().default(true),
   cacheMarkerPolicy: z.union(CACHE_MARKER_POLICIES).default('cc3'),
+  ccWireParity: z.boolean().default(false),
   models: z.array(modelSetting).default(builtInModels).volatile(),
 })

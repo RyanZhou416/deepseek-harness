@@ -917,6 +917,28 @@ describe('provider error capture', () => {
     expect(failing.read()).toEqual({ status: 429 })
   })
 
+  it('retains the pool A-unavailable marker only when the response carries it', async () => {
+    const marked = new ProviderErrorCapture(async () => new Response('no', {
+      status: 503,
+      headers: { 'x-cc-wire-parity-unavailable': '1' },
+    }))
+    await marked.fetch('http://127.0.0.1/unused', {})
+    expect(marked.readResponse()).toEqual({ status: 503, wireParityUnavailable: true })
+
+    // The status alone is not the fact: an unmarked 503 retains no marker, and a
+    // value outside the pool's stable `1` is not that refusal either.
+    const unmarked = new ProviderErrorCapture(async () => new Response('no', { status: 503 }))
+    await unmarked.fetch('http://127.0.0.1/unused', {})
+    expect(unmarked.readResponse()).toEqual({ status: 503 })
+
+    const other = new ProviderErrorCapture(async () => new Response('no', {
+      status: 503,
+      headers: { 'x-cc-wire-parity-unavailable': 'true' },
+    }))
+    await other.fetch('http://127.0.0.1/unused', {})
+    expect(other.readResponse()).toEqual({ status: 503 })
+  })
+
   it('retains the response status and pool request id for diagnostics', async () => {
     const capture = new ProviderErrorCapture(async () => new Response('ok', {
       status: 201,

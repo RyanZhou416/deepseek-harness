@@ -7,7 +7,15 @@ import {
   POOL_SESSION_BUSY_CODE,
   POOL_TRANSIENT_CODE,
 } from '@deepseek-ai/dsh-llm'
-import { assertServiceable, Config, resolveProfiles, resolveSessionHeaders, type Options } from '../src/config.ts'
+import {
+  assertServiceable,
+  Config,
+  resolveProfiles,
+  resolveSessionHeaders,
+  type Options,
+  type PiAiProviderProfile,
+  type ResolvedPiAiProviderProfile,
+} from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
 const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
@@ -271,5 +279,45 @@ describe('retry policy pool codes', () => {
     expect(policy.retryableCodes).not.toContain('EMPTY_RESPONSE')
     expect(policy.retryableCodes).not.toContain('TIMEOUT')
     expect(policy.retryableCodes).not.toContain(POOL_CAPACITY_CODE)
+  })
+})
+
+/** Resolve one parity A route, with the caller's fields layered onto it. */
+const wireParityRoute = (profile: PiAiProviderProfile): ResolvedPiAiProviderProfile | undefined =>
+  resolveProfiles({
+    pool: {
+      api: 'anthropic-messages',
+      baseURL: 'https://pool.test',
+      models: [{ id: 'm' }],
+      ...profile,
+    },
+  }).get('pool')
+
+describe('CC wire parity cache intent', () => {
+  it('accepts both intents on a parity A route and resolves the default', () => {
+    expect(wireParityRoute({ ccWireParity: true, ccWireParityCache: 'off' })?.ccWireParityCache).toBe('off')
+    expect(wireParityRoute({ ccWireParity: true, ccWireParityCache: 'main' })?.ccWireParityCache).toBe('main')
+    // Omission is the `main` plan, resolved once with the rest of the profile so
+    // the adapter reads a decided value rather than defaulting per request. A
+    // route that never enables A carries the same resolved default, unread.
+    expect(wireParityRoute({ ccWireParity: true })?.ccWireParityCache).toBe('main')
+    expect(wireParityRoute({})?.ccWireParityCache).toBe('main')
+  })
+
+  it('refuses an intent on a route that never sends the A headers', () => {
+    expect(() => wireParityRoute({ ccWireParityCache: 'off' })).toThrow(/ccWireParityCache.*ccWireParity/)
+    expect(() => wireParityRoute({ ccWireParityCache: 'main' })).toThrow(/ccWireParityCache.*ccWireParity/)
+  })
+
+  it('never lets the profile name the helper intent', () => {
+    // `helper` is a helper request's own declaration, not a route choice, and
+    // `disabled` is the rejected wire token rather than a profile value.
+    for (const value of ['helper', 'disabled']) {
+      expect(() => Config({ providers: { pool: {
+        api: 'anthropic-messages',
+        ccWireParity: true,
+        ccWireParityCache: value,
+      } } } as never), value).toThrow()
+    }
   })
 })

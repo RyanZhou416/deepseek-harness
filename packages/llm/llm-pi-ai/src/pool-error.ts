@@ -117,10 +117,23 @@ export interface ProviderResponseFacts {
   readonly status: number
   /** Pool-issued request id echoed by the response, when the pool issued one. */
   readonly poolRequestId?: string
+  /**
+   * Whether the pool's own `cc_wire_parity_unavailable` refusal marked this
+   * response. Present only when the pool stated it, so an unrelated `503` leaves
+   * the capability answer unchanged.
+   */
+  readonly wireParityUnavailable?: boolean
 }
 
 /** The member pool's per-request id, echoed on a response when the pool issues one. */
 const POOL_REQUEST_ID_HEADER = 'x-cc-pool-request-id'
+
+/**
+ * The pool's stable marker for its `cc_wire_parity_unavailable` refusal, whose only
+ * value is `1`. The status alone is not that fact: an unmarked `503` is some
+ * other failure.
+ */
+const WIRE_PARITY_UNAVAILABLE_HEADER = 'x-cc-wire-parity-unavailable'
 
 /**
  * The readiness refusal's body field naming the pool-issued request id. The
@@ -423,6 +436,7 @@ export class ProviderErrorCapture {
       this.observed = Object.freeze({
         status: response.status,
         ...poolRequestId === undefined ? {} : { poolRequestId },
+        ...wireParityUnavailableFacts(response.headers),
       })
       if (!response.ok && this.response === undefined) {
         this.response = Object.freeze({
@@ -444,7 +458,8 @@ export class ProviderErrorCapture {
 
   /**
    * The response observed during this call, successful or failed.
-   * @returns status and the pool's request id, or undefined when no response arrived.
+   * @returns status, the pool's request id, and the pool's wire-parity-unavailable
+   *   marker, or undefined when no response arrived.
    */
   readResponse(): ProviderResponseFacts | undefined {
     return this.observed
@@ -506,4 +521,19 @@ function retryAfterFacts(headers: Headers): Pick<ProviderErrorResponse, 'provide
   const seconds = Number(raw)
   const delay = Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : Date.parse(raw) - Date.now()
   return Number.isFinite(delay) && delay > 0 ? { providerRetryAfterMs: delay } : {}
+}
+
+/**
+ * Whether the response carries the pool's wire-parity-unavailable marker.
+ *
+ * The pool writes `1` on its `cc_wire_parity_unavailable` refusal only, so the
+ * marker separates that refusal from any other `503`. Any other value is not
+ * that refusal, and an absent header retains no fact at all.
+ * @param headers - the settled response's headers.
+ * @returns the retained marker fact, or an empty record when it is absent.
+ */
+function wireParityUnavailableFacts(
+  headers: Headers,
+): Pick<ProviderResponseFacts, 'wireParityUnavailable'> | Record<string, never> {
+  return headers.get(WIRE_PARITY_UNAVAILABLE_HEADER) === '1' ? { wireParityUnavailable: true } : {}
 }

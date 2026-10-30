@@ -11,7 +11,7 @@ import LlmRuntime from '@deepseek-ai/dsh-llm'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as CcPool from '../src/index.ts'
-import { DISCOVERY_NAMESPACE, MODELS_URL, discoverPoolModels } from '../src/discovery.ts'
+import { CAPABILITIES_URL, DISCOVERY_NAMESPACE, MODELS_URL, discoverPoolModels, probePoolCapabilities } from '../src/discovery.ts'
 import { BASE_URL, MODELS, PROVIDER } from '../src/pool.ts'
 import { capturePoolFetch } from './harness.ts'
 
@@ -78,6 +78,22 @@ function unreadableReply(): Response {
       controller.error(new Error('connection reset'))
     },
   }), { status: 200 })
+}
+
+/**
+ * A capability reply in the pool's exact `{protocol, ccWireParity, buildId}`
+ * form. An override of `undefined` drops that member from the JSON, which is how
+ * a reply that never states the member is built.
+ * @param overrides - reply members to replace or add.
+ * @returns the HTTP reply the capability probe parses.
+ */
+function capabilityReply(overrides: Record<string, unknown> = {}): Response {
+  return new Response(JSON.stringify({
+    protocol: 2,
+    ccWireParity: 1,
+    buildId: 'sha256:pool-build',
+    ...overrides,
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
 }
 
 describe('pool model listing read', () => {
@@ -217,6 +233,142 @@ describe('pool model listing read', () => {
     const read = discoverPoolModels('pool-member-key', controller.signal)
     controller.abort()
     await expect(read).rejects.toMatchObject({ code: 'ABORTED' })
+  })
+})
+
+describe('pool capability probe', () => {
+  it('reads the fixed capabilities URL with the member credential and returns the build proof', async () => {
+    const capture = capturePoolFetch(() => capabilityReply({ buildId: 'sha256:7f3a' }))
+    vi.stubGlobal('fetch', capture.fetch)
+
+    expect(await probePoolCapabilities('pool-member-key')).toEqual({
+      endpoint: CAPABILITIES_URL,
+      buildId: 'sha256:7f3a',
+    })
+
+    expect(capture.calls).toHaveLength(1)
+    const call = capture.calls[0]
+    expect(call?.url).toBe(`${BASE_URL}/v1/capabilities`)
+    expect(call?.url).toBe(CAPABILITIES_URL)
+    expect(call?.method).toBe('GET')
+    expect(call?.headers.get('authorization')).toBe('Bearer pool-member-key')
+    expect(call?.headers.get('accept')).toBe('application/json')
+  })
+
+  it('requires a usable pool build identity to bind the proof', async () => {
+    // A build identity is printable ASCII, up to the pool's own 128-character
+    // bound; both edges are accepted, because the pool may publish either.
+    for (const buildId of ['a', `sha256:${'0'.repeat(64)}`, 'b'.repeat(128)]) {
+      vi.stubGlobal('fetch', capturePoolFetch(() => capabilityReply({ buildId })).fetch)
+      expect(await probePoolCapabilities('pool-member-key')).toMatchObject({ buildId })
+    }
+
+    const unusable: readonly [label: string, buildId: unknown][] = [
+      ['absent', undefined],
+      ['empty', ''],
+      ['oversized', 'c'.repeat(129)],
+      ['space', 'build id'],
+      ['tab', 'build\tid'],
+      ['newline', 'build\nid'],
+      ['non-printable', 'build\u007fid'],
+      ['non-ASCII', 'b\u00fcild'],
+      ['numeric', 42],
+      ['null', null],
+      ['array', ['build']],
+    ]
+    for (const [label, buildId] of unusable) {
+      vi.stubGlobal('fetch', capturePoolFetch(() => capabilityReply({ buildId })).fetch)
+      expect(await probePoolCapabilities('pool-member-key'), label).toBeUndefined()
+    }
+  })
+
+  it('accepts only protocol 2 with wire parity 1', async () => {
+    const rejected = [
+      { protocol: 1, ccWireParity: 1 },
+      { protocol: 3, ccWireParity: 1 },
+      { protocol: '2', ccWireParity: 1 },
+      { protocol: 2, ccWireParity: 0 },
+      { protocol: 2, ccWireParity: 2 },
+      { protocol: 2, ccWireParity: true },
+      { protocol: 2, ccWireParity: '1' },
+      { ccWireParity: 1, protocol: undefined },
+      { protocol: 2, ccWireParity: undefined },
+    ]
+    for (const overrides of rejected) {
+      vi.stubGlobal('fetch', capturePoolFetch(() => capabilityReply(overrides)).fetch)
+      expect(await probePoolCapabilities('pool-member-key'), JSON.stringify(overrides)).toBeUndefined()
+    }
+  })
+
+  it('answers only to exactly a 200 status and never retries', async () => {
+    const refused = [201, 202, 204, 302, 400, 401, 404, 429, 500, 503]
+    for (const status of refused) {
+      const capture = capturePoolFetch(() => new Response(
+        // A null-body status cannot carry the reply a proof would need.
+        status === 204 ? null : JSON.stringify({ protocol: 2, ccWireParity: 1, buildId: 'build' }),
+        { status },
+      ))
+      vi.stubGlobal('fetch', capture.fetch)
+      expect(await probePoolCapabilities('pool-member-key'), String(status)).toBeUndefined()
+      // One probe is one request: a refused answer is not asking again.
+      expect(capture.calls, String(status)).toHaveLength(1)
+    }
+  })
+
+  it('answers nothing for a body that is not a capability proof', async () => {
+    for (const text of ['not json', 'null', '[]', '"capability"', '{}']) {
+      vi.stubGlobal('fetch', capturePoolFetch(() => new Response(text, { status: 200 })).fetch)
+      expect(await probePoolCapabilities('pool-member-key'), text).toBeUndefined()
+    }
+  })
+
+  it('answers nothing when the reply body cannot be read', async () => {
+    vi.stubGlobal('fetch', capturePoolFetch(() => unreadableReply()).fetch)
+    expect(await probePoolCapabilities('pool-member-key')).toBeUndefined()
+  })
+
+  it('answers nothing when the endpoint cannot be reached', async () => {
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('getaddrinfo ENOTFOUND')))
+    expect(await probePoolCapabilities('pool-member-key')).toBeUndefined()
+  })
+
+  it('forwards caller cancellation and reports it as no proof', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const fetchStub = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
+      Promise.reject(new DOMException('aborted', 'AbortError')))
+    vi.stubGlobal('fetch', fetchStub)
+    expect(await probePoolCapabilities('pool-member-key', controller.signal)).toBeUndefined()
+    expect(fetchStub).toHaveBeenCalledWith(CAPABILITIES_URL, expect.objectContaining({ method: 'GET' }))
+    // The probe bounds its own read and also honours the caller's cancellation.
+    const init = fetchStub.mock.calls[0]?.[1]
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+    expect(init?.signal?.aborted).toBe(true)
+  })
+
+  it('replaces the build identity a later probe answers with', async () => {
+    const replies = [
+      capabilityReply({ buildId: 'pool-build-a' }),
+      capabilityReply({ buildId: 'pool-build-b' }),
+    ]
+    const capture = capturePoolFetch(() => {
+      const reply = replies.shift()
+      if (reply === undefined) throw new Error('the probe asked more than once per call')
+      return reply
+    })
+    vi.stubGlobal('fetch', capture.fetch)
+
+    expect(await probePoolCapabilities('pool-member-key')).toEqual({
+      endpoint: CAPABILITIES_URL,
+      buildId: 'pool-build-a',
+    })
+    // A new probe answers for the build that answered it; the previous build's
+    // proof is not reused.
+    expect(await probePoolCapabilities('pool-member-key')).toEqual({
+      endpoint: CAPABILITIES_URL,
+      buildId: 'pool-build-b',
+    })
+    expect(capture.calls).toHaveLength(2)
   })
 })
 

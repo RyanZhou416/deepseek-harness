@@ -1753,7 +1753,7 @@ export interface Config {
 
 - `inject`: `llm`
 - `refs`: [`PiAiCacheMarkerPolicy`](../packages/llm/llm-pi-ai/src/index.ts) · [`PiAiRequestLogProfile`](../packages/llm/llm-pi-ai/src/index.ts) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-cc-pool/src/config.ts:25`](../packages/llm/llm-cc-pool/src/config.ts)
+- `source`: [`packages/llm/llm-cc-pool/src/config.ts:32`](../packages/llm/llm-cc-pool/src/config.ts)
 
 ```ts config-catalog
 /** Loader configuration for the mac-pool route. */
@@ -1777,10 +1777,13 @@ export interface Config {
    * Prompt-cache TTL this route declares for a request's `cache_control`
    * markers: `5m` keeps the API's default five-minute lifetime, `1h` asks for
    * the extended one, and `none` sends no marker. The default `1h` is the
-   * lifetime the route serves now; `5m` and `none` are refused while
+   * lifetime the route serves now; `5m` is refused while
    * {@link cacheMarkerPolicy} is `cc3`, because that policy writes one-hour
-   * markers on its own. The value reaches the wire only through this route's
-   * profile, so no other provider's request changes.
+   * markers on its own. `none` is this route's caching-disabled state: it has no
+   * marker placement, so the configured marker policy is not applicable and is
+   * dropped during resolution; with {@link ccWireParity} it declares cache intent
+   * `off` instead of the worker's main plan. The value reaches the wire only
+   * through this route's profile, so no other provider's request changes.
    */
   cacheTtl: CcPoolCacheTtl
   /**
@@ -1804,6 +1807,29 @@ export interface Config {
    * at request time. No other provider route reads this value.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
+  /**
+   * Ask this route for the CC wire parity wire. The request is a preference, not a
+   * grant: the route advertises wire parity on its profile only after the deployed
+   * pool's member endpoint answers `GET /v1/capabilities` with
+   * `{protocol: 2, ccWireParity: 1, buildId}` using this route's member credential.
+   * `buildId` is the pool build's own stable identity; the proof is kept only
+   * for the endpoint and build that answered, so an old pool or an unpackaged
+   * build that reports none binds nothing and leaves the route on the default
+   * wire. A missing credential, a refused or malformed answer, a timeout, or an
+   * unreachable endpoint leaves the route on its current three-marker bytes.
+   * Wire parity changes what the pi-ai adapter writes; this plugin only publishes
+   * the proved capability on the profile and never rewrites a request body or
+   * header. The profile keeps the configured cache policy alongside the flag,
+   * because a wire-parity-off request keeps that wire, and it also declares the
+   * cache intent the wire-parity-on request sends: {@link cacheTtl} `none` — the
+   * route's caching-disabled state — becomes intent `off`, so the worker writes
+   * no marker, no TTL, and no cache beta, while every other lifetime becomes
+   * intent `main`, the worker's own cache plan. The wire-parity body itself
+   * carries no marker in either case, so wire parity does not constrain which
+   * policy the route may configure. The default `false` keeps the current wire
+   * exactly and sends no probe request.
+   */
+  ccWireParity: boolean
   /**
    * The catalogue selector surfaces offer, replacing the built-in four-model
    * catalogue wholesale. Absent, or reset through the settings service, serves
@@ -1898,7 +1924,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:293`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:363`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2046,6 +2072,39 @@ export interface PiAiProviderProfile {
    * model on the route speaks `anthropic-messages`.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
+  /**
+   * Claude Code wire parity on this route's Anthropic Messages requests (default
+   * `false`): the member body and the three `x-cc-*` headers a wire-parity
+   * endpoint reads. The adapter builds `[identity, static, dynamic]` from the
+   * request's `systemSections` — the pinned interactive identity line, the
+   * reordered `stable` sections, then the session-specific remainder — and
+   * applies the pinned top-level field order, the `updates` thinking display,
+   * and the eager-streaming and beta removals, with no `cache_control` of its
+   * own. A helper class (`compaction`, `auxiliary`) keeps the caller's system,
+   * layout `none`, and no markers; a main or subagent request that cannot state
+   * a real boundary, or that names no class at all, is served as the current
+   * non-wire-parity request instead of a partial wire-parity body. The three
+   * header names are adapter-owned on every route, and the flag replaces
+   * {@link cacheMarkerPolicy} `cc3` on a wire-parity request while a
+   * wire-parity-off request keeps that policy's body. {@link ccWireParityCache}
+   * selects the cache intent a main or subagent request declares. Refused when
+   * no model on the route speaks `anthropic-messages`.
+   */
+  ccWireParity?: boolean
+  /**
+   * Cache intent a wire-parity route's `main` and `subagent` requests declare
+   * (default `main`), and with it whether the pool's worker writes cache
+   * markers: `main` keeps the worker's main cache plan, while `off` is the
+   * wire-parity-on form of a deployment that disabled prompt caching — the same
+   * member body, class, and layout with `x-cc-cache-intent: off`, so the worker
+   * writes no marker, no TTL, and no cache beta. Both modes already send a body
+   * with no `cache_control` and no caller cache beta; `off` withholds the
+   * worker's plan instead of adding anything. Helpers always declare `helper`.
+   * The field is only meaningful with {@link ccWireParity}: resolution refuses
+   * it on a route that does not send the wire-parity headers, because no request
+   * would read it.
+   */
+  ccWireParityCache?: PiAiCcWireParityCache
   /** Streaming transport preference. */
   transport?: Transport
   /** HTTP/provider SDK timeout in milliseconds. */
@@ -2249,6 +2308,9 @@ export type PiAiModality = Model<Api>['input'][number]
 
 /** One placement policy from {@link CACHE_MARKER_POLICIES}. */
 export type PiAiCacheMarkerPolicy = (typeof CACHE_MARKER_POLICIES)[number]
+
+/** One wire-parity cache intent from {@link CC_WIRE_PARITY_CACHE_MODES}. */
+export type PiAiCcWireParityCache = (typeof CC_WIRE_PARITY_CACHE_MODES)[number]
 
 /**
  * Selectable reasoning efforts for one model: each key is a level the model

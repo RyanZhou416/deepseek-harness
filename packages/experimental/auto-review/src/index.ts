@@ -624,6 +624,7 @@ async function classifyRisk(
   const options: GenerateOptions = deepFreeze({
     provider: snapshot.provider,
     model: snapshot.model,
+    requestClass: 'auxiliary',
     system: REVIEW_POLICY,
     messages: [{
       role: 'user',

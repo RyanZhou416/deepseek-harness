@@ -396,6 +396,12 @@ test('an unknown or unsupported body field is refused by name, never dropped', (
   const unsupported = validateAnthropicBody(body({ mcp_servers: [] }))
   assert.equal(unsupported.ok, false)
   assert.equal(unsupported.ok === false ? unsupported.failure.kind : undefined, 'unsupported')
+
+  // The field names a server-side editing policy this engine does not implement, so a caller
+  // that states one is refused rather than having it forwarded or dropped.
+  const contextManagement = validateAnthropicBody(body({ context_management: { edits: [] } }))
+  assert.equal(contextManagement.ok, false)
+  assert.equal(contextManagement.ok === false ? contextManagement.failure.kind : undefined, 'unsupported')
 })
 
 test('a non-streaming V1 request is refused explicitly', () => {

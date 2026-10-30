@@ -27,11 +27,29 @@
  * them, and nothing here rewrites a request body. No other route reads these
  * values.
  *
+ * The route may additionally ask for the CC wire parity wire, but only the member
+ * endpoint can grant it: {@link poolProviderProfile} adds the `ccWireParity` flag
+ * to the profile once the plugin's capability probe proved it for this endpoint
+ * and the pool build that answered. The cache policy fields still ship alongside
+ * that flag, because a wire-parity-off request keeps the route's current wire,
+ * and the adapter's wire-parity branch owns the wire-parity body and headers;
+ * nothing here rewrites either.
+ *
+ * Wire parity declares its own cache intent, so it can carry any policy this
+ * route's own rules admit: a policy whose {@link CcPoolCachePolicy.cacheTtl} is
+ * `none` is the deployment's caching-disabled state, and
+ * {@link poolProviderProfile} maps it to `ccWireParityCache: "off"` so a main or
+ * subagent wire-parity request asks the worker for no marker, no TTL, and no
+ * cache beta. Every other lifetime maps to `"main"`, the worker's own cache
+ * plan. The intent is profile data the adapter declares in its member headers;
+ * no cache setting here reaches a wire-parity body.
+ *
  * @module dsh-llm-cc-pool/pool
  */
 import { resolvePiAiProfiles } from '@deepseek-ai/dsh-llm-pi-ai'
 import type {
   PiAiCacheMarkerPolicy,
+  PiAiCcWireParityCache,
   PiAiModality,
   PiAiProviderProfile,
   PiAiReasoningEfforts,
@@ -85,7 +103,11 @@ export type CcPoolCacheTtl = (typeof CACHE_TTLS)[number]
  * adds the beta a one-hour lifetime declares, and `cacheMarkerPolicy` replaces
  * the transport's placement with the Claude Code 2.1.288 layout when configured.
  * {@link resolvePoolCachePolicy} refuses a policy whose fields cannot serve a
- * request together.
+ * request together. A policy of `cacheTtl: "none"` is also this route's
+ * caching-disabled state, so a profile that enables wire parity declares cache
+ * intent `off`; every other policy declares `main`. Wire parity does not
+ * constrain the policy itself, because the wire-parity body carries no marker
+ * of its own and the worker, not this route, writes the cache plan.
  */
 export interface CcPoolCachePolicy {
   /** Marker lifetime every block marked on this route declares; see {@link CACHE_TTLS}. */
@@ -123,30 +145,68 @@ export const DEFAULT_CACHE_POLICY: CcPoolCachePolicy = Object.freeze({
 })
 
 /**
+ * A prompt-cache policy that cannot serve a request.
+ *
+ * Raised while the plugin resolves its loader configuration and each route
+ * profile, so the deployment learns the combination at load instead of at the
+ * first turn. No caller catches it into a fallback: an impossible policy fails
+ * the plugin.
+ */
+export class CcPoolCachePolicyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CcPoolCachePolicyError'
+  }
+}
+
+/**
+ * The cache intent a wire parity request of this route declares.
+ *
+ * A route whose policy writes no marker — `cacheTtl: "none"`, the deployment's
+ * caching-disabled state — keeps wire parity and asks the worker for no cache
+ * plan, so it declares `off`. Every other lifetime keeps the worker's main
+ * plan.
+ * @param policy - the route's resolved cache policy.
+ * @returns the cache intent a main or subagent wire-parity request declares.
+ */
+function wireParityCacheIntent(policy: CcPoolCachePolicy): PiAiCcWireParityCache {
+  return policy.cacheTtl === 'none' ? 'off' : 'main'
+}
+
+/**
  * Validate one prompt-cache policy before it can become a route profile.
  *
  * The one-hour lifetime requires the extended beta, and the `cc3` policy
  * requires both; a policy that names one without the other would only fail at
- * the provider, after the request left the host. This runs at plugin load and
- * on every profile resolution — including the settings-write validation — so an
- * impossible combination is refused where it is written.
+ * the provider, after the request left the host. A CC wire parity request adds no
+ * requirement of its own: its body carries no cache marker, so the worker's plan
+ * follows {@link wireParityCacheIntent} rather than these fields. This runs at
+ * plugin load and on every profile resolution — including the settings-write
+ * validation — so an impossible combination is refused where it is written.
  * @param policy - the policy a deployment or caller supplied.
  * @returns the same policy, unchanged, when it can serve a request.
- * @throws Error naming the field combination that cannot serve a request.
+ * @throws {CcPoolCachePolicyError} naming the field combination that cannot serve a request.
  */
 export function resolvePoolCachePolicy(policy: CcPoolCachePolicy): CcPoolCachePolicy {
+  if (policy.cacheTtl === 'none') {
+    // A caching-disabled route has no marker placement to perform. The
+    // configured marker policy is not applicable, so it cannot veto `none`;
+    // the resolved policy carries neither markers nor the extended beta.
+    const { cacheMarkerPolicy: _marker, ...rest } = policy
+    return { ...rest, extendedCacheBeta: false }
+  }
   if (policy.cacheMarkerPolicy === 'cc3') {
     if (policy.cacheTtl !== '1h') {
-      throw new Error(
+      throw new CcPoolCachePolicyError(
         `llm-cc-pool: cacheMarkerPolicy "cc3" requires cacheTtl "1h"; got ${JSON.stringify(policy.cacheTtl)}`,
       )
     }
     if (!policy.extendedCacheBeta) {
-      throw new Error('llm-cc-pool: cacheMarkerPolicy "cc3" requires extendedCacheBeta: true')
+      throw new CcPoolCachePolicyError('llm-cc-pool: cacheMarkerPolicy "cc3" requires extendedCacheBeta: true')
     }
   }
   if (policy.cacheTtl === '1h' && !policy.extendedCacheBeta) {
-    throw new Error('llm-cc-pool: cacheTtl "1h" requires extendedCacheBeta: true')
+    throw new CcPoolCachePolicyError('llm-cc-pool: cacheTtl "1h" requires extendedCacheBeta: true')
   }
   return policy
 }
@@ -300,12 +360,20 @@ function retryPolicy(): RetryPolicyConfig {
  * @param models - the effective catalogue; omission serves the built-in catalogue.
  * @param policy - prompt-cache policy this route declares; omission declares the
  *   three-marker, one-hour policy with the extended beta.
+ * @param ccWireParity - whether the member endpoint proved the CC wire parity wire for
+ *   this route. `false` keeps the profile on the current three-marker wire; `true`
+ *   adds the adapter-owned flag and the cache intent its main and subagent
+ *   requests declare — `off` for a `cacheTtl` of `none`, the route's
+ *   caching-disabled state, and `main` otherwise. The policy fields stay as the
+ *   wire-parity-off fallback the adapter reproduces.
  * @returns the raw profile the generic resolver validates.
- * @throws Error when the policy combination cannot serve a request.
+ * @throws {CcPoolCachePolicyError} when the policy combination cannot serve a
+ *   request.
  */
 export function poolProviderProfile(
   models: readonly CcPoolModel[] = MODELS,
   policy: CcPoolCachePolicy = DEFAULT_CACHE_POLICY,
+  ccWireParity = false,
 ): PiAiProviderProfile {
   resolvePoolCachePolicy(policy)
   return {
@@ -317,6 +385,7 @@ export function poolProviderProfile(
     cacheRetention: CACHE_RETENTION[policy.cacheTtl],
     extendedCacheBeta: policy.extendedCacheBeta,
     ...policy.cacheMarkerPolicy === undefined ? {} : { cacheMarkerPolicy: policy.cacheMarkerPolicy },
+    ...ccWireParity ? { ccWireParity: true, ccWireParityCache: wireParityCacheIntent(policy) } : {},
     retryPolicy: retryPolicy(),
     models: models.map(model => ({
       id: model.id,
@@ -339,12 +408,16 @@ export function poolProviderProfile(
  * @param models - the effective catalogue; omission serves the built-in catalogue.
  * @param policy - prompt-cache policy this route declares; omission declares the
  *   three-marker, one-hour policy with the extended beta.
+ * @param ccWireParity - whether the member endpoint proved the CC wire parity wire; see
+ *   {@link poolProviderProfile}. A `true` value declares the cache intent the
+ *   policy maps to.
  * @returns the resolved profiles keyed by {@link PROVIDER}.
- * @throws Error when the policy combination cannot serve a request.
+ * @throws {CcPoolCachePolicyError} when the policy combination cannot serve a request.
  */
 export function resolvePoolProfiles(
   models: readonly CcPoolModel[] = MODELS,
   policy: CcPoolCachePolicy = DEFAULT_CACHE_POLICY,
+  ccWireParity = false,
 ): ReadonlyMap<string, ResolvedPiAiProviderProfile> {
-  return resolvePiAiProfiles({ [PROVIDER]: poolProviderProfile(models, policy) })
+  return resolvePiAiProfiles({ [PROVIDER]: poolProviderProfile(models, policy, ccWireParity) })
 }

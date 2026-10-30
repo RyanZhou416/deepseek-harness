@@ -89,6 +89,7 @@ export { CACHE_MARKER_POLICIES, Config, PiAiRequestLogProfileSchema } from './co
 export type {
   Options,
   PiAiCacheMarkerPolicy,
+  PiAiCcWireParityCache,
   PiAiCompatProfile,
   PiAiModality,
   PiAiModelOverride,

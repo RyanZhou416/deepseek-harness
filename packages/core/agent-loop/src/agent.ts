@@ -72,6 +72,18 @@ function requestProposal(header: EpochHeader): LlmCallConfig {
 }
 
 /**
+ * Class of one loop-built conversation request: every request of a delegated
+ * child session is `subagent`, and every other request is `main`. Both stamps
+ * are durable header facts, so a resumed child keeps its delegation class.
+ * @param session - the session whose request is being assembled.
+ * @returns the explicit request class this request carries.
+ */
+function conversationRequestClass(session: Session): 'main' | 'subagent' {
+  const { origin, delegationDepth } = session.header
+  return origin === 'subagent' || (delegationDepth ?? 0) > 0 ? 'subagent' : 'main'
+}
+
+/**
  * Read the cause `cancel()` passed when aborting a loop-owned signal, copying
  * only the fields `turn/end` records. The live reason stays the caller's
  * object, and Node's fetch assigns a `stack` onto it that `Session.append`
@@ -778,6 +790,7 @@ export class ReactLoopAgent implements Agent {
       ...header.tools !== undefined ? { tools: header.tools } : {},
       ...promptSections.length > 0 ? { systemSections: promptSections } : {},
       sessionId: this.session.id,
+      requestClass: conversationRequestClass(this.session),
       ...sessionName === undefined || sessionName.length === 0 ? {} : { sessionName },
       ...attemptNonce === undefined ? {} : { attemptNonce },
       signal,
