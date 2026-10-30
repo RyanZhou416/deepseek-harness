@@ -1263,58 +1263,68 @@ build-time dependencies), the staged package/files, the legacy
 `providers.cc-pool` guard, the portable template owning no `cc-pool` provider,
 and the single dedicated bundle/route selection.
 
-## CC pool one-hour prompt-cache policy (fork)
+## CC pool three-marker prompt-cache policy (fork)
 
-**Behavior.** `llm-cc-pool` defaults to the four-marker Claude Code policy:
-`cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc4`. The other
-schema values (`cacheTtl` `5m`/`none`, `extendedCacheBeta: false`,
-`toolCacheBreakpoint`) are accepted at the field level but a combination that
-cannot serve is refused by `resolvePoolCachePolicy`: `cacheTtl: "1h"` requires
-`extendedCacheBeta: true`, and `cacheMarkerPolicy: "cc4"` requires
-`cacheTtl: "1h"` and `extendedCacheBeta: true`. `toolCacheBreakpoint` is
-accepted and ignored while `cc4` owns placement. Validation runs in `apply`
+**Behavior.** `llm-cc-pool` defaults to the three authentic Claude Code 2.1.288
+markers: `cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc3`. The
+other schema values (`cacheTtl` `5m`/`none`, `extendedCacheBeta: false`) are
+accepted at the field level but a combination that cannot serve is refused by
+`resolvePoolCachePolicy`: `cacheTtl: "1h"` requires `extendedCacheBeta: true`,
+and `cacheMarkerPolicy: "cc3"` requires `cacheTtl: "1h"` and
+`extendedCacheBeta: true`. `toolCacheBreakpoint` and
+`compat.supportsCacheControlOnTools` are gone: the policy never marks a tool
+declaration, so there is no switch to state one. Validation runs in `apply`
 before the route registers and in the `internal/config` waterfall for settings
 writes, so an impossible combination fails at load rather than at request time.
 Its profile maps the fields to pi-ai `cacheRetention`, the `extendedCacheBeta`
-route option, `compat.supportsCacheControlOnTools`, and the route's own
-`cacheMarkerPolicy`. `llm-pi-ai` accepts `extendedCacheBeta` on a route whose
-models speak `anthropic-messages` and, through pi-ai's single `onPayload` hook,
-appends `extended-cache-ttl-2025-04-11` to the request's `betas` list; the
-Anthropic SDK sends that list as `anthropic-beta`. The beta is never inferred
-from `cacheRetention: long`, and no route adds a `scope` field or
+route option, and the route's own `cacheMarkerPolicy`. `llm-pi-ai` accepts
+`extendedCacheBeta` on a route whose models speak `anthropic-messages` and,
+through pi-ai's single `onPayload` hook, appends
+`extended-cache-ttl-2025-04-11` to the request's `betas` list; the Anthropic SDK
+sends that list as `anthropic-beta`. The beta is never inferred from
+`cacheRetention: long`, and no route adds a `scope` field or
 `prompt-caching-scope-2026-01-05`.
 
-The four-marker policy is the route's only placement by configuration. The same
+The three-marker policy is the route's only placement by configuration. The same
 `onPayload` hook removes every `cache_control` the transport or a caller placed
-from `system`, `tools`, and `messages`, then marks exactly the slots the request
-has: `system[0]`, the last tool declaration, the last cacheable user content
-block, and the last cacheable assistant content block, each with
-`{type: "ephemeral", ttl: "1h"}`. A final assistant block that is `thinking` or
-`redacted_thinking` is skipped without searching backward; a request with no
-tool declaration or no assistant turn carries only the remaining slots and never
-gains an invented block. Other Anthropic pi-ai routes keep their explicitly
-configured retention and betas.
+from `system`, `tools`, and `messages`, opens the system array with the pinned
+identity line `You are Claude Code, Anthropic's official CLI for Claude.`
+(dropping a caller block equal to it so the line appears once), and marks exactly
+three slots with `{type: "ephemeral", ttl: "1h"}`: the harness system block, the
+last user message's trailing cacheable block, and the previous cacheable
+message. Only the harness block is marked; the identity and the billing block the
+mac pool sends ahead of it stay unmarked, so the forwarded order is identity then
+harness and the final order is billing, identity, harness. The previous slot is
+role-agnostic and walks backward past a tool-only message or a message whose
+trailing block is `thinking` or `redacted_thinking`. A request with a single
+message carries only the harness and last-user markers and never gains an
+invented block. Other Anthropic pi-ai routes keep their explicitly configured
+retention and betas.
 
-**Preservation rule.** Keep the four-marker defaults and the loud cross-field
-validation: do not weaken them into a request-time failure or a silent fallback,
-and do not let `toolCacheBreakpoint` remove the tool marker while `cc4` owns
-placement. Keep the policy route-scoped: no default outside `llm-cc-pool`, no
-beta from the retention tier, no `scope` field, no scope beta, and no change to
-another pi-ai Anthropic route, `llm-deepseek`, or the subscription routes. Keep
-every other pi-ai Anthropic route's `cacheRetention` explicit; do not add a
-global payload or header hook, a `fetch` rewrite, or a mac-pool branch to
-`llm-pi-ai`. Keep both transformations on the one `onPayload` assignment; a
-second assignment on the same route would silently drop the other policy. The
-layout deliberately stops at the stable four breakpoints: do not reproduce CC's
-`markerIndices` fork/compaction planner or infer one hour from a subscription.
+**Preservation rule.** Keep the three-marker defaults, the identity block, and
+the loud cross-field validation: do not weaken them into a request-time failure
+or a silent fallback, and do not restore a tool marker or a
+`toolCacheBreakpoint`/`supportsCacheControlOnTools` switch. Keep the policy
+route-scoped: no default outside `llm-cc-pool`, no identity block or default
+marker policy outside the `cc3` opt-in, no beta from the retention tier, no
+`scope` field, no scope beta, and no change to another pi-ai Anthropic route,
+`llm-deepseek`, or the subscription routes. Keep every other pi-ai Anthropic
+route's `cacheRetention` explicit; do not add a global payload or header hook, a
+`fetch` rewrite, or a mac-pool branch to `llm-pi-ai`. Keep both transformations
+on the one `onPayload` assignment; a second assignment on the same route would
+silently drop the other policy. The layout deliberately stops at the three
+authentic markers: do not reproduce CC's `markerIndices` fork/compaction planner,
+its static/dynamic prompt split, or infer one hour from a subscription.
 
 **Focused verification.**
 `pnpm exec vitest run packages/llm/llm-cc-pool packages/llm/llm-pi-ai/tests/cache-policy.spec.ts`
-covers the default four-marker body, the assistant slot, the ignored
-`toolCacheBreakpoint`, the load-time refusal of `5m`/`none`/missing-beta
-combinations, the beta header only on the pool route, a second Anthropic route's
-unchanged retention, DeepSeek with no marker or cache beta, the refusal of
-`cc4` on a non-Anthropic route, and the Loader composition.
+covers the default three-marker body with the identity block, the role-agnostic
+previous message, the skipped tool-only and thinking-tailed previous messages,
+the single-message request, the absence of a tool marker and of the removed
+field, the load-time refusal of `5m`/`none`/missing-beta combinations, the beta
+header only on the pool route, a second Anthropic route's unchanged retention
+and absent identity block, DeepSeek with no marker or cache beta, the refusal of
+`cc3` on a non-Anthropic route, and the Loader composition.
 
 ## CC subscription pool settings page (fork)
 

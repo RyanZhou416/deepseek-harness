@@ -18,14 +18,12 @@
  * ordered before they open, because the pool admits one in-flight direct
  * request per session and refuses a concurrent one instead of waiting.
  * `cacheTtl` declares the prompt-cache lifetime of this route's
- * `cache_control` markers, `extendedCacheBeta` declares the beta a one-hour
- * lifetime requires, and `toolCacheBreakpoint` selects whether a tool
- * definition carries a marker when the four-marker policy does not own
- * placement. The defaults enable the four-marker Claude Code layout —
- * `cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc4` — and an
- * impossible combination is refused when the plugin loads. All of them reach
- * the wire only through this route's profile; no other provider's request is
- * touched.
+ * `cache_control` markers, and `extendedCacheBeta` declares the beta a one-hour
+ * lifetime requires. The defaults enable the three-marker Claude Code 2.1.288
+ * layout — `cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc3` —
+ * and an impossible combination is refused when the plugin loads. All of them
+ * reach the wire only through this route's profile; no other provider's request
+ * is touched.
  *
  * ```yaml
  * - id: llm-cc-pool
@@ -225,7 +223,7 @@ function cachePolicyOf(config: Config): CcPoolCachePolicy {
   return {
     cacheTtl: config.cacheTtl,
     extendedCacheBeta: config.extendedCacheBeta,
-    toolCacheBreakpoint: config.toolCacheBreakpoint,
+    /* v8 ignore next -- the schema default always names a placement policy */
     ...config.cacheMarkerPolicy === undefined ? {} : { cacheMarkerPolicy: config.cacheMarkerPolicy },
   }
 }

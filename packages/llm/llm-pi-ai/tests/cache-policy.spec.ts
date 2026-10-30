@@ -1,13 +1,13 @@
 /**
  * Route-scoped Anthropic prompt-cache policy: the explicit extended-beta
- * opt-in, its independence from the retention tier, the opt-in four-marker
- * layout, and the guarantee that a second pi-ai route and the DeepSeek route
- * stay as they were.
+ * opt-in, its independence from the retention tier, the opt-in Claude Code
+ * three-marker layout, and the guarantee that a second pi-ai route and the
+ * DeepSeek route stay as they were.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createAssistantMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
@@ -102,18 +102,10 @@ const CONVERSATION = {
   ...PROBE,
   messages: [
     userText('hello'),
-    assistantText('hi', 'cache-cc4'),
+    assistantText('hi', 'cache-cc3'),
     userText('continue'),
   ],
 }
-
-/** The four markers the policy places when every slot exists. */
-const FOUR_MARKERS: Marker[] = [
-  ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-  ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-  ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-  ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
-]
 
 describe('Anthropic extended cache TTL beta', () => {
   it('declares the beta only on the route that opts in, not from the retention tier', async () => {
@@ -245,10 +237,48 @@ describe('Anthropic extended cache TTL beta', () => {
   })
 })
 
-describe('Anthropic cc4 marker policy', () => {
-  it('places exactly the four one-hour markers on the route that configures it', async () => {
+/** An assistant turn whose only content is a tool call, so it is a tool-only previous message. */
+function assistantToolCall(provider: string) {
+  return createAssistantMessage({
+    content: [{ type: 'tool-call', id: ToolCallId('call-1'), name: 'echo', arguments: '{}' }],
+    source: { provider, model: 'model' },
+  })
+}
+
+/** An assistant turn whose trailing block is reasoning, so it cannot carry a marker. */
+function assistantThinking(provider: string) {
+  // Replay metadata restores the native thinking signature, so the assistant
+  // turn reaches the wire with a trailing thinking block.
+  return createAssistantMessage({
+    content: [{ type: 'text', text: 'hi' }, { type: 'reasoning', text: 'hmm' }],
+    source: {
+      provider,
+      model: 'model',
+      replayState: {
+        response: {
+          kind: 'pi-ai',
+          version: 2,
+          api: 'anthropic-messages',
+          provider,
+          model: 'model',
+          stopReason: 'stop',
+        },
+        blocks: [
+          { type: 'text' },
+          { type: 'reasoning', thinkingSignature: 'sig' },
+        ],
+      },
+    },
+  })
+}
+
+/** The pinned Claude Code identity line a `cc3` route forwards. */
+const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+
+describe('Anthropic cc3 marker policy', () => {
+  it('places the identity block and exactly the three one-hour markers on the route that configures it', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
-    const [cc4Server, plainServer] = await Promise.all([
+    const [cc3Server, plainServer] = await Promise.all([
       mockServer([{ events: anthropicTextEvents }]),
       mockServer([{ events: anthropicTextEvents }]),
     ])
@@ -257,12 +287,12 @@ describe('Anthropic cc4 marker policy', () => {
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, {
       providers: {
-        'cache-cc4': {
+        'cache-cc3': {
           api: 'anthropic-messages',
-          baseURL: cc4Server.url,
+          baseURL: cc3Server.url,
           apiKeyEnv: 'CACHE_POLICY_KEY',
           extendedCacheBeta: true,
-          cacheMarkerPolicy: 'cc4',
+          cacheMarkerPolicy: 'cc3',
           models: [{ id: 'model' }],
         },
         // The same conversation without the opt-in keeps pi-ai's own placement.
@@ -276,32 +306,45 @@ describe('Anthropic cc4 marker policy', () => {
       },
     })
 
-    await assemble(ctx, { ...CONVERSATION, provider: 'cache-cc4' })
+    await assemble(ctx, { ...CONVERSATION, provider: 'cache-cc3' })
     await assemble(ctx, { ...CONVERSATION, provider: 'cache-plain' })
 
-    const cc4 = cc4Server.requests[0] as Record<string, unknown>
+    const cc3 = cc3Server.requests[0] as Record<string, unknown>
     const plain = plainServer.requests[0] as Record<string, unknown>
 
-    // Exactly the four slots: system, last tool, last user block, last
-    // assistant block. No fifth marker and no scope on any of them.
-    expect(markersOf(cc4)).toEqual(FOUR_MARKERS)
-    expect(JSON.stringify(cc4)).not.toContain('"scope"')
-    expect(JSON.stringify(cc4)).not.toContain(CACHE_SCOPE_BETA)
-    expect(betasOf(cc4Server.headers[0] ?? {})).toEqual([EXTENDED_CACHE_TTL_BETA])
-    expect(betasOf(cc4Server.headers[0] ?? {})).not.toContain(CACHE_SCOPE_BETA)
+    // The system array opens with the byte-exact Claude Code identity line and
+    // then the harness prompt; only the harness block carries a marker.
+    expect(cc3['system']).toEqual([
+      { type: 'text', text: IDENTITY },
+      { type: 'text', text: PROBE.system, cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    // Exactly three slots: the harness system block, the previous assistant
+    // message, and the last user block. No tool declaration is marked.
+    expect(markersOf(cc3)).toEqual([
+      ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    const tools = cc3['tools'] as Record<string, unknown>[]
+    expect(tools.every(tool => !('cache_control' in tool))).toBe(true)
+    expect(JSON.stringify(cc3)).not.toContain('"scope"')
+    expect(JSON.stringify(cc3)).not.toContain(CACHE_SCOPE_BETA)
+    expect(betasOf(cc3Server.headers[0] ?? {})).toEqual([EXTENDED_CACHE_TTL_BETA])
+    expect(betasOf(cc3Server.headers[0] ?? {})).not.toContain(CACHE_SCOPE_BETA)
 
     // The unconfigured route is untouched: pi-ai's three default markers, no
-    // one-hour value, and no beta.
+    // identity block, no one-hour value, and no beta.
     expect(markersOf(plain)).toEqual([
       ['.messages[2].content[0].cache_control', { type: 'ephemeral' }],
       ['.system[0].cache_control', { type: 'ephemeral' }],
       ['.tools[1].cache_control', { type: 'ephemeral' }],
     ])
+    expect(JSON.stringify(plain)).not.toContain(IDENTITY)
     expect(JSON.stringify(plain)).not.toContain('"ttl"')
     expect(betasOf(plainServer.headers[0] ?? {})).toEqual([])
   })
 
-  it('skips the assistant marker when the final assistant block is thinking', async () => {
+  it('skips a tool-only previous message and marks the earlier cacheable one', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const server = await mockServer([{ events: anthropicTextEvents }])
     const ctx = new Context()
@@ -309,59 +352,39 @@ describe('Anthropic cc4 marker policy', () => {
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, {
       providers: {
-        'cache-cc4': {
+        'cache-cc3': {
           api: 'anthropic-messages',
           baseURL: server.url,
           apiKeyEnv: 'CACHE_POLICY_KEY',
-          cacheMarkerPolicy: 'cc4',
+          cacheMarkerPolicy: 'cc3',
           models: [{ id: 'model' }],
-        },
-      },
-    })
-    // Replay metadata restores the native thinking signature, so the assistant
-    // turn reaches the wire with a trailing thinking block.
-    const thinking = createAssistantMessage({
-      content: [{ type: 'text', text: 'hi' }, { type: 'reasoning', text: 'hmm' }],
-      source: {
-        provider: 'cache-cc4',
-        model: 'model',
-        replayState: {
-          response: {
-            kind: 'pi-ai',
-            version: 2,
-            api: 'anthropic-messages',
-            provider: 'cache-cc4',
-            model: 'model',
-            stopReason: 'stop',
-          },
-          blocks: [
-            { type: 'text' },
-            { type: 'reasoning', thinkingSignature: 'sig' },
-          ],
         },
       },
     })
 
     await assemble(ctx, {
       ...PROBE,
-      provider: 'cache-cc4',
-      messages: [userText('hello'), thinking, userText('continue')],
+      provider: 'cache-cc3',
+      messages: [userText('hello'), assistantToolCall('cache-cc3'), userText('continue')],
     })
 
     const body = server.requests[0] as Record<string, unknown>
     const messages = body['messages'] as { role: string; content: { type: string }[] }[]
-    // The setup is real: the assistant message ends with the thinking block.
-    expect(messages[1]?.content.at(-1)?.type).toBe('thinking')
-    // The policy does not search backward, so the assistant slot stays unmarked
-    // and only the system, tool, and user slots carry a marker.
+    // The setup is real: the tool call has no result, so the transport follows it
+    // with a tool-result user turn, and the assistant turn is a tool-use block
+    // and nothing else.
+    expect(messages[1]?.content.map(block => block.type)).toEqual(['tool_use'])
+    expect(messages[2]?.content.map(block => block.type)).toEqual(['tool_result'])
+    // Both tool-only messages are skipped, and the user turn before them is the
+    // previous slot instead.
     expect(markersOf(body)).toEqual([
-      ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.messages[3].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
   })
 
-  it('marks only the slots a request has when no tool or assistant turn exists', async () => {
+  it('skips a thinking-tailed previous message and marks the earlier cacheable one', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const server = await mockServer([{ events: anthropicTextEvents }])
     const ctx = new Context()
@@ -369,11 +392,46 @@ describe('Anthropic cc4 marker policy', () => {
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, {
       providers: {
-        'cache-cc4': {
+        'cache-cc3': {
           api: 'anthropic-messages',
           baseURL: server.url,
           apiKeyEnv: 'CACHE_POLICY_KEY',
-          cacheMarkerPolicy: 'cc4',
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      ...PROBE,
+      provider: 'cache-cc3',
+      messages: [userText('hello'), assistantThinking('cache-cc3'), userText('continue')],
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    const messages = body['messages'] as { role: string; content: { type: string }[] }[]
+    // The setup is real: the assistant message ends with the thinking block.
+    expect(messages[1]?.content.at(-1)?.type).toBe('thinking')
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+  })
+
+  it('marks only the system and last-user slots when the request has a single message', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheMarkerPolicy: 'cc3',
           models: [{ id: 'model' }],
         },
       },
@@ -381,24 +439,61 @@ describe('Anthropic cc4 marker policy', () => {
 
     await assemble(ctx, {
       model: 'model',
-      system: 'You are the four-marker assistant.',
+      system: 'You are the three-marker assistant.',
       messages: [userText('hello')],
-      provider: 'cache-cc4',
+      provider: 'cache-cc3',
     })
 
     const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY },
+      { type: 'text', text: 'You are the three-marker assistant.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    // One message has no previous message, and no tool was sent.
     expect(markersOf(body)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
-    // No tool was sent, so no empty tool list or marker is invented.
     expect(body['tools']).toBeUndefined()
+  })
+
+  it('marks only the last-user slot when the request has no system prompt', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      model: 'model',
+      messages: [userText('hello'), assistantText('hi', 'cache-cc3'), userText('continue')],
+      provider: 'cache-cc3',
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    // The identity block is the only system block, so it is forwarded unmarked.
+    expect(body['system']).toEqual([{ type: 'text', text: IDENTITY }])
+    expect(markersOf(body)).toEqual([
+      ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
   })
 
   it('leaves another Anthropic route and the DeepSeek route unchanged', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     vi.stubEnv('DEEPSEEK_ROUTE_KEY', 'deepseek-key')
-    const [cc4Server, plainServer, deepseekServer] = await Promise.all([
+    const [cc3Server, plainServer, deepseekServer] = await Promise.all([
       mockServer([{ events: anthropicTextEvents }]),
       mockServer([{ events: anthropicTextEvents }]),
       mockServer([{ events: anthropicTextEvents }]),
@@ -408,11 +503,11 @@ describe('Anthropic cc4 marker policy', () => {
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, {
       providers: {
-        'cache-cc4': {
+        'cache-cc3': {
           api: 'anthropic-messages',
-          baseURL: cc4Server.url,
+          baseURL: cc3Server.url,
           apiKeyEnv: 'CACHE_POLICY_KEY',
-          cacheMarkerPolicy: 'cc4',
+          cacheMarkerPolicy: 'cc3',
           models: [{ id: 'model' }],
         },
         'cache-plain': {
@@ -431,16 +526,15 @@ describe('Anthropic cc4 marker policy', () => {
       thinking: 'disabled',
     })
 
-    await assemble(ctx, { ...PROBE, provider: 'cache-cc4' })
+    await assemble(ctx, { ...PROBE, provider: 'cache-cc3' })
     await assemble(ctx, { ...PROBE, provider: 'cache-plain' })
     await assemble(ctx, { ...PROBE, provider: 'deepseek-official', model: 'deepseek-model' })
 
-    // The cc4 route marks the three slots this request has, while the other
+    // The cc3 route marks the two slots this request has, while the other
     // routes keep their own placement and declare no beta.
-    expect(markersOf(cc4Server.requests[0] as Record<string, unknown>)).toEqual([
+    expect(markersOf(cc3Server.requests[0] as Record<string, unknown>)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
     expect(markersOf(plainServer.requests[0] as Record<string, unknown>)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
@@ -449,17 +543,18 @@ describe('Anthropic cc4 marker policy', () => {
     ])
     const deepseek = deepseekServer.requests[0] as Record<string, unknown>
     expect(JSON.stringify(deepseek)).not.toContain('cache_control')
+    expect(JSON.stringify(deepseek)).not.toContain(IDENTITY)
     expect(betasOf(deepseekServer.headers[0] ?? {})).toEqual([])
   })
 
-  it('refuses cc4 on a route with no Anthropic Messages model', () => {
+  it('refuses cc3 on a route with no Anthropic Messages model', () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     expect(() => LlmPiAi.resolvePiAiProfiles({
       'openai-route': {
         api: 'openai-completions',
         baseURL: 'https://openai.example',
         apiKeyEnv: 'CACHE_POLICY_KEY',
-        cacheMarkerPolicy: 'cc4',
+        cacheMarkerPolicy: 'cc3',
         models: [{ id: 'model' }],
       },
     })).toThrow(/cacheMarkerPolicy.*anthropic-messages/)

@@ -1771,7 +1771,7 @@ export interface Config {
    * markers: `5m` keeps the API's default five-minute lifetime, `1h` asks for
    * the extended one, and `none` sends no marker. The default `1h` is the
    * lifetime the route serves now; `5m` and `none` are refused while
-   * {@link cacheMarkerPolicy} is `cc4`, because that policy writes one-hour
+   * {@link cacheMarkerPolicy} is `cc3`, because that policy writes one-hour
    * markers on its own. The value reaches the wire only through this route's
    * profile, so no other provider's request changes.
    */
@@ -1784,26 +1784,17 @@ export interface Config {
    */
   extendedCacheBeta: boolean
   /**
-   * Mark the last tool declaration with the route's `cache_control` marker
-   * when {@link cacheMarkerPolicy} does not own placement. It has no effect
-   * while the default `cc4` policy is set: that policy always marks the last
-   * tool declaration itself. Without `cc4`, `true` keeps the marker pi-ai
-   * places and `false` selects the Claude Code 2.1.288 layout, which marks the
-   * system prompt and the last user content block but no tool definition.
-   */
-  toolCacheBreakpoint: boolean
-  /**
    * Prompt-cache marker placement this route asks pi-ai to perform. The
-   * default `cc4` places exactly the four Claude Code markers — the first
-   * system block, the last tool declaration, the last user content block, and
-   * the last assistant content block — with `{type: "ephemeral", ttl: "1h"}` on
-   * each. The policy owns placement, so it takes precedence over
-   * {@link toolCacheBreakpoint} and over the lifetime {@link cacheTtl} selects,
-   * and a request with no tool declaration or no assistant turn carries only
-   * the slots it has. It requires `cacheTtl: "1h"` and
-   * {@link extendedCacheBeta}: an impossible combination is refused at load and
-   * on a settings write, never at request time. No other provider route reads
-   * this value.
+   * default `cc3` places the Claude Code 2.1.288 layout — the client identity
+   * system block, the harness system block, the last cacheable user content
+   * block, and the previous cacheable message — with
+   * `{type: "ephemeral", ttl: "1h"}` on each system and message slot, and no
+   * marker on any tool declaration. The policy owns placement, so it takes
+   * precedence over the lifetime {@link cacheTtl} selects, and a request with a
+   * single message carries only the system and last-user slots. It requires
+   * `cacheTtl: "1h"` and {@link extendedCacheBeta}: an impossible combination is
+   * refused at load and on a settings write, never at request time. No other
+   * provider route reads this value.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**
@@ -1900,7 +1891,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:288`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:291`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2028,16 +2019,18 @@ export interface PiAiProviderProfile {
   /**
    * Prompt-cache marker placement this route's adapter performs on an Anthropic
    * Messages request. Omission keeps pi-ai's placement from
-   * {@link cacheRetention}. `cc4` places exactly the Claude Code four-marker
-   * layout — the first system block, the last tool declaration, the last user
-   * content block, and the last assistant content block — with
-   * `{type: "ephemeral", ttl: "1h"}` on each and discards every other marker on
-   * the route. It owns placement outright, so it takes precedence over
-   * `cacheRetention` and over `compat.supportsCacheControlOnTools`; a request
-   * with no tool declaration or no assistant turn carries only the slots it
-   * has. The policy adds no `scope` field and no scope beta, and
-   * {@link extendedCacheBeta} stays a separate explicit opt-in. Refused when
-   * no model on the route speaks `anthropic-messages`.
+   * {@link cacheRetention}. `cc3` places the Claude Code 2.1.288 layout — the
+   * client's identity system block, the harness system block, the last cacheable
+   * user content block, and the previous cacheable message — with
+   * `{type: "ephemeral", ttl: "1h"}` on each system and message slot, and
+   * discards every other marker on the route. It marks no tool declaration, and
+   * the identity and billing system blocks stay unmarked. It owns placement
+   * outright, so it takes precedence over `cacheRetention` and over
+   * `compat.supportsCacheControlOnTools`; a request with a single message carries
+   * the system and last-user slots only, and a request with no caller system
+   * prompt carries the identity block alone. The policy adds no `scope` field and
+   * no scope beta, and {@link extendedCacheBeta} stays a separate explicit
+   * opt-in. Refused when no model on the route speaks `anthropic-messages`.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /** Streaming transport preference. */

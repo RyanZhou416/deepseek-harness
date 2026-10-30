@@ -1,7 +1,8 @@
 /**
- * Prompt-cache policy: the route's default four-marker one-hour layout, its
- * exact placement, the loud refusal of impossible combinations at load, and the
- * guarantee that no other provider route changes.
+ * Prompt-cache policy: the route's default three-marker one-hour layout, the
+ * identity block it forwards, its exact placement, the loud refusal of
+ * impossible combinations at load, and the guarantee that no other provider
+ * route changes.
  */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -9,7 +10,9 @@ import LlmRuntime, { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import * as PiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Config } from '../src/config.ts'
 import * as CcPool from '../src/index.ts'
+import { PROVIDER, resolvePoolProfiles } from '../src/pool.ts'
 import { assemble, capturePoolFetch, user } from './harness.ts'
 import type { CapturedRequest } from './harness.ts'
 
@@ -18,6 +21,9 @@ const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
 
 /** The beta that selects a cache scope; this route never declares one. */
 const CACHE_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
+
+/** The pinned Claude Code identity line the route forwards ahead of the harness prompt. */
+const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 let context: Context | undefined
 
@@ -133,23 +139,33 @@ function assistant(text: string) {
 }
 
 describe('pool prompt-cache policy', () => {
-  it('enables the four-marker one-hour policy by default', async () => {
+  it('enables the three-marker one-hour policy by default', async () => {
     const request = await probe()
 
-    // PROBE has no assistant turn, so the policy places exactly the three slots
-    // it has; every marker carries the explicit one-hour lifetime.
+    // PROBE has a system prompt, two tools, and one user turn, so the policy
+    // places the identity block, the harness system marker, and the last-user
+    // marker; no tool declaration is marked.
+    expect(request.body['system']).toEqual([
+      { type: 'text', text: IDENTITY },
+      {
+        type: 'text',
+        text: 'You are the pool test assistant.',
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      },
+    ])
     expect(markersOf(request.body)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
+    const tools = request.body['tools'] as Record<string, unknown>[]
+    expect(tools.every(tool => !('cache_control' in tool))).toBe(true)
     expect(betasOf(request)).toEqual([EXTENDED_CACHE_TTL_BETA])
     expect(betasOf(request)).not.toContain(CACHE_SCOPE_BETA)
     expect(JSON.stringify(request.body)).not.toContain('"scope"')
     expect(JSON.stringify(request.body)).not.toContain(CACHE_SCOPE_BETA)
   })
 
-  it('uses the assistant slot when the conversation has an assistant turn', async () => {
+  it('marks the previous message whatever its role when the conversation has one', async () => {
     const request = await probe({}, {
       messages: [
         user('hello'),
@@ -161,22 +177,22 @@ describe('pool prompt-cache policy', () => {
     expect(markersOf(request.body)).toEqual([
       ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
   })
 
-  it('ignores toolCacheBreakpoint while the four-marker policy owns placement', async () => {
-    const ignored = await probe({ toolCacheBreakpoint: false })
-    const defaulted = await probe()
+  it('no longer declares a tool-cache switch or a tool marker', async () => {
+    const request = await probe()
 
-    // The switch can no longer remove the tool marker: the policy writes it.
-    expect(markersOf(ignored.body)).toEqual([
-      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
-    ])
-    expect(ignored.body).toEqual(defaulted.body)
+    // The policy owns placement and marks no tool declaration, so the route
+    // profile states no `supportsCacheControlOnTools` compat override at all.
+    const model = resolvePoolProfiles().get(PROVIDER)
+    expect(model?.compat).toBeUndefined()
+    // The removed field is not part of the schema any more.
+    expect('toolCacheBreakpoint' in Config({})).toBe(false)
+    const tools = request.body['tools'] as Record<string, unknown>[]
+    expect(tools).toHaveLength(2)
+    expect(tools.every(tool => !('cache_control' in tool))).toBe(true)
   })
 
   it('leaves another provider route at its own placement and betas', async () => {
@@ -186,7 +202,7 @@ describe('pool prompt-cache policy', () => {
     context = ctx
     await ctx.plugin(LlmRuntime)
     // The pool route is mounted without cache configuration: its new defaults
-    // must enable the four-marker policy without reaching any other route.
+    // must enable the three-marker policy without reaching any other route.
     await ctx.plugin(CcPool, { requestLog: { enabled: false } })
     // A second Anthropic Messages route states its own retention explicitly, as
     // every non-pool route must, and opts into no beta.
@@ -213,8 +229,7 @@ describe('pool prompt-cache policy', () => {
     expect(capture.calls[1]?.url.startsWith('https://other.example')).toBe(true)
     expect(markersOf(capture.calls[0]?.body ?? {})).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
     expect(markersOf(capture.calls[1]?.body ?? {})).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
@@ -224,18 +239,20 @@ describe('pool prompt-cache policy', () => {
     const other = capture.calls[1]
     if (other === undefined) throw new Error('the second route sent no request')
     expect(JSON.stringify(other.body)).not.toContain('"ttl"')
+    expect(JSON.stringify(other.body)).not.toContain(IDENTITY)
     expect(betasOf(other)).toEqual([])
     // The pool route's beta and marker policy reached only the pool route.
     const pool = capture.calls[0]
     if (pool === undefined) throw new Error('the pool route sent no request')
+    expect(JSON.stringify(pool.body)).toContain(IDENTITY)
     expect(betasOf(pool)).toEqual([EXTENDED_CACHE_TTL_BETA])
   })
 
   it('refuses an impossible cache policy at load, before registering the route', async () => {
     const cases: readonly [label: string, config: Record<string, unknown>, error: RegExp][] = [
-      ['five-minute lifetime', { cacheTtl: '5m' }, /cacheMarkerPolicy "cc4" requires cacheTtl "1h"/],
-      ['no lifetime', { cacheTtl: 'none' }, /cacheMarkerPolicy "cc4" requires cacheTtl "1h"/],
-      ['one hour without the beta', { cacheTtl: '1h', extendedCacheBeta: false }, /cacheMarkerPolicy "cc4" requires extendedCacheBeta: true/],
+      ['five-minute lifetime', { cacheTtl: '5m' }, /cacheMarkerPolicy "cc3" requires cacheTtl "1h"/],
+      ['no lifetime', { cacheTtl: 'none' }, /cacheMarkerPolicy "cc3" requires cacheTtl "1h"/],
+      ['one hour without the beta', { cacheTtl: '1h', extendedCacheBeta: false }, /cacheMarkerPolicy "cc3" requires extendedCacheBeta: true/],
     ]
     for (const [label, config, error] of cases) {
       const ctx = new Context()

@@ -38,7 +38,7 @@ export interface Config {
    * markers: `5m` keeps the API's default five-minute lifetime, `1h` asks for
    * the extended one, and `none` sends no marker. The default `1h` is the
    * lifetime the route serves now; `5m` and `none` are refused while
-   * {@link cacheMarkerPolicy} is `cc4`, because that policy writes one-hour
+   * {@link cacheMarkerPolicy} is `cc3`, because that policy writes one-hour
    * markers on its own. The value reaches the wire only through this route's
    * profile, so no other provider's request changes.
    */
@@ -51,26 +51,17 @@ export interface Config {
    */
   extendedCacheBeta: boolean
   /**
-   * Mark the last tool declaration with the route's `cache_control` marker
-   * when {@link cacheMarkerPolicy} does not own placement. It has no effect
-   * while the default `cc4` policy is set: that policy always marks the last
-   * tool declaration itself. Without `cc4`, `true` keeps the marker pi-ai
-   * places and `false` selects the Claude Code 2.1.288 layout, which marks the
-   * system prompt and the last user content block but no tool definition.
-   */
-  toolCacheBreakpoint: boolean
-  /**
    * Prompt-cache marker placement this route asks pi-ai to perform. The
-   * default `cc4` places exactly the four Claude Code markers — the first
-   * system block, the last tool declaration, the last user content block, and
-   * the last assistant content block — with `{type: "ephemeral", ttl: "1h"}` on
-   * each. The policy owns placement, so it takes precedence over
-   * {@link toolCacheBreakpoint} and over the lifetime {@link cacheTtl} selects,
-   * and a request with no tool declaration or no assistant turn carries only
-   * the slots it has. It requires `cacheTtl: "1h"` and
-   * {@link extendedCacheBeta}: an impossible combination is refused at load and
-   * on a settings write, never at request time. No other provider route reads
-   * this value.
+   * default `cc3` places the Claude Code 2.1.288 layout — the client identity
+   * system block, the harness system block, the last cacheable user content
+   * block, and the previous cacheable message — with
+   * `{type: "ephemeral", ttl: "1h"}` on each system and message slot, and no
+   * marker on any tool declaration. The policy owns placement, so it takes
+   * precedence over the lifetime {@link cacheTtl} selects, and a request with a
+   * single message carries only the system and last-user slots. It requires
+   * `cacheTtl: "1h"` and {@link extendedCacheBeta}: an impossible combination is
+   * refused at load and on a settings write, never at request time. No other
+   * provider route reads this value.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**
@@ -90,7 +81,6 @@ export type Options = {
   requestLog?: PiAiRequestLogProfile
   cacheTtl?: CcPoolCacheTtl
   extendedCacheBeta?: boolean
-  toolCacheBreakpoint?: boolean
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   models?: CcPoolModel[]
 }
@@ -112,7 +102,6 @@ export const Config = z.object({
   requestLog: PiAiRequestLogProfileSchema,
   cacheTtl: z.union(CACHE_TTLS).default('1h'),
   extendedCacheBeta: z.boolean().default(true),
-  toolCacheBreakpoint: z.boolean().default(true),
-  cacheMarkerPolicy: z.union(CACHE_MARKER_POLICIES).default('cc4'),
+  cacheMarkerPolicy: z.union(CACHE_MARKER_POLICIES).default('cc3'),
   models: z.array(modelSetting).default(builtInModels).volatile(),
 })
