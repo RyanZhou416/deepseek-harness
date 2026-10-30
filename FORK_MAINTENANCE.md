@@ -1570,7 +1570,8 @@ Gates: DSH `pnpm run typecheck`, `build`, `doc-sync`,
 packages/llm/llm-pi-ai/tests packages/llm/llm-cc-pool/tests
 packages/experimental/auto-review/tests packages/experimental/translator/tests`
 (exit 0); worker `node development/direct-worker/scripts/run-tests.mjs
---summary --require-no-skips` (0 failed/0 skipped, updated counts); Mac
+--summary /tmp/cc-parity-a-worker-tests.json --require-no-skips` (0 failed/
+0 skipped, updated counts); Mac
 `development/scripts/change-gate.sh --stage development/swift --only-testing
 <affected suites>` plus `xcodebuild test -scheme MacPool -testPlan MacPoolTests`
 (0 failures, updated 2893/16). Simulation adds `testCCParityAOn` and
