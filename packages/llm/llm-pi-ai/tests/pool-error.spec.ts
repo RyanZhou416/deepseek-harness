@@ -154,6 +154,15 @@ describe('pool error envelope', () => {
     expect(parseProviderErrorEnvelope('provider timed out')).toBeUndefined()
     expect(parseProviderErrorEnvelope('500 {not json}')).toBeUndefined()
   })
+
+  it('reads an in-range integer error.status and ignores anything else', () => {
+    expect(parseProviderErrorEnvelope('503 {"error":{"status":503}}')).toEqual({ status: 503 })
+    expect(parseProviderErrorEnvelope('500 {"error":{"status":507,"retryable":"yes"}}')).toEqual({ status: 507 })
+    expect(parseProviderErrorEnvelope('500 {"error":{"status":99}}')).toEqual({})
+    expect(parseProviderErrorEnvelope('500 {"error":{"status":600}}')).toEqual({})
+    expect(parseProviderErrorEnvelope('500 {"error":{"status":5.5}}')).toEqual({})
+    expect(parseProviderErrorEnvelope('500 {"error":{"status":"503"}}')).toEqual({})
+  })
 })
 
 describe('generated pool error catalog', () => {
@@ -344,12 +353,17 @@ describe('pool failure classification', () => {
     })
   })
 
-  it('recovers a closed client request id with a retry instead of ending the turn', () => {
-    // The adapter stamps a fresh attempt id on every deliberate retry, so the
-    // resend is a new ledger entry; forbidding it would waste that recovery.
+  it('recovers a closed client request id with a fresh attempt instead of ending the turn', () => {
+    // The real envelope: the pool closed this request id, marks the envelope
+    // terminal, and still asks for a retry with a fresh id. `terminal` refuses a
+    // replay of the closed id, not the fresh ledger entry a deliberate retry
+    // creates, so the catalog's retry_same action keeps the failure retryable.
     const failure = classifyPoolFailure(poolEnvelope({
       type: 'cc_pool_request_closed',
-      retryable: false,
+      code: 'cc_pool_request_closed',
+      retryable: true,
+      terminal: true,
+      client_action: 'retry_same',
       message: 'request already recorded',
     }, 409))
 
@@ -359,6 +373,21 @@ describe('pool failure classification', () => {
     })
     expect(failure?.retryDisposition).toBeUndefined()
     expect(failure?.message).toBe('request already recorded')
+  })
+
+  it('honors a pool that withdraws retryability on the closed-request code', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_request_closed',
+      retryable: false,
+      terminal: true,
+      client_action: 'retry_same',
+    }, 409))
+
+    expect(failure).toMatchObject({
+      code: POOL_REQUEST_CLOSED_CODE,
+      status: 409,
+      retryDisposition: 'forbid',
+    })
   })
 
   it('retries no-available-account within the finite retry budget', () => {
@@ -388,6 +417,30 @@ describe('pool failure classification', () => {
     expect(failure).toMatchObject({ code: POOL_RATE_LIMITED_CODE, status: 429 })
   })
 
+  it('reads error.status when neither the response nor the message supplies one', () => {
+    const failure = classifyPoolFailure(JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'cc_pool_rate_limited',
+        origin: 'pool',
+        status: 429,
+        message: 'slow down',
+      },
+    }))
+
+    expect(failure).toMatchObject({ code: POOL_RATE_LIMITED_CODE, status: 429 })
+  })
+
+  it('keeps the captured response status ahead of error.status', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_rate_limited',
+      status: 429,
+      message: 'slow down',
+    }, 503), { status: 503 })
+
+    expect(failure).toMatchObject({ code: POOL_RATE_LIMITED_CODE, status: 503 })
+  })
+
   it.each([
     ['client_action retry_same', { type: 'cc_pool_request_in_flight', client_action: 'retry_same' }, 409, POOL_TRANSIENT_CODE],
     ['retryable true', { type: 'cc_pool_direct_engine_not_ready', retryable: true }, 503, POOL_TRANSIENT_CODE],
@@ -405,7 +458,7 @@ describe('pool failure classification', () => {
     expect(failure).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid' })
   })
 
-  it('lets an explicit terminal marker forbid a resend even for a retryable refusal', () => {
+  it('keeps an explicit terminal marker authoritative outside the closed-request action', () => {
     const unknown = classifyPoolFailure(poolEnvelope({
       type: 'cc_pool_engine_starting',
       retryable: true,
@@ -642,46 +695,52 @@ describe('pool readiness refusal', () => {
     expect(classifyPoolFailure(readinessEnvelope({ retryable: true }))).toBeUndefined()
   })
 
-  it('forbids a readiness 5xx whose detail wording drifted', () => {
+  it('leaves a 5xx whose detail is not the readiness refusal to the text classifier', () => {
+    // The pool echoes pool_request_id on every error body, including a native
+    // provider failure, so the markers alone no longer identify its refusal.
     const drifted = 'the lease is still being verified; retry this request later'
-    const failure = classifyPoolFailure(readinessEnvelope({ message: drifted }), { status: 503 })
-
-    expect(failure).toMatchObject({
-      code: POOL_ERROR_CODE,
-      status: 503,
-      retryDisposition: 'forbid',
-    })
-    expect(failure?.message).toBe(drifted)
+    expect(classifyPoolFailure(readinessEnvelope({ message: drifted }), { status: 503 })).toBeUndefined()
   })
 
-  it('forbids a readiness 5xx even when its detail is absent', () => {
-    const failure = classifyPoolFailure(readinessEnvelope({ message: undefined }), { status: 503 })
-
-    expect(failure).toMatchObject({
-      code: POOL_ERROR_CODE,
-      status: 503,
-      retryDisposition: 'forbid',
-    })
-    expect(failure?.message).toBe(fallback(POOL_ERROR_CODE))
+  it('leaves a marker-only 5xx without the lease detail to the text classifier', () => {
+    expect(classifyPoolFailure(readinessEnvelope({ message: undefined }), { status: 503 })).toBeUndefined()
   })
 
-  it('scopes the pool-marker fallback to 5xx responses', () => {
-    // A non-5xx rejection carrying the same markers is not the readiness
-    // refusal; it keeps the text classifier instead of gaining a pool code.
+  it('leaves a native provider 5xx carrying the pool request id and retryable:false to the text classifier', () => {
+    // The pool decorates every error body with pool_request_id, so a native
+    // provider 5xx must keep its own wording and text classification.
+    const native = `503 ${JSON.stringify({
+      pool_request_id: 'pool-request-native',
+      type: 'error',
+      error: {
+        type: 'api_error',
+        message: 'Anthropic API is temporarily overloaded',
+        retryable: false,
+      },
+    })}`
+
+    expect(classifyPoolFailure(native)).toBeUndefined()
+    expect(classifyPoolFailure(native, { status: 503 })).toBeUndefined()
+  })
+
+  it('identifies the refusal by its lease detail regardless of the HTTP status', () => {
     const rejection = `400 ${JSON.stringify({
       pool_request_id: 'pool-request-rejected',
       type: 'error',
-      error: { type: 'api_error', retryable: false, message: 'the lease is still being verified' },
+      error: { type: 'api_error', retryable: false, message: READINESS_DETAIL },
     })}`
-    // Below 5xx the markers alone do not identify the refusal; its lease detail
-    // still does, and a body carrying neither stays with the text classifier.
+    // The markers alone do not identify the refusal; a body carrying neither
+    // the lease detail nor a pool code stays with the text classifier.
     const markerOnly = JSON.stringify({
       pool_request_id: 'pool-request-marker',
       type: 'error',
       error: { type: 'api_error', retryable: false },
     })
 
-    expect(classifyPoolFailure(rejection, { status: 400 })).toBeUndefined()
+    expect(classifyPoolFailure(rejection, { status: 400 })).toMatchObject({
+      code: POOL_ERROR_CODE,
+      retryDisposition: 'forbid',
+    })
     expect(classifyPoolFailure(markerOnly)).toBeUndefined()
   })
 

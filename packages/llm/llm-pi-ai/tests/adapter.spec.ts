@@ -12,7 +12,7 @@ import type {
   SaveImageAttachment,
   StoredImageAttachment,
 } from '@deepseek-ai/dsh-attachment'
-import LlmRuntime, { createAssistantMessage, createToolResultMessage, createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, POOL_CAPACITY_CODE, POOL_ERROR_CODE, ReasoningEffortId, userAgent } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createAssistantMessage, createToolResultMessage, createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, POOL_CAPACITY_CODE, POOL_ERROR_CODE, POOL_REQUEST_CLOSED_CODE, ReasoningEffortId, userAgent } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
@@ -478,23 +478,9 @@ describe('PiAiAdapter provider routing', () => {
       .toBe('all accounts are at their 2-session limit')
   })
 
-  it.each([
-    [
-      'its pinned lease detail',
-      'the egress path is not verified for this lease; worker detail:'
-        + ' capability_not_ready: the lease maintenance is not ready',
-      /^the egress path is not verified for this lease; worker detail: capability_not_ready: the lease maintenance is not ready$/,
-    ],
-    [
-      'a rewritten lease detail',
-      'the lease is still being verified; retry this request later',
-      /^the lease is still being verified; retry this request later$/,
-    ],
-  ] as const)('stops on a pool readiness refusal carrying %s instead of resending its ledger id', async (
-    _label,
-    readinessDetail,
-    messagePattern,
-  ) => {
+  it('stops on a pool readiness refusal instead of resending its ledger id', async () => {
+    const readinessDetail = 'the egress path is not verified for this lease; worker detail:'
+      + ' capability_not_ready: the lease maintenance is not ready'
     const server = await mockServer([
       {
         status: 503,
@@ -510,7 +496,7 @@ describe('PiAiAdapter provider routing', () => {
         status: 409,
         body: JSON.stringify({
           type: 'error',
-          error: { type: 'cc_pool_request_closed', retryable: false, message: 'request already recorded' },
+          error: { type: 'cc_pool_request_closed', retryable: true, terminal: true, client_action: 'retry_same', message: 'request already recorded' },
         }),
       },
     ])
@@ -535,7 +521,87 @@ describe('PiAiAdapter provider routing', () => {
       failure: { code: POOL_ERROR_CODE, status: 503, retryDisposition: 'forbid' },
     })
     expect(result.finish.kind === 'error' ? result.finish.failure.message : '')
-      .toMatch(messagePattern)
+      .toBe(readinessDetail)
+  })
+
+  it('classifies the real closed-request envelope as retryable under a fresh attempt id', async () => {
+    const server = await mockServer([{
+      status: 409,
+      body: JSON.stringify({
+        type: 'error',
+        pool_request_id: 'pool-request-closed',
+        error: {
+          type: 'cc_pool_request_closed',
+          code: 'cc_pool_request_closed',
+          origin: 'pool',
+          scope: 'request',
+          retryable: true,
+          terminal: true,
+          client_action: 'retry_same',
+          kind: 'request',
+          status: 409,
+          message: 'this client request id is already closed',
+        },
+      }),
+    }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cc-pool': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          models: [{ id: 'claude-sonnet-4-6' }],
+        },
+      },
+    })
+
+    const result = await assemble(ctx, { provider: 'cc-pool', model: 'claude-sonnet-4-6', messages: [] })
+
+    expect(server.paths).toHaveLength(1)
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: POOL_REQUEST_CLOSED_CODE, status: 409 },
+    })
+    // `terminal` refuses a replay of the closed id; the retry stamps a fresh
+    // attemptNonce and x-client-request-id, so no forbid may be attached.
+    const failure = result.finish.kind === 'error' ? result.finish.failure : undefined
+    expect(failure?.retryDisposition).toBeUndefined()
+    expect(failure?.message).toBe('this client request id is already closed')
+  })
+
+  it('keeps a native provider 5xx carrying the pool request id in text classification', async () => {
+    const server = await mockServer([{
+      status: 503,
+      body: JSON.stringify({
+        pool_request_id: 'pool-request-native',
+        type: 'error',
+        error: { type: 'api_error', message: 'Anthropic API is temporarily overloaded', retryable: false },
+      }),
+    }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cc-pool': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          models: [{ id: 'claude-sonnet-4-6' }],
+        },
+      },
+    })
+
+    const result = await assemble(ctx, { provider: 'cc-pool', model: 'claude-sonnet-4-6', messages: [] })
+
+    expect(server.paths).toHaveLength(1)
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'SERVER' },
+    })
+    const failure = result.finish.kind === 'error' ? result.finish.failure : undefined
+    expect(failure?.retryDisposition).toBeUndefined()
   })
 
   it('keeps text classification on a protocol that rejects a custom fetch', async () => {
