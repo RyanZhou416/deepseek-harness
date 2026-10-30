@@ -361,7 +361,7 @@ Claude Messages share a Bun transport child. An active response does not block l
 
 `claudeTransportMaxQueuedBytes` sets each response's unread-byte limit (positive safe integer, default 33554432). Consumed bytes do not count, so a promptly read response can exceed that total size. Exceeding the unread limit cancels only that request upstream and fails its body with `backpressure`; other streams remain usable. Configure the limit before the shared child starts; a live child or pending start refuses a different limit. After child death, a later request can start a replacement. The failed request is not replayed by the transport and never falls back to Node.
 
-These guarantees concern request lifetime, not TLS or wire equivalence. Request fields and proxy refusal are unchanged. A running Host uses its installed plugin artifact; source edits require rebuilding and explicitly deploying that artifact after the Host stops.
+These guarantees concern request lifetime, not TLS or wire equivalence. Request fields and proxy refusal are unchanged. A running Host uses its installed `link:` staging copy; source edits require re-staging and a Host restart after the Host stops.
 
 ## Claude response limits and usage
 
@@ -474,7 +474,7 @@ Three source directories are extractable for a caller outside this harness and i
 
 Do not read this section as HIPAA compliance or as parity with a Desktop-managed client. This provider has no surface for the keys whose enforcement belongs to a client transcript scan or a repository probe, so those keys are inapplicable here and a denial never widens into transcript reads or transmission. A key this build does not map is refused conservatively rather than translated. The flag source is caller-injected and closable, with no new flag introduced, and a proactive minimum-version floor is not implemented: source analysis of the flag source shows its closable, unawaited, fail-open check defaults to `0.0.0` with no source or evidence behind it, so it carries no reliable scope or revision for a per-request forecast, and the known-refusal latch that exists records only refusals already seen. A policy applied by another DSH host is outside this plugin's scope — the public pool worker executes no tools here — so a cross-DSH policy handoff is unfinished. Platform identity claims need the deployment's real manifest and a real platform run; a synthetic fixture from one platform is not evidence for another, the checks recorded for this work are synthetic, and the pool caller's bidirectional evidence has not been delivered.
 
-The route does not issue the optional startup `HEAD /api/hello` preconnect. Messages establishes its transport when needed; this deliberate omission adds no heartbeat or periodic connection traffic. Source and test builds do not update an installed plugin: deployment installs a verified versioned package while the Host is stopped.
+The route does not issue the optional startup `HEAD /api/hello` preconnect. Messages establishes its transport when needed; this deliberate omission adds no heartbeat or periodic connection traffic. Source and test builds do not update an installed plugin: deployment re-stages the source and restarts the Host while it is stopped.
 
 ## Proxy
 

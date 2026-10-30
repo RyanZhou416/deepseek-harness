@@ -6,13 +6,13 @@ The rules dsh-context must hold on every supported `@deepseek-ai/dsh` release, a
 
 **Law.** Record only what no other artifact carries; delete what code, tests, or git history already say. Verify against the dsh sources before acting — source wins over this page. Less is ALWAYS better.
 
-Last verified: **2026-10-14** (dsh-context `0.70.0`, dsh `0.2.0-rc.2` npm install and `0.2.1-alpha.3` tree).
+Last verified: **2026-10-18** (dsh-context `0.73.0-dsh021rc2.1`, dsh `0.2.1-rc.2` source checkout and link-installed Web profile).
 
 ## 1 · Supported set
 
 *What the plugin declares it works on.*
 
-1. **Support exactly `0.1.7-rc.2` and `0.2.0-rc.2`** — both the V4 durable-log generation. The floor is `0.1.7-rc.2` because it is the first `0.1.7`-line release with a complete npm dependency closure; anything older gets §2's fallback composition with an upgrade prompt, never a fold.
+1. **Support exactly `0.2.0-rc.2` and `0.2.1-rc.2`** — both the V4 durable-log generation. The floor is `0.2.0-rc.2`; anything older gets §2's fallback composition with an upgrade prompt, never a fold.
 
 ## 2 · Admission
 
@@ -20,7 +20,7 @@ Last verified: **2026-10-14** (dsh-context `0.70.0`, dsh `0.2.0-rc.2` npm instal
 
 **Harness-side**
 
-1. **dsh ≥ `0.1.7` enforces a plugin's `@deepseek-ai/dsh*` peer ranges** at startup and install (semver, `includePrerelease: true`; exemption `dsh plugin allow-version`). This plugin's peers are all `>=0.1.7-rc.2` — no exemption on any supported line. (dsh: `packages/boot/app-boot/src/plugin-compatibility.ts`, `apps/cli/src/plugin.ts`)
+1. **dsh ≥ `0.1.7` enforces a plugin's `@deepseek-ai/dsh*` peer ranges** at startup and install (semver, `includePrerelease: true`; exemption `dsh plugin allow-version`). This plugin's peers are all `>=0.2.1-rc.2` — no exemption on any supported line. (dsh: `packages/boot/app-boot/src/plugin-compatibility.ts`, `apps/cli/src/plugin.ts`)
 
 **Plugin-side**
 

@@ -21,6 +21,8 @@
 
 ## Install / Update
 
+> **DSH fork.** This checkout is the DeepSeek Harness-maintained fork: the real Web profile links the source-built staging directory `.build/fork-plugins/context`, never an npm package. Stop the Host, run `build.cmd` (or `pnpm exec tsx scripts/fork-plugins-build.ts`), then restart. Never run `dsh plugin --profile web update dsh-context@latest` against a maintained profile; the npm instructions below describe the upstream release channel.
+
 ### Install on DeekSeek Harness web or desktop
 
 Fill `dsh-context` in the **Add plugin** wizard's search box, and click **Install**:

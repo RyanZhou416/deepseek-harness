@@ -21,6 +21,8 @@
 
 ## 安装 / 更新
 
+> **DSH fork。** 本检出是 DeepSeek Harness 维护的 fork：真实 Web profile 以 `link:` 指向从源码构建的 staging 目录 `.build/fork-plugins/context`，绝不指向 npm 包。停下 Host，运行 `build.cmd`（或 `pnpm exec tsx scripts/fork-plugins-build.ts`），再重启。不得对维护中的 profile 运行 `dsh plugin --profile web update dsh-context@latest`；下方的 npm 指令描述的是上游发行渠道。
+
 ### 在 DeepSeek Harness 网页版或桌面版中安装
 
 在 **Add plugin** 向导的搜索框中填写 `dsh-context`，然后点击 **Install**：

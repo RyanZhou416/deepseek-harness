@@ -40,7 +40,7 @@ The route now states no server-side context edit and performs no provider-local 
 Keeping the conversation under the model window belongs to DSH compaction. The evidence,
 the decision and the rejected alternatives are in
 [claude-context-management-cache-fix.md](claude-context-management-cache-fix.md). The
-plugin's focused suite ran 1919 tests with 0 failures and 0 skips; no provider request,
+plugin's full suite ran 1932 tests with 0 failures and 0 skips; no provider request,
 build, or restart was performed.
 
 ## Remaining limits
@@ -62,3 +62,7 @@ At this checkpoint, the running profile starts the user-installed `0.9.4-dsh017r
 The 17:06 startup manifest records `0.9.4-dsh017rc1.33`; its entry hash matches the installed package. A read-only comparison of all 257 package-manifest, patch and runtime files matches the `.33` tarball. This establishes the installed artifact and startup identity, not provider acceptance, and the publication checks did not install or restart anything.
 
 The three focused source files passed together without forced process exit: 14 restart cases, 25 continuation-state cases and 13 production-policy cases, with no failures, skips or cancellation. The production fixture seeds accounts before plugin hydration and checks that a request without a Session is refused by the request-recording contract. Another 30 continuation/resume/request-id cases passed separately. Server and test typechecks passed; a private compilation matched all 254 packaged JavaScript/declaration outputs, and three plain-Node artifact checks passed against the matching fork Host dependencies. Documentation checks passed 42 gates. Full repository lint still reports five failures in existing LLM/runtime and model-selection-test files outside these changes; no full plugin suite or real-provider run is claimed.
+
+## Current installation — 0.2.1-rc.2 generation (source-only)
+
+From 2026-10-18 the Web profile links the source-built staging directory `.build/fork-plugins/subscriptions` at `0.9.4-dsh021rc2.1`; no tarball is installed and no published artifact represents this generation. `build.cmd` (or `pnpm exec tsx scripts/fork-plugins-build.ts`) stages the source and records the pnpm `link:` after the Host stops. The `.32` and `.33` checkpoints above remain historical evidence for the retired tarball path: they establish the installed artifact and startup identity of those generations, not the current link. A source edit does not reach the running Host until the plugin is re-staged and the Host restarts; the profile's credential store under `DSH_HOME/plugins/subscriptions/` is untouched by staging.

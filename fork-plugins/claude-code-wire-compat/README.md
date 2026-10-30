@@ -7,15 +7,18 @@ An ESM-only, runtime-neutral TypeScript package for constructing a pinned Claude
 > **Status:** stable. `buildClaudeCodeRequest` and `parseBuiltClaudeCodeRequest` build and read back the pinned wire contract. The package performs no I/O: credentials, transport, persistence, refresh coordination, and retries remain the consumer's responsibility.
 
 > **DSH-maintained fork.** This directory is the DeepSeek Harness fork of
-> `@tormentalabs/claude-code-wire-compat`, imported from
-> `marco-jardim/claude-code-wire-compat` at upstream commit `d5b036a`
-> (`0.7.2-dsh15`). It keeps the upstream package name, version, license, and
-> provenance so the consumer's pin still identifies the wire contract. The
-> fork adds the `clear_at` preservation fix in
-> `applyMessageCacheControl` (`src/request-body.ts`); see
+> `@tormentalabs/claude-code-wire-compat`, started from upstream release
+> `0.7.1` (reviewed manifest: `release-manifests/0.7.1.json`). It keeps the
+> upstream package name and GPL-3.0-or-later license so the consumer's pin
+> still identifies the wire contract. The fork adds the `clear_at`
+> preservation fix in `applyMessageCacheControl` (`src/request-body.ts`) and
+> publishes it as `0.7.2-dsh16`; that version names the DSH build, not an
+> upstream release. The retained
+> `fork-plugins/releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh15.tgz`
+> is historical evidence of the previous DSH build, which first added the fix. See
 > [FORK_MAINTENANCE.md](./FORK_MAINTENANCE.md) for the preservation rule and
 > the local build and verification commands. It is built from this source
-> checkout; no tarball release is published or consumed.
+> checkout; no tarball is a build input.
 
 ## Package
 
@@ -165,3 +168,5 @@ Do not include access tokens, account identifiers, session identifiers, or priva
 SPDX-License-Identifier: GPL-3.0-or-later
 
 This repository is a modified work derived from [opencode-anthropic-fix](https://github.com/marco-jardim/opencode-anthropic-fix) at upstream commit `466d500`. See [NOTICE](./NOTICE) for attribution and modification details. Corresponding source is available in this public repository.
+
+The DSH fork vendors this source under `fork-plugins/claude-code-wire-compat` and inlines the compiled builder into the MIT-licensed subscriptions bundle, so `LICENSE` and `NOTICE` travel with both the source and the staged package's third-party notices.
