@@ -351,6 +351,39 @@ function portIsListening(port: number, timeoutMs = 750): Promise<boolean> {
   })
 }
 
+/** Options for {@link assertHostNotRunning}. */
+export interface HostGuardOptions {
+  /** Continue while the Host port listens, after a loud warning. */
+  readonly allowRunningHost: boolean
+  /** What the caller is about to change, for both messages. */
+  readonly action: string
+  /** Receives the warning emitted when the override allows the run. */
+  readonly warn: (message: string) => void
+  /** Port to probe; defaults to the Host's own. */
+  readonly port?: number
+}
+
+/**
+ * Refuse a profile change while a Host listens on the loopback Host port.
+ *
+ * Profile package links must not change under a running Host, and a Host that
+ * already started would read the configuration this caller is about to
+ * rewrite. The override proceeds after one warning so an operator can accept
+ * that risk explicitly.
+ * @param options - override, action, warning sink, and port.
+ * @throws When a Host listens and the override was not passed.
+ */
+export async function assertHostNotRunning(options: HostGuardOptions): Promise<void> {
+  const port = options.port ?? HOST_PORT
+  if (!await portIsListening(port)) return
+  if (!options.allowRunningHost) {
+    fail(`a Host is listening on 127.0.0.1:${String(port)}; stop it before ${options.action}. `
+      + 'Profile package links must not change under a running Host. '
+      + 'Pass --allow-running-host only if you accept that risk.')
+  }
+  options.warn(`a Host is listening on 127.0.0.1:${String(port)}; continuing only because --allow-running-host was passed`)
+}
+
 /** Run one child process with inherited output, failing on a nonzero exit. */
 function run(command: string, args: readonly string[], options: { cwd: string; env?: NodeJS.ProcessEnv }): void {
   const result = spawnSync(command, [...args], {
@@ -1533,12 +1566,7 @@ export async function main(options: BuildOptions): Promise<void> {
   cliEntry()
   const home = resolveHome(options.dshHome)
   const profileDirectory = join(home, 'profiles', PROFILE_NAME)
-  const listening = await portIsListening(HOST_PORT)
-  if (listening && !options.allowRunningHost) {
-    fail(`a Host is listening on 127.0.0.1:${HOST_PORT}; stop it before rebuilding the profile. `
-      + 'Profile package links must not change under a running Host. Pass --allow-running-host only if you accept that risk.')
-  }
-  if (listening) warn(`a Host is listening on 127.0.0.1:${HOST_PORT}; continuing only because --allow-running-host was passed`)
+  await assertHostNotRunning({ allowRunningHost: options.allowRunningHost, action: 'rebuilding the profile', warn })
   let previousState: BuildState = { schema: SCHEMA_VERSION, scriptVersion: SCRIPT_VERSION, plugins: {} }
   if (existsSync(STATE_FILE)) {
     try {

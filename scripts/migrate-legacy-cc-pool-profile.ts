@@ -3,20 +3,37 @@
  * `@deepseek-ai/dsh-llm-cc-pool` bundle owned the `cc-pool` route.
  *
  * This is the only script that knows the legacy `llm-pi-ai`
- * `providers.cc-pool` declaration. It backs the profile up first, removes that
- * declaration structurally (block, quoted, and flow-map forms), ensures the
- * dedicated plugin is linked and listed as a bundle, seeds the portable profile
- * support files, and records a migration marker. It never starts a Host and it
- * does not build the repository.
+ * `providers.cc-pool` declaration. It backs the profile and the Harness home's
+ * `settings.yaml` up first, removes that declaration structurally (block,
+ * quoted, and flow-map forms), ensures the dedicated plugin is linked and
+ * listed as a bundle, seeds the portable profile support files, and records a
+ * migration marker. A `settings.yaml` section that still declares the route is
+ * rewritten without it, because a Host imports the removed settings document
+ * into the profile on its next start. It never starts a Host and it does not
+ * build the repository.
  *
- * Run it manually, then run `build.cmd` for the current profile format:
+ * The ordinary root build is a precondition: a profile that lacks the dedicated
+ * link is repaired from `packages/llm/llm-cc-pool/lib`, which only the root
+ * build produces. On a clean checkout the order is:
  *
- *   pnpm exec tsx scripts/migrate-legacy-cc-pool-profile.ts --dsh-home <path>
+ *   pnpm install
+ *   pnpm run build
+ *   pnpm exec tsx scripts/migrate-legacy-cc-pool-profile.ts [--dsh-home <path>] [--allow-running-host]
+ *   build.cmd
  *
- * A fresh or already-current profile is skipped without a backup or write. The
- * second run is therefore a no-op. This script is deletable after every
- * maintained profile carries the marker (`.dsh-profile-migrations.json` with
- * `legacy-llm-pi-ai-cc-pool-provider`); `build.cmd` no longer carries legacy
+ * The Harness home is `--dsh-home`, else `DSH_HOME`, else the launchers'
+ * default (`<checkout parent>/deepseek-harness-data`). A Host listening on
+ * 127.0.0.1:3080 refuses the run unless `--allow-running-host` is passed,
+ * because this migration rewrites files a running Host reads.
+ *
+ * Every non-profile composition layer is inspected even when the profile patch
+ * is already clean, so a home patch or `--patch` overlay cannot hide the legacy
+ * route. A clean or hand-migrated profile still reaches the marker, the
+ * dedicated bundle/link check, and the seed, which makes an interrupted run
+ * resumable; a profile that already carries the marker is a no-op. This script
+ * is deletable after every maintained profile carries the marker
+ * (`.dsh-profile-migrations.json` with
+ * `legacy-llm-pi-ai-cc-pool-provider`); `build.cmd` carries no legacy
  * detection, a guard, or fallback behavior.
  *
  * @module scripts/migrate-legacy-cc-pool-profile
@@ -28,9 +45,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import * as yaml from 'js-yaml'
 import {
+  assertHostNotRunning,
   ensureProfileBundles,
   pluginProfileProblem,
-  resolveHome,
   runProfileCommand,
   stagedPluginDirectory,
   stageWorkspacePlugin,
@@ -42,6 +59,10 @@ import { seedPortableProfile, type SeedResult } from './fork-profile-seed.ts'
 const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const BUILD_ROOT = join(REPOSITORY_ROOT, '.build', 'fork-plugins')
 const PROFILE_NAME = 'web'
+/** Directory name `build.cmd` and `run.cmd` use for their default Harness home. */
+export const LAUNCHER_HOME_DIRECTORY = 'deepseek-harness-data'
+/** Live settings document the removed settings service imports on Host start. */
+export const SETTINGS_FILE = 'settings.yaml'
 /** Marker written after a successful migration; build ignores it. */
 export const MIGRATION_MARKER_FILE = '.dsh-profile-migrations.json'
 /** Stable id of the migration recorded in the marker. */
@@ -144,6 +165,107 @@ export function findLegacyPoolProviders(source: string, label = 'patch'): Legacy
   }
   visit(document, [])
   return findings
+}
+
+/** Profile entry keys the removed settings document may use for the `llm-pi-ai` route. */
+const LEGACY_SETTINGS_ENTRIES = ['llm-pi-ai', '@deepseek-ai/dsh-llm-pi-ai'] as const
+
+/** One value that the loader's `!!js` tag produced and a YAML dump would lose. */
+function holdsJavascriptExpression(value: unknown, visited = new WeakSet<object>()): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  if (visited.has(value)) return false
+  visited.add(value)
+  if (Array.isArray(value)) return value.some(entry => holdsJavascriptExpression(entry, visited))
+  const record = value as Record<string, unknown>
+  if (Object.hasOwn(record, 'jsExpression')) return true
+  return Object.values(record).some(entry => holdsJavascriptExpression(entry, visited))
+}
+
+/** One legacy `providers.cc-pool` declaration inside the Harness home's settings document. */
+export interface LegacySettingsFinding {
+  /** Top-level settings section that owns the declaration. */
+  readonly section: string
+}
+
+/**
+ * Find every `llm-pi-ai` `providers.cc-pool` declaration in `settings.yaml`.
+ *
+ * The removed settings service imports each top-level section as the
+ * configuration of the entry with that id, so the legacy route appears as
+ * `llm-pi-ai.providers.cc-pool` rather than inside a loader row.
+ * @param source - settings document text.
+ * @param label - file label for a parse diagnostic.
+ * @returns the declarations in document order.
+ */
+export function findLegacySettingsProviders(source: string, label = SETTINGS_FILE): LegacySettingsFinding[] {
+  const document = parsePatchDocument(source, label)
+  if (!isRecord(document)) return []
+  const findings: LegacySettingsFinding[] = []
+  for (const section of LEGACY_SETTINGS_ENTRIES) {
+    const values = document[section]
+    if (!isRecord(values)) continue
+    const providers = values['providers']
+    if (!isRecord(providers) || !Object.hasOwn(providers, 'cc-pool')) continue
+    findings.push({ section })
+  }
+  return findings
+}
+
+/** Outcome of removing every legacy declaration from the settings document. */
+export interface LegacySettingsMigration {
+  readonly source: string
+  readonly removed: number
+}
+
+/**
+ * Remove the legacy `llm-pi-ai` `providers.cc-pool` declaration from `settings.yaml`.
+ *
+ * The document is parsed and re-serialized, so comments are not preserved; the
+ * original file is in the migration backup. A document carrying loader `!!js`
+ * expressions is refused instead: re-serializing it as data would silently
+ * replace those expressions with objects.
+ * @param source - settings document text.
+ * @param label - file label for diagnostics.
+ * @returns the migrated text and the number of declarations removed.
+ */
+export function migrateLegacySettingsProviders(source: string, label = SETTINGS_FILE): LegacySettingsMigration {
+  const findings = findLegacySettingsProviders(source, label)
+  if (findings.length === 0) return { source, removed: 0 }
+  const document = parsePatchDocument(source, label)
+  if (!isRecord(document)) throw new Error(`${label} is not a YAML mapping`)
+  if (holdsJavascriptExpression(document)) {
+    throw new Error(`${label} declares the legacy llm-pi-ai "providers.cc-pool" route beside a !!js expression this migration cannot rewrite safely; `
+      + 'remove the "cc-pool" key under providers manually, then rerun this migration')
+  }
+  for (const section of LEGACY_SETTINGS_ENTRIES) {
+    const values = document[section]
+    if (!isRecord(values)) continue
+    const providers = values['providers']
+    if (!isRecord(providers)) continue
+    Reflect.deleteProperty(providers, 'cc-pool')
+  }
+  return { source: yaml.dump(document, { lineWidth: -1, noRefs: true }), removed: findings.length }
+}
+
+/**
+ * Resolve the Harness home exactly as `build.cmd` and `run.cmd` do.
+ *
+ * An explicit `--dsh-home` wins, then `DSH_HOME`, then the launchers' default
+ * directory beside the checkout. Those launchers export `DSH_HOME` before
+ * invoking any script, so the default only matters for a manual run.
+ * @param explicit - `--dsh-home` value.
+ * @param env - environment to read `DSH_HOME` from.
+ * @param repositoryRoot - checkout root the default sits beside.
+ * @returns the absolute Harness home.
+ */
+export function resolveMigrationHome(
+  explicit?: string,
+  env: NodeJS.ProcessEnv = process.env,
+  repositoryRoot = REPOSITORY_ROOT,
+): string {
+  const configured = explicit ?? env.DSH_HOME
+  if (configured !== undefined && configured.trim() !== '') return resolve(configured)
+  return resolve(join(dirname(repositoryRoot), LAUNCHER_HOME_DIRECTORY))
 }
 
 /**
@@ -604,8 +726,9 @@ const PROFILE_BACKUP_FILES = [
   MIGRATION_MARKER_FILE,
 ] as const
 
-/** Home files the portable seed may create. */
+/** Home files the migration may rewrite or create. */
 const HOME_BACKUP_FILES = [
+  SETTINGS_FILE,
   '.agent-presets/chatgpt-dsh/agent.cordis.yml',
   '.agent-presets/chatgpt-dsh/preset.yml',
   '.agent-presets/chatgpt-dsh/no-escalation.cjs',
@@ -785,7 +908,7 @@ export interface MigrationHooks {
 
 /** Input for {@link migrateLegacyProfile}. */
 export interface MigrateLegacyProfileOptions {
-  /** Harness home; defaults to `DSH_HOME`, then `~/.dsh`. */
+  /** Harness home; defaults to `DSH_HOME`, then the launchers' sibling directory. */
   readonly dshHome?: string
   /** Profile directory override; defaults to `<home>/profiles/web`. */
   readonly profileDirectory?: string
@@ -793,29 +916,54 @@ export interface MigrateLegacyProfileOptions {
   readonly repositoryRoot?: string
   /** Additional `--patch` overlays to inspect for the legacy route. */
   readonly overlays?: readonly string[]
+  /** Continue while a Host listens on the Host port, after a loud warning. */
+  readonly allowRunningHost?: boolean
   /** Test hooks for the install and seed steps. */
   readonly hooks?: MigrationHooks
 }
 
 /** Outcome of one migration invocation. */
 export interface MigrationOutcome {
-  readonly status: 'migrated' | 'skipped'
+  /**
+   * `migrated` removed a legacy declaration, `completed` recorded the
+   * completion state of an already-clean profile, and `skipped` changed nothing.
+   */
+  readonly status: 'migrated' | 'completed' | 'skipped'
   /** Why the migration skipped, when it did. */
   readonly reason?: string
-  /** Backup directory written before mutation, when migrated. */
+  /** Backup directory written before mutation, when the run wrote anything. */
   readonly backup?: string
-  /** Marker file written after migration, when migrated. */
+  /** Marker file written after migration, when the run wrote one. */
   readonly markerPath?: string
-  /** Number of legacy declarations removed. */
+  /** Number of legacy declarations removed from the profile patch. */
   readonly removed?: number
+  /** Number of legacy declarations removed from `settings.yaml`. */
+  readonly removedSettings?: number
 }
 
 function log(message: string): void {
   process.stdout.write(`[migrate-cc-pool] ${message}\n`)
 }
 
+function warn(message: string): void {
+  process.stderr.write(`[migrate-cc-pool] warning: ${message}\n`)
+}
+
 function fail(message: string): never {
   throw new Error(message)
+}
+
+/** Whether the profile already records this migration in its marker. */
+async function hasMigrationMarker(path: string): Promise<boolean> {
+  if (!existsSync(path)) return false
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
+    if (!isRecord(parsed) || parsed['schema'] !== 1 || !isRecord(parsed['migrations'])) return false
+    return Object.hasOwn(parsed['migrations'], LEGACY_MIGRATION_ID)
+  } catch {
+    // A malformed marker records nothing; the migration rewrites it.
+    return false
+  }
 }
 
 async function ensureDedicatedPlugin(context: MigrationContext): Promise<void> {
@@ -862,13 +1010,17 @@ function assertOnlyProfileHasLegacy(source: PatchSource, sourceText: string): vo
 /**
  * Migrate one legacy web profile.
  *
- * A missing profile patch or one without a legacy declaration is skipped
- * without a backup or write, which makes a second run a no-op.
- * @param options - Harness home, profile override, and test hooks.
- * @returns what was migrated or why it was skipped.
+ * A missing profile patch is skipped without a write, and a profile that
+ * already records the migration and declares the route nowhere is a no-op. A
+ * clean profile without the marker — hand-migrated, or left clean by an
+ * interrupted run — still verifies the dedicated bundle, seeds, and writes the
+ * marker, so the completion state is reachable without reintroducing the legacy
+ * declaration.
+ * @param options - Harness home, profile override, host override, and test hooks.
+ * @returns what was migrated, completed, or why it was skipped.
  */
 export async function migrateLegacyProfile(options: MigrateLegacyProfileOptions = {}): Promise<MigrationOutcome> {
-  const home = resolveHome(options.dshHome)
+  const home = resolveMigrationHome(options.dshHome)
   const profileDirectory = options.profileDirectory ?? join(home, 'profiles', PROFILE_NAME)
   const profilePatch = join(profileDirectory, 'cordis.patch.yml')
   if (!existsSync(profilePatch)) {
@@ -876,12 +1028,10 @@ export async function migrateLegacyProfile(options: MigrateLegacyProfileOptions 
   }
   const current = await readFile(profilePatch, 'utf8')
   const profileFindings = findLegacyPoolProviders(current, profilePatch)
-  if (profileFindings.length === 0) {
-    return { status: 'skipped', reason: 'the profile patch has no legacy llm-pi-ai providers.cc-pool route' }
-  }
-  if (!existsSync(join(profileDirectory, 'package.json'))) {
-    throw new Error(`the legacy profile at ${profileDirectory} has no package.json; restore the profile before migrating it`)
-  }
+
+  // Every other composition layer is inspected before the profile decides to
+  // skip: a home patch or --patch overlay that still declares the route fails
+  // loudly instead of being skipped with an already-clean profile patch.
   const sources = compositionPatchSources({
     home,
     profileDirectory,
@@ -892,21 +1042,55 @@ export async function migrateLegacyProfile(options: MigrateLegacyProfileOptions 
     if (source.kind === 'profile' || !existsSync(source.path)) continue
     assertOnlyProfileHasLegacy(source, await readFile(source.path, 'utf8'))
   }
-  const migrated = migrateLegacyPoolProvider(current, profilePatch)
+
+  const settingsPath = join(home, SETTINGS_FILE)
+  const settingsText = existsSync(settingsPath) ? await readFile(settingsPath, 'utf8') : undefined
+  const settings = settingsText === undefined
+    ? undefined
+    : migrateLegacySettingsProviders(settingsText, settingsPath)
+  const markerPath = join(profileDirectory, MIGRATION_MARKER_FILE)
+  const marked = await hasMigrationMarker(markerPath)
+  if (profileFindings.length === 0 && (settings?.removed ?? 0) === 0 && marked) {
+    return { status: 'skipped', reason: `the profile already records ${LEGACY_MIGRATION_ID}` }
+  }
+  if (!existsSync(join(profileDirectory, 'package.json'))) {
+    if (profileFindings.length > 0) {
+      throw new Error(`the legacy profile at ${profileDirectory} has no package.json; restore the profile before migrating it`)
+    }
+    return { status: 'skipped', reason: `the profile directory at ${profileDirectory} has no package.json` }
+  }
+  // Mutating from here: refuse while a Host could read or import these files.
+  await assertHostNotRunning({
+    allowRunningHost: options.allowRunningHost === true,
+    action: 'migrating the profile',
+    warn,
+  })
+  const migrated = profileFindings.length === 0
+    ? { source: current, removed: 0 }
+    : migrateLegacyPoolProvider(current, profilePatch)
   const backup = await backupProfile({ profileDirectory, home })
   try {
-    await writeTextAtomic(profilePatch, migrated.source)
-    log(`removed ${String(migrated.removed)} legacy llm-pi-ai "providers.cc-pool" declaration(s) from ${profilePatch}`)
+    if (migrated.removed > 0) {
+      await writeTextAtomic(profilePatch, migrated.source)
+      log(`removed ${String(migrated.removed)} legacy llm-pi-ai "providers.cc-pool" declaration(s) from ${profilePatch}`)
+    }
+    const removedSettings = settings?.removed ?? 0
+    if (settings !== undefined && removedSettings > 0) {
+      await writeTextAtomic(settingsPath, settings.source)
+      log(`removed ${String(removedSettings)} legacy llm-pi-ai "providers.cc-pool" declaration(s) from ${settingsPath}`
+        + ' (the rewrite normalizes YAML formatting; the original document is in the backup)')
+    }
     const context: MigrationContext = { home, profileDirectory, backup }
     await (options.hooks?.ensurePlugin ?? ensureDedicatedPlugin)(context)
     await (options.hooks?.seed ?? seedProfile)(context)
-    const markerPath = await writeMigrationMarker(profileDirectory, migrated.removed)
-    log(`wrote migration marker ${markerPath}`)
+    const written = await writeMigrationMarker(profileDirectory, migrated.removed)
+    log(`wrote migration marker ${written}`)
     return {
-      status: 'migrated',
+      status: migrated.removed > 0 || removedSettings > 0 ? 'migrated' : 'completed',
       backup: backup.directory,
-      markerPath,
+      markerPath: written,
       removed: migrated.removed,
+      ...removedSettings === 0 ? {} : { removedSettings },
     }
   } catch (error) {
     let rollbackText: string
@@ -936,16 +1120,20 @@ function usage(): string {
     'Usage: tsx scripts/migrate-legacy-cc-pool-profile.ts [options]',
     '',
     'One-time migration for a web profile that still declares llm-pi-ai providers.cc-pool.',
-    'It backs up the profile first, removes the legacy declaration, ensures the dedicated',
-    '@deepseek-ai/dsh-llm-cc-pool bundle/link, seeds the portable profile, and writes',
-    '.dsh-profile-migrations.json. A current or fresh profile is skipped.',
+    'It backs the profile and settings.yaml up first, removes the legacy declaration,',
+    'ensures the dedicated @deepseek-ai/dsh-llm-cc-pool bundle/link, seeds the portable',
+    'profile, and writes .dsh-profile-migrations.json. A marked, clean profile is a no-op;',
+    'a clean profile without the marker is completed without reintroducing the route.',
     '',
     'Options:',
-    '  --dsh-home <path>  Harness home to migrate instead of DSH_HOME or ~/.dsh',
-    '  --help             Show this help',
+    '  --dsh-home <path>     Harness home instead of DSH_HOME or the launchers\' default',
+    '  --allow-running-host  Continue while 127.0.0.1:3080 listens (unsafe; warns loudly)',
+    '  --help                Show this help',
     '',
-    'Run build.cmd after a successful migration. Delete this script after every',
-    'maintained profile carries the migration marker.',
+    'Preconditions: run the ordinary root build (`pnpm run build`) once before this',
+    'script, because staging the dedicated plugin needs its lib/ output. Run build.cmd',
+    'after a successful migration. Delete this script after every maintained profile',
+    'carries the migration marker.',
     '',
   ].join('\n')
 }
@@ -953,11 +1141,13 @@ function usage(): string {
 /** Parse only the options this script owns. */
 export function parseArguments(argv: readonly string[]): MigrateLegacyProfileOptions | undefined {
   let dshHome: string | undefined
+  let allowRunningHost = false
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === undefined) continue
     if (argument === '--help' || argument === '-h') return undefined
-    if (argument === '--dsh-home') {
+    if (argument === '--allow-running-host') allowRunningHost = true
+    else if (argument === '--dsh-home') {
       const value = argv[index + 1]
       if (value === undefined || value.startsWith('--')) fail('--dsh-home requires a path')
       dshHome = value
@@ -967,6 +1157,7 @@ export function parseArguments(argv: readonly string[]): MigrateLegacyProfileOpt
   }
   return {
     ...dshHome === undefined ? {} : { dshHome },
+    allowRunningHost,
   }
 }
 
@@ -980,7 +1171,11 @@ if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).hre
         log(`skipped: ${outcome.reason}; nothing changed`)
         return
       }
-      log(`migration complete (${String(outcome.removed)} declaration(s) removed)`)
+      if (outcome.status === 'completed') {
+        log('no legacy declaration remained; verified the dedicated bundle, seeded the profile, and wrote the marker')
+      } else {
+        log(`migration complete (${String(outcome.removed ?? 0)} profile declaration(s) removed)`)
+      }
       log(`backup: ${outcome.backup}`)
       log(`marker: ${outcome.markerPath}`)
       log('run build.cmd now to build and install the current profile format')
