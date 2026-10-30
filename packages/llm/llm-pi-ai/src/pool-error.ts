@@ -13,9 +13,9 @@
  * The pool echoes `pool_request_id` on every error body, including native
  * provider failures, so that id cannot identify the readiness refusal; its
  * unverified-egress/`capability_not_ready` detail does. The id does carry one
- * decision: a pool-authored body that states `retryable: false` forbids the
- * retry even when the failure otherwise looks native, because the text
- * classifier would retry its 5xx.
+ * decision only for a native 5xx: a pool-authored body that states
+ * `retryable: false` forbids that retry, while a 400/413 context-overflow body
+ * stays with the text classifier so the agent loop can compact.
  *
  * The pool owns account selection, cooldown, and session binding. This module
  * only decides what the client may do with the refusal: retry after the
@@ -270,8 +270,9 @@ function fallbackMessage(code: string): string {
  * detail is missing or unsafe. A body without a pool code or `origin: pool`
  * keeps the text classification unless the pool itself decided otherwise: an
  * explicit `retryable: false` together with a pool marker — its body
- * `pool_request_id` or `origin: pool` — becomes a non-retryable `POOL_ERROR`,
- * because the text classifier would retry the 5xx it describes. The readiness
+ * `pool_request_id` or `origin: pool` — becomes a non-retryable `POOL_ERROR`
+ * only for a 5xx, because the text classifier would retry that failure. A
+ * 400/413 context-overflow body keeps the text classifier so compaction runs. The readiness
  * refusal reaches the same outcome through its unverified-egress or
  * `capability_not_ready` detail even though it carries neither a pool code nor
  * `origin`. An unparseable message, or a body with neither a pool code nor a
