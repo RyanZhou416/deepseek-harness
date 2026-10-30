@@ -639,17 +639,17 @@ Lexical 的 history 在每个窗口内合并连续输入，而窗口从上一次
 
 `build.cmd` 在普通 `pnpm run build` 之后自动运行 [fork-plugins-build.ts](scripts/fork-plugins-build.ts)，把四个 fork 插件全部从源码构建，并以本地 `link:` 安装进所选 `DSH_HOME` 的 `profiles\web`。Subscriptions 与 AetherShell 由 staging 生成的 tsdown 配置直接产出；AgentTeams 与 Context 先复制到被忽略的 `.build/fork-plugins/work/<id>/` 隔离工作副本，在那里按各自的 `package.json` 运行 `build`，staging 只从该副本读取 `lib/`。仓库中提交的插件 `lib/` 不再是构建输入，干净 clone 无需预构建产物。同事克隆仓库后只需 `build.cmd` 再 `run.cmd`，不需要第二条安装命令、私有 registry 或人工交付的 tgz。构建会修改 web profile，**运行中的 Host 必须先停止**：脚本探测 `127.0.0.1:3080`，监听时直接失败，只有显式 `--allow-running-host` 才会警告后继续。
 
-脚本优先使用显式 `--dsh-home`，否则 `DSH_HOME`，再否则 `%USERPROFILE%\.dsh`；只操作 `profiles\web` 的包元数据与 pnpm 状态。`build.cmd` 仍是唯一入口，不需要第二条迁移脚本。组合守卫在任何 staging 或 profile 写入之前运行，结构解析 YAML（容忍 `!!js`），读取仓库 base bundle、web bundle、portable 模板、`fork-runtime\diagnostics\cordis.patch.yml`、目标 profile 的 `cordis.patch.yml` 与 `memory-limits.patch.yml`、home 级 `cordis.patch.yml`，以及脚本 `--patch <file>`（可重复）声明的额外 overlay。若 legacy `llm-pi-ai` `providers.cc-pool` 出现在目标 profile patch 之外，脚本在任何写入前失败并给出要删除该键的确切文件；只有目标 profile patch 可以自动迁移，且迁移必须把结构解析结果精确还原为“删除该 provider 后的文档”（支持 block、quoted、flow-map 与 `insert` 包装），否则同样在写入前失败。迁移后立即用备份兜底，不需要用户手工删除旧块。
+脚本优先使用显式 `--dsh-home`，否则 `DSH_HOME`，再否则 `%USERPROFILE%\.dsh`；只操作 `profiles\web` 的包元数据与 pnpm 状态。构建只面向当前 profile 格式：没有 legacy `llm-pi-ai` `providers.cc-pool` 检测、没有守卫、没有自动迁移或旧格式兼容；旧 profile 由用户在任何构建之前手动运行一次性 [migrate-legacy-cc-pool-profile.ts](scripts/migrate-legacy-cc-pool-profile.ts)。该脚本先备份 profile 与 portable seed 文件，结构解析 YAML（容忍 `!!js`）并移除 block、quoted、flow-map、`insert` 包装等 legacy 声明，确保 `@deepseek-ai/dsh-llm-cc-pool` bundle/link，按需 seed，并写入 `profiles\web\.dsh-profile-migrations.json` marker；无法精确还原的布局在写入前失败。当前或全新 profile 直接跳过、不写文件。**迁移成功后必须运行 `build.cmd`**，因为构建本身不补旧格式。所有维护中的 profile 都带 marker 后，该脚本及其 spec 可以删除，构建无需同步修改。
 
-守卫通过后，脚本先备份 `package.json`、`cordis.patch.yml`、存在时的 lock/workspace/compatibility 与 portable seed 支持文件到被忽略的 `.build/fork-plugins/backups/`，再执行迁移、构建、安装和 seed；备份先于任何 profile/staging 变更，且新的 staging 先写入临时同级目录再整体换入，失败时只删除临时目录，保留上一代可用 staging。全新的 profile 由 `dsh plugin add` 自动初始化，安装成功并补齐 bundle 条目后才应用 portable seed；安装或 seed 失败会用备份回滚，删除本次创建的 profile 与 seed 文件。已有 profile 失败时恢复备份文件并删除本次新增文件；`node_modules` 的 pnpm 状态不作为备份内容，恢复后的 manifest/lockfile 是下一次构建或启动的输入。staging 位于被忽略的 `.build/fork-plugins/`，安装命令为 `dsh plugin --profile web add <staged 绝对目录>`，profile 记录 `link:`；重建与重装由源码 key（源文件、版本、内联与平台 runtime 依赖版本、tgz 哈希与脚本版本）决定，未变化的第二次运行不重建。脚本不读取或写入 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
+新的 staging 先写入临时同级目录再整体换入，失败时只删除临时目录，保留上一代可用 staging。全新的 profile 由 `dsh plugin add` 自动初始化，安装成功并补齐 bundle 条目后才应用 portable seed。staging 位于被忽略的 `.build/fork-plugins/`，安装命令为 `dsh plugin --profile web add <staged 绝对目录>`，profile 记录 `link:`；重建与重装由源码 key（源文件、版本、内联与平台 runtime 依赖版本、tgz 哈希与脚本版本）决定，未变化的第二次运行不重建。构建不读取或写入 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
 
 隔离构建的依赖准备是显式的：复制源文件后在工作副本中执行 `pnpm install --frozen-lockfile --ignore-scripts`，先尝试 `--offline`（`--config.trust-lockfile=true` 跳过离线元数据检查），store 缺少包时再以 `--prefer-offline` 走网络；peer 自动安装设置取自插件 lockfile。依赖或构建失败会打印插件名、工作副本、命令、退出码与末尾错误，并提示删除工作副本重试，不会静默继续。工作副本带 `.fork-plugin-build.json` 与 `.fork-plugin-deps.json` 标记：同一源码 key 且声明输出齐全时直接复用；staging 目录被删除但工作副本仍在时无需重新编译。源码改动会重建整个插件（不做未配置或未验证的 tsc 增量），并且每次从干净副本运行插件自己的 `build`；AgentTeams 的 `clean-build.mjs` 因此只清理隔离副本，不会触碰主检出跟踪的 `lib/`。删除 `.build/fork-plugins/work/` 或 `.build/fork-plugins/<id>/` 后再次运行会从源码重建。
 
 Subscriptions 的 staged 包从源码编译 `lib/index.js` 与 `lib/client.js`：node 半区把 `@tormentalabs/claude-code-wire-compat`（仓库 tgz）和 `undici` 内联进 bundle，staged manifest 删除这两个运行时依赖、全部 dev 依赖以及仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer；`@deepseek-ai/*` peer 保持 `0.2.1-rc.2`。公开的 optional provider 依赖（`@cursor/sdk`、`@oven/bun-*`）保留在 manifest 中；`link:` 安装不会安装被链接包的 optional 依赖，因此 Cursor 仍需 profile 或环境提供。pinned Bun transport 不依赖插件本地安装或构建：staging 用仓库根 TypeScript 编译器从 `src/transport/bun-child.ts`、`src/transport/frames.ts` 生成 `lib/bun-child.js`、`lib/frames.js`，并按插件 lockfile 固定当前平台 `@oven/bun-*` 的版本，把它装进 `.build/fork-plugins/build-deps/`，再把解引用后的真实目录复制到 staged 包；staged 包不链接回 build-deps，删除 build-deps 不影响已 `link:` 的 profile。transport 源改动会改变源码 key 并触发重建，不会发布旧的 child/frames 产物，脚本也不回退到 tgz。AetherShell 从源码编译 `lib/lifecycle.mjs`，保持 `@deepseek-ai/*` peer 外部且为 `0.2.1-rc.2`。Subscriptions 与 AetherShell 的 staged 包都不附带 `.d.ts`；类型来源仍是源码检出；bundle 使用仓库根工具的 tsdown，transport 使用同一仓库 TypeScript 编译器的 transpile-only emit（显式源文件、`--noCheck`），不依赖插件自带的 tsc 构建。AgentTeams 使用自己的 `tsc`/`tsdown` 生成 `lib/index.js`、`lib/client.js` 与 `lib/types/**`，Context 使用自己的 `tsdown` 生成 `lib/index.js`、`lib/client.js` 与 `lib/index.d.ts`；两者的构建工具与类型依赖都来自隔离副本的 plugin-local install。
 
-**Preservation rule.** 保留端口拒绝、先备份后变更、结构守卫、源码 key 幂等、`.build/` staging 与本地 `link:` 安装路径；不要改回 tgz 交付或 `pnpm update --latest`。不得把 legacy `providers.cc-pool` 守卫移回 staging/seed 之后，也不得改回正则匹配：必须解析 YAML，覆盖 base bundle、profile patch 与 `--patch` overlay，并且只在目标 profile patch 上自动迁移。迁移不得用 `yaml.dump` 重写整份用户文件；必须保持注释、`!!js` 表达式、无关行和非目标 `cc-pool` provider 不变，无法精确还原时在写入前失败。备份必须覆盖 profile 与 portable seed 文件，失败回滚必须恢复原字节并删除本次新增文件；全新 profile 的 seed 必须发生在成功安装之后。四个插件都不得把仓库 `lib/` 当作 staging 输入：AgentTeams 与 Context 必须在 `.build/fork-plugins/work/<id>/` 隔离副本中构建，staging 只复制该副本的声明产物；工作副本的删除与重建不得改写主检出或插件目录中被 Git 跟踪的 `lib/`。staged manifest 若再次出现 `file:`、`link:`、tgz、`@tormentalabs` 或 `undici` 运行时依赖，安装必须失败。Subscriptions staging 必须同时带 `lib/bun-child.js`、`lib/frames.js` 和当前平台的 `@oven/bun-*`，否则 Claude Messages 的 pinned Bun transport 会在启动 bridge 时以 `TRANSPORT` 失败；child/frames 必须由 staging 从 `src/transport` 现建，不能改回复制插件本地 `lib/`，平台 runtime 只能从 `.build/fork-plugins/build-deps/` 中按 lockfile 固定的版本解引用复制，staged 包不得链接回 build-deps。插件本地依赖准备失败必须保留插件名、工作副本、命令与退出信息和修复提示，不能静默跳过或退回提交的预构建产物。
+**Preservation rule.** 保留端口拒绝、源码 key 幂等、`.build/` staging 与本地 `link:` 安装路径；不要改回 tgz 交付或 `pnpm update --latest`。不得把 legacy `providers.cc-pool` 知识重新加入 `build.cmd`、`fork-plugins-build.ts` 或任何构建辅助代码：构建不得检测、拒绝、备份或迁移旧 profile，旧格式只由 `scripts/migrate-legacy-cc-pool-profile.ts` 处理。该迁移脚本必须先用备份、再改写；结构解析 YAML，保持注释、`!!js`、无关行与非目标 `cc-pool` provider 不变；无法精确还原时在写入前失败；成功后写 marker 并提示运行 `build.cmd`。所有 profile 迁移完成后可删除该脚本、其 spec 和 marker 支持，构建无需改动。全新 profile 的 seed 仍必须发生在成功安装之后。四个插件都不得把仓库 `lib/` 当作 staging 输入：AgentTeams 与 Context 必须在 `.build/fork-plugins/work/<id>/` 隔离副本中构建，staging 只复制该副本的声明产物；工作副本的删除与重建不得改写主检出或插件目录中被 Git 跟踪的 `lib/`。staged manifest 若再次出现 `file:`、`link:`、tgz、`@tormentalabs` 或 `undici` 运行时依赖，安装必须失败。Subscriptions staging 必须同时带 `lib/bun-child.js`、`lib/frames.js` 和当前平台的 `@oven/bun-*`，否则 Claude Messages 的 pinned Bun transport 会在启动 bridge 时以 `TRANSPORT` 失败；child/frames 必须由 staging 从 `src/transport` 现建，不能改回复制插件本地 `lib/`，平台 runtime 只能从 `.build/fork-plugins/build-deps/` 中按 lockfile 固定的版本解引用复制，staged 包不得链接回 build-deps。插件本地依赖准备失败必须保留插件名、工作副本、命令与退出信息和修复提示，不能静默跳过或退回提交的预构建产物。
 
-**Focused verification.** `pnpm exec vitest run scripts/fork-plugins-build.spec.ts scripts/fork-profile-seed.spec.ts` 覆盖 staged manifest、私有依赖拒绝、DSH peer cohort、profile 路径解析与参数，并断言四个插件都是源码构建、源码 hash 不含 `lib`、隔离 staging 只读取工作副本、未变化 staging 跳过、源码 key 变化触发重建、四个插件的 manifest/资产/输出齐全，以及依赖准备失败会给出可操作的诊断。legacy 守卫与迁移用例在真实临时目录中覆盖：block、quoted block、flow-map、`insert` 包装和仅按 package name 识别的行；注释、无关行、非目标 `cc-pool` provider 与 `!!js` 表达式保持不变；只有 `cc-pool` 时保留空 `providers`；无法安全还原的布局与非法 YAML 在写入前失败；仓库 base bundle、diagnostics overlay、显式 `--patch` overlay 和目标 profile patch 分别被检查，且 guard 不改文件。备份/回滚用例写入真实 profile 与 `.agent-presets` 文件，断言备份先存在、原字节恢复、本次新增文件被删除，以及本次创建的 profile 整个移除；install/seed 顺序用例断言 seed 只在 install 返回后运行，安装失败不 seed。`subscriptions transport staging` 用例直接调用 `buildSubscriptionsTransport` 从仓库源码生成 `lib/bun-child.js`/`lib/frames.js`，断言 child 引用生成的 frame codec，并覆盖六个平台的 `@oven/bun-*`/可执行文件映射、真实 lockfile 的版本固定，以及平台 runtime 的解引用复制（链接源被实体化）与缺失可执行文件的失败。`scripts/fork-windows-launchers.spec.ts` 断言 `build.cmd` 在普通构建之后才调用该脚本。端到端验证使用独立临时 `DSH_HOME`：全新 clone 中首次运行 staging 从源码生成 transport、安装锁定的平台 runtime、在隔离副本中构建 AgentTeams/Context，并以 `link:` 解析四个插件与 `llm-cc-pool`；第二次运行跳过构建；删除工作副本和 staging 目录后再次运行可从源码重建；旧 profile 的 legacy `providers.cc-pool` 在备份后自动移除且只保留一个 `cc-pool` route；staged manifest 与 bundle 中不存在私有 tarball/`file:` 依赖。3080 的现有 Host 可继续运行（显式 `--allow-running-host`），但 profile 只写临时目录，验证不启动新的 Host 监听。
+**Focused verification.** `pnpm exec vitest run scripts/fork-plugins-build.spec.ts scripts/fork-profile-seed.spec.ts scripts/migrate-legacy-cc-pool-profile.spec.ts` 覆盖 staged manifest、私有依赖拒绝、DSH peer cohort、profile 路径解析与参数，并断言四个插件都是源码构建、源码 hash 不含 `lib`、隔离 staging 只读取工作副本、未变化 staging 跳过、源码 key 变化触发重建、四个插件的 manifest/资产/输出齐全，以及依赖准备失败会给出可操作的诊断；构建侧的 install/seed 用例在 profile patch 仍含 legacy 文本时照样安装与 seed，证明构建不检测、不拒绝、不迁移旧 profile。迁移脚本用例在真实临时目录中覆盖 block、quoted block、flow-map、`insert` 包装和仅按 package name 识别的行；注释、无关行、非目标 `cc-pool` provider 与 `!!js` 表达式保持不变；只有 `cc-pool` 时保留空 `providers`；无法安全还原的布局与非法 YAML 在写入前失败；首次迁移写备份与 marker，第二次运行跳过且不新增备份，全新 profile 跳过且不创建目录，后续步骤失败时恢复原字节并删除本次新增文件。`subscriptions transport staging` 用例直接调用 `buildSubscriptionsTransport` 从仓库源码生成 `lib/bun-child.js`/`lib/frames.js`，断言 child 引用生成的 frame codec，并覆盖六个平台的 `@oven/bun-*`/可执行文件映射、真实 lockfile 的版本固定，以及平台 runtime 的解引用复制（链接源被实体化）与缺失可执行文件的失败。`scripts/fork-windows-launchers.spec.ts` 断言 `build.cmd` 在普通构建之后才调用该脚本。端到端验证使用独立临时 `DSH_HOME`：旧 profile 先手动运行迁移脚本（备份、移除 legacy、link/bundle、seed、marker），再运行 `build.cmd` 构建并安装当前格式；全新 profile 直接由 `build.cmd` 初始化；第二次构建跳过重建；删除工作副本和 staging 目录后再次运行可从源码重建；staged manifest 与 bundle 中不存在私有 tarball/`file:` 依赖。3080 的现有 Host 可继续运行（显式 `--allow-running-host`），但 profile 只写临时目录，验证不启动新的 Host 监听。
 
 ### Local launch and build scripts
 
@@ -1229,14 +1229,16 @@ Keep the base bundle and the shipped web profile free of an `llm-pi-ai`
 `cc-pool` provider: the plugin is the only owner. `scripts/fork-plugins-build.ts`
 stages this workspace package beside the four fork plugins and links it with
 `dsh plugin --profile web add <staged directory>`, so a fresh profile installed
-by `build.cmd` gets exactly that one `cc-pool` route. Before any staging or
-profile write the script parses the repository base bundle, the portable
-templates, the target profile patch, the home patch, and the known or explicit
-`--patch` overlays. A legacy block in the target profile patch is backed up and
-removed structurally (block, quoted, or flow-map form); a block anywhere else
-fails with the exact file to edit. A provider block in `llm-pi-ai` — including
-in `fork-runtime/web/portable-profile.patch.yml` — would make both adapters
-claim the route and plugin loading fails.
+by `build.cmd` gets exactly that one `cc-pool` route. The build targets the
+current profile format only and carries no legacy detection, guard, or fallback.
+An old profile is converted manually with
+`scripts/migrate-legacy-cc-pool-profile.ts`, which backs the profile up, removes
+the legacy block structurally, ensures this bundle/link, seeds, writes
+`.dsh-profile-migrations.json`, and tells the operator to run `build.cmd`
+afterwards. That script is the only legacy owner and is deletable after every
+maintained profile is migrated. A provider block in `llm-pi-ai` — including in
+`fork-runtime/web/portable-profile.patch.yml` — would make both adapters claim
+the route and plugin loading fails.
 Keep the durable sink's default path
 (`$DSH_HOME/logs/llm-pi-ai-requests.jsonl`) so evidence collection survives the
 split.
@@ -1264,14 +1266,14 @@ including its dropped usage sample and an unqueued next request, a thrown opener
 releasing the lane, and a promptly returned `cc_pool_rate_limited` 429 that is
 never retried), and a real Loader composition proving the route exists
 only with the plugin row installed.
-`pnpm exec vitest run scripts/fork-plugins-build.spec.ts scripts/fork-profile-seed.spec.ts`
+`pnpm exec vitest run scripts/fork-plugins-build.spec.ts scripts/fork-profile-seed.spec.ts scripts/migrate-legacy-cc-pool-profile.spec.ts`
 covers the staged workspace manifest (workspace peer ranges converted, no
-build-time dependencies), the staged package/files, structural legacy
-`providers.cc-pool` detection and migration for block, quoted, and flow-map
-forms, the guard over the base bundle and `--patch` overlays, backup/rollback of
-a real profile and its seed files, install-before-seed ordering, the portable
-template owning no `cc-pool` provider, and the single dedicated bundle/route
-selection.
+build-time dependencies), the staged package/files, install-before-seed
+ordering, the build not special-casing a legacy-looking profile patch, the
+portable template owning no `cc-pool` provider, and the single dedicated
+bundle/route selection. The migration spec covers structural removal of block,
+quoted, and flow-map forms, comments/`!!js` preservation, backup/marker writing,
+idempotent second runs, fresh-profile skips, and rollback after a failed step.
 
 ## CC pool one-hour prompt-cache policy (fork)
 

@@ -6,9 +6,11 @@
 
 ## 仓库内构建与安装
 
-Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）全部链接到选定的 `web` profile。无需第二条命令、私有 registry 或手工提供的 tgz。构建会**修改 profile**，因此必须先停止 Host：Host 端口（`3080`）仍在监听时，构建会在触碰任何 profile 文件之前失败。
+Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）全部链接到选定的 `web` profile。当前格式的 profile 无需第二条命令、私有 registry 或手工提供的 tgz。构建会**修改 profile**，因此必须先停止 Host：Host 端口（`3080`）仍在监听时，构建会在触碰任何 profile 文件之前失败。
 
-`scripts/fork-plugins-build.ts` 使用 `DSH_HOME`（未设置时用 `%USERPROFILE%\.dsh`），目标是 `profiles\web`。它把包 staging 到被忽略的 `.build/fork-plugins/`，再用 `dsh plugin --profile web add <绝对 staging 目录>` 安装，记录为 pnpm `link:`。在任何 staging 或 profile 写入前，它会解析仓库 base bundle、portable 模板、目标 profile patch、home patch 以及已知或显式 `--patch` overlay 中的 legacy `llm-pi-ai` `providers.cc-pool` 路由；只有目标 profile patch 会被自动迁移，其他位置的声明会带着要修改的文件失败。修改前会把 profile 与 portable seed 文件备份到 `.build/fork-plugins/backups/`，并记录源码 key，使未变化的第二次运行既不重建也不重装。全新的 `web` profile 由安装步骤初始化，安装成功后才 seed；之后的失败会从备份回滚 profile。不会读取或写入任何 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
+构建只面向当前 profile 格式：没有 legacy 检测、守卫、备份或迁移。仍声明 `llm-pi-ai` `providers.cc-pool` 的旧 profile 必须先运行一次性 [`scripts/migrate-legacy-cc-pool-profile.ts`](../scripts/migrate-legacy-cc-pool-profile.ts)，再运行 `build.cmd`。该脚本备份 profile 与 seed 文件、结构移除 legacy 声明、确保专用 bundle/link、按需 seed、写入 `.dsh-profile-migrations.json` 后退出；它是唯一持有 legacy 知识的位置，所有维护中的 profile 迁移完成后可删除。
+
+`scripts/fork-plugins-build.ts` 使用 `DSH_HOME`（未设置时用 `%USERPROFILE%\.dsh`），目标是 `profiles\web`。它把包 staging 到被忽略的 `.build/fork-plugins/`，再用 `dsh plugin --profile web add <绝对 staging 目录>` 安装，记录为 pnpm `link:`；源码 key 使未变化的第二次运行既不重建也不重装，全新的 profile 在安装成功后才 seed。不会读取或写入任何 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
 
 - Subscriptions 从源码编译 `lib/index.js` 与 `lib/client.js`。staged manifest 内联 `@tormentalabs/claude-code-wire-compat`（来自仓库 tgz）与 `undici`，删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer，且不声明运行时依赖。公开的 optional provider 条目（`@cursor/sdk`、`@oven/bun-*`）保留声明；link 安装不会安装被链接包的 optional 依赖，因此这些 provider 需要另行提供对应包。staged 包不附带声明文件；源码检出仍是类型来源。
 - AetherShell 从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.1-rc.2`。
