@@ -9,7 +9,7 @@ kind: "package-bundle"
 
 ## 概述
 
-`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：安装后恰好提供一条 Anthropic Messages 路由，其端点、凭据与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它，设置服务会把该目录投影为可编辑表单。其默认提示缓存策略是 CC 2.1.288 的三标记布局，带显式一小时存活期、identity 块与 extended beta。可选的 `ccWireParity` 请求在成员端点证明该能力后才改用 parity 请求体与 header。插件不注册可配置 provider 目录项，因此只有经校验的配置才能加入模型。
+`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：提供一条 Anthropic Messages 路由，其端点、凭据与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它。其默认提示缓存策略是 CC 2.1.288 的三标记布局：main 与 subagent 请求带显式一小时存活期、identity 块与 extended beta，helper 请求保持 API 默认的五分钟存活期。可选的 `ccWireParity` 请求在成员端点证明该能力后才改用 parity 请求体与 header。插件不注册可配置 provider 目录项，因此只有经校验的配置才能加入模型。
 
 ## 目录
 
@@ -63,13 +63,13 @@ kind: "package-bundle"
 
 ### 提示缓存策略
 
-本路由的默认策略是 CC 2.1.288 的三标记布局，带显式一小时存活期：`cacheMarkerPolicy: cc3`、`cacheTtl: 1h`、`extendedCacheBeta: true`。三者都不配置的 profile 就使用这套策略。这些字段是插件装载时读取的 loader 配置，只作用于本路由，并且只经本路由的 profile 到达请求。`cacheTtl` 命名标记存活期，`extendedCacheBeta` 声明一小时存活期所需的 `extended-cache-ttl-2025-04-11`，`cacheMarkerPolicy: cc3` 掌管放置。
+本路由的默认策略是 CC 2.1.288 的三标记布局，带显式一小时存活期：`cacheMarkerPolicy: cc3`、`cacheTtl: 1h`、`extendedCacheBeta: true`。三者都不配置的 profile 就使用这套策略。这些字段是插件装载时读取的 loader 配置，只作用于本路由，并且只经本路由的 profile 到达请求。`cacheTtl` 命名 main 或 subagent 请求声明的标记存活期，`extendedCacheBeta` 声明该一小时存活期所需的 `extended-cache-ttl-2025-04-11`，`cacheMarkerPolicy: cc3` 掌管放置。helper 请求（`compaction`、`auxiliary`）不属于该存活期：它保持 API 默认的五分钟存活期，不带 `ttl`，也不声明 extended beta。
 
-不可能成立的组合会在插件装载时被拒绝，设置写入也走同一校验，绝不会拖到请求时才失败：`cacheTtl: 1h` 缺少 `extendedCacheBeta: true` 是错误，`cacheMarkerPolicy: cc3` 还要求 `cacheTtl: 1h`。`cacheTtl: none` 是受支持的关闭缓存状态：解析时会移除 `cacheMarkerPolicy`、强制 `extendedCacheBeta: false`，路由不写任何标记。`cacheTtl: 5m` 不是受支持的 loader 取值：schema 唯一的标记策略是 `cc3` 且默认为它，因此带默认组合的五分钟存活期会被拒绝。schema 仍接受三个存活期取值，但由解析后的策略决定它们如何服务，因此路由不会留下来不带其标记所需 beta 的状态。
+不可能成立的组合会在插件装载时被拒绝，设置写入也走同一校验，绝不会拖到请求时才失败：`cacheTtl: 1h` 缺少 `extendedCacheBeta: true` 是错误，`cacheMarkerPolicy: cc3` 还要求 `cacheTtl: 1h`。`cacheTtl: none` 是受支持的关闭缓存状态：解析时会移除 `cacheMarkerPolicy`、强制 `extendedCacheBeta: false`，路由不写任何标记。`cacheTtl: 5m` 不是受支持的 loader 取值：schema 唯一的标记策略是 `cc3` 且默认为它，因此带默认组合的五分钟存活期会被拒绝。helper 存活期同样不是 loader 取值：它跟随请求类别，任何配置字段都不会把 helper 变成一小时。schema 仍接受三个存活期取值，但由解析后的策略决定它们如何服务，因此路由不会留下来不带其标记所需 beta 的状态。
 
-使用 `cc3` 时，放置由本路由的适配器接管：先移除 `system`、`tools` 和 `messages` 上共享传输或调用方放置的全部 `cache_control`，然后只给三个位置加上 `{"type": "ephemeral", "ttl": "1h"}`——pinned identity 块、harness system 块，以及最后一个可缓存的用户内容块。identity 块——`You are Claude Code, Anthropic's official CLI for Claude.`——排在整个 system 数组最前，因此本路由转发的顺序是 identity、harness；mac 池在其前面发送的 billing 块属于池本身，最终顺序为 billing、identity、harness。策略会给 identity 块加标记；池插入的 billing 块不带标记，最后一条 user 消息之前的消息与任何工具声明也都不带。identity 行最多出现一次，因为与它逐字节相等的调用方块会在策略加入自己的块之前被丢弃。
+使用 `cc3` 时，放置由本路由的适配器接管：先移除 `system`、`tools` 和 `messages` 上共享传输或调用方放置的全部 `cache_control`，然后只给三个位置加标记——pinned identity 块、harness system 块，以及最后一个可缓存的用户内容块。main 或 subagent 请求在每个位置写入 `{"type": "ephemeral", "ttl": "1h"}`；helper 请求（`compaction`、`auxiliary`）保持 API 默认的五分钟存活期，写入 `{"type": "ephemeral"}`、不带 `ttl`，也不声明 extended beta。identity 块——`You are Claude Code, Anthropic's official CLI for Claude.`——排在整个 system 数组最前，因此本路由转发的顺序是 identity、harness；mac 池在其前面发送的 billing 块属于池本身，最终顺序为 billing、identity、harness。策略会给 identity 块加标记；池插入的 billing 块不带标记，最后一条 user 消息之前的消息与任何工具声明也都不带。identity 行最多出现一次，因为与它逐字节相等的调用方块会在策略加入自己的块之前被丢弃。
 
-唯一的消息位置是最后一条 user 消息的末尾块；没有调用方 system prompt 的请求标记 identity 与最后 user 两个位置，只有一条消息的请求仍带三个标记。请求体还遵循 pinned 客户端的顶层字段顺序——`model`、`messages`、`system`、`tools`、`tool_choice`、`metadata`、`max_tokens`、`thinking`，随后是其余字段，`stream` 最后——若 `metadata` 缺失，则在规范位置补一个空对象，好让池的 forward-body 编辑器就地把 `metadata.user_id` 写入其中，而不是在 `stream` 之后追加成员；转发后的请求体保持一个 `metadata` 成员，且仍在原位置。beta 走请求的 `anthropic-beta` header；转发的请求体不增加 `scope` 字段，也不声明 scope beta。
+唯一的消息位置是最后一条 user 消息的末尾块；没有调用方 system prompt 的请求标记 identity 与最后 user 两个位置，只有一条消息的请求仍带三个标记。请求体还遵循 pinned 客户端的顶层字段顺序——`model`、`messages`、`system`、`tools`、`tool_choice`、`metadata`、`max_tokens`、`thinking`，随后是其余字段，`stream` 最后——若 `metadata` 缺失，则在规范位置补一个空对象，好让池的 forward-body 编辑器就地把 `metadata.user_id` 写入其中，而不是在 `stream` 之后追加成员；转发后的请求体保持一个 `metadata` 成员，且仍在原位置。beta 走请求的 `anthropic-beta` header，且只随 main 或 subagent 请求发送，helper 不声明；转发的请求体不增加 `scope` 字段，也不声明 scope beta。
 
 由于策略显式落在 profile 上，环境中的 provider 偏好（`PI_CACHE_RETENTION`，其它路由仍可跟随它）无法改变它。其它每一条 pi-ai Anthropic Messages 路由都会显式声明自己的 `cacheRetention`，因此本路由的策略无法到达它们，它们也都不声明 extended beta。
 
@@ -146,7 +146,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 #### KV Cache effect
 
-固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。默认的 `cc3` 策略加入 identity 块，用显式一小时存活期标记 identity 块、harness system 块与最后一个用户内容块，写入 pinned 客户端的字段顺序，并声明 extended beta。`cacheTtl` 与 `extendedCacheBeta` 仍是本路由的字段，但策略要求一小时且声明 beta 的组合，并由策略掌管标记集合与字段顺序，因此布局不会在请求之间变化，任何工具声明也都不带标记。一旦证明 `ccWireParity`，parity 请求体反而完全不携带 `cache_control`：它把 prompt 拆成 identity 行、重排后的静态 section 与会话专属余下部分，由 worker 按声明的意图写入缓存计划——`main`，或关闭缓存路由的 `off`——因此该线路的前缀布局与标记放置属于池的 worker，而不属于本路由。
+固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。默认的 `cc3` 策略加入 identity 块，对 main 或 subagent 请求用显式一小时存活期、对 helper 请求用 API 默认的五分钟存活期标记 identity 块、harness system 块与最后一个用户内容块，写入 pinned 客户端的字段顺序，并只在采用一小时存活期时声明 extended beta。`cacheTtl` 与 `extendedCacheBeta` 仍是本路由的字段，但策略要求一小时且声明 beta 的组合，并由策略掌管标记集合与字段顺序，因此布局不会在请求之间变化，任何工具声明也都不带标记。一旦证明 `ccWireParity`，parity 请求体反而完全不携带 `cache_control`：它把 prompt 拆成 identity 行、重排后的静态 section 与会话专属余下部分，由 worker 按声明的意图写入缓存计划——`main`，或关闭缓存路由的 `off`——因此该线路的前缀布局与标记放置属于池的 worker，而不属于本路由。
 
 ## 已知限制与后续工作
 
@@ -168,4 +168,4 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 - 路由事实、部署未配置的容量或档位集合都随插件版本发布。本包拥有这些值，因此任何 profile 编辑都无法偏离已部署的池；部署自己的模型集属于配置，而不是版本事实。
 - 会话忙碌重试计划属于池行为事实，而不是部署可调项：租约在流结束后很快释放，固定的 100-250 ms 步进限定等待时间，既不拖慢正常请求，也不让卡住的会话挂住整轮。这里只重试 `POOL_SESSION_BUSY`；全局槽位限制与 provider 限速仍归 `dsh-llm-retry` 处理。
-- 插件的 `Config` 有六个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl`、`extendedCacheBeta` 与 `cacheMarkerPolicy` 是本路由的提示缓存策略，`ccWireParity` 是可选的 CC wire parity 请求。缓存默认值就是三标记一小时策略（`cacheTtl: 1h`、`extendedCacheBeta: true`、`cacheMarkerPolicy: cc3`），`none` 存活期解析为无标记、无 extended beta，不可能的组合会在装载时被拒绝，`ccWireParity` 默认 `false`。这些字段都不接受档位映射、任意 compat 开关、重试计划、探测间隔或凭据字面量。
+- 插件的 `Config` 有六个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl`、`extendedCacheBeta` 与 `cacheMarkerPolicy` 是本路由的提示缓存策略，`ccWireParity` 是可选的 CC wire parity 请求。缓存默认值就是三标记一小时策略（`cacheTtl: 1h`、`extendedCacheBeta: true`、`cacheMarkerPolicy: cc3`），`none` 存活期解析为无标记、无 extended beta，helper 请求保持 API 默认的五分钟存活期，不可能的组合会在装载时被拒绝，`ccWireParity` 默认 `false`。这些字段都不接受档位映射、任意 compat 开关、重试计划、探测间隔或凭据字面量。
