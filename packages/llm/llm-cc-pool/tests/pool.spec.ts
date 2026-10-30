@@ -269,9 +269,12 @@ describe('prompt-cache policy', () => {
       extendedCacheBeta: true,
       cacheMarkerPolicy: 'cc3',
     })
-    // The schema still accepts the lifetime enum; resolution refuses the values
-    // the configured policy cannot combine.
-    expect(Config({ cacheTtl: '5m' }).cacheTtl).toBe('5m')
+    // The loader offers only the lifetimes its default policy can serve: `cc3`
+    // writes one-hour markers for a main or subagent request, so `5m` is not a
+    // loader choice. The programmatic set stays three-valued for a profile that
+    // omits the marker policy.
+    expect(Config({ cacheTtl: 'none' }).cacheTtl).toBe('none')
+    expect(() => Config({ cacheTtl: '5m' } as never)).toThrow(/cacheTtl/)
     expect(() => Config({ cacheTtl: '24h' } as never)).toThrow(/cacheTtl/)
     expect(() => Config({ cacheTtl: '5min' } as never)).toThrow(/cacheTtl/)
   })

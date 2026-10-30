@@ -92,7 +92,10 @@ export const MODEL_INPUT: readonly PiAiModality[] = Object.freeze(['text', 'imag
  * it. The route's default policy declares `1h` and the three-marker layout, and
  * that combination also requires {@link CcPoolCachePolicy.extendedCacheBeta};
  * {@link resolvePoolCachePolicy} refuses the other lifetimes while `cc3` owns
- * placement.
+ * placement. `5m` is therefore programmatic-only: a loader configuration always
+ * resolves the `cc3` default, so its schema offers `1h` and `none` alone, while
+ * a caller of {@link poolProviderProfile} that omits `cacheMarkerPolicy` can
+ * select `5m`.
  */
 export const CACHE_TTLS = Object.freeze(['5m', '1h', 'none'] as const)
 
@@ -137,7 +140,9 @@ export interface CcPoolCachePolicy {
    * slots. It marks no tool declaration and no message before the last user
    * turn, writes the pinned client's top-level field order with an empty
    * `metadata` in its canonical slot, and requires `cacheTtl: "1h"` and
-   * `extendedCacheBeta: true`.
+   * `extendedCacheBeta: true`. A `cacheTtl` of `none` drops this policy, so the
+   * identity block, the pinned field order, and the `metadata` placeholder are
+   * absent with it.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
 }

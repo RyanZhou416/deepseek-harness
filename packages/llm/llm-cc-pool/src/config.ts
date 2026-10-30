@@ -25,8 +25,24 @@ import type { Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { CACHE_MARKER_POLICIES, PiAiRequestLogProfileSchema } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { PiAiCacheMarkerPolicy, PiAiRequestLogProfile } from '@deepseek-ai/dsh-llm-pi-ai'
-import { CACHE_TTLS, MODELS, REASONING_LEVELS } from './pool.ts'
-import type { CcPoolCacheTtl, CcPoolModel } from './pool.ts'
+import { MODELS, REASONING_LEVELS } from './pool.ts'
+import type { CcPoolModel } from './pool.ts'
+
+/**
+ * Prompt-cache lifetimes the loader admits.
+ *
+ * `5m` belongs to the programmatic cache-TTL set only: this route's loader
+ * configuration always resolves a `cacheMarkerPolicy`, whose only value
+ * (`cc3`) writes one-hour markers and requires `cacheTtl: "1h"`. Offering `5m`
+ * in the loader schema would advertise a value no configuration can serve, so
+ * the loader exposes the two lifetimes it can: the extended one the default
+ * policy declares, and the caching-disabled state. A programmatic caller that
+ * omits `cacheMarkerPolicy` can still select `5m` through the profile resolver.
+ */
+export const LOADER_CACHE_TTLS = Object.freeze(['1h', 'none'] as const)
+
+/** One prompt-cache lifetime the loader admits; see {@link LOADER_CACHE_TTLS}. */
+export type CcPoolLoaderCacheTtl = (typeof LOADER_CACHE_TTLS)[number]
 
 /** Loader configuration for the mac-pool route. */
 export interface Config {
@@ -47,21 +63,25 @@ export interface Config {
   requestLog?: PiAiRequestLogProfile
   /**
    * Prompt-cache TTL this route declares for a main or subagent request's
-   * `cache_control` markers: `5m` keeps the API's default five-minute lifetime,
-   * `1h` asks for the extended one, and `none` sends no marker. A helper
-   * request (`compaction`, `auxiliary`) always keeps the API's default
-   * five-minute lifetime whatever this field selects, so it sends
-   * `{type: "ephemeral"}` with no `ttl` and declares no extended beta. The
-   * default `1h` is the lifetime the route serves main and subagent requests
-   * now; `5m` is refused while {@link cacheMarkerPolicy} is `cc3`, because that
-   * policy writes one-hour markers for those requests on its own. `none` is
-   * this route's caching-disabled state: it has no marker placement, so the
-   * configured marker policy is not applicable and is dropped during
-   * resolution; with {@link ccWireParity} it declares cache intent `off`
-   * instead of the worker's main plan. The value reaches the wire only through
-   * this route's profile, so no other provider's request changes.
+   * `cache_control` markers: `1h` asks for the extended lifetime and `none`
+   * sends no marker. A helper request (`compaction`, `auxiliary`) always keeps
+   * the API's default five-minute lifetime whatever this field selects, so it
+   * sends `{type: "ephemeral"}` with no `ttl` and declares no extended beta.
+   * The default `1h` is the lifetime the route serves main and subagent
+   * requests now. `5m` is not a loader choice: the default
+   * {@link cacheMarkerPolicy} (`cc3`) always writes one-hour markers for those
+   * requests and requires `cacheTtl: "1h"`, so no loader configuration can
+   * serve it; a programmatic profile that omits the marker policy can still
+   * select it. `none` is this route's caching-disabled state: it has no marker
+   * placement, so the configured marker policy is not applicable and is dropped
+   * during resolution. Because that policy also owns the Claude Code identity
+   * system block, the pinned top-level field order, and the `metadata`
+   * placeholder, a `none` request omits all three along with the markers and
+   * the extended beta, and with {@link ccWireParity} it declares cache intent
+   * `off` instead of the worker's main plan. The value reaches the wire only
+   * through this route's profile, so no other provider's request changes.
    */
-  cacheTtl: CcPoolCacheTtl
+  cacheTtl: CcPoolLoaderCacheTtl
   /**
    * Declare `extended-cache-ttl-2025-04-11` on this route's Anthropic Messages
    * requests. The default `true` is what the default `cacheTtl: 1h` and
@@ -83,8 +103,10 @@ export interface Config {
    * client's top-level field order with an empty `metadata` placeholder in its
    * canonical slot for the pool's `user_id` splice. It requires `cacheTtl: "1h"`
    * and {@link extendedCacheBeta}: an impossible combination is refused at load
-   * and on a settings write, never at request time. No other provider route
-   * reads this value.
+   * and on a settings write, never at request time. A `cacheTtl` of `none` drops
+   * the policy, so the identity block, the pinned field order, and the
+   * `metadata` placeholder are absent with it. No other provider route reads
+   * this value.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**
@@ -125,7 +147,7 @@ export interface Config {
 /** Plain loader configuration a composition writes, before schema defaults apply. */
 export type Options = {
   requestLog?: PiAiRequestLogProfile
-  cacheTtl?: CcPoolCacheTtl
+  cacheTtl?: CcPoolLoaderCacheTtl
   extendedCacheBeta?: boolean
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   ccWireParity?: boolean
@@ -147,7 +169,7 @@ const builtInModels: CcPoolModel[] = MODELS.map(model => ({ ...model }))
 /** Runtime schema for {@link Config}. */
 export const Config = z.object({
   requestLog: PiAiRequestLogProfileSchema,
-  cacheTtl: z.union(CACHE_TTLS).default('1h'),
+  cacheTtl: z.union(LOADER_CACHE_TTLS).default('1h'),
   extendedCacheBeta: z.boolean().default(true),
   cacheMarkerPolicy: z.union(CACHE_MARKER_POLICIES).default('cc3'),
   ccWireParity: z.boolean().default(false),

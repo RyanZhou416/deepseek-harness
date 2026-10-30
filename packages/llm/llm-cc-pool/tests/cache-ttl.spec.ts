@@ -352,7 +352,9 @@ describe('pool prompt-cache policy', () => {
 
   it('refuses an impossible cache policy at load, before registering the route', async () => {
     const cases: readonly [label: string, config: Record<string, unknown>, error: RegExp][] = [
-      ['five-minute lifetime', { cacheTtl: '5m' }, /cacheMarkerPolicy "cc3" requires cacheTtl "1h"/],
+      // `5m` is not a loader choice: the schema admits only the lifetimes the
+      // default `cc3` policy can serve.
+      ['five-minute lifetime', { cacheTtl: '5m' }, /cacheTtl/],
       ['one hour without the beta', { cacheTtl: '1h', extendedCacheBeta: false }, /cacheMarkerPolicy "cc3" requires extendedCacheBeta: true/],
     ]
     for (const [label, config, error] of cases) {
@@ -384,6 +386,25 @@ describe('pool prompt-cache policy', () => {
     expect(ctx.llm.listProviders()).toContainEqual(expect.objectContaining({ id: 'cc-pool' }))
     await ctx.fiber.dispose()
     context = undefined
+  })
+
+  it('serves the caching-disabled lifetime as pi-ai\'s own body', async () => {
+    const request = await probe({ cacheTtl: 'none' })
+
+    // A none lifetime drops the cc3 policy, and with it everything that policy
+    // owns: no marker, no extended beta, no Claude Code identity block, and no
+    // pinned field order or metadata placeholder.
+    expect(markersOf(request.body)).toEqual([])
+    expect(JSON.stringify(request.body)).not.toContain('cache_control')
+    expect(betasOf(request)).toEqual([])
+    expect(JSON.stringify(request.body)).not.toContain(IDENTITY)
+    expect(request.body['system']).toEqual([{ type: 'text', text: 'You are the pool test assistant.' }])
+    expect(request.body['metadata']).toBeUndefined()
+    // pi-ai's construction order keeps `stream` before the fields it appends,
+    // not last as the pinned client's order requires.
+    const keys = Object.keys(request.body)
+    expect(keys.at(-1)).not.toBe('stream')
+    expect(keys).not.toContain('metadata')
   })
 
   it('refuses a lifetime the route does not offer before it registers', async () => {
