@@ -59,6 +59,15 @@ test('a mid-conversation system message never merges with its neighbours', () =>
   assert.deepEqual(wire.map(message => message.role), ['user', 'system', 'system', 'user'])
 })
 
+test('dated and dotted ids normalize to the same catalogue decision', () => {
+  // The compat builder normalizes dated suffixes and dotted versions before its catalogue lookup;
+  // this route must make the same decision or it sends a system-role message the beta cannot cover.
+  assert.equal(supportsMidConversationSystem('claude-sonnet-4-5-20250929'), false)
+  assert.equal(supportsMidConversationSystem('claude-opus-5-20260101'), true)
+  assert.equal(supportsMidConversationSystem('claude-opus-4.8'), true)
+  assert.equal(supportsMidConversationSystem('claude-sonnet-5-20260101'), true)
+})
+
 test('the pinned catalogue decides the capability for every model and its 1M-marked id', () => {
   // The capability was a duplicated local list until the catalogue became the source. Pin the
   // whole catalogue rather than a few names, and pin the marker: the request-time `[1m]` suffix

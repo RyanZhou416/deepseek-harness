@@ -17,7 +17,7 @@ import type {
 import {
   CLAUDE_CODE_2_1_288_PROFILE,
   isClaude3Model,
-  supportsMidConversationSystem as compatSupportsMidConversationSystem,
+  modelCapability,
 } from '@tormentalabs/claude-code-wire-compat'
 import type { BuiltClaudeCodeRequest } from '@tormentalabs/claude-code-wire-compat'
 import type { FlowSpec } from '../auth/oauth-flow.js'
@@ -470,10 +470,7 @@ export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) 
  * @returns whether the pinned catalogue grants the mid-conversation system form.
  */
 export function supportsMidConversationSystem(model: string): boolean {
-  return compatSupportsMidConversationSystem(
-    model.replace(/\[1m\]/iu, ''),
-    CLAUDE_CODE_2_1_288_PROFILE,
-  )
+  return modelCapability(model, 'mid_conv_system', CLAUDE_CODE_2_1_288_PROFILE)
 }
 
 /** Files API upload. Official path from the Files HTTP reference. */

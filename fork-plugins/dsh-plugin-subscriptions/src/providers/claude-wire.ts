@@ -17,7 +17,7 @@ import {
   ClaudeCodeWireError,
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   buildClaudeCodeRequest,
-  supportsMidConversationSystem,
+  modelCapability,
 } from '@tormentalabs/claude-code-wire-compat'
 import { desktopClientHeaders } from './claude-desktop.js'
 import { unifiedRateLimitFor } from './unified-rate-limit.js'
@@ -543,7 +543,7 @@ export async function buildClaudeWireRequest(
       // The same predicate that decides the beta header, so a mid-conversation system message and
       // its header are always decided together. A suppressing policy turns the predicate off: the
       // message is refused by the caller's own gate rather than degraded into a top-level prompt.
-      supportsMidConversationSystem(options.model.replace(/\[1m\]/iu, ''), CLAUDE_CODE_2_1_288_PROFILE)
+      modelCapability(options.model, 'mid_conv_system', CLAUDE_CODE_2_1_288_PROFILE)
         && resolveSuppressBetas(policy) === undefined,
     ),
     system,
