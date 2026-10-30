@@ -501,6 +501,27 @@ describe('lease-release refusal', () => {
     expect(gate.activeSessions).toBe(0)
   })
 
+  it('opens a session-busy retry with a fresh attempt nonce', async () => {
+    const gate = new SessionSerialGate()
+    const nonces: (string | undefined)[] = []
+    const chunks = await drain(gate.serialize({
+      sessionId: 's',
+      signal: undefined,
+      open: (retryNonce) => {
+        nonces.push(retryNonce)
+        return nonces.length === 1 ? scripted(BUSY) : scripted(...ANSWERED)
+      },
+    }))
+    expect(chunks).toEqual(ANSWERED)
+    // The first attempt keeps the caller's attempt identity; the refused
+    // attempt's ledger entry is already closed at the pool, so the retry must
+    // carry a different nonce instead of reusing its request id.
+    expect(nonces).toHaveLength(2)
+    expect(nonces[0]).toBeUndefined()
+    expect(nonces[1]).toEqual(expect.any(String))
+    expect(nonces[1]).not.toBe('')
+  })
+
   it('forwards a session-busy refusal after content was already forwarded', async () => {
     const gate = new SessionSerialGate()
     const partial: StreamChunk = { type: 'text-delta', index: 0, text: 'partial' }

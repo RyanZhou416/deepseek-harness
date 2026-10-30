@@ -20,8 +20,16 @@
  * refusal, including the global-slot `cc_pool_rate_limited` 429 and its
  * `Retry-After`, is delivered unchanged: `dsh-llm-retry` owns those.
  *
+ * The retry is this route's deliberate deviation from the pool contract: the
+ * pool marks `cc_pool_session_busy` terminal (`retryable: false`,
+ * `client_action: stop`), while the lease it names is already releasing. Each
+ * retry therefore opens a new attempt with a fresh ledger nonce, so the pool
+ * reads a new client request id rather than a replay of the refused one. The
+ * retry stays bounded so a leased session still surfaces the refusal.
+ *
  * @module @deepseek-ai/dsh-llm-cc-pool/session-gate
  */
+import { randomUUID } from 'node:crypto'
 import { LlmError, POOL_SESSION_BUSY_CODE } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 
@@ -60,8 +68,14 @@ export interface SessionStreamRequest {
   readonly sessionId: string
   /** Caller cancellation; aborts a queued wait and the busy retry delay. */
   readonly signal: AbortSignal | undefined
-  /** Opens the upstream stream once this request owns the session. */
-  readonly open: () => AsyncIterable<StreamChunk>
+  /**
+   * Opens the upstream stream once this request owns the session. The first
+   * attempt passes `undefined` and keeps the caller's attempt identity; every
+   * busy retry passes a fresh nonce, which the caller stamps on the retry's
+   * attempt so a shared-account pool reads a new ledger entry instead of a
+   * replay of the refused one.
+   */
+  readonly open: (retryNonce: string | undefined) => AsyncIterable<StreamChunk>
 }
 
 /** One queued request awaiting its turn. */
@@ -295,6 +309,8 @@ class SerializedStream implements AsyncIterableIterator<StreamChunk> {
   private held: StreamChunk | undefined
   private emitted = false
   private busyRetries = 0
+  /** Fresh attempt nonce for the current retry; undefined for the first attempt. */
+  private retryNonce: string | undefined
 
   /**
    * @param request - session identity, caller cancellation, and the stream opener.
@@ -326,7 +342,7 @@ class SerializedStream implements AsyncIterableIterator<StreamChunk> {
           continue
         }
         if (this.inner === undefined) {
-          this.inner = this.request.open()[Symbol.asyncIterator]()
+          this.inner = this.request.open(this.retryNonce)[Symbol.asyncIterator]()
         }
         const chunk = await this.readChunk(this.inner)
         if (chunk === undefined) {
@@ -436,7 +452,10 @@ class SerializedStream implements AsyncIterableIterator<StreamChunk> {
 
   /**
    * Close the refused attempt, wait the next bounded delay, and leave the
-   * stream ready to open one more attempt while still holding the session.
+   * stream ready to open one more attempt while still holding the session. The
+   * retry's attempt nonce is minted here, before the delay: the pool already
+   * closed the refused ledger entry, so the next attempt must carry a different
+   * client request id.
    */
   private async retry(): Promise<void> {
     /* v8 ignore next -- the frozen delay list is never empty; the fallback only discharges noUncheckedIndexedAccess. */
@@ -444,6 +463,7 @@ class SerializedStream implements AsyncIterableIterator<StreamChunk> {
     /* v8 ignore next -- retry() runs only while busyRetries is below the delay list's length. */
     const delay = SESSION_BUSY_DELAYS_MS[this.busyRetries] ?? lastDelay
     this.busyRetries += 1
+    this.retryNonce = randomUUID()
     const inner = this.inner
     this.inner = undefined
     try {

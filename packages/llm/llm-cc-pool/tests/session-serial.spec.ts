@@ -76,6 +76,8 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
 interface MemberCall {
   /** Session header the adapter sent, absent only for a sessionless caller. */
   readonly sessionId: string | undefined
+  /** Attempt ledger id the adapter sent as `x-client-request-id`. */
+  readonly requestId: string | undefined
   /** First user text in the request body, naming which request reached the pool. */
   readonly text: string
 }
@@ -110,7 +112,8 @@ function memberFetch(respond: Responder): {
         ? {}
         : JSON.parse(raw) as MemberBody
       const sessionId = headers.get('x-claude-code-session-id') ?? undefined
-      calls.push({ sessionId, text: body.messages?.[0]?.content?.[0]?.text ?? '' })
+      const requestId = headers.get('x-client-request-id') ?? undefined
+      calls.push({ sessionId, requestId, text: body.messages?.[0]?.content?.[0]?.text ?? '' })
       return respond(calls.length - 1, sessionId)
     },
   }
@@ -281,6 +284,12 @@ it('retries a session-busy refusal for the next request after the previous strea
   expect(second.finish).toEqual({ kind: 'stop' })
   expect(second.message.content).toEqual([{ type: 'text', text: 'second' }])
   expect(stub.calls.map(call => call.text)).toEqual(['first', 'second', 'second'])
+  // The refused attempt's ledger entry is terminal at the pool, so the retry
+  // must present a fresh client request id instead of a replay of it.
+  const [, refused, retried] = stub.calls
+  expect(refused?.requestId).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/))
+  expect(retried?.requestId).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/))
+  expect(retried?.requestId).not.toBe(refused?.requestId)
 })
 
 it('keeps the request log for a queued session-busy retry as one logical request', async () => {

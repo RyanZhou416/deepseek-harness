@@ -105,6 +105,24 @@ export const inject = ['llm']
 const SESSION_HEADERS: ReadonlySet<string> = Object.freeze(new Set([PROVIDER]))
 
 /**
+ * Stamp a session-busy retry as a new attempt of one request.
+ *
+ * The loop's `attemptNonce` identifies its own deliberate attempt, so a retry
+ * inside that attempt combines the two rather than replacing it: replacing
+ * would make the retry indistinguishable from a different loop attempt, and
+ * deriving it from the loop nonce alone would repeat the refused attempt's wire
+ * id. The value is model-hidden transport metadata; the pi-ai adapter hashes it
+ * into `x-client-request-id`.
+ * @param options - the request as the caller assembled it.
+ * @param retryNonce - the fresh nonce the session gate minted for this retry.
+ * @returns a copy of the request whose attempt carries its own ledger identity.
+ */
+function retriedAttempt(options: GenerateOptions, retryNonce: string): GenerateOptions {
+  const attemptNonce = options.attemptNonce === undefined ? retryNonce : `${options.attemptNonce}/${retryNonce}`
+  return { ...options, attemptNonce }
+}
+
+/**
  * The pi-ai adapter with two mac-pool differences: the model catalogue is the
  * plugin's configured catalogue, not a credential-gated discovery result, and
  * streams for one session are ordered before they reach the pool.
@@ -148,20 +166,23 @@ class CcPoolAdapter extends PiAiAdapter {
    * Run one dispatch under its session's queue. A request without a session has
    * no pool binding to order against and opens directly.
    * @param options - the assembled request carrying the session identity.
-   * @param open - opens this dispatch's upstream stream.
+   * @param open - opens this dispatch's upstream stream for one attempt.
    * @returns the session-ordered stream.
    */
-  private ordered(options: GenerateOptions, open: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
-    if (options.sessionId === undefined) return open()
+  private ordered(
+    options: GenerateOptions,
+    open: (attempt: GenerateOptions) => AsyncIterable<StreamChunk>,
+  ): AsyncIterable<StreamChunk> {
+    if (options.sessionId === undefined) return open(options)
     return this.sessions.serialize({
       sessionId: String(options.sessionId),
       signal: options.signal,
-      open,
+      open: retryNonce => open(retryNonce === undefined ? options : retriedAttempt(options, retryNonce)),
     })
   }
 
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    return this.ordered(options, () => super.stream(options))
+    return this.ordered(options, attempt => super.stream(attempt))
   }
 
   /**
@@ -181,7 +202,7 @@ class CcPoolAdapter extends PiAiAdapter {
     const call = await super.prepareCall(provider, model, signal)
     return {
       model: call.model,
-      stream: options => this.ordered(options, () => call.stream(options)),
+      stream: options => this.ordered(options, attempt => call.stream(attempt)),
     }
   }
 
