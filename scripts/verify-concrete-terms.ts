@@ -10,6 +10,9 @@ const root = resolve(import.meta.dirname, '..')
 const blockedTerm = 'prove' + 'nance'
 const excludedPrefixes = [
   'vendor/',
+  // Imported upstream source keeps its attribution language, including the
+  // source-origin headers and guards the GPL-3.0 import requires.
+  'fork-plugins/claude-code-wire-compat/',
   'fork-plugins/dsh-agent-teams/',
   'fork-plugins/dsh-context/',
   'fork-plugins/dsh-plugin-subscriptions/',

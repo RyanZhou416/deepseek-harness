@@ -6,6 +6,7 @@
     ".github/review-ownership/README.md",
     "docs/AGENTS.md",
     "docs/cordis-api/inherited.md",
+    "fork-plugins/claude-code-wire-compat/",
     "fork-plugins/dsh-agent-teams/",
     "fork-plugins/dsh-context/",
     "docs/i18n/style-samples.md",
