@@ -685,5 +685,59 @@ describe('CC wire parity cache intent', () => {
     expect(offServer.headers[1]?.['x-cc-cache-intent']).toBe('helper')
     expect(markersOf(helper)).toEqual([])
     expect(JSON.stringify(helper)).not.toContain('"ttl"')
+    // The pool splices `metadata.user_id` into every forwarded request, helpers
+    // included, so the canonical slot is part of the helper body too.
+    expect(helper['metadata']).toEqual({})
+  })
+})
+
+describe('CC wire parity body', () => {
+  it('declares a subagent request and expands only its final user text turn', async () => {
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        ccWireParity: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    await assemble(ctx, {
+      ...WIRE_PARITY_PROBE,
+      provider: 'parity-main',
+      requestClass: 'subagent',
+      messages: [
+        userText('first turn'),
+        assistantText('hi', 'parity-main'),
+        userText('last turn'),
+      ],
+    })
+
+    const headers = server.headers[0] ?? {}
+    const body = server.requests[0] as Record<string, unknown>
+    expect(headers['x-cc-request-class']).toBe('subagent')
+    expect(headers['x-cc-system-layout']).toBe('boundary:1')
+    expect(headers['x-cc-cache-intent']).toBe('main')
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY },
+      { type: 'text', text: 'Stable route instructions.' },
+      { type: 'text', text: 'Current session state.' },
+    ])
+    // The pinned client wraps a string user message only for the message that
+    // carries the cache marker, so earlier text-only turns stay bare strings.
+    const messages = body['messages'] as Record<string, unknown>[]
+    expect(messages[0]?.['content']).toBe('first turn')
+    expect(messages[1]?.['content']).toEqual([{ type: 'text', text: 'hi' }])
+    expect(messages[2]?.['content']).toEqual([{ type: 'text', text: 'last turn' }])
+    expect(markersOf(body)).toEqual([])
   })
 })

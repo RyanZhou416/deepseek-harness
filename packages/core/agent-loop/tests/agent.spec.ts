@@ -136,6 +136,39 @@ describe('Agent', () => {
     expect(statuses).toEqual(['running', 'idle'])
   })
 
+  it('stamps a top-level request main and a delegated child subagent', async () => {
+    const adapter = new MockAdapter([
+      textResponse('root'),
+      textResponse('origin child'),
+      textResponse('depth child'),
+    ])
+    const ctx = await harness(adapter)
+    const rootId = SessionId('request-class-root')
+    const root = await ctx.agentLoop.create(rootId, { provider: 'mock', model: 'mock' })
+    send(root, 'root')
+    await root.whenIdle()
+
+    const originChild = await ctx.agents.create({
+      sessionId: SessionId('request-class-origin-child'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+      meta: { parentSession: rootId, origin: 'subagent', delegationDepth: 1 },
+    })
+    send(originChild.agent, 'origin child')
+    await originChild.agent.whenIdle()
+
+    const depthChild = await ctx.agents.create({
+      sessionId: SessionId('request-class-depth-child'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+      meta: { parentSession: rootId, delegationDepth: 1 },
+    })
+    send(depthChild.agent, 'depth child')
+    await depthChild.agent.whenIdle()
+
+    expect(adapter.requests.map(request => request.requestClass)).toEqual(['main', 'subagent', 'subagent'])
+    await originChild.dispose()
+    await depthChild.dispose()
+  })
+
   it('whenIdle() resolves immediately without active work', async () => {
     const ctx = await harness(new MockAdapter([textResponse('ok')]))
     const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })

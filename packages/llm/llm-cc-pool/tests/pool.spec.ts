@@ -2,7 +2,7 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createSystemMessage } from '@deepseek-ai/dsh-llm'
 import {
   POOL_CAPACITY_CODE,
   POOL_RATE_LIMITED_CODE,
@@ -412,6 +412,22 @@ function declaresWireParity(request: CapturedRequest): boolean {
 }
 
 /**
+ * Assert one request was served the route's ordinary cc3 wire, not a partial
+ * wire-parity body: no member header and exactly the three one-hour markers
+ * plus the extended cache beta.
+ * @param request - one captured model request the proof did not cover.
+ */
+function expectCc3Wire(request: CapturedRequest): void {
+  expect(request.headers.has('x-cc-request-class')).toBe(false)
+  expect(request.headers.has('x-cc-system-layout')).toBe(false)
+  expect(request.headers.has('x-cc-cache-intent')).toBe(false)
+  const body = JSON.stringify(request.body)
+  expect(body.match(/"cache_control"/gu)).toHaveLength(3)
+  expect(body).toContain('"ttl":"1h"')
+  expect((request.headers.get('anthropic-beta') ?? '').split(',')).toContain('extended-cache-ttl-2025-04-11')
+}
+
+/**
  * Mount the real LLM service and the plugin with the fetch stand-in installed
  * before mount, so the load probe is the one under test answers.
  * @param respond - the response for one recorded request, routed by URL.
@@ -460,6 +476,37 @@ describe('CC wire parity capability proof', () => {
     expect(call?.headers.get('x-cc-system-layout')).toBe('boundary:1')
     expect(call?.headers.get('x-cc-cache-intent')).toBe('main')
     // One load probe; a request never asks the endpoint again.
+    expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('serves a proved route the cc3 wire when the request states no coverable boundary', async () => {
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? capabilityReply('pool-build-1')
+      : anthropicSuccessResponse())
+    await awaitWireParity(ctx, capture)
+
+    const { requestClass: _requestClass, ...classless } = WIRE_PARITY_PROBE
+    const { systemSections: _sections, ...noSections } = WIRE_PARITY_PROBE
+    const stableOnly = WIRE_PARITY_SECTIONS.slice(0, 1)
+    await assemble(ctx, classless)
+    await assemble(ctx, noSections)
+    await assemble(ctx, {
+      ...WIRE_PARITY_PROBE,
+      systemSections: stableOnly,
+      system: stableOnly[0]?.text ?? '',
+    })
+    await assemble(ctx, {
+      ...WIRE_PARITY_PROBE,
+      messages: [
+        createSystemMessage('A prompt committed in history.'),
+        ...WIRE_PARITY_PROBE.messages,
+      ],
+    })
+
+    const fallbacks = modelCalls(capture).slice(-4)
+    expect(fallbacks).toHaveLength(4)
+    for (const fallback of fallbacks) expectCc3Wire(fallback)
+    // The proof is still valid: only these requests could not state the wire.
     expect(capabilityCalls(capture)).toHaveLength(1)
   })
 

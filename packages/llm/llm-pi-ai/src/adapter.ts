@@ -62,9 +62,9 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
-import { CC_WIRE_PARITY_MEMBER_HEADERS } from './config.ts'
+import { CC_WIRE_PARITY_MEMBER_HEADERS, CC_WIRE_PARITY_OWNED_HEADERS } from './config.ts'
 import type { PiAiCcWireParityCache, ResolvedPiAiProviderProfile } from './config.ts'
-import { requestImageTarget, toPiContext } from './context.ts'
+import { leadingSystemText, requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
 import { ProviderErrorCapture } from './pool-error.ts'
 import { encodeSessionNameHeader, sanitizeSessionName } from './session-name.ts'
@@ -718,29 +718,6 @@ function ccWireParityRequestClass(options: GenerateOptions): CcWireParityRequest
 }
 
 /**
- * The effective leading system text of one request.
- *
- * The request-level text and every leading system-role message join the way the
- * pi-ai context split joins them, which is the text the transport would send as
- * the system prompt.
- * @param options - the assembled request.
- * @returns the system prompt text, or the empty string when the request has none.
- */
-function leadingSystemText(options: GenerateOptions): string {
-  const parts: string[] = []
-  if (options.system !== undefined && options.system.length > 0) parts.push(options.system)
-  for (const message of options.messages) {
-    if (message.role !== 'system') break
-    const text = message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
-      .join('')
-    if (text.length > 0) parts.push(text)
-  }
-  return parts.join('\n\n')
-}
-
-/**
  * Resolve one request's wire-parity decisions.
  *
  * A main or subagent request needs a real boundary: the assembled sections,
@@ -773,7 +750,7 @@ function resolveCcWireParityRequest(
   }
   const sections = options.systemSections
   if (sections === undefined || sections.length === 0) return undefined
-  if (sections.map(section => section.text).join('\n\n') !== leadingSystemText(options)) return undefined
+  if (sections.map(section => section.text).join('\n\n') !== leadingSystemText(options).text) return undefined
   const stable: string[] = []
   const session: string[] = []
   for (const section of sections) {
@@ -906,21 +883,23 @@ function ccWireParitySystem(boundary: { readonly staticText: string; readonly dy
 }
 
 /**
- * Copy one wire-parity message without markers, expanding plain text content.
+ * Copy one wire-parity message without markers, expanding the final user text turn.
  *
  * The worker marks the trailing content block of the last user message, and the
  * transport serializes a text-only user message as a bare string — which has no
- * block to mark, so an ordinary text turn would lose the last-user marker.
- * Wire parity therefore sends every non-empty text-only user message in the
- * one-block array the marker writer expects. Content that is already a block
- * array, or any other role, is only stripped of its markers.
+ * block to mark. The pinned client's own message converter wraps a string user
+ * message in the one-block array only for the message that carries the cache
+ * marker, so wire parity expands exactly the final user-role message and leaves
+ * every earlier text-only turn as the bare string the client sends. Content that
+ * is already a block array, or any other role, is only stripped of its markers.
  * @param value - one message pi-ai built for the request.
- * @returns the message with markers stripped and string user content expanded.
+ * @param expandText - whether this is the final user message that receives the worker's marker.
+ * @returns the message with markers stripped and its text-only content expanded when it is last.
  */
-function ccWireParityMessage(value: unknown): unknown {
+function ccWireParityMessage(value: unknown, expandText: boolean): unknown {
   /* v8 ignore next -- pi-ai builds every message as an object */
   if (!isRequestPayload(value)) return value
-  if (value['role'] !== 'user') return stripMessage(value)
+  if (!expandText || value['role'] !== 'user') return stripMessage(value)
   const content = value['content']
   if (typeof content !== 'string' || content.length === 0) return stripMessage(value)
   return { ...value, content: [{ type: 'text', text: content }] }
@@ -935,9 +914,10 @@ function ccWireParityMessage(value: unknown): unknown {
  * system its caller built. Both strip every marker the transport or a caller
  * placed — on system blocks, tool declarations, and message content — and
  * remove only the cache betas the worker plans, leaving context-window and
- * tool-streaming betas intact. A text-only user
- * message travels as a content block array rather than a bare string, because
- * the worker's marker writer can only mark a block. The edits finish by writing
+ * tool-streaming betas intact. The final text-only user message travels as a
+ * content block array rather than a bare string, because the worker's marker
+ * writer can only mark a block; earlier text-only turns keep the bare-string
+ * form the pinned client sends. The edits finish by writing
  * the pinned client's top-level field order, whose `metadata` placeholder keeps
  * the pool's `user_id` splice in its canonical slot. A request whose decisions
  * declare cache intent `off` sends this same body: every marker and cache beta
@@ -953,12 +933,16 @@ function withCcWireParityBody(payload: Record<string, unknown>, request: CcWireP
     : ccWireParitySystem(boundary)
   const toolBlocks = arrayOf(payload['tools'])
   const messageBlocks = arrayOf(payload['messages'])
+  const lastUser = messageBlocks?.findLastIndex(message => isRequestPayload(message) && message['role'] === 'user') ?? -1
+  const wireMessages = messageBlocks?.map(
+    (message, index) => ccWireParityMessage(message, index === lastUser),
+  )
   const stripped: Record<string, unknown> = {
     ...payload,
     ...system === undefined ? {} : { system },
     ...toolBlocks === undefined ? {} : { tools: toolBlocks.map(withoutToolExtras) },
     /* v8 ignore next -- every Anthropic Messages request carries its messages */
-    ...messageBlocks === undefined ? {} : { messages: messageBlocks.map(ccWireParityMessage) },
+    ...wireMessages === undefined ? {} : { messages: wireMessages },
   }
   const betas = withoutCacheBetas(stripped['betas'])
   if (betas === undefined) delete stripped['betas']
@@ -1097,11 +1081,6 @@ const ADAPTER_SESSION_HEADERS: ReadonlySet<string> = Object.freeze(new Set([
   SESSION_NAME_HEADER,
   CLIENT_REQUEST_ID_HEADER,
 ].map(name => name.toLowerCase())))
-
-/** Lower-cased wire-parity member header names this adapter owns on every route. */
-const ADAPTER_CC_WIRE_PARITY_HEADERS: ReadonlySet<string> = Object.freeze(new Set(
-  Object.values(CC_WIRE_PARITY_MEMBER_HEADERS).map(name => name.toLowerCase()),
-))
 
 /** Remove every header whose case-insensitive name is one of `owned`. */
 function withoutHeaders(headers: Record<string, string>, owned: ReadonlySet<string>): Record<string, string> {
@@ -1452,7 +1431,7 @@ export class PiAiAdapter extends LlmAdapter {
       // two conflicting values, a non-wire-parity route cannot inject a partial
       // wire-parity header set, and wire parity never sends one either.
       const profileHeaders = requestHeaders(profile.headers)
-      const deploymentHeaders = withoutHeaders(profileHeaders, ADAPTER_CC_WIRE_PARITY_HEADERS)
+      const deploymentHeaders = withoutHeaders(profileHeaders, CC_WIRE_PARITY_OWNED_HEADERS)
       const headers = {
         ...sessionHeaders === undefined ? deploymentHeaders : withoutSessionHeaders(deploymentHeaders),
         ...sessionHeaders,

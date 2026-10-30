@@ -77,7 +77,7 @@ kind: "package-bundle"
 
 `ccWireParity` 为本路由请求 CC wire parity 线路，默认 `false`。该请求是偏好而不是授权：标志关闭时插件不发送任何探测；即使打开，路由也只在成员端点用本路由的成员凭据回答 `GET https://ccpool.tiancegames.com/v1/capabilities` 并返回 `{protocol: 2, ccWireParity: 1, buildId}` 之后，才在 profile 上公布该标志。只有携带该精确三元组的 `200` 才能证明能力；`buildId` 是池构建自身的稳定身份（`MacPoolBuildId`），未打包构建不报告它，因而证明不了任何东西。被拒绝、畸形、超时或不可达的回答都会让路由留在默认的三标记线路上，缺少成员凭据同样保持关闭，而不是让装载失败。通用 pi-ai resolver 会拒绝任何没有容量证明的 profile 上的 `ccWireParity`，且该证明的 endpoint 必须与该路由同源；只有本插件会提供这样的证明——取自它对上述端点的探测——因此手写 profile 无法启用该线路。
 
-正面证明只属于作出回答的端点与池构建。插件在 profile 装载时以及 `CC_POOL_API_KEY` 被替换时再次询问，绝不轮询。它也没有重连接缝：新构建上的池重启在其中一个触发器运行之前不会被重新探测，因此路由可能继续为上一个构建证明过的线路服务。池标记为 `x-cc-wire-parity-unavailable: 1` 的 `503` 是对能力的反证，而不是再问一次的理由：插件丢弃证明，下一个请求改用默认线路，且不重新探测。
+正面证明只属于作出回答的端点与池构建。插件在 profile 装载时以及 `CC_POOL_API_KEY` 被替换时再次询问，绝不轮询。它也没有重连接缝：新构建上的池重启在其中一个触发器运行之前不会被重新探测，因此路由可能继续为上一个构建证明过的线路服务。池标记为 `x-cc-wire-parity-unavailable: 1` 的 `503` 是对能力的反证，而不是再问一次的理由：插件丢弃证明，下一个请求改用默认线路，且不重新探测。该标记本身也禁止自动重发——即使响应体没有 pool code、`origin` 或重试事实——因此被拒绝的 wire parity 请求绝不会以默认线路重试。
 
 在已证明的路由上，适配器写入 parity 请求体与三个成员 header（`x-cc-request-class`、`x-cc-system-layout`、`x-cc-cache-intent`）；本插件只公布标志与缓存意图，绝不改写请求体或 header。线路自行声明缓存意图：`cacheTtl: none`——本路由的关闭缓存状态——变成意图 `off`，worker 因此不写标记、不写 TTL、不声明 cache beta，而其它存活期都变成 `main`，即 worker 自己的缓存计划；helper 始终声明 `helper`。parity 请求体本身不携带 `cache_control`，因此该线路不要求 `cc3`、`cacheTtl: 1h` 或 `extendedCacheBeta`，关闭缓存的路由仍启用该线路。适配器无法分类的请求，或没有真实静态/动态分界的主/子智能体请求，会改用默认三标记请求体，而不是部分 parity 请求体。
 

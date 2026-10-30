@@ -321,6 +321,27 @@ describe('CC wire parity capability proof', () => {
     }]]))).toThrow(/does not cover baseURL/)
   })
 
+  it('redacts userinfo and query from the endpoints a proof refusal names', () => {
+    const baseURL = 'https://member:secret@pool.test/v1?api_key=hidden'
+    const endpoint = 'https://member:secret@other.test/v1/capabilities?token=hidden'
+    let reported = ''
+    try {
+      wireParityRoute({ ccWireParity: true, baseURL }, new Map([['pool', { endpoint, buildId: 'test-build' }]]))
+    } catch (error) {
+      reported = error instanceof Error ? error.message : String(error)
+    }
+    expect(reported).toContain('https://pool.test/v1')
+    expect(reported).toContain('https://other.test/v1/capabilities')
+    expect(reported).not.toContain('secret')
+    expect(reported).not.toContain('api_key')
+    expect(reported).not.toContain('hidden')
+
+    expect(() => wireParityRoute({ ccWireParity: true }, new Map([['pool', {
+      endpoint: 'not a url?token=secret',
+      buildId: 'test-build',
+    }]]))).toThrow(/not an absolute URL: "not a url"/u)
+  })
+
   it('refuses a proof for a route that does not request the wire', () => {
     expect(() => wireParityRoute({}, POOL_PROOFS))
       .toThrow(/capability proof.*does not set ccWireParity/)

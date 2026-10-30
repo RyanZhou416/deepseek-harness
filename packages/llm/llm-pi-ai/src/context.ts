@@ -27,6 +27,36 @@ function flattenText(message: RequestMessage): string {
     .join('')
 }
 
+/** The effective leading system prompt text and the history messages it consumes. */
+export interface LeadingSystemText {
+  /** Request-level system text and every leading system message, joined as the transport sends them. */
+  readonly text: string
+  /** Number of leading system-role history messages the text includes. */
+  readonly leadingMessages: number
+}
+
+/**
+ * The effective leading system text of one request.
+ *
+ * The request-level text and every leading system-role message join the way the
+ * pi-ai context split joins them, which is the text the transport sends as the
+ * system prompt. Empty contributions disappear before the join, so an absent or
+ * blank prompt yields the empty string.
+ * @param options - the assembled request.
+ * @returns the joined text and the number of leading system messages it covers.
+ */
+export function leadingSystemText(options: GenerateOptions): LeadingSystemText {
+  const parts: string[] = []
+  if (options.system !== undefined && options.system.length > 0) parts.push(options.system)
+  let leadingMessages = 0
+  for (const message of options.messages) {
+    if (message.role !== 'system') break
+    const text = flattenText(message)
+    if (text.length > 0) parts.push(text)
+    leadingMessages++
+  }
+  return { text: parts.join('\n\n'), leadingMessages }
+}
 
 /** Recover the pi-ai toolResult message for one harness tool-role message. */
 function toolResultOf(
@@ -154,15 +184,11 @@ interface SystemPromptSplit {
 
 /** Combine request-level text and leading system history into the initial prompt. */
 function splitSystemPrompt(options: GenerateOptions): SystemPromptSplit {
-  const text = [options.system]
-  let end = 0
-  for (const message of options.messages) {
-    if (message.role !== 'system') break
-    text.push(flattenText(message))
-    end++
+  const leading = leadingSystemText(options)
+  return {
+    systemPrompt: leading.text.length > 0 ? leading.text : undefined,
+    messages: options.messages.slice(leading.leadingMessages),
   }
-  const systemPrompt = text.filter(Boolean).join('\n\n')
-  return { systemPrompt: systemPrompt || undefined, messages: options.messages.slice(end) }
 }
 
 /** Assemble the request-level pi-ai context envelope shared by both conversion paths. */

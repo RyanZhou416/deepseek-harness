@@ -48,6 +48,7 @@ import {
   DEFAULT_REQUEST_LOG_MAX_FILES,
   defaultRequestLogPath,
   MAX_REQUEST_LOG_TOTAL_BYTES,
+  redactEndpoint,
 } from './request-log.ts'
 import type { ResolvedRequestLogConfig } from './request-log.ts'
 
@@ -97,6 +98,18 @@ export const CC_WIRE_PARITY_MEMBER_HEADERS = Object.freeze({
   systemLayout: 'x-cc-system-layout',
   cacheIntent: 'x-cc-cache-intent',
 } as const)
+
+/**
+ * The member header names this adapter owns, folded once for case-insensitive
+ * comparison.
+ *
+ * Header names are case-insensitive, so both the resolution refusal and the
+ * per-request stripping compare a lower-cased spelling. One frozen set keeps
+ * the two decisions reading the same pre-folded names.
+ */
+export const CC_WIRE_PARITY_OWNED_HEADERS: ReadonlySet<string> = Object.freeze(new Set(
+  Object.values(CC_WIRE_PARITY_MEMBER_HEADERS).map(name => name.toLowerCase()),
+))
 
 /**
  * Cache intents a CC wire parity route may declare for a main or subagent request.
@@ -718,9 +731,8 @@ function assertValidHeaders(provider: string, headers: Readonly<Record<string, s
  * @throws Error naming the adapter-owned header.
  */
 function assertNoCcWireParityHeaders(provider: string, headers: Readonly<Record<string, string>> | undefined): void {
-  const owned: ReadonlySet<string> = new Set<string>(Object.values(CC_WIRE_PARITY_MEMBER_HEADERS))
   for (const name of Object.keys(headers ?? {})) {
-    if (owned.has(name.toLowerCase())) {
+    if (CC_WIRE_PARITY_OWNED_HEADERS.has(name.toLowerCase())) {
       throw new Error(
         `llm-pi-ai: provider "${provider}" sets header "${name}", which this adapter owns on every route`,
       )
@@ -800,7 +812,8 @@ function urlOrigin(value: string): string | undefined {
  * interrogated its endpoint supplied a proof for this exact route, and that
  * proof's endpoint shares the profile's origin. A proof supplied for a route
  * that does not request the wire is a caller bug and is refused instead of
- * silently dropped.
+ * silently dropped. Diagnostics name an endpoint without its userinfo or query,
+ * since either may carry a credential.
  * @param provider - the route being resolved.
  * @param source - its configured profile.
  * @param proofs - capability proofs supplied by the probing plugin, if any.
@@ -832,8 +845,9 @@ function assertCcWireParityProof(
   if (proof.buildId.length === 0) {
     throw new Error(`llm-pi-ai: provider "${provider}" has a CC wire parity proof with an empty build id`)
   }
-  const origin = source.baseURL === undefined ? undefined : urlOrigin(source.baseURL)
-  if (origin === undefined) {
+  const baseURL = source.baseURL
+  const origin = baseURL === undefined ? undefined : urlOrigin(baseURL)
+  if (origin === undefined || baseURL === undefined) {
     throw new Error(
       `llm-pi-ai: provider "${provider}" sets ccWireParity but names no absolute baseURL a capability proof could cover`,
     )
@@ -842,13 +856,14 @@ function assertCcWireParityProof(
   if (proofOrigin === undefined) {
     throw new Error(
       `llm-pi-ai: provider "${provider}" has a CC wire parity proof endpoint that is not an absolute URL:`
-      + ` ${JSON.stringify(proof.endpoint)}`,
+      + ` ${JSON.stringify(redactEndpoint(proof.endpoint))}`,
     )
   }
   if (proofOrigin !== origin) {
     throw new Error(
       `llm-pi-ai: provider "${provider}" sets ccWireParity, but its capability proof for`
-      + ` ${JSON.stringify(proof.endpoint)} does not cover baseURL ${JSON.stringify(source.baseURL)}`,
+      + ` ${JSON.stringify(redactEndpoint(proof.endpoint))} does not cover baseURL`
+      + ` ${JSON.stringify(redactEndpoint(baseURL))}`,
     )
   }
 }

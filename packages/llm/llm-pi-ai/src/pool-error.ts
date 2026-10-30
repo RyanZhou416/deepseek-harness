@@ -109,6 +109,13 @@ export interface ProviderErrorResponse {
   readonly status: number
   /** Provider-requested delay from `Retry-After`, when valid. */
   readonly providerRetryAfterMs?: number
+  /**
+   * Whether the pool marked this response as its `cc_wire_parity_unavailable`
+   * refusal. The marker alone forbids a resend: the refusal is about the
+   * wire-parity request, so retrying its body on the default wire would exceed
+   * what the pool's capability answer allows.
+   */
+  readonly wireParityUnavailable?: boolean
 }
 
 /** Response facts retained for request diagnostics, independent of failure classification. */
@@ -290,9 +297,13 @@ function fallbackMessage(code: string): string {
  * `capability_not_ready` detail even though it carries neither a pool code nor
  * `origin`. An unparseable message, or a body with neither a pool code nor a
  * pool marker, returns undefined so the caller keeps the pre-existing
- * classification.
+ * classification. The captured response's `wireParityUnavailable` marker
+ * outranks the body entirely: a marker-only `503` becomes a non-retryable
+ * `POOL_ERROR` instead of reaching the text classifier as a retryable `SERVER`
+ * failure.
  * @param message - pi-ai's terminal error text.
- * @param response - status and retry delay captured from the failed HTTP response.
+ * @param response - status, retry delay, and wire-parity refusal marker captured
+ *   from the failed HTTP response.
  * @returns a pool-semantic failure, or undefined when this is not a pool failure.
  */
 export function classifyPoolFailure(
@@ -300,6 +311,22 @@ export function classifyPoolFailure(
   response?: ProviderErrorResponse,
 ): LlmFailure | undefined {
   const envelope = parseProviderErrorEnvelope(message)
+  const status = response?.status ?? statusOf(message) ?? envelope?.status
+  const retryAfterMs = response?.providerRetryAfterMs
+  const detail = sanitizeProviderMessage(envelope?.message)
+  const failure = (code: string): LlmFailure => ({
+    message: detail ?? fallbackMessage(code),
+    code,
+    ...status === undefined ? {} : { status },
+    ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
+  })
+  // The marker is the pool's own statement about a wire-parity request, so it
+  // outranks every body field: without it a marker-only body would reach the
+  // text classifier, whose 503 classification would retry the same request on
+  // the default wire the pool just refused.
+  if (response?.wireParityUnavailable === true) {
+    return { ...failure(POOL_ERROR_CODE), retryDisposition: 'forbid' }
+  }
   if (envelope === undefined) return undefined
   const identity = identityOf(envelope)
   const poolByOrigin = envelope.origin === 'pool'
@@ -308,16 +335,6 @@ export function classifyPoolFailure(
   const poolByCode = envelope.origin !== 'claude'
     && identity !== undefined
     && identity.startsWith(POOL_CODE_PREFIX)
-
-  const status = response?.status ?? statusOf(message) ?? envelope.status
-  const retryAfterMs = response?.providerRetryAfterMs
-  const detail = sanitizeProviderMessage(envelope.message)
-  const failure = (code: string): LlmFailure => ({
-    message: detail ?? fallbackMessage(code),
-    code,
-    ...status === undefined ? {} : { status },
-    ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
-  })
 
   if (!poolByOrigin && !poolByCode) {
     // The pool's readiness refusal omits the `cc_pool_*` code and `origin` its
@@ -442,6 +459,7 @@ export class ProviderErrorCapture {
         this.response = Object.freeze({
           status: response.status,
           ...retryAfterFacts(response.headers),
+          ...wireParityUnavailableFacts(response.headers),
         })
       }
       return response
@@ -450,7 +468,8 @@ export class ProviderErrorCapture {
 
   /**
    * The failed response observed during this call.
-   * @returns status and retry delay, or undefined when no request failed.
+   * @returns status, retry delay, and the pool's wire-parity refusal marker, or
+   *   undefined when no request failed.
    */
   read(): ProviderErrorResponse | undefined {
     return this.response

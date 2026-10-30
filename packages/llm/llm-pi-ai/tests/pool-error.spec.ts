@@ -772,6 +772,39 @@ describe('pool readiness refusal', () => {
     })
   })
 
+  it('forbids the pool wire-parity refusal from its marker alone', () => {
+    // The mac-pool refusal carries neither `origin: pool` nor a `cc_pool_*` code,
+    // and its body may state no retry decision at all. The response marker is the
+    // whole fact, so it must outrank the text classifier's retryable SERVER.
+    const envelope = `503 ${JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'cc_wire_parity_unavailable',
+        message: 'the selected worker does not advertise ccWireParity',
+      },
+    })}`
+    expect(classifyPoolFailure(envelope, { status: 503, wireParityUnavailable: true })).toMatchObject({
+      code: POOL_ERROR_CODE,
+      retryDisposition: 'forbid',
+      message: 'the selected worker does not advertise ccWireParity',
+    })
+
+    for (const markerOnly of [
+      `503 ${JSON.stringify({ type: 'error', error: {} })}`,
+      '503 ',
+      '',
+    ]) {
+      expect(classifyPoolFailure(markerOnly, { status: 503, wireParityUnavailable: true })).toMatchObject({
+        code: POOL_ERROR_CODE,
+        retryDisposition: 'forbid',
+      })
+    }
+
+    // Without the marker these bodies are native failures; the text classifier
+    // may retry them, which is why the marker fact must reach classification.
+    expect(classifyPoolFailure(envelope, { status: 503 })).toBeUndefined()
+  })
+
   it('forbids a native provider 5xx carrying the pool request id and retryable:false', () => {
     // The pool decorates every error body with pool_request_id and may withdraw
     // the retry there; the text classifier would otherwise call this 5xx
@@ -924,12 +957,15 @@ describe('provider error capture', () => {
     }))
     await marked.fetch('http://127.0.0.1/unused', {})
     expect(marked.readResponse()).toEqual({ status: 503, wireParityUnavailable: true })
+    // Classification reads the failed response, so the marker rides along.
+    expect(marked.read()).toEqual({ status: 503, wireParityUnavailable: true })
 
     // The status alone is not the fact: an unmarked 503 retains no marker, and a
     // value outside the pool's stable `1` is not that refusal either.
     const unmarked = new ProviderErrorCapture(async () => new Response('no', { status: 503 }))
     await unmarked.fetch('http://127.0.0.1/unused', {})
     expect(unmarked.readResponse()).toEqual({ status: 503 })
+    expect(unmarked.read()).toEqual({ status: 503 })
 
     const other = new ProviderErrorCapture(async () => new Response('no', {
       status: 503,
