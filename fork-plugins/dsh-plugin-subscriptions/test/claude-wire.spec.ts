@@ -244,8 +244,11 @@ test('the request class follows the call kind the caller stated', async () => {
     account, history(), 32_000, undefined, undefined, wireSessionId('sess-class-title'), ACCOUNT,
   )
   assert.equal(headerMap(title).get('x-claude-code-request-class'), 'auxiliary')
-  // An unstated purpose is the conversation's own Messages request.
-  assert.equal(claudeRequestClass(undefined), 'main')
+  // An unstated purpose is the conversation's own Messages request; explicit classes win.
+  assert.equal(claudeRequestClass(undefined, undefined), 'main')
+  assert.equal(claudeRequestClass(undefined, 'auxiliary'), 'auxiliary')
+  assert.equal(claudeRequestClass(undefined, 'subagent'), 'subagent')
+  assert.equal(claudeRequestClass('session-title', 'main'), 'main')
 })
 
 test('the body states no context-management field on any model', async () => {
@@ -529,6 +532,26 @@ test('the cache ttl and its beta follow the granted scope', async () => {
   assert.equal(String(plain.body).includes('"ttl"'), false, 'no ttl key at all')
   const plainBeta = String(plain.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? '')
   assert.equal(plainBeta.includes('extended-cache-ttl'), false, 'and no beta declaring one')
+
+  // An explicit helper/subagent class outranks purpose for both the header and the ttl.
+  for (const requestClass of ['auxiliary', 'subagent'] as const) {
+    const helper = await buildClaudeWireRequest(
+      { ...options(), requestClass }, session(), history(), 32_000, undefined, undefined,
+      wireSessionId(`sess-ttl-${requestClass}`), ACCOUNT,
+    )
+    assert.equal(headerMap(helper).get('x-claude-code-request-class'), requestClass)
+    assert.equal(String(helper.body).includes('"ttl"'), false, `${requestClass} takes the default ttl`)
+    const helperBeta = String(helper.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? '')
+    assert.equal(helperBeta.includes('extended-cache-ttl'), false, `${requestClass} omits the extended beta`)
+  }
+
+  // An explicit main class outranks a helper purpose for both the header and the ttl.
+  const explicitMain = await buildClaudeWireRequest(
+    { ...options(), purpose: 'session-title', requestClass: 'main' }, session(), history(), 32_000,
+    undefined, undefined, wireSessionId('sess-ttl-explicit-main'), ACCOUNT,
+  )
+  assert.equal(headerMap(explicitMain).get('x-claude-code-request-class'), 'main')
+  assert.match(String(explicitMain.body), /"ttl":"1h"/)
 })
 
 test('grouping shared sections first reproduces the client cache layout', async () => {

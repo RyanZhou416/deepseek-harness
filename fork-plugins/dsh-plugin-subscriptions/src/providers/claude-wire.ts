@@ -275,24 +275,32 @@ const USER_INFERENCE_SCOPE = 'user:inference'
 /**
  * The cache ttl a request declares, computed as the client computes it.
  *
- * A main OAuth request whose granted scopes include `user:inference`, and whose account is not
- * drawing on overage, declares an hour. A helper call (`compaction`, `session-title`) and an
- * account on overage omit the field, so the server's own default applies, and the beta that
- * declares the longer ttl follows the field rather than the account. The overage reading is the
- * account's already-captured unified rate-limit report, so this performs no I/O; a plan label is
- * not an input.
+ * Only a `main` request whose granted scopes include `user:inference`, and whose account is not
+ * drawing on overage, declares an hour. An explicit `auxiliary`, `subagent` or `compaction`
+ * class, a helper purpose (`compaction`, `session-title`), and an account on overage omit the
+ * field, so the server's own default applies. The beta that declares the longer ttl follows the
+ * field rather than the account. An explicit class outranks purpose for both the field and the
+ * header; the client's source allowlist excludes subagent, so it takes the default. The overage
+ * reading is the account's already-captured unified rate-limit report, so this performs no I/O;
+ * a plan label is not an input.
  *
  * @param session - the account whose request this is.
  * @param account - the canonical account key that report is filed under.
  * @param purpose - the call kind the caller classified, when it classified one.
+ * @param requestClass - the caller's explicit call class, which outranks purpose.
  * @returns whether the request declares the longer ttl.
  */
 function usesExtendedCacheTtl(
   session: ClaudeSession,
   account: string,
   purpose: GenerateOptions['purpose'],
+  requestClass: GenerateOptions['requestClass'],
 ): boolean {
-  if (purpose === 'compaction' || purpose === 'session-title') return false
+  if (requestClass !== undefined) {
+    if (requestClass !== 'main') return false
+  } else if (purpose === 'compaction' || purpose === 'session-title') {
+    return false
+  }
   if (!session.scopes.split(/\s+/).includes(USER_INFERENCE_SCOPE)) return false
   const report = unifiedRateLimitFor('claude', account)
   const onOverage = report?.status === 'rejected'
@@ -367,15 +375,18 @@ function claudeEffort(value: string | undefined): ClaudeCodeEffort | undefined {
  * predicate short-circuits true at the host check, so the feature flag that would otherwise
  * decide emission is reached only for a base URL that is not Anthropic's own — a case this route
  * never produces. The header therefore carries the request class as its value on every request
- * here. `subagent` and `workflow` name agent and workflow-run query sources that no call reaching
- * this adapter has, so neither class is reachable here.
+ * here. The caller's explicit `requestClass` outranks purpose; `subagent` is reachable when a
+ * delegated child session runs on this route. `workflow` remains unreachable.
  *
  * @param purpose - the provider-neutral classification the caller set on the request.
+ * @param requestClass - the caller's explicit call class, when it set one.
  * @returns the class the genuine client would report for that call kind.
  */
 export function claudeRequestClass(
   purpose: GenerateOptions['purpose'],
+  requestClass: GenerateOptions['requestClass'],
 ): NonNullable<ClaudeCodeRequestInput['requestClass']> {
+  if (requestClass !== undefined) return requestClass
   if (purpose === 'compaction') return 'compaction'
   if (purpose === 'session-title') return 'auxiliary'
   return 'main'
@@ -551,7 +562,7 @@ export async function buildClaudeWireRequest(
       systemBreakpoint: true,
       toolBreakpoint: false,
       messageBreakpoint: true,
-      ...usesExtendedCacheTtl(session, account, options.purpose) ? { ttl: '1h' as const } : {},
+      ...usesExtendedCacheTtl(session, account, options.purpose, options.requestClass) ? { ttl: '1h' as const } : {},
     },
     runtime: {
       sessionId,
@@ -591,7 +602,7 @@ export async function buildClaudeWireRequest(
     // The class follows the call's purpose: the harness states whether this request is a
     // compaction or a session-title helper, and the client reports those two as `compaction`
     // and `auxiliary`. Everything else here is the conversation's own Messages request.
-    requestClass: claudeRequestClass(options.purpose),
+    requestClass: claudeRequestClass(options.purpose, options.requestClass),
     ...continuation.previousRequestId === undefined ? {} : { previousRequestId: continuation.previousRequestId },
     promptId: claudePromptId(sessionId, promptTurn(messages)),
     // Messages carry the desktop platform/version pair, not the application-only
