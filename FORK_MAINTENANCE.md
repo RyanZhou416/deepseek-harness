@@ -1535,34 +1535,57 @@ from profile headers; a profile attempt is a load error. Add headers before
 Because A reorders/drops/replaces system text, record the A body/section plan in
 the request log or a prepared-request record.
 
-**Acceptance.** Commit `mac-pool:development/cc-parity-a-corpus/` with
-cases, pinned identities, injected facts, expected raw body SHA/headers/order/
-markers, baseline raw bytes, runner and matrix. `run.py` CLI is `--case <id>|--
-all`, `--boundary member|frame|upstream|all`, `--matrix`, `--capture-baseline`,
+**Acceptance.** The A change commits
+`mac-pool:development/cc-parity-a-corpus/` with cases, pinned identities,
+injected facts, expected raw body SHA/headers/order/markers, baseline raw bytes,
+runner and matrix. `run.py` CLI is `--case <id>|--all`, `--boundary
+member|frame|upstream|response|all`, `--matrix`, `--capture-baseline`,
 `--compare-bytes`, `--reset-capability`, `--report json`; exit 0 pass, 1
-mismatch, 2 invalid. Pinned identity makes the `metadata.user_id` splice
-deterministic. Baseline comes from pre-A pool `0ae553a` and DSH `ec1877b3e1`;
-old worker is that bundle; new artefacts are the A commit. The 12-cell matrix is
-old/A-off/A-on DSH x old/new pool x old/new worker; each cell expects non-A
-success, `503 cc_parity_a_unavailable`, or A success only. Rollback sets
-`ccParityA=false`, reloads, resets the probe, verifies no `ccParityA:1`, then
-installs the old pool.
+mismatch, 2 invalid. Pinned identity makes `metadata.user_id` deterministic.
+Baseline comes from pre-A pool `0ae553a` and DSH `ec1877b3e1`; old worker is
+that bundle; new artefacts are the A commit.
+
+The matrix is one expected outcome per cell:
+
+| DSH | pool | worker | expected |
+| --- | --- | --- | --- |
+| old | old | old | non-A success |
+| old | old | new | non-A success |
+| old | new | old | non-A success |
+| old | new | new | non-A success |
+| A-off | old | old | non-A success |
+| A-off | old | new | non-A success |
+| A-off | new | old | non-A success |
+| A-off | new | new | non-A success |
+| A-on | old | old | non-A success (probe absent) |
+| A-on | old | new | non-A success (probe absent) |
+| A-on | new | old | 503 `cc_parity_a_unavailable` |
+| A-on | new | new | A success |
+
+Rollback sets `ccParityA=false`, reloads, resets the probe, verifies no
+`ccParityA:1`, then installs the old pool.
 
 Gates: DSH `pnpm run typecheck`, `build`, `doc-sync`,
 `verify-config-catalog`, and `pnpm exec vitest run packages/llm/llm/tests
 packages/llm/llm-pi-ai/tests packages/llm/llm-cc-pool/tests
 packages/experimental/auto-review/tests packages/experimental/translator/tests`
-(exit 0); worker `node development/direct-worker/scripts/run-tests.mjs` (0
-failed/0 skipped, updated counts); Mac `development/scripts/change-gate.sh
---stage development/swift --only-testing <affected suites>` plus
-`xcodebuild test -scheme MacPool -testPlan MacPoolTests` (0 failures, updated
-2893/16); `simulate-dsh.sh --case cc-parity-a-on --json` and off;
-`v2-golden.test.ts` plus `CrossLanguageGoldenTests` after fixing the known
-drift; `verify-goldens.py` for v1; installed acceptance from
-`CHANGE-WORKFLOW.md:71-72` with an A-header case; manifest commands from
-`scripts/README-deployment.md`; security review at
-`development/cc-parity-a-corpus/SECURITY-REVIEW.md`, gated by `test -s` and a
-checklist. No install until all pass.
+(exit 0); worker `node development/direct-worker/scripts/run-tests.mjs
+--summary --require-no-skips` (0 failed/0 skipped, updated counts); Mac
+`development/scripts/change-gate.sh --stage development/swift --only-testing
+<affected suites>` plus `xcodebuild test -scheme MacPool -testPlan MacPoolTests`
+(0 failures, updated 2893/16). Simulation adds `testCCParityAOn` and
+`testCCParityAOff` to `MacPoolSimulationTests`; run
+`development/scripts/simulate-dsh.sh --case testCCParityAOn` and
+`--case testCCParityAOff` (exit 0; tests assert their own bodies/headers/hashes;
+there is no `--json`). Real v2 goldens via `v2-golden.test.ts` and
+`CrossLanguageGoldenTests` after fixing the known drift; `verify-goldens.py`
+for v1; installed acceptance
+`xcodebuild test -scheme MacPool -testPlan MacPoolTests -only-testing:
+InstalledAppAcceptanceTests/testInstalledArtifactWithCcParityAHeaders` (0
+failures, expected SSE); manifest commands `regenerate-source-manifest.py`,
+`worker-parity.py refresh`, `artifact-manifest.py refresh` then verify; security
+review at `development/cc-parity-a-corpus/SECURITY-REVIEW.md`, gated by
+`test -s` and a checklist. No install until all pass.
 
 **Explicit exclusions.** Helpers under-emit billing/identity versus the carve
 title/compaction; evict/keepalive/message-threads/context-hint are omitted;
