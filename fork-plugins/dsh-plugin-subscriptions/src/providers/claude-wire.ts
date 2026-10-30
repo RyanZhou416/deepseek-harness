@@ -296,11 +296,7 @@ function usesExtendedCacheTtl(
   purpose: GenerateOptions['purpose'],
   requestClass: GenerateOptions['requestClass'],
 ): boolean {
-  if (requestClass !== undefined) {
-    if (requestClass !== 'main') return false
-  } else if (purpose === 'compaction' || purpose === 'session-title') {
-    return false
-  }
+  if (claudeRequestClass(purpose, requestClass) !== 'main') return false
   if (!session.scopes.split(/\s+/).includes(USER_INFERENCE_SCOPE)) return false
   const report = unifiedRateLimitFor('claude', account)
   const onOverage = report?.status === 'rejected'
@@ -368,8 +364,8 @@ function claudeEffort(value: string | undefined): ClaudeCodeEffort | undefined {
  *
  * The client derives the header from the query source that spawned the request: a compact query
  * reports `compaction`, and its own session-title generator runs under the
- * `generate_session_title` source, which reports `auxiliary`. Every other request this route
- * issues is the conversation's own Messages call, which reports `main`.
+ * `generate_session_title` source, which reports `auxiliary`, and a delegated child reports
+ * `subagent`.
  *
  * The client sends the header unconditionally on an ordinary first-party session: its emission
  * predicate short-circuits true at the host check, so the feature flag that would otherwise
@@ -547,7 +543,7 @@ export async function buildClaudeWireRequest(
       // The same predicate that decides the beta header, so a mid-conversation system message and
       // its header are always decided together. A suppressing policy turns the predicate off: the
       // message is refused by the caller's own gate rather than degraded into a top-level prompt.
-      supportsMidConversationSystem(options.model, CLAUDE_CODE_2_1_288_PROFILE)
+      supportsMidConversationSystem(options.model.replace(/\[1m\]/iu, ''), CLAUDE_CODE_2_1_288_PROFILE)
         && resolveSuppressBetas(policy) === undefined,
     ),
     system,
@@ -599,9 +595,8 @@ export async function buildClaudeWireRequest(
     stainlessTimeoutSeconds: 900,
     stream: true,
     clientRequestId: randomUUID(),
-    // The class follows the call's purpose: the harness states whether this request is a
-    // compaction or a session-title helper, and the client reports those two as `compaction`
-    // and `auxiliary`. Everything else here is the conversation's own Messages request.
+    // An explicit class wins; otherwise the purpose maps compaction and session-title to
+    // their client classes, and everything else is the conversation's own Messages request.
     requestClass: claudeRequestClass(options.purpose, options.requestClass),
     ...continuation.previousRequestId === undefined ? {} : { previousRequestId: continuation.previousRequestId },
     promptId: claudePromptId(sessionId, promptTurn(messages)),

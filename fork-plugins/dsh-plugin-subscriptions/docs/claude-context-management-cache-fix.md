@@ -1,9 +1,13 @@
 # Claude context management and cache
 
-Status: decided, applied, and focused-test verified. The Claude route sends no server-side
-context edit and performs no provider-local pruning. Keeping the conversation under the
-model window is DSH's compaction task. `pnpm test` in the plugin ran 1919 tests with 0
-failures and 0 skips; no provider request, build, or restart was performed.
+Status: decided, applied to the source tree, and full-plugin-test verified. The Claude route
+sends no server-side context edit and performs no provider-local pruning. Keeping the
+conversation under the model window is DSH's compaction task. `pnpm test` runs the test
+compile (`tsc -p tsconfig.test.json`) and the full 142-file plugin suite; it ran 1919 tests
+with 0 failures and 0 skips. That is a test build, not the package `lib` build: the live
+profile links the staged `.build/fork-plugins/subscriptions` build, so the running Host still
+executes the previous build until the Host is stopped, `build.cmd` is run, and the Host is
+restarted. No provider request or Host restart was performed.
 
 ## Evidence
 

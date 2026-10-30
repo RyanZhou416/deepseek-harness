@@ -534,7 +534,7 @@ test('the cache ttl and its beta follow the granted scope', async () => {
   assert.equal(plainBeta.includes('extended-cache-ttl'), false, 'and no beta declaring one')
 
   // An explicit helper/subagent class outranks purpose for both the header and the ttl.
-  for (const requestClass of ['auxiliary', 'subagent'] as const) {
+  for (const requestClass of ['auxiliary', 'subagent', 'compaction'] as const) {
     const helper = await buildClaudeWireRequest(
       { ...options(), requestClass }, session(), history(), 32_000, undefined, undefined,
       wireSessionId(`sess-ttl-${requestClass}`), ACCOUNT,
@@ -552,6 +552,14 @@ test('the cache ttl and its beta follow the granted scope', async () => {
   )
   assert.equal(headerMap(explicitMain).get('x-claude-code-request-class'), 'main')
   assert.match(String(explicitMain.body), /"ttl":"1h"/)
+
+  // An explicit main class still cannot declare the long lifetime without the scope.
+  const unscopedMain = await buildClaudeWireRequest(
+    { ...options(), requestClass: 'main' }, { ...session(), scopes: 'user:profile' }, history(),
+    32_000, undefined, undefined, wireSessionId('sess-ttl-main-unscoped'), ACCOUNT,
+  )
+  assert.equal(headerMap(unscopedMain).get('x-claude-code-request-class'), 'main')
+  assert.equal(String(unscopedMain.body).includes('"ttl"'), false)
 })
 
 test('grouping shared sections first reproduces the client cache layout', async () => {

@@ -14,7 +14,11 @@ import type {
   LlmResolvedModelInfo,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { CLAUDE_CODE_2_1_288_PROFILE, isClaude3Model } from '@tormentalabs/claude-code-wire-compat'
+import {
+  CLAUDE_CODE_2_1_288_PROFILE,
+  isClaude3Model,
+  supportsMidConversationSystem as compatSupportsMidConversationSystem,
+} from '@tormentalabs/claude-code-wire-compat'
 import type { BuiltClaudeCodeRequest } from '@tormentalabs/claude-code-wire-compat'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { ClaudeSession } from '../auth/store.js'
@@ -457,15 +461,19 @@ export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) 
  */
 
 /**
- * Models the prompt-caching guide allows to take a later `{"role":"system"}`
- * message: Fable 5, Fable 5.1, Mythos 5, Mythos 5.1, Opus 4.8, and Opus 5.
- * Sonnet 5 and Opus 5.5 are not in that list.
+ * Whether this model can take a later `{"role":"system"}` message.
+ *
+ * The pinned 2.1.288 catalogue is the one source: the local list this used to
+ * duplicate missed the Sonnet 5 / Opus 5.5 entries the catalogue grants. The
+ * request-time `[1m]` marker is not part of the catalogue key.
+ * @param model - the wire model id.
+ * @returns whether the pinned catalogue grants the mid-conversation system form.
  */
 export function supportsMidConversationSystem(model: string): boolean {
-  if (model.startsWith('claude-fable-5') || model.startsWith('claude-mythos-5') || model.startsWith('claude-opus-4-8')) {
-    return true
-  }
-  return model === 'claude-opus-5' || (model.startsWith('claude-opus-5-') && !model.startsWith('claude-opus-5-5'))
+  return compatSupportsMidConversationSystem(
+    model.replace(/\[1m\]/iu, ''),
+    CLAUDE_CODE_2_1_288_PROFILE,
+  )
 }
 
 /** Files API upload. Official path from the Files HTTP reference. */
