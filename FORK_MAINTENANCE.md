@@ -1453,32 +1453,42 @@ default branch and is not evidence. In particular:
 `{type:"ephemeral",ttl:"1h"}`, last user block with `{type:"ephemeral",ttl:"1h"}`;
 no previous-message or tool marker; pinned top-level order with `metadata` in
 its canonical slot; `thinking.display:"updates"` plus its beta; no eager tool
-streaming. Header: pool-composed canonical beta membership/order including
-scope and cache-diagnosis; request class from the declared source; cache-diagnosis
-latch/rejection state; one-hour only on allowlisted main sources.
+streaming. Header: worker-composed full canonical beta site order including
+scope, context-hint and cache-diagnosis; request class from the declared
+source; cache-diagnosis latch/rejection state; one-hour only on allowlisted
+main sources.
 
-**Interface contract before coding.** The previous draft assigned DSH a TTL it
-could not compute and left the beta/scope owner undefined. A now makes the pool
-the cache-policy owner, because only the pool holds first-party mode, official
-base URL, HIPAA taint, `user:inference`/overage eligibility and the upstream
-400 path. DSH sends on the v2 request frame: `requestClass`
-(`main|compaction|auxiliary|subagent|workflow`), `systemLayout` (whether a
-static/shared boundary exists and which system block is static/dynamic),
-`cacheIntent` (main 1h, helper 5m/no-marker default, or caching-disabled), and
-`mcpTools` (blocked until the member API accepts `mcp__` names). The pool applies
-TTL/scope to `cache_control`, composes the canonical beta order (scope only with
-global, then extended, then diagnosis), owns the cache-diagnosis latch and
-rejection state, and emits the request class. This deliberately changes the
-current byte-preserving/no-marker-edit rule; the alternative pre-request
-capability endpoint is not chosen.
+**Interface contract before coding.** The executable owner is the **worker**,
+not the Swift server. The worker holds the policy-limits/HIPAA state,
+`user:inference`/overage eligibility, the header plan, the body forward path and
+the upstream error record; the server does not parse cache TTL/scope. A mode
+(default off) adds four bounded member headers from DSH to the pool:
+`x-dsh-cc-request-class` (`main|compaction|auxiliary|subagent|workflow`),
+`x-dsh-cc-system-layout` (`boundary|none`), `x-dsh-cc-cache-intent`
+(`main|helper|disabled`), and `x-dsh-cc-mcp-tools` (`present|none`, blocked
+until the member API accepts `mcp__` names). The server validates them and maps
+them to new v2 request-frame fields; v1 must refuse A mode rather than drop the
+headers. DSH stops writing `cache_control` TTL/scope and the extended beta for
+the A route; the worker writes markers, applies TTL/scope, composes the full
+canonical beta site order (scope@9, extended@19, context-hint@20, diagnosis@21,
+base sites interleaved—not a grouped scope/extended/diagnosis list), owns the
+per-session cache-diagnosis latch and rejected-beta fact, and emits the class.
+HIPAA/eligibility/overage stay worker-side and never travel to DSH. This
+changes the current byte-preserving/no-marker-edit and "worker adds no
+undeclared beta" rules; the frozen v2 `requestMemberBeta`/`notCarried` wording
+must be rewritten with the A fields and their v1 absence rule.
 
-The frozen v2 contract, `ipc/messages.ts`/`validate.ts`, member API MCP-name
-gate, observer positions (A needs unmarked identity plus marked static and
-dynamic runs), DSH profile mapping, package READMEs/JSDoc and the tests that
-currently assert "no scope/no diagnosis" all change in the same A change. The
-current docs are current-behavior contracts, not optional prose. Without this
-contract work, A cannot be implemented honestly; do not emit scope,
-cache-diagnosis or a class on assumption.
+The same change must update `ipc/messages.ts`/`validate.ts`,
+`MemberRequestHeaders.swift`, `MemberAPI` allowlist/MCP gate,
+`DirectSSEAdapter.sendRequest`, `forward-body.ts`, `forward-betas.ts`,
+`cc-profile-overlay.ts`, `cache-observation.ts` (A needs unmarked identity plus
+marked static and dynamic runs), audit facts, the DSH `llm-pi-ai` payload hook,
+`llm-cc-pool` profile/config, package READMEs/JSDoc, generated catalogs, and
+the tests that currently assert no scope/no diagnosis/no extended change. The
+current docs are current-behavior contracts, not optional prose. Resolve the
+policy-limits path spelling (`/api/claude_code/policy_limits` in the carve vs
+the worker's underscore variant) before claiming parity; without these contract
+changes A cannot be implemented honestly.
 
 **Preservation during implementation.** The current three-marker/no-scope
 behavior remains the shipped behavior until the A change lands with its
