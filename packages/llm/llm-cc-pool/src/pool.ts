@@ -85,11 +85,14 @@ export const MODEL_INPUT: readonly PiAiModality[] = Object.freeze(['text', 'imag
  * not a request field of its own: `5m` is the API's default lifetime and sends
  * `cache_control: {type: "ephemeral"}`, `1h` extends it with
  * `cache_control: {type: "ephemeral", ttl: "1h"}`, and `none` sends no marker
- * at all. The value reaches the wire only through this route's profile, so a
- * request to another provider never reads it. The route's default policy
- * declares `1h` and the three-marker layout, and that combination also requires
- * {@link CcPoolCachePolicy.extendedCacheBeta}; {@link resolvePoolCachePolicy}
- * refuses the other lifetimes while `cc3` owns placement.
+ * at all. The choice applies to a main or subagent request; a helper request
+ * (`compaction`, `auxiliary`) always keeps the API's default five-minute
+ * lifetime and declares no extended beta. The value reaches the wire only
+ * through this route's profile, so a request to another provider never reads
+ * it. The route's default policy declares `1h` and the three-marker layout, and
+ * that combination also requires {@link CcPoolCachePolicy.extendedCacheBeta};
+ * {@link resolvePoolCachePolicy} refuses the other lifetimes while `cc3` owns
+ * placement.
  */
 export const CACHE_TTLS = Object.freeze(['5m', '1h', 'none'] as const)
 
@@ -100,9 +103,11 @@ export type CcPoolCacheTtl = (typeof CACHE_TTLS)[number]
  * The route's prompt-cache policy, one explicit choice per field.
  *
  * A policy applies to the whole route and reaches the wire only through this
- * route's profile: `cacheTtl` selects the marker lifetime, `extendedCacheBeta`
- * adds the beta a one-hour lifetime declares, and `cacheMarkerPolicy` replaces
- * the transport's placement with the Claude Code 2.1.288 layout when configured.
+ * route's profile: `cacheTtl` selects the marker lifetime a main or subagent
+ * request declares, `extendedCacheBeta` adds the beta a one-hour lifetime
+ * declares, and `cacheMarkerPolicy` replaces the transport's placement with the
+ * Claude Code 2.1.288 layout when configured. A helper request (`compaction`,
+ * `auxiliary`) keeps the API's default five-minute lifetime regardless.
  * {@link resolvePoolCachePolicy} refuses a policy whose fields cannot serve a
  * request together. A policy of `cacheTtl: "none"` is also this route's
  * caching-disabled state, so a profile that enables wire parity declares cache
@@ -111,13 +116,14 @@ export type CcPoolCacheTtl = (typeof CACHE_TTLS)[number]
  * of its own and the worker, not this route, writes the cache plan.
  */
 export interface CcPoolCachePolicy {
-  /** Marker lifetime every block marked on this route declares; see {@link CACHE_TTLS}. */
+  /** Marker lifetime a main or subagent request's blocks declare; see {@link CACHE_TTLS}. */
   cacheTtl: CcPoolCacheTtl
   /**
    * Add `extended-cache-ttl-2025-04-11` to the request's `anthropic-beta`
    * header. `1h` writes `ttl: "1h"` on the markers, while this field alone
    * declares the beta that permits it; {@link resolvePoolCachePolicy} refuses
-   * a one-hour lifetime without it.
+   * a one-hour lifetime without it. A helper request declares no beta, because
+   * it keeps the API's default five-minute lifetime.
    */
   extendedCacheBeta: boolean
   /**
@@ -126,10 +132,11 @@ export interface CcPoolCachePolicy {
    * layout — the client identity system block, the harness system block, and
    * the last cacheable user content block — and takes precedence over the
    * marker field on this route: it discards the markers {@link cacheTtl}
-   * selects and writes `{type: "ephemeral", ttl: "1h"}` on the slots it owns. It
-   * marks no tool declaration and no message before the last user turn, writes
-   * the pinned client's top-level field order with an empty `metadata` in its
-   * canonical slot, and requires `cacheTtl: "1h"` and
+   * selects and writes `{type: "ephemeral", ttl: "1h"}` on the slots a main or
+   * subagent request owns, and `{type: "ephemeral"}` on a helper request's
+   * slots. It marks no tool declaration and no message before the last user
+   * turn, writes the pinned client's top-level field order with an empty
+   * `metadata` in its canonical slot, and requires `cacheTtl: "1h"` and
    * `extendedCacheBeta: true`.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
@@ -137,7 +144,8 @@ export interface CcPoolCachePolicy {
 
 /**
  * The policy this route serves by default: the three Claude Code markers with
- * the explicit one-hour lifetime and the beta that permits it.
+ * the explicit one-hour lifetime and the beta that permits it. A helper request
+ * keeps the API's default five-minute lifetime under this policy.
  */
 export const DEFAULT_CACHE_POLICY: CcPoolCachePolicy = Object.freeze({
   cacheTtl: '1h',

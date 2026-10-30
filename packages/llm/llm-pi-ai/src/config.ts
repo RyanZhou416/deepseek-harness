@@ -78,7 +78,11 @@ export const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
  * system block, and the last cacheable user content block. The policy owns the
  * complete marker set, the identity block, and the top-level field order on the
  * route, so it removes every marker pi-ai or a caller placed first, marks no
- * message before the last user turn, and never marks a tool declaration.
+ * message before the last user turn, and never marks a tool declaration. It is
+ * class-aware about the lifetime: a main or subagent request gets the one-hour
+ * marker with the extended beta the route declares, while a helper (`compaction`,
+ * `auxiliary`) request keeps the API's default five-minute lifetime with no
+ * `ttl` and no extended beta.
  */
 export const CACHE_MARKER_POLICIES = ['cc3'] as const
 
@@ -262,8 +266,10 @@ export interface PiAiProviderProfile {
    * markers but does not declare the beta, so a route that needs the extended
    * lifetime sets both. The beta joins the request's `betas` list before the
    * Anthropic SDK serializes it, which keeps every automatic beta pi-ai derives
-   * for the route. Refused when no model on the route speaks
-   * `anthropic-messages`.
+   * for the route. On a `cc3` route it permits the one-hour lifetime that
+   * policy writes on a main or subagent request; a helper request keeps the API
+   * default five-minute lifetime and declares no beta. Refused when no model on
+   * the route speaks `anthropic-messages`.
    */
   extendedCacheBeta?: boolean
   /**
@@ -271,11 +277,14 @@ export interface PiAiProviderProfile {
    * Messages request. Omission keeps pi-ai's placement from
    * {@link cacheRetention}. `cc3` places the Claude Code 2.1.288 layout — the
    * client's identity system block, the harness system block, and the last
-   * cacheable user content block — with `{type: "ephemeral", ttl: "1h"}` on
-   * each slot, and discards every other marker on the route. It marks no tool
-   * declaration and no message before the last user turn, and the billing block
-   * the pool places ahead of the identity block stays unmarked too. It owns
-   * placement outright, so it takes precedence over `cacheRetention` and over
+   * cacheable user content block — and discards every other marker on the route.
+   * A main or subagent request marks each slot with
+   * `{type: "ephemeral", ttl: "1h"}`; a helper request (`compaction`,
+   * `auxiliary`) keeps the API's default five-minute lifetime with
+   * `{type: "ephemeral"}` and no extended beta. It marks no tool declaration and
+   * no message before the last user turn, and the billing block the pool places
+   * ahead of the identity block stays unmarked too. It owns placement outright,
+   * so it takes precedence over `cacheRetention` and over
    * `compat.supportsCacheControlOnTools`; a request with no caller system prompt
    * marks the identity and last-user slots. The policy also writes the pinned
    * client's top-level field order with `stream` last, and an absent `metadata`

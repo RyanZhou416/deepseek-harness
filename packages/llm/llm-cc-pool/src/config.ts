@@ -46,37 +46,45 @@ export interface Config {
    */
   requestLog?: PiAiRequestLogProfile
   /**
-   * Prompt-cache TTL this route declares for a request's `cache_control`
-   * markers: `5m` keeps the API's default five-minute lifetime, `1h` asks for
-   * the extended one, and `none` sends no marker. The default `1h` is the
-   * lifetime the route serves now; `5m` is refused while
-   * {@link cacheMarkerPolicy} is `cc3`, because that policy writes one-hour
-   * markers on its own. `none` is this route's caching-disabled state: it has no
-   * marker placement, so the configured marker policy is not applicable and is
-   * dropped during resolution; with {@link ccWireParity} it declares cache intent
-   * `off` instead of the worker's main plan. The value reaches the wire only
-   * through this route's profile, so no other provider's request changes.
+   * Prompt-cache TTL this route declares for a main or subagent request's
+   * `cache_control` markers: `5m` keeps the API's default five-minute lifetime,
+   * `1h` asks for the extended one, and `none` sends no marker. A helper
+   * request (`compaction`, `auxiliary`) always keeps the API's default
+   * five-minute lifetime whatever this field selects, so it sends
+   * `{type: "ephemeral"}` with no `ttl` and declares no extended beta. The
+   * default `1h` is the lifetime the route serves main and subagent requests
+   * now; `5m` is refused while {@link cacheMarkerPolicy} is `cc3`, because that
+   * policy writes one-hour markers for those requests on its own. `none` is
+   * this route's caching-disabled state: it has no marker placement, so the
+   * configured marker policy is not applicable and is dropped during
+   * resolution; with {@link ccWireParity} it declares cache intent `off`
+   * instead of the worker's main plan. The value reaches the wire only through
+   * this route's profile, so no other provider's request changes.
    */
   cacheTtl: CcPoolCacheTtl
   /**
    * Declare `extended-cache-ttl-2025-04-11` on this route's Anthropic Messages
    * requests. The default `true` is what the default `cacheTtl: 1h` and
    * {@link cacheMarkerPolicy} require; an explicit `false` is refused instead
-   * of producing a request the provider would reject.
+   * of producing a request the provider would reject. A helper request keeps
+   * the API's default five-minute lifetime, so it declares no beta.
    */
   extendedCacheBeta: boolean
   /**
    * Prompt-cache marker placement this route asks pi-ai to perform. The
    * default `cc3` places the Claude Code 2.1.288 layout — the client identity
    * system block, the harness system block, and the last cacheable user content
-   * block — with `{type: "ephemeral", ttl: "1h"}` on each slot, and no marker on
-   * any tool declaration or on a message before the last user turn. The policy
-   * owns placement, so it takes precedence over the lifetime {@link cacheTtl}
-   * selects, and it also writes the pinned client's top-level field order with
-   * an empty `metadata` placeholder in its canonical slot for the pool's
-   * `user_id` splice. It requires `cacheTtl: "1h"` and {@link extendedCacheBeta}:
-   * an impossible combination is refused at load and on a settings write, never
-   * at request time. No other provider route reads this value.
+   * block — with `{type: "ephemeral", ttl: "1h"}` on each slot of a main or
+   * subagent request, and `{type: "ephemeral"}` — the API's default five-minute
+   * lifetime — on a helper (`compaction`, `auxiliary`) request, which declares no
+   * extended beta. It places no marker on any tool declaration or on a message
+   * before the last user turn. The policy owns placement, so it takes precedence
+   * over the lifetime {@link cacheTtl} selects, and it also writes the pinned
+   * client's top-level field order with an empty `metadata` placeholder in its
+   * canonical slot for the pool's `user_id` splice. It requires `cacheTtl: "1h"`
+   * and {@link extendedCacheBeta}: an impossible combination is refused at load
+   * and on a settings write, never at request time. No other provider route
+   * reads this value.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**

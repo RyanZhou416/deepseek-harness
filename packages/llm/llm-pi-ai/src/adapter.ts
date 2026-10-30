@@ -400,9 +400,23 @@ const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
  */
 const CLAUDE_CODE_IDENTITY_TEXT = "You are Claude Code, Anthropic's official CLI for Claude."
 
-/** The one-hour `cache_control` value the `cc3` policy writes on each slot. */
-function cc3CacheControl(): Record<string, string> {
-  return { type: 'ephemeral', ttl: '1h' }
+/**
+ * The marker lifetime the `cc3` policy writes on one request.
+ *
+ * The pinned client asks for the route's one-hour lifetime on an ordinary
+ * conversation request and leaves a helper (`compaction`, `auxiliary`) at the
+ * API's default five-minute lifetime.
+ */
+type Cc3MarkerLifetime = '1h' | '5m'
+
+/**
+ * The `cache_control` value the `cc3` policy writes on each slot.
+ * @param lifetime - the lifetime this request's markers declare.
+ * @returns `{type: "ephemeral", ttl: "1h"}` for the extended lifetime, and the
+ *   API-default form with no `ttl` for five minutes.
+ */
+function cc3CacheControl(lifetime: Cc3MarkerLifetime): Record<string, string> {
+  return lifetime === '5m' ? { type: 'ephemeral' } : { type: 'ephemeral', ttl: '1h' }
 }
 
 /**
@@ -462,10 +476,11 @@ function stripMessage(value: unknown): unknown {
 /**
  * Copy one request object with the policy's `cache_control` value added.
  * @param value - a system block, message, or message content block.
- * @returns the block carrying the explicit one-hour marker.
+ * @param lifetime - the lifetime this request's markers declare.
+ * @returns the block carrying the marker for that lifetime.
  */
-function withCc3Marker(value: Record<string, unknown>): Record<string, unknown> {
-  return { ...value, cache_control: cc3CacheControl() }
+function withCc3Marker(value: Record<string, unknown>, lifetime: Cc3MarkerLifetime): Record<string, unknown> {
+  return { ...value, cache_control: cc3CacheControl(lifetime) }
 }
 
 /**
@@ -484,12 +499,16 @@ function isIdentityBlock(value: unknown): boolean {
  * expands it to the one-block array the transport already uses for marked
  * messages.
  * @param message - one message pi-ai built.
+ * @param lifetime - the lifetime this request's markers declare.
  * @returns the marked message, or undefined when it has no content block.
  */
-function markMessageTail(message: Record<string, unknown>): Record<string, unknown> | undefined {
+function markMessageTail(
+  message: Record<string, unknown>,
+  lifetime: Cc3MarkerLifetime,
+): Record<string, unknown> | undefined {
   const content = message['content']
   if (typeof content === 'string') {
-    return { ...message, content: [{ type: 'text', text: content, cache_control: cc3CacheControl() }] }
+    return { ...message, content: [{ type: 'text', text: content, cache_control: cc3CacheControl(lifetime) }] }
   }
   const blocks = arrayOf(content)
   /* v8 ignore next 2 -- pi-ai emits message content as a string or a non-empty block array */
@@ -497,7 +516,7 @@ function markMessageTail(message: Record<string, unknown>): Record<string, unkno
   const last = blocks[blocks.length - 1]
   /* v8 ignore next -- pi-ai builds every content block as an object */
   if (!isRequestPayload(last)) return undefined
-  return { ...message, content: [...blocks.slice(0, -1), withCc3Marker(last)] }
+  return { ...message, content: [...blocks.slice(0, -1), withCc3Marker(last, lifetime)] }
 }
 
 /**
@@ -573,23 +592,27 @@ function withClaudeCodeFieldOrder(payload: Record<string, unknown>): Record<stri
  *
  * The policy owns placement: every `cache_control` the transport or a caller
  * placed is removed from `system`, `tools`, and `messages` first, then exactly
- * the slots present are marked with `{type: "ephemeral", ttl: "1h"}`. The
- * identity block opens the system array this route builds and the caller's
- * prompt blocks follow, so a request that already carries the mac pool's billing
- * block forwards it as billing, identity, harness. The three slots are the
- * identity block, the harness block, and the last user content block: the two
- * system blocks are the cached static prefix, a single-message request carries
- * the same three, and a request with no caller system prompt marks the identity
- * and last-user slots. No other message is marked — the previous-message
- * breakpoint belongs to a different prompt branch — and no tool declaration is
- * ever marked.
+ * the slots present are marked with {@link cc3CacheControl}'s value for the
+ * request's lifetime. The identity block opens the system array this route
+ * builds and the caller's prompt blocks follow, so a request that already
+ * carries the mac pool's billing block forwards it as billing, identity,
+ * harness. The three slots are the identity block, the harness block, and the
+ * last user content block: the two system blocks are the cached static prefix, a
+ * single-message request carries the same three, and a request with no caller
+ * system prompt marks the identity and last-user slots. No other message is
+ * marked — the previous-message breakpoint belongs to a different prompt branch
+ * — and no tool declaration is ever marked.
  *
  * The edits finish by restoring the pinned client's top-level field order; see
  * {@link withClaudeCodeFieldOrder}.
  * @param payload - the Anthropic Messages request fields pi-ai built.
+ * @param lifetime - the marker lifetime this request's class declares.
  * @returns the fields with the policy's identity block and markers in place.
  */
-function withCc3Markers(payload: Record<string, unknown>): Record<string, unknown> {
+function withCc3Markers(
+  payload: Record<string, unknown>,
+  lifetime: Cc3MarkerLifetime,
+): Record<string, unknown> {
   const systemValue = payload['system']
   /* v8 ignore next 3 -- pi-ai serializes `system` as a block array; the string form is handled for a transport that sends one */
   const systemBlocks = typeof systemValue === 'string'
@@ -600,12 +623,15 @@ function withCc3Markers(payload: Record<string, unknown>): Record<string, unknow
   // The client emits the identity line at most once, so a caller block equal to
   // it is dropped before the policy's own block opens the array.
   const callerSystem = (systemBlocks ?? []).filter(block => !isIdentityBlock(block))
-  const system: unknown[] = [withCc3Marker({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }), ...callerSystem]
+  const system: unknown[] = [
+    withCc3Marker({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }, lifetime),
+    ...callerSystem,
+  ]
   const harnessIndex = system.length - 1
   if (harnessIndex > 0) {
     const harness = system[harnessIndex]
     /* v8 ignore next -- a caller block pi-ai built is an object */
-    if (isRequestPayload(harness)) system[harnessIndex] = withCc3Marker(harness)
+    if (isRequestPayload(harness)) system[harnessIndex] = withCc3Marker(harness, lifetime)
   }
   const stripped: Record<string, unknown> = {
     ...payload,
@@ -624,7 +650,7 @@ function withCc3Markers(payload: Record<string, unknown>): Record<string, unknow
     const message = messages[lastUser]
     /* v8 ignore next -- the index lookup only matches message objects */
     if (isRequestPayload(message)) {
-      const userMarked = markMessageTail(message)
+      const userMarked = markMessageTail(message, lifetime)
       if (userMarked !== undefined) marked[lastUser] = userMarked
     }
   }
@@ -715,6 +741,23 @@ function ccWireParityRequestClass(options: GenerateOptions): CcWireParityRequest
   if (options.purpose === 'compaction') return 'compaction'
   if (options.purpose === 'session-title') return 'auxiliary'
   return undefined
+}
+
+/**
+ * Whether one request is a helper call.
+ *
+ * The helper classes are `compaction` and `auxiliary`: the two call families the
+ * loop sends alongside a conversation, and the two the pinned client keeps at
+ * the API's default cache lifetime. The classification is
+ * {@link ccWireParityRequestClass}'s, so an explicit `requestClass` outranks
+ * `purpose` here too. Every other request — `main`, `subagent`, or one that
+ * states no class — reads the route's configured lifetime.
+ * @param options - the assembled request.
+ * @returns whether the request is a helper.
+ */
+function isHelperRequest(options: GenerateOptions): boolean {
+  const requestClass = ccWireParityRequestClass(options)
+  return requestClass === 'compaction' || requestClass === 'auxiliary'
 }
 
 /**
@@ -963,23 +1006,31 @@ function withCcWireParityBody(payload: Record<string, unknown>, request: CcWireP
  * non-wire-parity policy the same profile declares — a wire-parity-off request
  * is the current non-wire-parity request, never half of each. Every other route
  * keeps the previous behavior: the beta alone preserves pi-ai's own markers,
- * while the `cc3` policy replaces them and adds the identity system block.
+ * while the `cc3` policy replaces them and adds the identity system block. On a
+ * `cc3` route a helper request keeps the API's default five-minute lifetime, so
+ * its markers carry no `ttl` and the route's extended beta is not declared; a
+ * main, subagent, or unclassified request keeps the route's one-hour policy.
  * @param payload - the Anthropic Messages request fields pi-ai built.
  * @param profile - the resolved route whose payload policy applies.
  * @param ccWireParity - the request's wire-parity decisions, absent when the
  *   request is wire-parity off.
+ * @param helper - whether the request is a helper call; see {@link isHelperRequest}.
  * @returns replacement fields, or undefined to leave them as built.
  */
 function withAnthropicPayloadPolicy(
   payload: unknown,
   profile: ResolvedPiAiProviderProfile,
   ccWireParity: CcWireParityRequest | undefined,
+  helper: boolean,
 ): Record<string, unknown> | undefined {
   /* v8 ignore next -- pi-ai hands the hook the request fields it built, always an object */
   if (!isRequestPayload(payload)) return undefined
   if (profile.ccWireParity === true && ccWireParity !== undefined) return withCcWireParityBody(payload, ccWireParity)
-  let next = profile.cacheMarkerPolicy === 'cc3' ? withCc3Markers(payload) : payload
-  if (profile.extendedCacheBeta === true) next = withExtendedCacheBeta(next)
+  const cc3 = profile.cacheMarkerPolicy === 'cc3'
+  let next = cc3 ? withCc3Markers(payload, helper ? '5m' : '1h') : payload
+  // The extended beta permits the one-hour lifetime the `cc3` policy writes; a
+  // helper keeps the API's default and declares no beta for it.
+  if (profile.extendedCacheBeta === true && !(cc3 && helper)) next = withExtendedCacheBeta(next)
   return next === payload ? undefined : next
 }
 
@@ -1391,6 +1442,9 @@ export class PiAiAdapter extends LlmAdapter {
       const ccWireParity = profile.ccWireParity === true && model.api === 'anthropic-messages'
         ? resolveCcWireParityRequest(request, profile.ccWireParityCache)
         : undefined
+      // The helper class is the one other request-level decision the payload
+      // policy reads: it selects the `cc3` marker lifetime.
+      const helper = isHelperRequest(request)
       const reasoning = resolveReasoningLevel(
         model,
         options.reasoningEffort ?? profile.reasoning,
@@ -1444,7 +1498,7 @@ export class PiAiAdapter extends LlmAdapter {
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...payloadPolicy
-          ? { onPayload: (payload: unknown) => withAnthropicPayloadPolicy(payload, profile, ccWireParity) }
+          ? { onPayload: (payload: unknown) => withAnthropicPayloadPolicy(payload, profile, ccWireParity, helper) }
           : {},
         ...supportsFetchCapture(model.api) ? { fetch: providerError.fetch } : {},
         ...options.temperature === undefined ? {} : { temperature: options.temperature },

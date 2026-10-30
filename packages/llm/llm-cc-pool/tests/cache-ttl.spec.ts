@@ -188,6 +188,53 @@ describe('pool prompt-cache policy', () => {
     expect(JSON.stringify(request.body)).not.toContain(CACHE_SCOPE_BETA)
   })
 
+  it('keeps a helper request at the default five-minute lifetime without the extended beta', async () => {
+    vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+    const capture = capturePoolFetch()
+    vi.stubGlobal('fetch', capture.fetch)
+    const ctx = await mount()
+
+    // One mount, one default wire: the request class alone decides the marker
+    // lifetime and whether the route declares the extended beta.
+    await assemble(ctx, { ...PROBE, requestClass: 'main' })
+    await assemble(ctx, { ...PROBE, requestClass: 'subagent' })
+    await assemble(ctx, { ...PROBE, requestClass: 'compaction' })
+    await assemble(ctx, { ...PROBE, purpose: 'session-title' })
+
+    expect(capture.calls).toHaveLength(4)
+    const [main, subagent, compaction, auxiliary] = capture.calls
+    for (const request of [main, subagent]) {
+      if (request === undefined) throw new Error('the pool route sent no main or subagent request')
+      expect(markersOf(request.body)).toEqual([
+        ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+        ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+        ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ])
+      expect(betasOf(request)).toEqual([EXTENDED_CACHE_TTL_BETA])
+    }
+    // A helper keeps the identity block and the same three slots, but at the
+    // API's default five-minute lifetime: no ttl on any marker and no cache
+    // beta, while the main and subagent requests keep the configured one hour.
+    for (const request of [compaction, auxiliary]) {
+      if (request === undefined) throw new Error('the pool route sent no helper request')
+      expect(request.body['system']).toEqual([
+        { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: 'You are the pool test assistant.', cache_control: { type: 'ephemeral' } },
+      ])
+      expect(markersOf(request.body)).toEqual([
+        ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
+        ['.system[0].cache_control', { type: 'ephemeral' }],
+        ['.system[1].cache_control', { type: 'ephemeral' }],
+      ])
+      expect(JSON.stringify(request.body)).not.toContain('"ttl"')
+      expect(betasOf(request)).toEqual([])
+      // Only the lifetime differs from a main request: the pinned field order,
+      // the metadata placeholder, and the three marker slots stay put.
+      expect(Object.keys(request.body)).toEqual(Object.keys(main?.body ?? {}))
+      expect(request.body['metadata']).toEqual({})
+    }
+  })
+
   it('writes the pinned client field order with metadata in its canonical slot', async () => {
     const request = await probe()
 

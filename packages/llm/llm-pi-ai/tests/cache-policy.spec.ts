@@ -357,6 +357,57 @@ describe('Anthropic cc3 marker policy', () => {
     expect(betasOf(plainServer.headers[0] ?? {})).toEqual([])
   })
 
+  it('keeps a helper request at the default five-minute lifetime without the extended beta', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, { ...PROBE, provider: 'cache-cc3', requestClass: 'main' })
+    await assemble(ctx, { ...PROBE, provider: 'cache-cc3', purpose: 'compaction' })
+
+    const main = server.requests[0] as Record<string, unknown>
+    const helper = server.requests[1] as Record<string, unknown>
+
+    // The one-hour lifetime belongs to the main request; a helper keeps the
+    // API's default five-minute lifetime, so its markers carry no ttl and its
+    // request declares no cache beta.
+    expect(markersOf(main)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expect(betasOf(server.headers[0] ?? {})).toEqual([EXTENDED_CACHE_TTL_BETA])
+    expect(helper['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: PROBE.system, cache_control: { type: 'ephemeral' } },
+    ])
+    expect(markersOf(helper)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
+      ['.system[0].cache_control', { type: 'ephemeral' }],
+      ['.system[1].cache_control', { type: 'ephemeral' }],
+    ])
+    expect(JSON.stringify(helper)).not.toContain('"ttl"')
+    expect(betasOf(server.headers[1] ?? {})).toEqual([])
+    // Only the lifetime differs: the helper keeps the pinned field order and
+    // the metadata placeholder a pool splice fills.
+    expect(Object.keys(helper)).toEqual(Object.keys(main))
+    expect(helper['metadata']).toEqual({})
+  })
+
   it('leaves the assistant turn before the last user block unmarked', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const server = await mockServer([{ events: anthropicTextEvents }])

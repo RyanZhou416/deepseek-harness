@@ -1772,37 +1772,45 @@ export interface Config {
    */
   requestLog?: PiAiRequestLogProfile
   /**
-   * Prompt-cache TTL this route declares for a request's `cache_control`
-   * markers: `5m` keeps the API's default five-minute lifetime, `1h` asks for
-   * the extended one, and `none` sends no marker. The default `1h` is the
-   * lifetime the route serves now; `5m` is refused while
-   * {@link cacheMarkerPolicy} is `cc3`, because that policy writes one-hour
-   * markers on its own. `none` is this route's caching-disabled state: it has no
-   * marker placement, so the configured marker policy is not applicable and is
-   * dropped during resolution; with {@link ccWireParity} it declares cache intent
-   * `off` instead of the worker's main plan. The value reaches the wire only
-   * through this route's profile, so no other provider's request changes.
+   * Prompt-cache TTL this route declares for a main or subagent request's
+   * `cache_control` markers: `5m` keeps the API's default five-minute lifetime,
+   * `1h` asks for the extended one, and `none` sends no marker. A helper
+   * request (`compaction`, `auxiliary`) always keeps the API's default
+   * five-minute lifetime whatever this field selects, so it sends
+   * `{type: "ephemeral"}` with no `ttl` and declares no extended beta. The
+   * default `1h` is the lifetime the route serves main and subagent requests
+   * now; `5m` is refused while {@link cacheMarkerPolicy} is `cc3`, because that
+   * policy writes one-hour markers for those requests on its own. `none` is
+   * this route's caching-disabled state: it has no marker placement, so the
+   * configured marker policy is not applicable and is dropped during
+   * resolution; with {@link ccWireParity} it declares cache intent `off`
+   * instead of the worker's main plan. The value reaches the wire only through
+   * this route's profile, so no other provider's request changes.
    */
   cacheTtl: CcPoolCacheTtl
   /**
    * Declare `extended-cache-ttl-2025-04-11` on this route's Anthropic Messages
    * requests. The default `true` is what the default `cacheTtl: 1h` and
    * {@link cacheMarkerPolicy} require; an explicit `false` is refused instead
-   * of producing a request the provider would reject.
+   * of producing a request the provider would reject. A helper request keeps
+   * the API's default five-minute lifetime, so it declares no beta.
    */
   extendedCacheBeta: boolean
   /**
    * Prompt-cache marker placement this route asks pi-ai to perform. The
    * default `cc3` places the Claude Code 2.1.288 layout — the client identity
    * system block, the harness system block, and the last cacheable user content
-   * block — with `{type: "ephemeral", ttl: "1h"}` on each slot, and no marker on
-   * any tool declaration or on a message before the last user turn. The policy
-   * owns placement, so it takes precedence over the lifetime {@link cacheTtl}
-   * selects, and it also writes the pinned client's top-level field order with
-   * an empty `metadata` placeholder in its canonical slot for the pool's
-   * `user_id` splice. It requires `cacheTtl: "1h"` and {@link extendedCacheBeta}:
-   * an impossible combination is refused at load and on a settings write, never
-   * at request time. No other provider route reads this value.
+   * block — with `{type: "ephemeral", ttl: "1h"}` on each slot of a main or
+   * subagent request, and `{type: "ephemeral"}` — the API's default five-minute
+   * lifetime — on a helper (`compaction`, `auxiliary`) request, which declares no
+   * extended beta. It places no marker on any tool declaration or on a message
+   * before the last user turn. The policy owns placement, so it takes precedence
+   * over the lifetime {@link cacheTtl} selects, and it also writes the pinned
+   * client's top-level field order with an empty `metadata` placeholder in its
+   * canonical slot for the pool's `user_id` splice. It requires `cacheTtl: "1h"`
+   * and {@link extendedCacheBeta}: an impossible combination is refused at load
+   * and on a settings write, never at request time. No other provider route
+   * reads this value.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**
@@ -1922,7 +1930,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:393`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:415`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2047,8 +2055,10 @@ export interface PiAiProviderProfile {
    * markers but does not declare the beta, so a route that needs the extended
    * lifetime sets both. The beta joins the request's `betas` list before the
    * Anthropic SDK serializes it, which keeps every automatic beta pi-ai derives
-   * for the route. Refused when no model on the route speaks
-   * `anthropic-messages`.
+   * for the route. On a `cc3` route it permits the one-hour lifetime that
+   * policy writes on a main or subagent request; a helper request keeps the API
+   * default five-minute lifetime and declares no beta. Refused when no model on
+   * the route speaks `anthropic-messages`.
    */
   extendedCacheBeta?: boolean
   /**
@@ -2056,11 +2066,14 @@ export interface PiAiProviderProfile {
    * Messages request. Omission keeps pi-ai's placement from
    * {@link cacheRetention}. `cc3` places the Claude Code 2.1.288 layout — the
    * client's identity system block, the harness system block, and the last
-   * cacheable user content block — with `{type: "ephemeral", ttl: "1h"}` on
-   * each slot, and discards every other marker on the route. It marks no tool
-   * declaration and no message before the last user turn, and the billing block
-   * the pool places ahead of the identity block stays unmarked too. It owns
-   * placement outright, so it takes precedence over `cacheRetention` and over
+   * cacheable user content block — and discards every other marker on the route.
+   * A main or subagent request marks each slot with
+   * `{type: "ephemeral", ttl: "1h"}`; a helper request (`compaction`,
+   * `auxiliary`) keeps the API's default five-minute lifetime with
+   * `{type: "ephemeral"}` and no extended beta. It marks no tool declaration and
+   * no message before the last user turn, and the billing block the pool places
+   * ahead of the identity block stays unmarked too. It owns placement outright,
+   * so it takes precedence over `cacheRetention` and over
    * `compat.supportsCacheControlOnTools`; a request with no caller system prompt
    * marks the identity and last-user slots. The policy also writes the pinned
    * client's top-level field order with `stream` last, and an absent `metadata`
