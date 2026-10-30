@@ -1410,7 +1410,7 @@ non-Anthropic route, and the Loader composition.
 genuine Claude Code 2.1.288 first-party desktop wire as a conservative subset.
 It replaces every earlier A draft and is not staged. The authoritative evidence,
 body/header rules, code delta, corpus and exclusions live in
-`mac-pool:development/CC-PARITY-A-DESIGN.md` (v4); this section is the DSH-side
+`mac-pool:development/CC-PARITY-A-DESIGN.md` (v5); this section is the DSH-side
 summary and must stay consistent with it.
 
 **Anchor rule.** Emit only what the carve supports, and take the less-emitting
