@@ -992,6 +992,16 @@ function mergedAccountsFor(
 }
 
 /**
+ * The parsed store's own entries as a JSON object.
+ * @param store - the store to enumerate.
+ * @returns a document holding exactly the store entries this build read.
+ */
+function storeEntries(store: SessionMap): Record<string, unknown> {
+  const entries: [string, unknown][] = Object.entries(store)
+  return Object.fromEntries(entries)
+}
+
+/**
  * The document a write must persist for one parsed store.
  *
  * Unknown top-level entries are copied through, providers the typed store does not represent are
@@ -1003,8 +1013,7 @@ function mergedAccountsFor(
  */
 function materializeStore(store: SessionMap): Record<string, unknown> {
   const preservation = preservedStores.get(store)
-  if (preservation === undefined) return store as unknown as Record<string, unknown>
-  const typedRoot = store as unknown as Record<string, unknown>
+  if (preservation === undefined) return storeEntries(store)
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(preservation.root)) {
     if (key === 'revisions') continue
@@ -1044,7 +1053,7 @@ function materializeStore(store: SessionMap): Record<string, unknown> {
   for (const provider of PROVIDER_IDS) {
     if (Object.hasOwn(out, provider)) continue
     if (Object.hasOwn(preservation.root, provider)) continue
-    const value = typedRoot[provider]
+    const value = store[provider]
     if (value !== undefined) out[provider] = value
   }
   const revisions = materializeRevisions(preservation.root.revisions, store.revisions)

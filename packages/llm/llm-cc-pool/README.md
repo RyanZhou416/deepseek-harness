@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`@deepseek-ai/dsh-llm-cc-pool` adds the mac pool as an optional provider: one Anthropic Messages route whose endpoint, credential reference, and retry policy are fixed, present only when installed. The route serves the built-in four-model catalogue until a deployment replaces it through `models`, which the settings service projects as an editable form. Its default prompt-cache policy is the three-marker Claude Code 2.1.288 layout with the explicit one-hour lifetime, the client identity system block, and the extended-cache beta. The plugin registers no configurable-provider entry; its discovery read reports the pool `/v1/models` listing as candidates and never writes the catalogue, so a model enters this route only through validated configuration.
+`@deepseek-ai/dsh-llm-cc-pool` adds the mac pool as an optional provider: one Anthropic Messages route with fixed endpoint, credential reference, and retry policy, present only when installed. It serves the built-in four-model catalogue until a deployment replaces it through `models`, which the settings service projects as an editable form. Its default prompt-cache policy is the three-marker Claude Code 2.1.288 layout with the explicit one-hour lifetime, client identity system block, and extended-cache beta. The plugin registers no configurable-provider entry; discovery reports the pool `/v1/models` listing as candidates and never writes the catalogue, so a model enters only through validated configuration.
 
 ## Table of Contents
 

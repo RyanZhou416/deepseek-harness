@@ -9,7 +9,7 @@ kind: "package-bundle"
 
 ## 概述
 
-`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：安装后恰好提供一条 Anthropic Messages 路由，其端点、凭据引用与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它，设置服务会把该目录投影为可编辑表单。其默认提示缓存策略是 CC 2.1.288 的三标记布局，带显式一小时存活期、客户端 identity system 块与 extended-cache beta。插件不注册可配置 provider 目录项；它的发现读取把池的 `/v1/models` 清单作为候选报告，绝不写目录，因此模型只能经校验过的配置进入本路由。
+`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：安装后恰好提供一条 Anthropic Messages 路由，其端点、凭据引用与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它，设置服务会把该目录投影为可编辑表单。其默认提示缓存策略是 CC 2.1.288 的三标记布局，带显式一小时存活期、客户端 identity system 块与 extended-cache beta。插件不注册可配置 provider 目录项；发现读取把池的 `/v1/models` 清单作为候选报告，绝不写目录，因此模型只能经校验过的配置进入。
 
 ## 目录
 
