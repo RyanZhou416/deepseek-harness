@@ -1354,12 +1354,25 @@ sends that list as `anthropic-beta`. The beta is never inferred from
 `cacheRetention: long`, and no route adds a `scope` field or
 `prompt-caching-scope-2026-01-05`.
 
+The lifetime is class-aware on that policy. The adapter classifies the request
+from `GenerateOptions.requestClass`, then `purpose` (compaction/session-title),
+exactly as the wire-parity class does; a helper request keeps the API's default
+five-minute lifetime, so its markers are `{type: "ephemeral"}` with no `ttl` and
+the route's `extendedCacheBeta` is not declared for it. A main, subagent, or
+unclassified request keeps the configured one-hour lifetime and the beta that
+permits it. That reproduces the genuine client's split — helpers at 5m with no
+beta, conversation requests at 1h with `extended-cache-ttl-2025-04-11` — on the
+default wire, and it does not change the route-level policy fields: `cacheTtl`,
+`extendedCacheBeta`, and `cacheMarkerPolicy` still validate and resolve as
+above. A proved wire-parity request keeps its own intent and body, described in
+the next section.
+
 The three-marker policy is the route's only placement by configuration. The same
 `onPayload` hook removes every `cache_control` the transport or a caller placed
 from `system`, `tools`, and `messages`, opens the system array with the pinned
 identity line `You are Claude Code, Anthropic's official CLI for Claude.`
 (dropping a caller block equal to it so the line appears once), and marks exactly
-three slots with `{type: "ephemeral", ttl: "1h"}`: the identity block, the harness
+three slots with the lifetime the class declares: the identity block, the harness
 system block, and the last user message's trailing cacheable block. The billing
 block the mac pool sends ahead of them stays unmarked, so the forwarded order is
 identity then harness and the final order is billing, identity, harness. No
@@ -1383,28 +1396,33 @@ system block, and the last user block, keep the pinned field order and the
 `metadata` placeholder, and keep the loud cross-field validation: do not weaken
 them into a request-time failure or a silent fallback, do not restore the
 previous-message marker, a tool marker, or a
-`toolCacheBreakpoint`/`supportsCacheControlOnTools` switch. Keep the policy
-route-scoped: no default outside `llm-cc-pool`, no identity block, field order,
-or default marker policy outside the `cc3` opt-in, no beta from the retention
-tier, no `scope` field, no scope beta, and no change to another pi-ai Anthropic
-route, `llm-deepseek`, or the subscription routes. Keep every other pi-ai
-Anthropic route's `cacheRetention` explicit; do not add a global payload or
-header hook, a `fetch` rewrite, or a mac-pool branch to `llm-pi-ai`. Keep both
-transformations on the one `onPayload` assignment; a second assignment on the
-same route would silently drop the other policy. This layout is the route's
-default wire under its default policy, served whenever `ccWireParity` is false —
-the default — and whenever the capability probe has not proved the wire; it is
-also what a request that carries the wire falls back to. Keep the three
-markers, pinned order and route-scoped behavior on that default wire: do not
-reproduce CC's
-`markerIndices` fork/compaction planner or infer one hour from a subscription.
+`toolCacheBreakpoint`/`supportsCacheControlOnTools` switch. Keep the helper
+lifetime: a helper request's markers carry no `ttl` and declare no extended beta,
+and the route-level `cacheTtl` must not turn a helper into a one-hour request.
+Keep the policy route-scoped: no default outside `llm-cc-pool`, no identity
+block, field order, or default marker policy outside the `cc3` opt-in, no beta
+from the retention tier, no `scope` field, no scope beta, and no change to
+another pi-ai Anthropic route, `llm-deepseek`, or the subscription routes. Keep
+every other pi-ai Anthropic route's `cacheRetention` explicit; do not add a
+global payload or header hook, a `fetch` rewrite, or a mac-pool branch to
+`llm-pi-ai`. Keep both transformations on the one `onPayload` assignment; a
+second assignment on the same route would silently drop the other policy. This
+layout is the route's default wire under its default policy, served whenever
+`ccWireParity` is false — the default — and whenever the capability probe has not
+proved the wire; it is also what a request that carries the wire falls back to.
+Keep the three markers, the class-decided lifetime, pinned order and
+route-scoped behavior on that default wire: do not reproduce CC's
+`markerIndices` fork/compaction prompt planner or infer one hour from a
+subscription.
 The opt-in wire parity section below replaces the body only on a request the
 member endpoint proved the capability for.
 
 **Focused verification.**
 `pnpm exec vitest run packages/llm/llm-cc-pool packages/llm/llm-pi-ai/tests/cache-policy.spec.ts`
 covers the default three-marker body with a marked identity block and harness
-system block, the unmarked assistant turn before the last user block, the
+system block, the helper request's five-minute markers with no `ttl` and no beta
+beside a main and subagent request's one-hour markers with the extended beta,
+the unmarked assistant turn before the last user block, the
 single-message and no-system-prompt requests, the pinned top-level field order,
 the empty `metadata` placeholder in its canonical slot, the absence of a tool
 marker and of the removed field, the load-time resolution of `none` (no marker,
@@ -1452,7 +1470,8 @@ claim no parity. HIPAA tainted/unknown and prompt caching disabled
 (`enablePromptCaching=false`) stay on the wire. HIPAA suppresses scope, extended
 beta and cache-diagnosis but does not force 5m; body TTL follows the `loe`
 decision. Caching disabled means no markers. The default wire would retain
-cc3's 1h and is wrong for these states. The rejected `disabled` token is a
+cc3's one-hour, beta-declaring main-request markers and is wrong for these
+states. The rejected `disabled` token is a
 header/intent value, not the "caching disabled" deployment state; they are
 distinct. `workflow`, agent-type and the `disabled` token are outside the wire.
 
