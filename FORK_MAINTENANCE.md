@@ -1407,16 +1407,18 @@ non-Anthropic route, and the Loader composition.
 ## CC parity A (accepted final design, not implemented)
 
 **Status.** A is the accepted final target for the cc-pool route: reproduce the
-genuine Claude Code 2.1.288 first-party desktop wire as a conservative subset.
-It replaces every earlier A draft and is not staged. The authoritative evidence,
-body/header rules, code delta, corpus and exclusions live in
-`mac-pool:development/CC-PARITY-A-DESIGN.md` (v5); this section is the DSH-side
+genuine Claude Code 2.1.288 first-party desktop wire. It replaces every earlier
+A draft and is not staged. The authoritative evidence, body/header rules, code
+delta, corpus and exclusions live in
+`mac-pool:development/CC-PARITY-A-DESIGN.md` (v6); this section is the DSH-side
 summary and must stay consistent with it.
 
-**Anchor rule.** Emit only what the carve supports, and take the less-emitting
-branch when a fact is unknown: no global scope, no one-hour TTL, no
-cache-diagnosis, no class header, no helper markers. Server acceptance is not a
-design input; a rejection removes a token or fails, never adds one.
+**Anchor rule.** Emit the carved behavior, with a less-emitting fallback only
+where a gate is genuinely unavailable. The 1h TTL mirrors `loe`: OAuth +
+`user:inference`, overage not explicitly true, allowlisted source, no force-5m
+override. Absent overage is the client default (not using), not unknown.
+Scope, extended beta and cache-diagnosis keep their own gates. Server acceptance
+is not a design input; a rejection removes a token or fails, never adds one.
 
 **Scope.** A covers `main` and `subagent` with a real static/dynamic boundary,
 and helpers (compaction/auxiliary) only in the conservative form: no billing, no
@@ -1426,10 +1428,12 @@ one-shot or no-system is A-off for that request (current non-A body/headers),
 not a 400. Custom base URL, gateway, non-firstParty and experimental off mean A
 is not enabled at all; current behavior is retained and not claimed as parity.
 HIPAA tainted/unknown and prompt caching disabled (`enablePromptCaching=false`)
-stay A-on with 5m and no scope; they are never A-off, because A-off would
-retain cc3's 1h and exceed the anchor. The rejected `disabled` token is a
-header/intent value, not the "caching disabled" deployment state; they are
-distinct. `workflow`, agent-type and the `disabled` token are outside A.
+stay A-on. HIPAA suppresses scope, extended beta and cache-diagnosis but does not
+force 5m; body TTL follows the `loe` decision. Caching disabled means no markers.
+A-off would retain cc3's 1h and is wrong for these states. The rejected
+`disabled` token is a header/intent value, not the "caching disabled" deployment
+state; they are distinct. `workflow`, agent-type and the `disabled` token are
+outside A.
 
 **Capability and ownership.** The worker is the executable cache-policy owner;
 the Swift pool is transport and member validation. Add member
@@ -1482,19 +1486,19 @@ scope gate (`Tse` + boundary/static) holds; 5m static is
 Billing/identity are main/subagent only; helpers get neither. The worker uses
 `staticBlockCount` and the identity text, not a leading-prefix guess.
 
-**TTL and facts.** 1h requires all of: first-party OAuth/committed token with
-`user:inference` (pro/max included), a lease overage fact positively saying
-overage is not in use (accountEpoch/credentialRevision/proxyRevision/observedAt/
-status; stale/absent => 5m), HIPAA `clear` or `not-applicable` (tainted/unknown
-=> 5m even with a declared allowlist), an explicit worker allowlist config that
-is known true (default absent), and no force-5m/env/settings/frontmatter
-override. `XNe`
-is carve's fallback that grants 1h; A does not use it. Unknown => 5m; the first
-release is 5m-only unless the allowlist is explicitly declared (those tests are
-override, not parity). HIPAA is tainted/clear/unknown/not-applicable: clear is a
-fresh accepted document with no hipaa taint, not `settled`; not-applicable is
-pro/max policy-read-ineligible; scope only for clear/not-applicable. Fix the
-policy-limits URL to `/api/claude_code/policy_limits` everywhere.
+**TTL and facts.** 1h mirrors `loe`: first-party OAuth/committed token with
+`user:inference` (pro/max included), overage not explicitly true (absent/false
+is the client default; a last-observed true fact suppresses 1h until a non-true
+observation), the source is allowlisted by the `XNe` fallback
+(`repl_main_thread*`, `sdk`, `auto_mode`, `memdir_relevance`) or an optional
+explicit config, and no force-5m/env/settings/frontmatter override. `XNe` is
+used, not rejected. 1h is the default for a subscriber main request; 5m only
+for non-subscriber/non-allowlisted/true overage/force-5m. HIPAA is
+tainted/clear/unknown/not-applicable: clear is a fresh accepted document with no
+hipaa taint, not `settled`; not-applicable is pro/max policy-read-ineligible;
+scope/extended/diagnosis only for clear/not-applicable, but body TTL still
+follows `loe`. Fix the policy-limits URL to
+`/api/claude_code/policy_limits` everywhere.
 
 **Beta/thinking.** Keep every non-cache plan identifier. Keep scope site 9 only
 when the body scope gate holds; extended site 19 only on 1h; diagnosis site 21
@@ -1519,21 +1523,24 @@ written/remote-worker-src/artifact manifests, update `dependency-pins.json`,
 `version-matrix.json`, `ServiceManifestHealthTests`, installed
 `direct-config.json` and the runbook in the same release.
 
-**DSH implementation.** Add `GenerateOptions.requestClass`
+**DSH implementation.** A is owned by `llm-cc-pool`, not shared `llm-pi-ai`.
+`llm-pi-ai` keeps its current cc3 behavior for every route; other providers are
+untouched. Add `GenerateOptions.requestClass`
 (`main|compaction|auxiliary|subagent`). Resolve explicit class, then `purpose`
 (compaction/session-title), then session origin/delegationDepth -> subagent,
 then named one-shots -> auxiliary, otherwise A-off; never fall through to main.
-Add producers for auto-review/one-shots. Add a pool-scoped `ccParityA` option in
-`PiAiAdapterOptions`/cc-pool, not a shared profile field. Build one A plan per
-request containing body and headers atomically; `onPayload` cannot add HTTP
-headers, so the adapter header construction must add them. A replaces the
-`withAnthropicPayloadPolicy` branch; it does not add a second `onPayload`, and
-it ignores/removes `cc3`, `cacheTtl`, `extendedCacheBeta`, `cacheRetention` for
-its route with updated load validation. A headers are adapter-owned and stripped
-from profile headers; a profile attempt is a load error. Add headers before
-`sessionIdentityHeaders` returns early for a missing sessionId, or A-off.
-Because A reorders/drops/replaces system text, record the A body/section plan in
-the request log or a prepared-request record.
+Add producers for auto-review/one-shots. The `llm-cc-pool` wrapper receives
+`systemSections`, normalizes `options.system` into identity/static/dynamic runs
+with a private sentinel, and installs a pool-private `fetch` override. The
+override splits/removes the sentinel, strips all `cache_control`, applies the A
+field order/metadata/thinking/eager/beta rules, and adds the three `x-cc-*`
+headers. The sentinel never reaches the pool/model. `ccParityA` is a pool-route
+option default off; when off the wrapper is absent and `llm-pi-ai` bytes are
+unchanged. If the wrapper cannot obtain sections/class/header seam, A-off. A
+headers are wrapper-owned and stripped from profile headers. The capability
+probe is a member HTTP request at profile load/reconnect, not a model/account
+request. Record the A body/section plan in the pool-route request log or a
+prepared-request record.
 
 **Acceptance.** The A change commits
 `mac-pool:development/cc-parity-a-corpus/` with cases, pinned identities,
@@ -1591,8 +1598,9 @@ review at `development/cc-parity-a-corpus/SECURITY-REVIEW.md`, gated by
 **Explicit exclusions.** Helpers under-emit billing/identity versus the carve
 title/compaction; evict/keepalive/message-threads/context-hint are omitted;
 `workflow`, agent-type and the `disabled` token are not A; prompt caching
-disabled is still A-on at 5m/no-scope; no live capture; live allowlist
-unknown; first request has no overage fact; HIPAA unknown means no scope/5m.
+disabled is still A-on but emits no markers; no live capture. `XNe` is used as
+the fallback, 1h is the default for a subscriber main request, absent overage is
+not overage, and HIPAA suppresses scope/extended/diagnosis without forcing 5m.
 The current three-marker/no-scope behavior remains shipped until A lands.
 
 ## CC subscription pool settings page (fork)
