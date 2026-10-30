@@ -801,8 +801,7 @@ describe('pool readiness refusal', () => {
       type: 'error',
       error: { type: 'api_error', retryable: false, message: READINESS_DETAIL },
     })}`
-    // Without the lease detail this body is not the readiness refusal, but the
-    // pool's withdrawal still forbids the retry.
+    // The readiness detail identifies the pool's own refusal at any status.
     const markerOnly = JSON.stringify({
       pool_request_id: 'pool-request-marker',
       type: 'error',
@@ -813,10 +812,22 @@ describe('pool readiness refusal', () => {
       code: POOL_ERROR_CODE,
       retryDisposition: 'forbid',
     })
-    expect(classifyPoolFailure(markerOnly)).toMatchObject({
-      code: POOL_ERROR_CODE,
-      retryDisposition: 'forbid',
+    // A marker-only 400 is a native failure: the withdrawal is 5xx-only so the
+    // text classifier can see context overflow and compact.
+    expect(classifyPoolFailure(markerOnly, { status: 400 })).toBeUndefined()
+  })
+
+  it.each([
+    ['400', 'prompt is too long: 250000 tokens > 200000 maximum'],
+    ['413', 'request_too_large: the prompt exceeds the context window'],
+  ])('leaves a native %s context overflow for the text classifier', (code, message) => {
+    const overflow = JSON.stringify({
+      pool_request_id: 'pool-request-overflow',
+      type: 'error',
+      error: { type: 'invalid_request_error', message, retryable: false },
     })
+    const status = Number(code)
+    expect(classifyPoolFailure(`${code} ${overflow}`, { status })).toBeUndefined()
   })
 
   it('honors the withdrawal on a body that also names a claude origin', () => {

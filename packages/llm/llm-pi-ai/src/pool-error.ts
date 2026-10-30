@@ -312,7 +312,7 @@ export function classifyPoolFailure(
     // body, so the detail decides. A pool-authored body that explicitly
     // withdraws the retry also decides: the text classifier would call its 5xx
     // retryable, which is exactly what the pool refused.
-    if (!isPoolReadinessFailure(envelope) && !withdrawsRetry(envelope)) return undefined
+    if (!isPoolReadinessFailure(envelope) && !withdrawsRetry(envelope, status)) return undefined
     return {
       ...failure(POOL_ERROR_CODE),
       retryDisposition: 'forbid',
@@ -374,14 +374,17 @@ function isPoolReadinessFailure(envelope: ProviderErrorEnvelope): boolean {
  *
  * The pool echoes `pool_request_id` on native provider failures too, so a body
  * carrying that id (or `origin: pool`) and stating `retryable: false` is the
- * pool's answer about this failure rather than the provider's. Without either
- * pool marker the envelope is still a native failure, and its text
- * classification — including the retryable 5xx default there — is kept.
+ * pool's answer about this failure rather than the provider's. The withdrawal
+ * applies only to a 5xx: a native 400/413 context-overflow response also carries
+ * the pool's id and its non-retryable flag, but it must reach the text
+ * classifier so the agent loop can compact instead of ending the turn.
  * @param envelope - the recognized error envelope.
+ * @param status - the resolved HTTP status, when one is known.
  * @returns whether the pool withdrew the retry.
  */
-function withdrawsRetry(envelope: ProviderErrorEnvelope): boolean {
+function withdrawsRetry(envelope: ProviderErrorEnvelope, status: number | undefined): boolean {
   if (envelope.retryable !== false) return false
+  if (status === undefined || status < 500 || status > 599) return false
   return envelope.origin === 'pool' || envelope.poolRequestId !== undefined
 }
 
