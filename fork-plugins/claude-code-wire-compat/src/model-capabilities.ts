@@ -5,6 +5,7 @@ import type {
   ClaudeCodeCatalogueEntry,
   ClaudeCodeProtocolProfile,
 } from "./contracts.js";
+import { normalizeModelId } from "./model-identity.js";
 import { profileBehaviors } from "./profile-behaviors.js";
 import { CLAUDE_CODE_2_1_195_PROFILE } from "./profiles/claude-code-2.1.195.js";
 
@@ -91,7 +92,8 @@ import { CLAUDE_CODE_2_1_195_PROFILE } from "./profiles/claude-code-2.1.195.js";
  * guard for that equivalence.
  *
  * Model ids reaching these functions have already been normalized by
- * `resolveModel` via `normalizeModelId`.
+ * `resolveModel` via `normalizeModelId`, which also strips the request-time
+ * `[1m]`/`[2m]` marker.
  */
 
 /**
@@ -253,6 +255,19 @@ export function supportsStructuredOutputs(normalizedId: string): boolean {
  * excludes `claude-opus-4-8`. Do not merge them.
  * This beta-only gate is intentionally absent from `ClaudeCodeCapabilities`.
  *
+ * THE ONE DECISION. This predicate answers both halves of the
+ * mid-conversation-system pair: the beta composer asks it before pushing the
+ * header, and a request builder asks it before putting the later system text
+ * on the wire as a `system`-role message. Both must use this function and
+ * nothing else -- `modelCapability` is catalogue-only and answers `false` for
+ * an id the catalogue lacks, so asking it beside a permissive composer made
+ * the header and the body disagree for exactly those ids.
+ *
+ * The marker is not part of the model identity. A `[1m]`/`[2m]` request-time
+ * suffix, a dotted version and a dated suffix are normalized off here, so a
+ * marked id and its plain spelling get one answer instead of the marked
+ * spelling falling through to the fallback below.
+ *
  * Catalogue-first WHEN a profile is supplied and that profile catalogues the
  * id: `mid_conv_system` exists as a catalogue string, and from 2.1.222+ the
  * catalogue is what upstream reads. The switch is behaviour-preserving for
@@ -265,9 +280,10 @@ export function supportsStructuredOutputs(normalizedId: string): boolean {
  * `claude-mythos-5` under 2.1.195 -- the predicate remains authoritative.
  */
 export function supportsMidConversationSystem(
-  normalizedId: string,
+  model: string,
   profile?: ClaudeCodeProtocolProfile,
 ): boolean {
+  const normalizedId = normalizeModelId(model);
   const entry = profile?.supportedModels[normalizedId];
   if (entry !== undefined) {
     return entry.capabilities.includes("mid_conv_system");

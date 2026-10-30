@@ -20,10 +20,18 @@
  * back to the plain window. The output ceiling is not beta-gated and is reported as documented.
  *
  * The catalogue key a wire model id resolves to therefore belongs to this module: the marker is a
- * capacity choice, and every entry lookup here reads through it.
+ * capacity choice, and every entry lookup here reads through it. The key itself is the wire
+ * library's `normalizeModelId`, not a local string edit: it strips the request-time marker, a
+ * dotted version and a dated suffix, so `claude-opus-4.8`, `claude-sonnet-4-5-20250929[1m]` and
+ * the plain catalogue spelling read one entry. A local strip would leave the dated and dotted
+ * spellings keyless, which reports their capacity, thinking shape, effort set and fast tier as
+ * unnamed.
  */
 
-import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
+import {
+  CLAUDE_CODE_2_1_288_PROFILE,
+  normalizeModelId,
+} from '@tormentalabs/claude-code-wire-compat'
 import type { ClaudeCodeCatalogueEntry } from '@tormentalabs/claude-code-wire-compat'
 
 /** The context and output capacity one Claude model is reported with. */
@@ -118,18 +126,25 @@ function carriesOneMillionMarker(model: string): boolean {
 
 /**
  * The pinned catalogue's key for a wire model id.
+ *
+ * Delegates to the wire library so this route and the builder agree on which
+ * model an id names: the request-time marker, a dotted version, a dated suffix
+ * and the letter case all resolve to the catalogue spelling. Exported because
+ * a per-model wire rule beside a catalogue lookup must key on the same id; a
+ * literal comparison against the raw wire id misses those spellings.
  * @param model - the wire model id.
  * @returns the id the profile keys its catalogue entry by.
  */
-function claudeCatalogueId(model: string): string {
-  return model.replace(/\[1m\]/giu, '')
+export function claudeCatalogueId(model: string): string {
+  return normalizeModelId(model)
 }
 
 /**
  * One model's entry in the pinned catalogue, when it carries one.
  *
  * A request-time marker is not part of the catalogue key, so a marked id reads the same entry as
- * the plain one.
+ * the plain one; neither is a dotted version or a dated suffix, which the same normalization
+ * removes.
  * @param model - the wire model id.
  * @returns the catalogue entry, or undefined for an id the profile does not carry.
  */

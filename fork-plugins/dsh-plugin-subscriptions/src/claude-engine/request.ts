@@ -58,7 +58,7 @@ const KNOWN_BODY_FIELDS: ReadonlySet<string> = new Set([
 const UNSUPPORTED_BODY_FIELDS: Readonly<Record<string, string>> = Object.freeze({
   mcp_servers: 'MCP servers are not part of the V1 single-account Messages engine',
   container: 'remote containers are not part of the V1 single-account Messages engine',
-  context_management: 'context management is owned by the harness route, not this engine',
+  context_management: 'the route sends no context editing, and this engine refuses a caller-supplied field',
   output_format: 'structured output is not part of the V1 engine',
   speed: 'fast tier selection is not part of the V1 engine',
   service_tier: 'service tiers are not part of the V1 engine',

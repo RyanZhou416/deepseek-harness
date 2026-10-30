@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.2-dsh16]
+
+### Fixed
+
+- **A model id normalizes once, marker and spelling included.** `normalizeModelId`
+  now strips the request-time `[1m]`/`[2m]` marker before its dotted, lowercase and
+  catalogue matching, so `claude-sonnet-4-0[1m]` resolves to `claude-sonnet-4-0`
+  instead of falling past the sonnet 4 lookahead as an uncatalogued id. The
+  mismatch that closes: `resolveModel` then granted mid-conversation betas from
+  the permissive fallback while `modelCapability` answered `false` from the
+  catalogue, so headers and body disagreed for that id.
+- **`supportsMidConversationSystem` is the one answer for both halves of the
+  mid-conversation form.** It strips the marker and normalizes the id itself, and
+  it is what a request builder must ask before sending the later system text as a
+  system-role message. The catalogue-first lookup and the ported fallback are
+  unchanged; a caller that asked the catalogue-only `modelCapability` beside the
+  composer's permissive fallback could still split on an id no profile names.
+
+### Added
+
+- **`normalizeModelId` is a public export.** A consumer that keys its own tables
+  by model id (context and output limits, thinking shape, effort levels, fast
+  tier) must ask the same identity question the catalogue lookup asks, or a dated,
+  dotted or marked spelling of a catalogued model misses its own row.
+
 ## [0.7.2-dsh15]
 
 ### Fixed

@@ -204,7 +204,7 @@ describe('fork plugin build recipe', () => {
     expect(WIRE_COMPAT_DIRECTORY).toBe(join(REPOSITORY_ROOT, 'fork-plugins', 'claude-code-wire-compat'))
     const manifest = JSON.parse(await readFile(join(WIRE_COMPAT_DIRECTORY, 'package.json'), 'utf8')) as PluginManifest
     expect(manifest.name).toBe(WIRE_COMPAT_PACKAGE)
-    expect(manifest.version).toBe('0.7.2-dsh15')
+    expect(manifest.version).toBe('0.7.2-dsh16')
     expect(wireCompatSourcePaths()).toContain('src')
     expect(wireCompatSourcePaths()).not.toContain('dist')
     expect(sourcePaths(plugin('subscriptions'))).not.toContain('dist')

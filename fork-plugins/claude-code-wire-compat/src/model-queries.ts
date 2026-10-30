@@ -82,7 +82,9 @@ const WEB_SEARCH_VENDOR_TOKENS: readonly string[] = Object.freeze([
  * `capability` is a verbatim upstream capability string. Ids the profile does
  * not catalogue answer `false` for every capability: the catalogue is the only
  * evidence this query consults, and absence of evidence is reported as
- * absence. Callers wanting the derived nine-boolean view -- which falls back
+ * absence. A request-time marker (`claude-sonnet-4-0[1m]`) is stripped by
+ * `normalizeModelId` first, so a marked id reads the same entry as its plain
+ * spelling. Callers wanting the derived nine-boolean view -- which falls back
  * to the ported predicates for uncatalogued ids -- want `resolveModel`.
  */
 export function modelCapability(

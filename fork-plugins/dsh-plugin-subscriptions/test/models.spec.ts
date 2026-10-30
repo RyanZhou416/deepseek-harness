@@ -14,7 +14,12 @@ import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/provide
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeThinkingBody, fetchClaudeCatalogue } from '../src/providers/claude.js'
 import { claudeBuiltInCatalogue, claudeCatalogueListing } from '../src/providers/claude-catalogue.js'
-import { claudeDocumentedLimits, claudeModelLimits, claudeProfileLimits } from '../src/providers/claude-model-limits.js'
+import {
+  claudeDocumentedLimits,
+  claudeModelLimits,
+  claudeOneMillionModelId,
+  claudeProfileLimits,
+} from '../src/providers/claude-model-limits.js'
 import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache, OAuthEndpointError } from '../src/providers/common.js'
@@ -419,6 +424,26 @@ test('the pinned catalogue is what advertises claude reasoning efforts', async (
   assert.equal((await claude.resolveModel('claude', 'claude-3-7-sonnet')).reasoning, undefined)
 })
 
+test('a dotted, dated or marked spelling advertises the catalogued model effort set', async () => {
+  // The effort flags are read from the catalogue entry, and the entry key is the wire library's
+  // normalization: a spelling that missed the key advertised no effort at all.
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: false,
+  })
+  const plain = await claude.resolveModel('claude', 'claude-sonnet-4-6')
+  for (const spelled of ['claude-sonnet-4.6', 'claude-sonnet-4-6-20250929', 'claude-sonnet-4.6[1m]']) {
+    assert.deepEqual((await claude.resolveModel('claude', spelled)).reasoning, plain.reasoning, spelled)
+  }
+  const opus48 = await claude.resolveModel('claude', 'claude-opus-4-8')
+  assert.deepEqual(
+    (await claude.resolveModel('claude', 'claude-opus-4.8')).reasoning?.efforts.map(effort => effort.id),
+    opus48.reasoning?.efforts.map(effort => effort.id),
+  )
+})
+
 test('codex discovery failure falls back to the static catalog with a warning', async () => {
   const warnings: string[] = []
   const { fetchFn } = fakeFetch({ error: 'boom' }, 500)
@@ -493,6 +518,16 @@ test('claudeThinkingBody refuses a manual budget on Opus 5.5', () => {
   assert.equal(claudeThinkingBody('claude-opus-4-5', undefined, 32_000), undefined)
 })
 
+test('a dotted, dated or marked spelling of Opus 5.5 still refuses the manual budget', () => {
+  // The refusal is keyed on the catalogue id. A raw literal comparison let every other spelling
+  // of the same model through, and a manual budget on Opus 5.5 is an API error in all of them.
+  for (const model of ['claude-opus-5.5', 'claude-opus-5.5[1m]', 'claude-opus-5-5-20260101']) {
+    assert.deepEqual(claudeThinkingBody(model, 'enabled', 32_000), { type: 'adaptive' }, model)
+  }
+  // A model that only has the same shape keeps the manual budget its entry allows.
+  assert.deepEqual(claudeThinkingBody('claude-opus-4.8', 'enabled', 32_000), { type: 'enabled', budgetTokens: 16_000 })
+})
+
 test('the thinking budget stays strictly under the output cap it is derived from', () => {
   // `budget_tokens >= max_tokens` is an API error in extended thinking, so the derived budget
   // has to stay below whatever cap a model now resolves to — including the 128K a flagship
@@ -564,6 +599,30 @@ test('the 1M marker is the one channel that reports the beta window, and it clam
   assert.equal(claudeModelLimits('claude-haiku-4-5[1m]').contextWindow, 200_000)
   assert.equal(claudeModelLimits('claude-3-7-sonnet[1m]').contextWindow, 200_000)
   assert.equal(claudeModelLimits('claude-unknown[1m]').contextWindow, 200_000)
+})
+
+test('a dated, dotted or upper-case spelling reports the catalogue spelling capacity', () => {
+  // The catalogue key is the wire library's normalization, not a local `[1m]` strip, so the
+  // spellings a real request carries all read one entry.
+  const spellings: readonly (readonly [string, string])[] = [
+    ['claude-opus-4.8', 'claude-opus-4-8'],
+    ['CLAUDE-OPUS-4.8', 'claude-opus-4-8'],
+    ['claude-sonnet-4.5-20250929', 'claude-sonnet-4-5'],
+    ['claude-sonnet-4-5-20250929[1m]', 'claude-sonnet-4-5[1m]'],
+    ['claude-sonnet-4.6', 'claude-sonnet-4-6'],
+  ]
+  for (const [spelled, plain] of spellings) {
+    assert.deepEqual(claudeDocumentedLimits(spelled), claudeDocumentedLimits(plain), spelled)
+    assert.deepEqual(claudeProfileLimits(spelled), claudeProfileLimits(plain), spelled)
+    assert.deepEqual(claudeModelLimits(spelled), claudeModelLimits(plain), spelled)
+  }
+  // The marked dated spelling composes the beta and reports its million, exactly as the marked
+  // catalogue spelling does; unmarked it reports the catalogue window.
+  assert.equal(claudeModelLimits('claude-sonnet-4-5-20250929[1m]').contextWindow, 1_000_000)
+  assert.equal(claudeModelLimits('claude-sonnet-4-5-20250929').contextWindow, 200_000)
+  assert.equal(claudeModelLimits('claude-opus-4.8').contextWindow, 1_000_000)
+  // The 1M row derivation reads the same key, so a dotted spelling raises the same variant.
+  assert.equal(claudeOneMillionModelId('claude-sonnet-4.6'), 'claude-sonnet-4.6[1m]')
 })
 
 test('the catalogue lists a 1M row for exactly the models the marker buys a window for', () => {
@@ -869,6 +928,11 @@ test('claude fast capability comes from the pinned catalogue, not from discovery
   assert.equal(claude.supportsFastTier('claude-opus-5-5[1m]'), true, 'the marker is not part of the catalogue key')
   assert.equal(claude.supportsFastTier('claude-fable-5'), false)
   assert.equal(claude.supportsFastTier('claude-not-a-model'), false)
+  // The tier is read from the catalogue entry, whose key is the wire library's normalization:
+  // the dotted, dated and marked spellings all keep the tier the catalogue spelling carries.
+  for (const spelled of ['claude-opus-4.8', 'claude-opus-4-8-20260101', 'claude-opus-5.5[1m]']) {
+    assert.equal(claude.supportsFastTier(spelled), true, spelled)
+  }
 
   // Logged out: no fast models, so the Speed toggle hides after logout.
   const loggedOut = new ClaudeAdapter({

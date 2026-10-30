@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: MIT
 /**
  * Build the workspace wire-compat source package's `dist/` before this plugin
- * type-checks or tests.
+ * type-checks, tests or builds.
  *
  * The plugin resolves `@tormentalabs/claude-code-wire-compat` to
  * `fork-plugins/claude-code-wire-compat`, whose exports point at `dist/`.
- * That directory is generated, not tracked, so a clean checkout has to build
- * it once. The compat package's own `prepare` script does this during a real
- * install; this guard covers plugin-local runs that skip lifecycle scripts.
+ * That directory is generated and not tracked, so a clean checkout has to
+ * build it once. It is also never a truth signal on its own: a `dist/` left
+ * over from an earlier checkout predates whatever the compat `src/` now says,
+ * and a test run against it silently exercises the previous builder. The
+ * guard therefore rebuilds on every run instead of skipping when the files
+ * exist, and a cheap mtime comparison would not fix it because a same-second
+ * edit, a fresh clone and a restored artifact all defeat it.
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -16,10 +20,6 @@ import { fileURLToPath } from 'node:url'
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const compatRoot = resolve(pluginRoot, '..', 'claude-code-wire-compat')
-const builtEntry = join(compatRoot, 'dist', 'index.js')
-const builtTypes = join(compatRoot, 'dist', 'index.d.ts')
-
-if (existsSync(builtEntry) && existsSync(builtTypes)) process.exit(0)
 
 const tsc = join(pluginRoot, 'node_modules', 'typescript', 'bin', 'tsc')
 if (!existsSync(tsc)) {

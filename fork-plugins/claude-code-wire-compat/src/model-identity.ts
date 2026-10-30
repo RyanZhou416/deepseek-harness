@@ -27,11 +27,20 @@ function dottedToDashedVersion(model: string): string {
  * address spaces: the first indexes the 2.1.195 platform binary, the second
  * the carved 2.1.280 JavaScript bundle, so neither can be found in the other.
  *
+ * The request-time `[1m]`/`[2m]` marker is stripped first (`stripModelMarkers`),
+ * before the dotted rewrite, the lowercasing and every catalogue rung. The
+ * marker selects a context size; it is not part of the model identity. Without
+ * that strip a marked id only reached the ids its rungs test by substring —
+ * `claude-sonnet-4-0[1m]` fell past the sonnet 4 lookahead and came back
+ * marked, resolving through the uncatalogued fallback while `modelCapability`
+ * answered from the catalogue. Every call site, and in particular
+ * `resolveModel`, now sees one identity for a marked id and its plain spelling.
+ *
  * Rung order is load-bearing: each test is a substring test, so a longer id
  * must precede the shorter id it contains or the shorter rung swallows it.
  */
 export function normalizeModelId(model: string): string {
-  model = dottedToDashedVersion(model.toLowerCase());
+  model = dottedToDashedVersion(stripModelMarkers(model).toLowerCase());
   if (model.includes("claude-fable-5-1")) return "claude-fable-5-1";
   if (model.includes("claude-fable-5")) return "claude-fable-5";
   if (model.includes("claude-mythos-5-1")) return "claude-mythos-5-1";

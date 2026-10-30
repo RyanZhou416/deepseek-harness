@@ -17,7 +17,7 @@ import type {
 import {
   CLAUDE_CODE_2_1_288_PROFILE,
   isClaude3Model,
-  modelCapability,
+  supportsMidConversationSystem as compatSupportsMidConversationSystem,
 } from '@tormentalabs/claude-code-wire-compat'
 import type { BuiltClaudeCodeRequest } from '@tormentalabs/claude-code-wire-compat'
 import type { FlowSpec } from '../auth/oauth-flow.js'
@@ -65,7 +65,7 @@ import type { ClaudeCaptureTicket, ClaudeSpanPin } from './claude-span-store.js'
 import type { ClaudeWireThinking } from './claude-wire.js'
 import { claudeCatalogueListing } from './claude-catalogue.js'
 import type { ClaudeCatalogueOption } from './claude-catalogue.js'
-import { claudeCatalogueEntry, claudeModelLimits } from './claude-model-limits.js'
+import { claudeCatalogueEntry, claudeCatalogueId, claudeModelLimits } from './claude-model-limits.js'
 import {
   effortDisplayName,
   idleWatchdog,
@@ -463,14 +463,18 @@ export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) 
 /**
  * Whether this model can take a later `{"role":"system"}` message.
  *
- * The pinned 2.1.288 catalogue is the one source: the local list this used to
- * duplicate missed the Sonnet 5 / Opus 5.5 entries the catalogue grants. The
- * request-time `[1m]` marker is not part of the catalogue key.
- * @param model - the wire model id.
- * @returns whether the pinned catalogue grants the mid-conversation system form.
+ * Delegates to the pinned builder's own predicate. That one function also
+ * decides the `mid-conversation-system` header, so the body form and the
+ * header cannot disagree: the pinned catalogue answers for every id it names,
+ * the ported fallback answers for the rest, and a `[1m]`/`[2m]` marker is
+ * stripped before either lookup. A local answer here would be a second opinion
+ * on the same question -- the failure this replaces asked the catalogue-only
+ * `modelCapability`, which denied an id the composer admitted.
+ * @param model - the wire model id, marker and all.
+ * @returns whether the pinned profile grants the mid-conversation system form.
  */
 export function supportsMidConversationSystem(model: string): boolean {
-  return modelCapability(model, 'mid_conv_system', CLAUDE_CODE_2_1_288_PROFILE)
+  return compatSupportsMidConversationSystem(model, CLAUDE_CODE_2_1_288_PROFILE)
 }
 
 /** Files API upload. Official path from the Files HTTP reference. */
@@ -1607,9 +1611,12 @@ function claudeThinkingType(model: string): 'enabled' | 'adaptive' | undefined {
 /**
  * Opus 5.5 accepts only omitted thinking or `type: adaptive`. A manual budget
  * is a 400 even when an older catalog snapshot still marks `enabled`.
+ *
+ * Keyed on the catalogue id, not the raw wire id, so a dotted, dated or marked
+ * spelling of the same model carries the same rule.
  */
 function rejectsBudgetThinking(model: string): boolean {
-  return model === 'claude-opus-5-5' || model.startsWith('claude-opus-5-5-')
+  return claudeCatalogueId(model) === 'claude-opus-5-5'
 }
 
 /**

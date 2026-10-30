@@ -42,7 +42,7 @@ export const REQUEST_RECORD_UNAVAILABLE = 'REQUEST_RECORD_UNAVAILABLE' satisfies
  * uses it, and `test/claude-wire-record.spec.ts` asserts it against the manifest
  * the resolver actually loads.
  */
-export const CLAUDE_WIRE_RECORD_LIBRARY = '@tormentalabs/claude-code-wire-compat@0.7.2-dsh15'
+export const CLAUDE_WIRE_RECORD_LIBRARY = '@tormentalabs/claude-code-wire-compat@0.7.2-dsh16'
 
 /** Whether one parsed JSON value is a plain object rather than an array or null. */
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { BETA_REGISTRY_2_1_288, CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
+import type { BuiltClaudeCodeRequest } from '@tormentalabs/claude-code-wire-compat'
 import type { ClaudeSession } from '../src/auth/store.js'
 import { supportsMidConversationSystem } from '../src/providers/claude.js'
 import { buildClaudeWireRequest } from '../src/providers/claude-wire.js'
@@ -184,4 +185,59 @@ test('a built request keeps clear_at through the cache-control pass and composes
     true,
     'the request declares the beta that carries the field',
   )
+})
+
+/** Whether a built body carries the later system text as its own system-role message. */
+function hasInHistorySystemMessage(body: {
+  messages: { role: string; content: unknown }[]
+}): boolean {
+  return body.messages.some(message => message.role === 'system' && message.content === 'mid-conversation context')
+}
+
+/** Whether the request's `anthropic-beta` header carries one registry header. */
+function declaresBeta(built: BuiltClaudeCodeRequest, header: string): boolean {
+  const beta = String(built.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? '')
+  return beta.split(',').map(value => value.trim()).includes(header)
+}
+
+test('the 1M rows and a discovered id keep the body form and the beta in agreement', async () => {
+  // One predicate answers both halves: the builder composes the header from the resolved id and
+  // this route decides the body form from the same function. A disagreement leaves a request with
+  // a beta whose body field is missing, or a system-role message no beta covers.
+  const models = [
+    // The four 1M rows the catalogue lists. None of their plain ids carries `mid_conv_system`.
+    'claude-sonnet-4-0[1m]',
+    'claude-sonnet-4-5[1m]',
+    'claude-sonnet-4-6[1m]',
+    'claude-opus-4-6[1m]',
+    // A discovery-appended id the pinned catalogue does not name.
+    'claude-sonnet-6[1m]',
+  ]
+
+  for (const model of models) {
+    const options: GenerateOptions = {
+      provider: 'claude',
+      model,
+      messages: conversation() as never,
+      system: 'be terse',
+    }
+    const built = await buildClaudeWireRequest(
+      options,
+      SESSION,
+      conversation(),
+      32_000,
+      undefined,
+      undefined,
+      { sessionId: WIRE_SESSION_ID, atisPin: undefined, previousRequestId: undefined },
+      'acct',
+    )
+    const body = JSON.parse(built.body) as { messages: { role: string; content: unknown }[] }
+    const inHistory = hasInHistorySystemMessage(body)
+    const systemBeta = declaresBeta(built, BETA_REGISTRY_2_1_288.MID_CONVERSATION_SYSTEM.header)
+    const clearAtBeta = declaresBeta(built, BETA_REGISTRY_2_1_288.MID_CONVERSATION_SYSTEM_CLEAR_AT.header)
+
+    assert.equal(inHistory, systemBeta, `${model}: body form and mid-conversation beta agree`)
+    assert.equal(clearAtBeta, systemBeta, `${model}: the clear_at beta accompanies the system beta`)
+    assert.equal(inHistory, supportsMidConversationSystem(model), `${model}: the route uses the shared predicate`)
+  }
 })

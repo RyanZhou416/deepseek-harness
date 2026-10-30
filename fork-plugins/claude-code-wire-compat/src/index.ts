@@ -96,6 +96,15 @@ export {
   selectIdentityText,
 } from "./system-prompt.js";
 
+/*
+ * Exported so a consumer that keys its own tables by model id (context and
+ * output limits, thinking shape, effort levels, fast tier) can ask the same
+ * identity question the catalogue lookup here asks. A caller that keys by the
+ * wire id instead would miss the dated, dotted and request-time-marked
+ * spellings of one model.
+ */
+export { normalizeModelId } from "./model-identity.js";
+
 export { BETA_REGISTRY_2_1_233 } from "./profiles/beta-registry-2.1.233.js";
 export { BETA_REGISTRY_2_1_280 } from "./profiles/beta-registry-2.1.280.js";
 export { BETA_REGISTRY_2_1_288 } from "./profiles/beta-registry-2.1.288.js";

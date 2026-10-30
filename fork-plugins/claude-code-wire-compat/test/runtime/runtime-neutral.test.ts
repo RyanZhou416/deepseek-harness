@@ -67,7 +67,10 @@ describe("runtime/runtime-neutral (Wave 1 RED specification)", () => {
     // a caller must be able to inject the reporting text verbatim and to inspect
     // which pinned line a mode selects, so these are deliberate API, not leaked
     // internals. Type-only exports are erased and never appear here, so any
-    // further runtime export fails this assertion.
+    // further runtime export fails this assertion. `normalizeModelId` joins the
+    // set because the model catalogue key is a public identity question its
+    // consumers must share; `supportsContextManagement` was already exported
+    // and missing from this pin.
     expect(Object.keys(first).sort()).toEqual([
       "BETA_INTRODUCED_IN",
       "BETA_REGISTRY",
@@ -110,10 +113,12 @@ describe("runtime/runtime-neutral (Wave 1 RED specification)", () => {
       "isOpus48Model",
       "isSonnet46Model",
       "modelCapability",
+      "normalizeModelId",
       "parseBuiltClaudeCodeRequest",
       "selectAntiVerbositySection",
       "selectIdentityText",
       "splitSystemAtBoundary",
+      "supportsContextManagement",
       "supportsMidConversationSystem",
       "supportsStructuredOutputs",
       "supportsWebSearch",

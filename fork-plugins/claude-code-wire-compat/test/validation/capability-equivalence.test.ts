@@ -343,7 +343,11 @@ const OUT_OF_CATALOGUE_IDS = [
   "claude-opus-5",
   "foo",
   "",
-  "claude-sonnet-4-5[1m]",
+  // A marked spelling is NOT an out-of-catalogue probe: `normalizeModelId`
+  // strips the request-time marker, so `claude-sonnet-4-5[1m]` resolves to
+  // the catalogued `claude-sonnet-4-5`. This id normalizes to itself and no
+  // profile catalogues it.
+  "claude-sonnet-4-2",
 ] as const;
 
 describe("capability derivation: ids outside the catalogue", () => {
