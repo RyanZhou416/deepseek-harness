@@ -1421,11 +1421,13 @@ design input; a rejection removes a token or fails, never adds one.
 **Scope.** A covers `main` and `subagent` with a real static/dynamic boundary,
 and helpers (compaction/auxiliary) only in the conservative form: no billing, no
 identity insertion, no markers. A main/subagent request with no boundary, an
-empty static/dynamic run, an in-history prompt mismatch or an unclassified
-one-shot is A-off for that request (current non-A body/headers), not a 400.
-Custom base URL, gateway, non-firstParty, experimental off, HIPAA
-tainted/unknown, caching off, `workflow`, agent-type and `disabled` are outside
-A.
+empty static/dynamic run, an in-history prompt mismatch, an unclassified
+one-shot or no-system is A-off for that request (current non-A body/headers),
+not a 400. Custom base URL, gateway, non-firstParty and experimental off mean A
+is not enabled at all; current behavior is retained and not claimed as parity.
+HIPAA tainted/unknown and caching off stay A-on with 5m and no scope; they are
+never A-off, because A-off would retain cc3's 1h and exceed the anchor.
+`workflow`, agent-type and `disabled` are outside A.
 
 **Capability and ownership.** The worker is the executable cache-policy owner;
 the Swift pool is transport and member validation. Add member
@@ -1440,30 +1442,40 @@ probe is cached only for the same endpoint and pool build.
 
 **Member contract.** Three headers, all present or all absent:
 `x-cc-request-class` (`main|compaction|auxiliary|subagent`; `workflow`
-rejected), `x-cc-system-layout` (`none|boundary:<n>`, n=1-8 static blocks after
-identity), `x-cc-cache-intent` (`main|helper`; no `disabled`). Values are exact
-lower-case tokens, 1-32 printable ASCII bytes, no trim/case folding, exactly one
-occurrence; repeated/empty/oversize/unknown/non-printable is a typed 400 after
-session-name validation and before body decode. The v2 request frame adds
-`requestClass`, `systemLayout`, `cacheIntent`, `staticBlockCount`; explicit
-null, partial/all-null, empty or unknown is invalid; absent keeps the frame
-byte-identical. v1 refusal is three layers: member API 400, pool encoder,
-worker parser; v1 bytes/goldens stay unchanged. A-off keeps today's upstream
-`x-claude-code-request-class: main` only when the caller supplied none; A-on
-replaces it with the frame class.
+rejected), `x-cc-system-layout` (`none|boundary:<n>`), `x-cc-cache-intent`
+(`main|helper`; no `disabled`). Values are exact lower-case tokens, 1-32
+printable ASCII bytes, no trim/case folding, exactly one occurrence;
+repeated/empty/oversize/unknown/non-printable is a typed 400 after session-name
+validation and before body decode. `boundary:<n>` is exactly decimal 1-8, no
+leading zero/sign/space; a bare boundary, 0, 08, +1, padded or 9 is a 400.
 
-**Body.** Main/subagent: `[identity, static, dynamic]` only when the
-pre-transform section join equals the effective leading system text; identity
-is the exact interactive CLI line `Gw`, first and unmarked; static is the
-reordered set of all `stable:true` sections except identity (drop
+The v2 request frame adds `requestClass`, `systemLayout`, `cacheIntent`,
+`staticBlockCount`. Presence is counted from raw keys; explicit null,
+partial/all-null, empty or unknown is invalid; absent keeps the frame
+byte-identical. `staticBlockCount` is an integer 0-8. The total table is:
+main/main/boundary:n/n; subagent/main/boundary:n/n; compaction/helper/none/0;
+auxiliary/helper/none/0. Any other combination is a typed member 400 and a
+worker frame rejection before forwarding. `cacheIntent` is the TTL-family
+selector; class selects billing/identity and marker form. v1 refusal is three
+layers: member API 400, pool encoder, worker parser; v1 bytes/goldens stay
+unchanged. A-off keeps today's upstream `x-claude-code-request-class: main`
+only when the caller supplied none; A-on replaces it with the frame class.
+
+**Body.** Member-side main/subagent: `[identity, static, dynamic]` only when
+the pre-transform section join equals the effective leading system text;
+identity is the exact interactive CLI line `Gw`, first and unmarked; static is
+the reordered set of all `stable:true` sections except identity (drop
 `harness:source`/`app:web-surface`, replace `harness:identity`); dynamic is the
 non-stable remainder. Do not reuse the subscription route's single-shared block
-or `DEFAULT_CLAUDE_IDENTITY_LINE`; A has its own builder. In-history mismatch,
-empty static/dynamic, no-system or unknown class is A-off. Helpers send the
-existing member system with no identity/billing, layout none, no markers. DSH
-sends no `cache_control`; the worker strips member markers and writes identity
-unmarked, static/dynamic/last-user with one TTL decision. Static scope only when
-the body scope gate (`Tse` + boundary/static) holds; 5m static is
+or `DEFAULT_CLAUDE_IDENTITY_LINE`; A has its own builder. Final pool-side
+system is `[billing, identity, static, dynamic]`: the worker inserts the
+existing billing block at `system[0]` with its existing bytes before computing
+indices; DSH does not send billing. In-history mismatch, empty static/dynamic,
+no-system or unknown class is A-off. Helpers send the existing member system
+with no identity/billing, layout none, no markers. DSH sends no
+`cache_control`; the worker strips member markers and writes identity unmarked,
+static/dynamic/last-user with one TTL decision. Static scope only when the body
+scope gate (`Tse` + boundary/static) holds; 5m static is
 `{type:"ephemeral",scope:"global"}` with no ttl. Empty static is not a boundary.
 Billing/identity are main/subagent only; helpers get neither. The worker uses
 `staticBlockCount` and the identity text, not a leading-prefix guess.
@@ -1519,18 +1531,34 @@ from profile headers; a profile attempt is a load error. Add headers before
 Because A reorders/drops/replaces system text, record the A body/section plan in
 the request log or a prepared-request record.
 
-**Acceptance.** Commit an executable corpus under
-`mac-pool:development/cc-parity-a-corpus/` with cases, injected facts, expected
-status/body SHA/headers/order/markers, raw baseline bytes for flag-off, a
-runner, and the DSH x pool-server x worker matrix including rollback. Name exact
-gates: DSH typecheck/build/doc-sync/config-catalog/focused tests; worker
-`run-tests.mjs` with updated lists/counts; Mac `change-gate.sh`/`MacPoolTests`
-with updated 2893/16; simulation A-on/A-off; real v2 goldens
-(`v2-golden.test.ts`, `CrossLanguageGoldenTests`; fix or exclude the known
-drift); `verify-goldens.py` only for v1; installed acceptance with A headers;
-manifest commands; a named security-review artifact. No install until the
-corpus, raw-byte flag-off, capability matrix, rollback, Mac plan and security
-review pass.
+**Acceptance.** Commit `mac-pool:development/cc-parity-a-corpus/` with
+cases, pinned identities, injected facts, expected raw body SHA/headers/order/
+markers, baseline raw bytes, runner and matrix. `run.py` CLI is `--case <id>|--
+all`, `--boundary member|frame|upstream|all`, `--matrix`, `--capture-baseline`,
+`--compare-bytes`, `--reset-capability`, `--report json`; exit 0 pass, 1
+mismatch, 2 invalid. Pinned identity makes the `metadata.user_id` splice
+deterministic. Baseline comes from pre-A pool `0ae553a` and DSH `ec1877b3e1`;
+old worker is that bundle; new artefacts are the A commit. The 12-cell matrix is
+old/A-off/A-on DSH x old/new pool x old/new worker; each cell expects non-A
+success, `503 cc_parity_a_unavailable`, or A success only. Rollback sets
+`ccParityA=false`, reloads, resets the probe, verifies no `ccParityA:1`, then
+installs the old pool.
+
+Gates: DSH `pnpm run typecheck`, `build`, `doc-sync`,
+`verify-config-catalog`, and `pnpm exec vitest run packages/llm/llm/tests
+packages/llm/llm-pi-ai/tests packages/llm/llm-cc-pool/tests
+packages/experimental/auto-review/tests packages/experimental/translator/tests`
+(exit 0); worker `node development/direct-worker/scripts/run-tests.mjs` (0
+failed/0 skipped, updated counts); Mac `development/scripts/change-gate.sh
+--stage development/swift --only-testing <affected suites>` plus
+`xcodebuild test -scheme MacPool -testPlan MacPoolTests` (0 failures, updated
+2893/16); `simulate-dsh.sh --case cc-parity-a-on --json` and off;
+`v2-golden.test.ts` plus `CrossLanguageGoldenTests` after fixing the known
+drift; `verify-goldens.py` for v1; installed acceptance from
+`CHANGE-WORKFLOW.md:71-72` with an A-header case; manifest commands from
+`scripts/README-deployment.md`; security review at
+`development/cc-parity-a-corpus/SECURITY-REVIEW.md`, gated by `test -s` and a
+checklist. No install until all pass.
 
 **Explicit exclusions.** Helpers under-emit billing/identity versus the carve
 title/compaction; evict/keepalive/message-threads/context-hint are omitted;
