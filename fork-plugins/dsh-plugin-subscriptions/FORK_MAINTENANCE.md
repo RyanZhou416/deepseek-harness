@@ -6,7 +6,7 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork source candidate: `0.9.4-dsh021rc2.1` — the real Web profile links the staged build at `.build/fork-plugins/subscriptions`, not this checkout; a Host restart alone does not compile the checkout. Stop the Host, run `build.cmd`, then restart. The historical install state is recorded in [docs/claude-implementation-status.md](docs/claude-implementation-status.md).
+- Fork source candidate: `0.9.4-dsh021rc2.1` — the real Web profile links the staged build at `.build/fork-plugins/subscriptions`, not this checkout, so the running Host keeps executing its previous build until the Host is stopped, `build.cmd` is run, and the Host is restarted. The historical install state is recorded in [docs/claude-implementation-status.md](docs/claude-implementation-status.md).
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
 - Distribution artifact: none — the profile installs the staged build through a `link:` dependency; the previous-generation tarballs live under `fork-plugins/releases/archive/` and must not be installed.
 

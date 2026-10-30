@@ -138,7 +138,7 @@ cd dsh-plugin-subscriptions && pnpm install && pnpm build
 dsh plugin --profile web add ./dsh-plugin-subscriptions
 ```
 
-在本 fork 的检出中，`build.cmd` 会在普通构建之后从源码构建该包并链接到选定的 `web` profile；不需要转交 tarball，也不查询私有 registry。该路径要求先停止 Host，从源码编译 node 半区与 client bundle，内联固定版本的 `@tormentalabs/claude-code-wire-compat` 包与 `undici`，并从 staged manifest 删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer。见 [fork 插件构建说明](../README.zh.md#repo-integrated-build-and-install)。
+在本 fork 的检出中，`build.cmd` 会在普通构建之后从源码构建该包并链接到选定的 `web` profile；不需要转交 tarball，也不查询私有 registry。该路径要求先停止 Host，从源码编译 node 半区与 client bundle，内联固定版本的 `@tormentalabs/claude-code-wire-compat` 包与 `undici`，并从 staged manifest 删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer。真实 Web profile 以 `link:` 指向暂存构建 `.build/fork-plugins/subscriptions`，而不是本检出；因此未停止 Host、运行 `build.cmd` 并重启之前，运行中的 Host 仍执行上一代构建。见 [fork 插件构建说明](../README.zh.md#repo-integrated-build-and-install)。
 
 不装进 profile 的 headless 用法(先在 web 界面登录过 —— token 文件是共享的):
 
@@ -407,7 +407,7 @@ Claude 优先读取 `retry-after-ms`，再读取 `retry-after`，接受不超过
 
 每个账号的 wire-session 跨度在首次请求时，从最近一次成功 bootstrap 读取中固定 `x-cc-atis`，也会固定“不发送头”的空值；初始身份先于该 bootstrap 读取被采纳而持久化，因此 pin 冻结自一个持久事实，而不是迟到的回答。后续 bootstrap 值只作用于新跨度。登出或身份失效会清理账号的 pin，而在 pin 被恢复或冻结之后到达的候选值绝不会复活旧值。此机制不新增轮询或额外请求；pin 由本插件的私有续接状态文档（salt、spans 与 identity generation）拥有，每账号最多保留 256 个跨度，按最早进入顺序淘汰，因此淘汰后的跨度可重新固定值，恢复时若事实缺失则从空开始。
 
-普通 OAuth 请求只有在授权 scope 包含 `user:inference`，且账号已捕获的限流报告并非 `rejected` 配合 overage 的 `allowed` 或 `allowed_warning` 时，才声明一小时 prompt-cache TTL。辅助调用（`compaction`、`session-title`）及其他情况省略 TTL 和扩展 TTL beta，使用提供方默认的五分钟。套餐名称不参与判定；overage 状态来自已有的账号级报告，不另发请求。本路由不发送仅针对特定子代理的顶层缓存淘汰字段。
+请求类别决定 prompt-cache TTL，显式的 `GenerateOptions.requestClass` 优先于调用 purpose。只有 `main` 类才声明一小时 TTL，且须授权 scope 包含 `user:inference`，同时账号已捕获的限流报告并非 `rejected` 配合 overage 的 `allowed` 或 `allowed_warning`。显式 `auxiliary`、`subagent` 或 `compaction` 类、helper purpose（`compaction`、`session-title`）及其他情况都省略 TTL 与扩展 TTL beta，使用提供方默认的五分钟。套餐名称不参与判定；overage 状态来自已有的账号级报告，不另发请求。本路由不发送仅针对特定子代理的顶层缓存淘汰字段。
 
 Bun 子进程使用 `--no-env-file` 启动，工作目录中的 `.env` 文件不能在继承环境白名单之外添加传输设置。启用 bridge 时，证书与主机名校验保持开启，支持的 CA 环境变量显式传入。`SSL_CERT_DIR` 要求按证书主题哈希命名的目录，不读取任意文件名。覆盖指定的 Bun 必须支持 `--no-env-file`，否则启动失败，不静默丢弃该选项。关闭 bridge 时，改由 Host fetch 及其配置的传输策略处理。
 

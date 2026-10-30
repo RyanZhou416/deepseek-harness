@@ -43,7 +43,7 @@ export const CAPABILITIES_URL = `${BASE_URL}/v1/capabilities`
 /**
  * Security bound on one capability probe, in milliseconds. The probe decides
  * whether a request may carry wire parity, so an endpoint that stops answering
- * answering must prove nothing instead of holding that decision open. It bounds
+ * must prove nothing instead of holding that decision open. It bounds
  * a single probe; it is not a polling interval, because the plugin asks only at
  * profile load and on a member credential change.
  */
@@ -52,8 +52,8 @@ const CAPABILITY_PROBE_TIMEOUT_MS = 5_000
 /**
  * The longest pool build identity this reader accepts, in characters. The pool's
  * own bound on the `MacPoolBuildId` it publishes is 128 printable ASCII
- * characters, and a `sha256:` build-manifest digest is 71; a longer value cannot
- * be that identity.
+ * characters; the identity is the packaged build's value, not a generated
+ * digest.
  */
 const CAPABILITY_BUILD_MAX_CHARACTERS = 128
 

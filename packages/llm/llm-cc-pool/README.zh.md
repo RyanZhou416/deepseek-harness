@@ -65,7 +65,7 @@ kind: "package-bundle"
 
 本路由的默认策略是 CC 2.1.288 的三标记布局，带显式一小时存活期：`cacheMarkerPolicy: cc3`、`cacheTtl: 1h`、`extendedCacheBeta: true`。三者都不配置的 profile 就使用这套策略。这些字段是插件装载时读取的 loader 配置，只作用于本路由，并且只经本路由的 profile 到达请求。`cacheTtl` 命名标记存活期，`extendedCacheBeta` 声明一小时存活期所需的 `extended-cache-ttl-2025-04-11`，`cacheMarkerPolicy: cc3` 掌管放置。
 
-不可能成立的组合会在插件装载时被拒绝，设置写入也走同一校验，绝不会拖到请求时才失败：`cacheTtl: 1h` 缺少 `extendedCacheBeta: true` 是错误，`cacheMarkerPolicy: cc3` 还要求 `cacheTtl: 1h`。schema 仍接受三个存活期取值，但由配置的策略决定哪些能真正服务，因此路由不会留下来不带其标记所需 beta 的状态。
+不可能成立的组合会在插件装载时被拒绝，设置写入也走同一校验，绝不会拖到请求时才失败：`cacheTtl: 1h` 缺少 `extendedCacheBeta: true` 是错误，`cacheMarkerPolicy: cc3` 还要求 `cacheTtl: 1h`。`cacheTtl: none` 是受支持的关闭缓存状态：解析时会移除 `cacheMarkerPolicy`、强制 `extendedCacheBeta: false`，路由不写任何标记。`cacheTtl: 5m` 不是受支持的 loader 取值：schema 唯一的标记策略是 `cc3` 且默认为它，因此带默认组合的五分钟存活期会被拒绝。schema 仍接受三个存活期取值，但由解析后的策略决定它们如何服务，因此路由不会留下来不带其标记所需 beta 的状态。
 
 使用 `cc3` 时，放置由本路由的适配器接管：先移除 `system`、`tools` 和 `messages` 上共享传输或调用方放置的全部 `cache_control`，然后只给三个位置加上 `{"type": "ephemeral", "ttl": "1h"}`——pinned identity 块、harness system 块，以及最后一个可缓存的用户内容块。identity 块——`You are Claude Code, Anthropic's official CLI for Claude.`——排在整个 system 数组最前，因此本路由转发的顺序是 identity、harness；mac 池在其前面发送的 billing 块属于池本身，最终顺序为 billing、identity、harness。策略会给 identity 块加标记；池插入的 billing 块不带标记，最后一条 user 消息之前的消息与任何工具声明也都不带。identity 行最多出现一次，因为与它逐字节相等的调用方块会在策略加入自己的块之前被丢弃。
 
@@ -157,7 +157,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 - **目录经本插件自己的字段编辑**——部署通过 `models` 改动自己的模型集，而池同步只报告候选：采纳需要一次显式的设置写入并经过目录校验，绝不会静默覆盖，该读取也无法采纳进通用 Models 页面。新增档位、移除 adaptive thinking 或修改路由事实都随插件版本发布。
 - **只公布生效目录中的 id**——服务层仍接受未列出的模型 id，但选择器表面展示该列表，配置后的目录是唯一事实来源。
 - **图片模态是声明而非探测**——每个目录条目都会得到 `text` 与 `image`；拒绝图片的池端点会在轮次中途以 provider 拒绝的形式浮现。
-- **缓存布局是三个真实的 CC 标记，而不是 CC 的完整 planner**——未启用 `ccWireParity` 时，路由转发客户端 identity 块，并按 pinned 客户端的顶层字段顺序标记 identity 块、harness system 块与最后一个用户内容块。它不复制客户端的 `markerIndices`、fork point、compact 断点规划、其静态/动态 prompt 切分，也不复制其前一条消息断点，并且不放置任何工具标记。可选线路只在成员端点证明能力后的请求上加入该切分与 parity header，否则回退到这条默认线路。缺少必需的一小时/beta 组合的策略会在装载时被拒绝，而不是静默回退。
+- **缓存布局是三个真实的 CC 标记，而不是 CC 的完整 planner**——未启用 `ccWireParity` 时，路由转发客户端 identity 块，并按 pinned 客户端的顶层字段顺序标记 identity 块、harness system 块与最后一个用户内容块。它不复制客户端的 `markerIndices`、fork point、compact 断点规划、其静态/动态 prompt 切分，也不复制其前一条消息断点，并且不放置任何工具标记。可选线路只在成员端点证明能力后的请求上加入该切分与 parity header，否则回退到这条默认线路。缺少必需的一小时/beta 组合的策略会在装载时被拒绝，而不是静默回退；`cacheTtl: none` 则解析为合法的关闭缓存策略，不写标记，也不声明 extended beta。
 - **线路按池构建证明，且没有重连触发器**——一次证明只覆盖一个成员端点与一个池 `buildId`；插件只在 profile 装载与 `CC_POOL_API_KEY` 被替换时再次询问。因此新构建上的池重启不会被重新探测，路由会继续为上一个构建证明过的线路服务，直到其中一个触发器运行或带标记的 `503` 丢弃证明。
 - **base bundle 不包含本包**——只有链接了该 bundle 的 profile 才存在该路由。fork 的 `build.cmd` 会为 web profile 完成链接，但未经过该构建的 profile 没有 `cc-pool` 路由。仍声明 `llm-pi-ai` `cc-pool` provider 的 profile 必须移除它，否则两个适配器都会占用 `cc-pool`，插件装载失败。
 - **同会话排序仅限单个 Host 进程**——队列属于一个插件实例，因此另一个 DSH 进程或其它 CC 客户端使用同一池会话时并不受协调。有界重试只能吸收稍晚释放的租约；若该会话仍在别处活跃，调用方会看到 `POOL_SESSION_BUSY`。
@@ -167,4 +167,4 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 - 路由事实、部署未配置的容量或档位集合都随插件版本发布。本包拥有这些值，因此任何 profile 编辑都无法偏离已部署的池；部署自己的模型集属于配置，而不是版本事实。
 - 会话忙碌重试计划属于池行为事实，而不是部署可调项：租约在流结束后很快释放，固定的 100-250 ms 步进限定等待时间，既不拖慢正常请求，也不让卡住的会话挂住整轮。这里只重试 `POOL_SESSION_BUSY`；全局槽位限制与 provider 限速仍归 `dsh-llm-retry` 处理。
-- 插件的 `Config` 有六个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl`、`extendedCacheBeta` 与 `cacheMarkerPolicy` 是本路由的提示缓存策略，`ccWireParity` 是可选的 CC wire parity 请求。缓存默认值就是三标记一小时策略（`cacheTtl: 1h`、`extendedCacheBeta: true`、`cacheMarkerPolicy: cc3`），不可能的组合会在装载时被拒绝，`ccWireParity` 默认 `false`。这些字段都不接受档位映射、任意 compat 开关、重试计划、探测间隔或凭据字面量。
+- 插件的 `Config` 有六个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl`、`extendedCacheBeta` 与 `cacheMarkerPolicy` 是本路由的提示缓存策略，`ccWireParity` 是可选的 CC wire parity 请求。缓存默认值就是三标记一小时策略（`cacheTtl: 1h`、`extendedCacheBeta: true`、`cacheMarkerPolicy: cc3`），`none` 存活期解析为无标记、无 extended beta，不可能的组合会在装载时被拒绝，`ccWireParity` 默认 `false`。这些字段都不接受档位映射、任意 compat 开关、重试计划、探测间隔或凭据字面量。

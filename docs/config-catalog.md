@@ -1922,7 +1922,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:363`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:364`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2077,16 +2077,17 @@ export interface PiAiProviderProfile {
    * request's `systemSections` — the pinned interactive identity line, the
    * reordered `stable` sections, then the session-specific remainder — and
    * applies the pinned top-level field order, the `updates` thinking display,
-   * and the eager-streaming and beta removals, with no `cache_control` of its
-   * own. A helper class (`compaction`, `auxiliary`) keeps the caller's system,
-   * layout `none`, and no markers; a main or subagent request that cannot state
-   * a real boundary, or that names no class at all, is served as the current
-   * non-wire-parity request instead of a partial wire-parity body. The three
-   * header names are adapter-owned on every route, and the flag replaces
-   * {@link cacheMarkerPolicy} `cc3` on a wire-parity request while a
-   * wire-parity-off request keeps that policy's body. {@link ccWireParityCache}
-   * selects the cache intent a main or subagent request declares. Refused when
-   * no model on the route speaks `anthropic-messages`.
+   * and the cache-beta removals while keeping `eager_input_streaming`, with no
+   * `cache_control` of its own. A helper class (`compaction`, `auxiliary`)
+   * keeps the caller's system, layout `none`, and no markers; a main or
+   * subagent request that cannot state a real boundary, or that names no class
+   * at all, is served as the current non-wire-parity request instead of a
+   * partial wire-parity body. The three header names are adapter-owned on every
+   * route, and the flag replaces {@link cacheMarkerPolicy} `cc3` on a
+   * wire-parity request while a wire-parity-off request keeps that policy's
+   * body. {@link ccWireParityCache} selects the cache intent a main or subagent
+   * request declares. Refused when no model on the route speaks
+   * `anthropic-messages`.
    */
   ccWireParity?: boolean
   /**

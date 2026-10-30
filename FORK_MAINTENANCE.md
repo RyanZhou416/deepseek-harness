@@ -1330,19 +1330,23 @@ and rollback after a failed step.
 ## CC pool three-marker prompt-cache policy (fork)
 
 **Behavior.** `llm-cc-pool` defaults to the three authentic Claude Code 2.1.288
-markers: `cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc3`. The
-other schema values (`cacheTtl` `5m`/`none`, `extendedCacheBeta: false`) are
-accepted at the field level but a combination that cannot serve is refused by
-`resolvePoolCachePolicy`: `cacheTtl: "1h"` requires `extendedCacheBeta: true`,
-and `cacheMarkerPolicy: "cc3"` requires `cacheTtl: "1h"` and
-`extendedCacheBeta: true`. `toolCacheBreakpoint` and
+markers: `cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc3`.
+`cacheTtl: none` is the accepted caching-disabled state: resolution removes
+`cacheMarkerPolicy` and forces `extendedCacheBeta: false`, so the route writes no
+markers and no extended beta. `cacheTtl: 5m` is not a supported loader choice:
+the only marker policy is `cc3` and the schema defaults to it, so the default
+combination of `5m` plus `cc3` is refused. `resolvePoolCachePolicy` refuses the
+combinations that cannot serve: `cacheTtl: "1h"` requires
+`extendedCacheBeta: true`, and `cacheMarkerPolicy: "cc3"` requires
+`cacheTtl: "1h"` and `extendedCacheBeta: true`. `toolCacheBreakpoint` and
 `compat.supportsCacheControlOnTools` are gone: the policy never marks a tool
 declaration, so there is no switch to state one. Validation runs in `apply`
 before the route registers and in the `internal/config` waterfall for settings
 writes, so an impossible combination fails at load rather than at request time.
-Its profile maps the fields to pi-ai `cacheRetention`, the `extendedCacheBeta`
-route option, and the route's own `cacheMarkerPolicy`. `llm-pi-ai` accepts
-`extendedCacheBeta` on a route whose models speak `anthropic-messages` and,
+Its profile maps the resolved fields to pi-ai `cacheRetention`, the
+`extendedCacheBeta` route option, and the route's own `cacheMarkerPolicy`.
+`llm-pi-ai` accepts `extendedCacheBeta` on a route whose models speak
+`anthropic-messages` and,
 through pi-ai's single `onPayload` hook, appends
 `extended-cache-ttl-2025-04-11` to the request's `betas` list; the Anthropic SDK
 sends that list as `anthropic-beta`. The beta is never inferred from
@@ -1387,10 +1391,11 @@ Anthropic route's `cacheRetention` explicit; do not add a global payload or
 header hook, a `fetch` rewrite, or a mac-pool branch to `llm-pi-ai`. Keep both
 transformations on the one `onPayload` assignment; a second assignment on the
 same route would silently drop the other policy. This layout is the route's
-default wire, served whenever `ccWireParity` is false — the default — and
-whenever the capability probe has not proved the wire; it is also what a
-request that carries the wire falls back to. Keep the three markers, pinned
-order and route-scoped behavior on that default wire: do not reproduce CC's
+default wire under its default policy, served whenever `ccWireParity` is false —
+the default — and whenever the capability probe has not proved the wire; it is
+also what a request that carries the wire falls back to. Keep the three
+markers, pinned order and route-scoped behavior on that default wire: do not
+reproduce CC's
 `markerIndices` fork/compaction planner or infer one hour from a subscription.
 The opt-in wire parity section below replaces the body only on a request the
 member endpoint proved the capability for.
@@ -1401,8 +1406,9 @@ covers the default three-marker body with a marked identity block and harness
 system block, the unmarked assistant turn before the last user block, the
 single-message and no-system-prompt requests, the pinned top-level field order,
 the empty `metadata` placeholder in its canonical slot, the absence of a tool
-marker and of the removed field, the load-time refusal of
-`5m`/`none`/missing-beta combinations, the beta header only on the pool route, a
+marker and of the removed field, the load-time resolution of `none` (no marker,
+no extended beta), the refusal of `cc3` outside `1h` and of `1h` without the
+beta, the beta header only on the pool route, a
 second Anthropic route's unchanged pi-ai field order and retention and absent
 identity block, DeepSeek with no marker or cache beta, the refusal of `cc3` on a
 non-Anthropic route, and the Loader composition.
@@ -1539,8 +1545,9 @@ and body `betas`; never append a member token. Thread a typed worker cache plan
 into the sealed engine via a new `cacheTtl` input; this needs a `vendor/engine`
 patch and re-seal. DSH writes `thinking.display:"updates"` on a request that
 enables thinking; the worker probe keeps `{type,budget_tokens}` and drops only
-`display`, so site 16 fires; the forwarded body keeps `updates`. Strip
-`eager_input_streaming`; do not flip the compat flag. Remove the cache betas the
+`display`, so site 16 fires; the forwarded body keeps `updates`. Keep
+`eager_input_streaming` on every tool: fine-grained tool streaming is a stated
+requirement, and its compat flag must not be flipped off. Remove the cache betas the
 worker plans from `payload.betas` and drop the member when none remain, instead
 of sending an empty `anthropic-beta`. `rejectedBeta` is v2-only with the three
 wire-parity cache identifiers, set only for an upstream 400 naming a forwarded
@@ -1596,8 +1603,8 @@ runner and matrix. `run.py` CLI is `--case <id>|--all`, `--boundary
 member|frame|upstream|response|all`, `--matrix`, `--capture-baseline`,
 `--compare-bytes`, `--reset-capability`, `--report json`; exit 0 pass, 1
 mismatch, 2 invalid. Pinned identity makes `metadata.user_id` deterministic.
-Baseline comes from pre-wire-parity pool `0ae553a` and DSH `ec1877b3e1`; old
-worker is that bundle; new artefacts are the wire parity commit.
+Baseline comes from the pre-wire-parity pool and DSH bundles; the old worker is
+that bundle; new artefacts are the wire parity commit.
 
 The matrix is one expected outcome per cell. The DSH column names the build
 under test: `old` is the pre-wire-parity build, and `off`/`on` are this build
