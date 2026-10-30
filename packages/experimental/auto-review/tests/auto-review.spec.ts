@@ -388,7 +388,7 @@ describe('native review request', () => {
       system: EXPECTED_REVIEW_POLICY,
       temperature: 0,
     })
-    expect(request).not.toHaveProperty('sessionId')
+    expect(request.sessionId).toBe(session.id)
     expect(request.maxTokens).toBeUndefined()
     expect(request.tools).toBeUndefined()
     expect(request.messages).toHaveLength(1)
@@ -524,6 +524,41 @@ describe('native review request', () => {
       parameters: { type: 'object' },
       arguments: { path: 'current' },
     })
+  })
+
+  it('names the owning Session so a request-recording route can accept the review', async () => {
+    // The Claude subscription route records every prepared request in the owning Session's
+    // log and refuses a request that names none before any credential, Files or Messages I/O.
+    // Mirror that first check so a sessionless review request fails the reviewed call.
+    const routed = async function* (request: GenerateOptions): AsyncIterable<StreamChunk> {
+      if (request.sessionId === undefined) {
+        throw new Error('claude request refused: GenerateOptions.sessionId is required')
+      }
+      yield* decisionChunks('{"risk":"low","decision":"allow"}')
+    }
+    const { ctx, adapter } = await harness([routed])
+    const probe = registerProbe(ctx)
+    const { session, agent } = autoSession(ctx, 'native-session-route')
+    appendHeader(session, [{ name: 'probe', description: 'probe', parameters: { type: 'object' } }])
+    const callId = ToolCallId('native-session-route-call')
+    appendAssistant(session, [{ type: 'tool-call', id: callId, name: 'probe', arguments: '{}' }])
+    appendNativeCall(session, callId, 'probe', '{}')
+
+    const result = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId,
+      name: 'probe',
+      arguments: {},
+      agent,
+    })
+
+    expect(result.isError).toBe(false)
+    expect(probe.runs()).toBe(1)
+    const request = adapter.requests[0]!
+    expect(request.sessionId).toBe(session.id)
+    // The record path resolves that id against the live Session store that owns the log.
+    const target = request.sessionId === undefined ? undefined : ctx.sessions.get(request.sessionId)
+    expect(target).toBe(session)
   })
 
   it('assigns child creation, direct-parent, human, and forged-message roles without overriding human limits', async () => {

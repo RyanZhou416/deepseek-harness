@@ -620,10 +620,13 @@ async function classifyRisk(
 ): Promise<AutoReviewDecision> {
   const cwd = await ctx.workingDirectory.ensure(agent, signal)
   const snapshot = snapshotAutoReview(agent, exec, cwd)
-  // This review prompt is sent only through ctx.llm.stream and never enters a Session log.
+  // This review prompt is sent only through ctx.llm.stream. The owning Session is still named
+  // because a route that records every prepared request in its Session log refuses a request
+  // with none before any I/O, so omitting it would fail the review and deny the call.
   const options: GenerateOptions = deepFreeze({
     provider: snapshot.provider,
     model: snapshot.model,
+    sessionId: agent.session.id,
     requestClass: 'auxiliary',
     system: REVIEW_POLICY,
     messages: [{
