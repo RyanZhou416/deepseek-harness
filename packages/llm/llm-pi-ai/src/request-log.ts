@@ -3,9 +3,12 @@
  *
  * The process logger keeps its bounded in-memory ring; this sink is the durable
  * copy a deployment can read after the fact, for example when a request never
- * reached the pool. It writes one JSON object per line with the same identity
- * and outcome fields the logger records, and it writes nothing else: no
- * messages, request bodies, credentials, token counts, or session titles.
+ * reached the pool. It writes one JSON object per line with the identity and
+ * outcome fields the logger records, and it writes nothing else: no messages,
+ * request bodies, credentials, token counts, or session titles. The endpoint is
+ * the route's origin and path only, and provider failure text is not persisted,
+ * because either can carry a credential or request content that outlives the
+ * process; the process logger remains the place for live failure text.
  *
  * Files rotate by size, the oldest rotation is dropped first, and the retained
  * set is bounded so a long-running host cannot grow the log without limit. A
@@ -29,10 +32,14 @@ export const DEFAULT_REQUEST_LOG_MAX_FILES = 8
 /** Upper bound on everything a request log retains (128 MiB). */
 export const MAX_REQUEST_LOG_TOTAL_BYTES = 128 * 1024 * 1024
 
-/** File name a request log uses below the harness home's `logs` directory. */
-const REQUEST_LOG_FILENAME = 'llm-pi-ai-requests.jsonl'
-
-/** The fields one persisted record may carry, in written order. */
+/**
+ * The fields one persisted record may carry, in written order.
+ *
+ * `message` and `cause` are deliberately absent: they are provider-authored
+ * text that can echo request content or credentials, and no bounded filter can
+ * take that back out of a file that outlives the process. The process logger
+ * still records them for live diagnosis.
+ */
 const RECORD_FIELDS = [
   'kind',
   'provider',
@@ -45,8 +52,6 @@ const RECORD_FIELDS = [
   'status',
   'poolRequestId',
   'code',
-  'message',
-  'cause',
 ] as const
 
 /** One diagnostic value read through the persisted vocabulary. */
@@ -55,10 +60,35 @@ type RecordValues = Partial<Record<(typeof RECORD_FIELDS)[number], unknown>>
 /**
  * Default request-log path: the harness home's `logs` directory, beside the
  * launch diagnostics a deployment already collects.
+ * @param owner - file-name prefix; the pi-ai adapter owns the default so a
+ *   fixed-route plugin passes its own name and never shares one file.
  * @returns the absolute default NDJSON file path.
  */
-export function defaultRequestLogPath(): string {
-  return join(resolveDshHome(), 'logs', REQUEST_LOG_FILENAME)
+export function defaultRequestLogPath(owner: string = 'llm-pi-ai'): string {
+  return join(resolveDshHome(), 'logs', `${owner}-requests.jsonl`)
+}
+
+/**
+ * Remove credentials and query secrets from one endpoint URL.
+ *
+ * The durable record only needs to identify where a request went, while a
+ * configured `baseURL` may embed a credential in its userinfo or query string.
+ * Origin and path stay, so routes on one host remain distinguishable.
+ * @param endpoint - the route's effective endpoint URL.
+ * @returns the endpoint without userinfo, query, or fragment.
+ */
+export function redactEndpoint(endpoint: string): string {
+  try {
+    const url = new URL(endpoint)
+    if (url.username === '' && url.password === '' && url.search === '' && url.hash === '') return endpoint
+    // `URL` normalizes a missing path to `/`; never invent one the endpoint did
+    // not spell.
+    const root = url.pathname === '/' && /^[a-z][a-z0-9+.-]*:\/\/[^/]*$/i.test(endpoint)
+    return `${url.origin}${root ? '' : url.pathname}`
+  } catch {
+    const address = endpoint.replace(/[?#].*$/s, '')
+    return address.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '$1')
+  }
 }
 
 /**
@@ -66,8 +96,10 @@ export function defaultRequestLogPath(): string {
  *
  * The record is projected onto an explicit field list instead of spreading the
  * event: a later adapter field that carries content therefore cannot leak into
- * the file. Optional fields are omitted rather than written as `null`, so a
- * request record and a minimal response record stay distinguishable.
+ * the file. The endpoint is reduced to its origin and path, and failure text is
+ * not part of the record at all. Optional fields are omitted rather than written
+ * as `null`, so a request record and a minimal response record stay
+ * distinguishable.
  * @param event - the request or settled-response diagnostic to persist.
  * @param now - timestamp to stamp the record with.
  * @returns the record as one line, terminated by `\n`.
@@ -79,6 +111,8 @@ export function requestLogLine(event: PiAiRequestDiagnostic, now: Date = new Dat
     const value = values[field]
     if (value !== undefined) record[field] = value
   }
+  // Replacing the value keeps the field at its listed position.
+  record['endpoint'] = redactEndpoint(event.endpoint)
   return `${JSON.stringify(record)}\n`
 }
 

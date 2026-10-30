@@ -24,12 +24,17 @@ import type { CcPoolCacheTtl, CcPoolModel } from './pool.ts'
 /** Loader configuration for the mac-pool route. */
 export interface Config {
   /**
-   * Durable NDJSON sink for the same request/response diagnostics the plugin
-   * logger records. With no configuration the fixed pool route persists its
-   * records to the shared pool log below the harness home, so a request that
-   * never reaches the pool still leaves client-side evidence; `enabled: true`
-   * persists every route, `enabled: false` turns the file off, and `path`,
-   * `maxFileBytes`, and `maxFiles` locate and size the retained set. Loader
+   * Optional durable NDJSON sink for the same request/response diagnostics the
+   * plugin logger records. It is off by default: a pool route carrying session
+   * headers does not imply a file, because a deployment may collect the logger
+   * or another provider's sink instead. Configure `requestLog` — `enabled:
+   * true` or any field such as `path` — to turn it on. Without `path` the pool
+   * route writes to `$DSH_HOME/logs/llm-cc-pool-requests.jsonl`, its own file,
+   * so an enabled pi-ai sink on its default path never gains a second writer.
+   * `enabled: false` turns the file off, and `maxFileBytes` and `maxFiles`
+   * bound the retained set. Records carry identity and outcome only: the
+   * endpoint is reduced to its origin and path, and no message, cause, request
+   * body, credential, token count, or session title is written. Loader
    * configuration is read when the plugin mounts.
    */
   requestLog?: PiAiRequestLogProfile

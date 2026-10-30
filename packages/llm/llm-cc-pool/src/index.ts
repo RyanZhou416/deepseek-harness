@@ -23,7 +23,9 @@
  * layout — `cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc3` —
  * and an impossible combination is refused when the plugin loads. All of them
  * reach the wire only through this route's profile; no other provider's request
- * is touched.
+ * is touched. The durable request log is opt-in: a request carrying the session
+ * identity does not write a file by itself, `requestLog` turns it on, and its
+ * default path is the pool's own so the pi-ai sink never gains a second writer.
  *
  * ```yaml
  * - id: llm-cc-pool
@@ -51,6 +53,7 @@ import type { GenerateOptions, LlmModelInfo, PreparedAdapterCall, StreamChunk } 
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import {
   createPiAiRequestLog,
+  defaultRequestLogPath,
   PiAiAdapter,
   piAiAuthFrom,
   piAiDiagnosticHooks,
@@ -280,6 +283,12 @@ export function apply(ctx: Context, config: Config): void {
     config: config.requestLog,
     sessionHeaders: SESSION_HEADERS,
     warn: (message) => { ctx.logger.warn(message) },
+    // The pool route carries session headers, but that is no reason to write a
+    // file: the durable sink is opt-in, and an unconfigured plugin stays silent.
+    implicit: false,
+    // Its own file, so enabling both this sink and llm-pi-ai's never puts two
+    // writers on one default path.
+    defaultPath: defaultRequestLogPath('llm-cc-pool'),
   })
   if (requestLog !== undefined) ctx.effect(() => () => requestLog.close(), 'llm-cc-pool.request-log')
 

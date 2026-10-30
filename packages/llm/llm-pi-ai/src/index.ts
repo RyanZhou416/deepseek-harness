@@ -101,6 +101,7 @@ export type {
 } from './config.ts'
 export { recordKeyFor } from './auth.ts'
 export { supportedProtocols } from './provider.ts'
+export { defaultRequestLogPath } from './request-log.ts'
 export { createPiAiRequestLog, piAiAuthFrom, piAiDiagnosticHooks, resolvePiAiProfiles } from './reuse.ts'
 export type { PiAiDiagnosticChannel, PiAiDiagnosticLogger, PiAiRequestLogSink } from './reuse.ts'
 
@@ -237,7 +238,9 @@ export function apply(ctx: Context, config: Config): void {
     : new RequestDiagnosticLog(requestLogSettings, (message) => { ctx.logger.warn(message) })
   if (requestLog !== undefined) ctx.effect(() => () => requestLog.close(), 'llm-pi-ai.request-log')
   // Same rule as the logger's level: a pool route persists by default, and an
-  // explicitly enabled log persists every route.
+  // explicitly enabled log persists every route. Only the routes whose records
+  // can be read back derive the ledger identity; a plain route pays neither the
+  // message hashing nor the attempt bookkeeping.
   const diagnostics = piAiDiagnosticHooks({
     label: 'llm-pi-ai',
     retainedRoutes: sessionHeaders,
@@ -253,6 +256,7 @@ export function apply(ctx: Context, config: Config): void {
     resolveApiKey,
     auth,
     sessionHeaders,
+    ...requestLogSettings?.allRoutes === true ? { ledgerRoutes: () => true } : {},
     resolveAttachments: () => ctx.get('attachments'),
     resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(
       attachments,

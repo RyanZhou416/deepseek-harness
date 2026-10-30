@@ -317,8 +317,12 @@ export interface Config {
    * so a pool route keeps client-side evidence without extra configuration;
    * `enabled: true` extends persistence to every route, and `enabled: false`
    * turns the file off entirely. The file never carries messages, request
-   * bodies, credentials, token counts, or session titles. Loader configuration
-   * is read when the plugin mounts, so a change takes effect at the next start.
+   * bodies, credentials, token counts, session titles, or provider failure
+   * text: an endpoint is reduced to its origin and path, and the process logger
+   * remains the place to read a failure's message and cause. Loader
+   * configuration is read when the plugin mounts, so a change takes effect at
+   * the next start. A fixed-route plugin owns its own file and default, which is
+   * why this one never writes the `llm-cc-pool` route's log.
    */
   requestLog?: PiAiRequestLogProfile
 }
@@ -521,17 +525,21 @@ export function resolveSessionHeaders(value: string | readonly string[] | undefi
  * divided by the per-file bound, so configured bounds cannot exceed it.
  * @param value - the configured request-log settings, if any.
  * @param sessionHeaders - routes that receive the session identity headers.
+ * @param defaultPath - file used when the configuration names none; a
+ *   fixed-route plugin passes its own file name so two plugins never write one
+ *   default path.
  * @returns the resolved settings, or undefined when no file is written.
  * @throws Error naming a bound that is not a positive integer or an empty path.
  */
 export function resolveRequestLog(
   value: PiAiRequestLogProfile | undefined,
   sessionHeaders: ReadonlySet<string>,
+  defaultPath: string = defaultRequestLogPath(),
 ): ResolvedRequestLogConfig | undefined {
   if (value?.enabled === false) return undefined
   const allRoutes = value?.enabled === true
   if (!allRoutes && sessionHeaders.size === 0) return undefined
-  const path = value?.path ?? defaultRequestLogPath()
+  const path = value?.path ?? defaultPath
   if (path.length === 0) throw new Error('llm-pi-ai: requestLog.path must be a non-empty file path')
   const maxFileBytes = value?.maxFileBytes ?? DEFAULT_REQUEST_LOG_MAX_FILE_BYTES
   if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes < 1) {

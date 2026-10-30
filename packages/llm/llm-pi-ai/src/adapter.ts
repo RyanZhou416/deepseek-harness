@@ -87,6 +87,14 @@ interface PiAiSnapshot {
   models: Models
 }
 
+/** One attempt's derived ledger identity, computed only for a route that uses it. */
+interface AttemptLedger {
+  /** Wire identity this attempt sends; a deliberate retry adds its nonce. */
+  readonly requestId: string
+  /** 1-based attempt number within its logical request. */
+  readonly attempt: number
+}
+
 /** The session identity header a conversation-aware Claude endpoint reads. */
 const CLAUDE_SESSION_HEADER = 'X-Claude-Code-Session-Id'
 
@@ -251,12 +259,15 @@ export interface PiAiRequestIdentity {
   readonly endpoint: string
   /** The request's session id, when the caller supplied one. */
   readonly sessionId?: string
-  /** This attempt's wire ledger identity; a deliberate retry of the same request sends a new value. */
-  readonly clientRequestId: string
+  /**
+   * This attempt's wire ledger identity; a deliberate retry of the same request
+   * sends a new value. Absent on a route that derives no ledger identity.
+   */
+  readonly clientRequestId?: string
   /** Whether the response is streamed; this adapter only requests streams. */
   readonly stream: true
-  /** 1-based attempt number within its logical request. */
-  readonly attempt: number
+  /** 1-based attempt number within its logical request; present with {@link clientRequestId}. */
+  readonly attempt?: number
 }
 
 /** One attempt's settled response, with non-content failure facts. */
@@ -315,6 +326,15 @@ export interface PiAiAdapterOptions {
    * untouched.
    */
   sessionHeaders?: ReadonlySet<string>
+  /**
+   * Routes whose diagnostics need the derived ledger identity (`clientRequestId`
+   * and `attempt`) even though they carry no session headers: the routes a
+   * durable request log persists, for example. Called once per stream call after
+   * `sessionHeaders` is checked, and only while `onRequestDiagnostic` is set.
+   * Every route outside both gates derives no identity, so its request path
+   * performs no message hashing or copying.
+   */
+  ledgerRoutes?: (provider: string) => boolean
   /**
    * Observe every provider request attempt and its settled response: the
    * route, model, endpoint, session, ledger id, attempt number, HTTP status,
@@ -795,6 +815,25 @@ export class PiAiAdapter extends LlmAdapter {
     return attempt
   }
 
+  /**
+   * Derive one attempt's ledger identity.
+   *
+   * Only a route in `sessionHeaders` or `ledgerRoutes` calls this: derivation
+   * hashes the request's conversation position, including every message without
+   * a durable id, and no other route reads the result.
+   * @param options - the assembled request.
+   * @param model - the resolved model id.
+   * @param sessionId - the request's session id, when it has one.
+   * @returns the wire identity and attempt number for this attempt.
+   */
+  private ledgerOf(options: GenerateOptions, model: string, sessionId: string | undefined): AttemptLedger {
+    const logicalId = logicalRequestId(options.provider, model, options)
+    return {
+      requestId: attemptRequestId(logicalId, options.attemptNonce),
+      attempt: this.attemptOf(sessionId, logicalId),
+    }
+  }
+
   override imageRequestTarget(provider: string, model: string, image: ImageAttachmentRef) {
     const snapshot = this.current()
     this.modelOf(snapshot, provider, model)
@@ -971,27 +1010,34 @@ export class PiAiAdapter extends LlmAdapter {
 
     try {
       const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
-      // Both taken before any await: a refused session id fails without
-      // resolving a credential or opening a request. The attempt number counts
-      // attempts of one conversation position, while the wire id adds the
-      // loop's nonce so a deliberate retry is a distinct ledger entry.
-      const logicalId = logicalRequestId(options.provider, model.id, options)
-      const clientRequestId = attemptRequestId(logicalId, options.attemptNonce)
-      identity = Object.freeze({
-        provider: options.provider,
-        model: model.id,
-        endpoint: model.baseUrl,
-        ...sessionId === undefined ? {} : { sessionId },
-        clientRequestId,
-        stream: true,
-        attempt: this.attemptOf(sessionId, logicalId),
-      })
-      diagnose?.({ kind: 'request', ...identity })
+      // The ledger identity is derived only where something reads it: a
+      // session-header route sends it on the wire, and a route the durable log
+      // covers records it. Deriving it hashes every message, so a route outside
+      // both gates must not pay that cost.
+      const sessionRoute = this.config.sessionHeaders?.has(options.provider) === true
+      const ledger = sessionRoute || (diagnose !== undefined && this.config.ledgerRoutes?.(options.provider) === true)
+        ? this.ledgerOf(options, model.id, sessionId)
+        : undefined
+      // The attempt number counts attempts of one conversation position, while
+      // the wire id adds the loop's nonce so a deliberate retry is a distinct
+      // ledger entry. Both come before any await, so a refused session id still
+      // fails without resolving a credential or opening a request.
+      if (diagnose !== undefined) {
+        identity = Object.freeze({
+          provider: options.provider,
+          model: model.id,
+          endpoint: model.baseUrl,
+          ...sessionId === undefined ? {} : { sessionId },
+          ...ledger === undefined ? {} : { clientRequestId: ledger.requestId, attempt: ledger.attempt },
+          stream: true,
+        })
+        diagnose({ kind: 'request', ...identity })
+      }
       // The session identity is adapter-owned: a refused session id fails here,
       // before the request opens, and outranks a static profile header of the
       // same name lower down.
-      const sessionHeaders = this.config.sessionHeaders?.has(options.provider) === true
-        ? sessionIdentityHeaders(options.provider, sessionId, clientRequestId, options.sessionName)
+      const sessionHeaders = sessionRoute && ledger !== undefined
+        ? sessionIdentityHeaders(options.provider, sessionId, ledger.requestId, options.sessionName)
         : undefined
       const updates = conversationUpdates(model)
       // pi-ai collapses Anthropic tool updates without an initially active declaration.

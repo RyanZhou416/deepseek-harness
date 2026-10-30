@@ -955,6 +955,7 @@ describe('request diagnostics', () => {
       input?: readonly ('text' | 'image')[]
       streamIdleTimeoutMs?: number
       attachments?: AttachmentStore
+      ledgerRoutes?: (provider: string) => boolean
     } = {},
   ): PiAiAdapter {
     return new PiAiAdapter({
@@ -971,6 +972,7 @@ describe('request diagnostics', () => {
       resolveApiKey: () => Promise.resolve('test-key'),
       auth: memoryAuth(),
       sessionHeaders: new Set(['cc-pool']),
+      ...extras.ledgerRoutes === undefined ? {} : { ledgerRoutes: extras.ledgerRoutes },
       onRequestDiagnostic: (event) => { events.push(event) },
       ...extras.attachments === undefined ? {} : { resolveAttachments: () => extras.attachments },
     })
@@ -1174,6 +1176,76 @@ describe('request diagnostics', () => {
     await drain(adapter, { provider: 'cc-pool', model: MODEL, messages, sessionId, purpose: 'compaction' })
 
     expect(eventAt(events, 2).clientRequestId).not.toBe(eventAt(events, 0).clientRequestId)
+  })
+
+  it('distinguishes one-shot message content that carries no durable id', async () => {
+    const server = await mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }])
+    const events: LlmPiAi.PiAiRequestDiagnostic[] = []
+    const adapter = diagnosticAdapter(server.url, events)
+    const oneShot = (text: string): GenerateOptions => ({
+      provider: 'cc-pool',
+      model: MODEL,
+      sessionId: 'session-one-shot' as never,
+      messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+    })
+
+    await drain(adapter, oneShot('first one-shot'))
+    await drain(adapter, oneShot('second one-shot'))
+
+    // A request-only input has no durable identity, so its content is hashed
+    // into the conversation position and two different inputs cannot collide.
+    expect(eventAt(events, 0).clientRequestId).toMatch(UUID_PATTERN)
+    expect(eventAt(events, 2).clientRequestId).not.toBe(eventAt(events, 0).clientRequestId)
+  })
+
+  it('derives no ledger identity for a route outside the gates', async () => {
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const events: LlmPiAi.PiAiRequestDiagnostic[] = []
+    const adapter = diagnosticAdapter(server.url, events)
+
+    await drain(adapter, {
+      provider: 'anthropic',
+      model: MODEL,
+      messages: [user('plain route')],
+      sessionId: 'session-plain' as never,
+    })
+
+    // A route with no session headers and no persisted record never reads the
+    // derived identity, so it is absent rather than copied onto the event.
+    expect(eventAt(events, 0)).toEqual({
+      kind: 'request',
+      provider: 'anthropic',
+      model: MODEL,
+      endpoint: server.url,
+      sessionId: 'session-plain',
+      stream: true,
+    })
+    for (const event of events) {
+      expect(event).not.toHaveProperty('clientRequestId')
+      expect(event).not.toHaveProperty('attempt')
+    }
+  })
+
+  it('derives the ledger identity for a route a persistent log covers', async () => {
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const events: LlmPiAi.PiAiRequestDiagnostic[] = []
+    const adapter = diagnosticAdapter(server.url, events, { ledgerRoutes: provider => provider === 'anthropic' })
+
+    await drain(adapter, {
+      provider: 'anthropic',
+      model: MODEL,
+      messages: [user('persisted plain route')],
+      sessionId: 'session-persisted' as never,
+    })
+
+    const request = eventAt(events, 0)
+    expect(request).toMatchObject({ kind: 'request', attempt: 1 })
+    expect(request.clientRequestId).toMatch(UUID_PATTERN)
+    expect(eventAt(events, 1)).toMatchObject({
+      kind: 'response',
+      attempt: 1,
+      clientRequestId: request.clientRequestId,
+    })
   })
 
   it('bounds the attempt counters it retains', async () => {
