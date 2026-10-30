@@ -68,6 +68,19 @@ export interface PiAiRequestLogSink {
 const NO_LOG_ROUTES: ReadonlySet<string> = new Set()
 
 /**
+ * Whether a request-log profile names at least one setting.
+ *
+ * A loader schema materializes an absent nested object as `{}`, so the presence
+ * of the key does not distinguish a configured profile from an absent one. A
+ * real setting carries a value.
+ * @param config - the operator's request-log settings.
+ * @returns whether any field carries a value.
+ */
+function isRequestLogConfigured(config: PiAiRequestLogProfile | undefined): config is PiAiRequestLogProfile {
+  return config !== undefined && Object.values(config).some(value => value !== undefined)
+}
+
+/**
  * Create the durable NDJSON sink for a fixed route set, when one applies.
  *
  * The same defaults the plugin itself uses: a configured `path` locates the
@@ -75,9 +88,11 @@ const NO_LOG_ROUTES: ReadonlySet<string> = new Set()
  * `enabled: false` disables it, and `enabled: true` widens it to every route.
  * A fixed-route plugin that must not write implicitly passes `implicit: false`
  * and its own `defaultPath`, so an unconfigured plugin leaves no file and an
- * enabled one never shares the pi-ai file.
+ * enabled one never shares the pi-ai file. An empty profile is unconfigured:
+ * a loader-materialized `{}` must not turn that opted-out plugin on.
  * @param options - sink settings and the mounting plugin's warning channel.
- * @param options.config - the operator's request-log settings; `undefined` keeps the route defaults.
+ * @param options.config - the operator's request-log settings; an absent profile,
+ *   or one whose every field is empty, keeps the route defaults.
  * @param options.sessionHeaders - routes that carry the pool session identity.
  * @param options.warn - receives the first write failure.
  * @param options.implicit - whether an unconfigured sink follows `sessionHeaders` (default true).
@@ -91,10 +106,11 @@ export function createPiAiRequestLog(options: {
   implicit?: boolean
   defaultPath?: string
 }): PiAiRequestLogSink | undefined {
-  const routes = options.implicit === false && options.config === undefined
+  const config = isRequestLogConfigured(options.config) ? options.config : undefined
+  const routes = options.implicit === false && config === undefined
     ? NO_LOG_ROUTES
     : options.sessionHeaders
-  const resolved = resolveRequestLog(options.config, routes, options.defaultPath)
+  const resolved = resolveRequestLog(config, routes, options.defaultPath)
   return resolved === undefined ? undefined : new RequestDiagnosticLog(resolved, options.warn)
 }
 

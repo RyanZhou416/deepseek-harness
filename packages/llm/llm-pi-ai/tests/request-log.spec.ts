@@ -158,19 +158,30 @@ describe('endpoint redaction', () => {
     ['https://user:secret@ccpool.test/v1/messages', 'https://ccpool.test/v1/messages'],
     ['https://ccpool.test/v1?token=secret#frag', 'https://ccpool.test/v1'],
     ['https://user@ccpool.test', 'https://ccpool.test'],
+    // Only the authority's userinfo is removed: a path keeps its own `@`.
+    ['https://ccpool.test/v1/users/@me', 'https://ccpool.test/v1/users/@me'],
   ])('keeps %s as %s', (input, expected) => {
     expect(redactEndpoint(input)).toBe(expected)
   })
 
   it('strips userinfo and query from a value fetch would refuse', () => {
-    // Not a URL, but the durable file still must not outlive a pasted secret.
+    // Not URLs, but the durable file still must not outlive a pasted secret.
+    expect(redactEndpoint('member:secret@host/v1')).toBe('host/v1')
+    expect(redactEndpoint('//member:secret@host/v1')).toBe('//host/v1')
     expect(redactEndpoint('not a url://user:secret@host/path?token=secret'))
       .toBe('not a url://host/path')
+  })
+
+  it('never emits a placeholder origin for a non-special scheme', () => {
+    // `URL.origin` is the string `null` for these schemes, which must not
+    // replace the route's own authority.
+    expect(redactEndpoint('custom://member:secret@host/v1')).toBe('custom://host/v1')
+    expect(redactEndpoint('custom://member:secret@host')).toBe('custom://host')
   })
 })
 
 describe('fixed-route request log', () => {
-  it('follows session headers by default and requires configuration when opted out', async () => {
+  it('follows session headers by default and requires a real setting when opted out', async () => {
     const home = await temporaryRoot()
     vi.stubEnv('DSH_HOME', home)
     const warn = vi.fn()
@@ -184,17 +195,25 @@ describe('fixed-route request log', () => {
     expect(implicit).toBeDefined()
     await implicit?.close()
 
-    // A fixed-route plugin opts out: no configuration means no sink.
+    // A fixed-route plugin opts out: no configuration means no sink. The loader
+    // materializes an absent nested object as `{}`, and that profile carries no
+    // setting, so it must not turn the sink on either.
     expect(createPiAiRequestLog({
       config: undefined,
       sessionHeaders: new Set(['cc-pool']),
       warn,
       implicit: false,
     })).toBeUndefined()
-
-    // An explicit configuration turns it back on, at the plugin's own default.
-    const explicit = createPiAiRequestLog({
+    expect(createPiAiRequestLog({
       config: {},
+      sessionHeaders: new Set(['cc-pool']),
+      warn,
+      implicit: false,
+    })).toBeUndefined()
+
+    // One real setting turns it back on, at the plugin's own default.
+    const explicit = createPiAiRequestLog({
+      config: { enabled: true },
       sessionHeaders: new Set(['cc-pool']),
       warn,
       implicit: false,
@@ -202,6 +221,16 @@ describe('fixed-route request log', () => {
     })
     expect(explicit).toBeDefined()
     await explicit?.close()
+
+    // pi-ai's own default is unchanged: the same empty profile still follows
+    // its session headers.
+    const implicitEmpty = createPiAiRequestLog({
+      config: {},
+      sessionHeaders: new Set(['cc-pool']),
+      warn,
+    })
+    expect(implicitEmpty).toBeDefined()
+    await implicitEmpty?.close()
   })
 })
 

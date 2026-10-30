@@ -68,6 +68,17 @@ async function temporaryDirectory(): Promise<string> {
   return root
 }
 
+/**
+ * Assert that neither this plugin's durable file nor the pi-ai default exists
+ * below a case's harness home.
+ * @param home - the case's `DSH_HOME`.
+ */
+async function expectNoRequestLog(home: string): Promise<void> {
+  for (const name of ['llm-cc-pool-requests.jsonl', 'llm-pi-ai-requests.jsonl']) {
+    await expect(readFile(join(home, 'logs', name), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  }
+}
+
 describe('mac-pool plugin registration', () => {
   it('registers exactly one cc-pool provider and nothing else', async () => {
     const ctx = await mount()
@@ -338,14 +349,18 @@ describe('mac-pool wire contract', () => {
     }, { timeout: 5000 })
   })
 
-  it('writes no request log unless requestLog is configured', async () => {
+  it.each<[string, Record<string, unknown>]>([
+    ['a loader-materialized empty profile', {}],
+    ['a configuration without the field', { models: CONFIGURED_MODELS }],
+  ])('writes no request log for %s', async (_case, config) => {
     vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
     const home = await temporaryDirectory()
     vi.stubEnv('DSH_HOME', home)
     const ctx = new Context()
     context = ctx
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(CcPool, {})
+    const fiber = ctx.plugin(CcPool, config)
+    await fiber
     const capture = capturePoolFetch()
     vi.stubGlobal('fetch', capture.fetch)
 
@@ -354,13 +369,13 @@ describe('mac-pool wire contract', () => {
       messages: [user('no default sink')],
       sessionId: 'session-cc-pool-no-default' as never,
     })
+    expect(capture.calls).toHaveLength(1)
 
     // The pool route carries session headers, but that is not an implicit
-    // request to persist anything: neither this plugin's file nor the pi-ai
-    // default exists.
-    for (const name of ['llm-cc-pool-requests.jsonl', 'llm-pi-ai-requests.jsonl']) {
-      await expect(readFile(join(home, 'logs', name), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    }
+    // request to persist anything. Disposal drains the sink's write queue, so
+    // absence is observed after a mounted sink would have created the file.
+    await fiber.dispose()
+    await expectNoRequestLog(home)
   })
 
   it('persists below its own file name when requestLog is explicitly enabled', async () => {
@@ -370,7 +385,7 @@ describe('mac-pool wire contract', () => {
     const ctx = new Context()
     context = ctx
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(CcPool, { requestLog: {} })
+    await ctx.plugin(CcPool, { requestLog: { enabled: true } })
     const capture = capturePoolFetch()
     vi.stubGlobal('fetch', capture.fetch)
 

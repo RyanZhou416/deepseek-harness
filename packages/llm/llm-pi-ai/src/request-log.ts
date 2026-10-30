@@ -73,22 +73,27 @@ export function defaultRequestLogPath(owner: string = 'llm-pi-ai'): string {
  *
  * The durable record only needs to identify where a request went, while a
  * configured `baseURL` may embed a credential in its userinfo or query string.
- * Origin and path stay, so routes on one host remain distinguishable.
+ * The authority's host and the path stay, so routes on one host remain
+ * distinguishable. Userinfo is removed by locating it in the authority instead
+ * of by parsing the value as a URL, so a value `URL` would refuse — one with no
+ * scheme, or a protocol-relative one — still loses its credential, and a
+ * non-special scheme never yields a placeholder origin such as `null`.
  * @param endpoint - the route's effective endpoint URL.
  * @returns the endpoint without userinfo, query, or fragment.
  */
 export function redactEndpoint(endpoint: string): string {
-  try {
-    const url = new URL(endpoint)
-    if (url.username === '' && url.password === '' && url.search === '' && url.hash === '') return endpoint
-    // `URL` normalizes a missing path to `/`; never invent one the endpoint did
-    // not spell.
-    const root = url.pathname === '/' && /^[a-z][a-z0-9+.-]*:\/\/[^/]*$/i.test(endpoint)
-    return `${url.origin}${root ? '' : url.pathname}`
-  } catch {
-    const address = endpoint.replace(/[?#].*$/s, '')
-    return address.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '$1')
-  }
+  const address = endpoint.replace(/[?#].*$/s, '')
+  // An authority starts after `//` when the value spells one, and at the start
+  // of the value when it does not: `member:secret@host/v1` has no separator.
+  const separator = address.indexOf('//')
+  const authorityStart = separator === -1 ? 0 : separator + 2
+  const pathStart = address.indexOf('/', authorityStart)
+  const authorityEnd = pathStart === -1 ? address.length : pathStart
+  // The last `@` of the authority separates userinfo from the host, so an
+  // endpoint whose password contains `@` still keeps just the host and port.
+  const userinfoEnd = address.lastIndexOf('@', authorityEnd - 1)
+  if (userinfoEnd < authorityStart) return address
+  return `${address.slice(0, authorityStart)}${address.slice(userinfoEnd + 1)}`
 }
 
 /**
