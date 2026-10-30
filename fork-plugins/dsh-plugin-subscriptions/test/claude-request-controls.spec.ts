@@ -303,10 +303,9 @@ test('a capable model and its marked ids decide the mid-conversation form the sa
     // The form is the client's: the context rides a system-role message in place, ahead of
     // the turn that follows it, rather than merging into a neighbour.
     assert.deepEqual(messages.map(message => message.role), ['user', 'assistant', 'system', 'user'])
-    // The pinned builder's cache-control pass rebuilds every message from its role and
-    // content, so the translated `clear_at` does not survive serialization; the field is not
-    // what this case pins. What it pins is the capability decision: the form above and the
-    // two betas that declare it, composed together from the catalogue entry.
+    // The pinned builder's cache-control pass keeps the message's own field, so the
+    // translated `clear_at` reaches the wire beside the two betas that declare it.
+    assert.equal((system[0] as { clear_at?: string } | undefined)?.clear_at, 'next_user_message')
     assert.equal(betasOf(request).includes(MID_CONVERSATION_SYSTEM_BETA), true, `${model} composes the beta`)
     assert.equal(betasOf(request).includes(MID_CONVERSATION_SYSTEM_CLEAR_AT_BETA), true)
   }

@@ -980,7 +980,7 @@ interface BuildDependencies {
 /** Install the build-time runtime packages that staging inlines or copies into the staged package. */
 async function ensureBuildDependencies(): Promise<BuildDependencies> {
   const bunRuntimeTarget = bunPlatformRuntime(process.platform, process.arch)
-  const wireTarball = join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz')
+  const wireTarball = join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh15.tgz')
   if (!existsSync(wireTarball)) fail(`missing inlined dependency artifact ${wireTarball}`)
   const lockfile = await readFile(join(SUBSCRIPTIONS_PLUGIN.directory, 'pnpm-lock.yaml'), 'utf8')
   const undiciVersion = lockedDependencyVersion(lockfile, 'undici', '^7.0.0')
@@ -1736,7 +1736,7 @@ export async function main(options: BuildOptions): Promise<void> {
     if (version === undefined) fail(`${plugin.name} source manifest has no version`)
     const keyParts = [String(SCRIPT_VERSION), await sourceHash(plugin), version, toolchain]
     if (plugin.id === 'subscriptions') {
-      keyParts.push(await hashFile(join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz')))
+      keyParts.push(await hashFile(join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh15.tgz')))
       keyParts.push(dependencies.wire.manifest.version ?? '', dependencies.undici.manifest.version ?? '')
       keyParts.push(dependencies.bunRuntime.packageName, dependencies.bunRuntime.version)
     }

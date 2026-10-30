@@ -107,7 +107,7 @@
     "typescript": "^5.8.0"
   },
   "dependencies": {
-    "@tormentalabs/claude-code-wire-compat": "file:../releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz",
+    "@tormentalabs/claude-code-wire-compat": "file:../releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh15.tgz",
     "undici": "^7.0.0"
   },
   "optionalDependencies": {

@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { BETA_REGISTRY_2_1_288, CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
+import type { ClaudeSession } from '../src/auth/store.js'
 import { supportsMidConversationSystem } from '../src/providers/claude.js'
+import { buildClaudeWireRequest } from '../src/providers/claude-wire.js'
 import { toAnthropicMessages } from '../src/translate/anthropic.js'
 import type { TranslatableMessage } from '../src/translate/resolved.js'
 
@@ -103,4 +106,73 @@ test('a marked capable model gets the mid-conversation form from the same predic
   const wire = toAnthropicMessages(conversation(), 'claude-sonnet-5[1m]', true)
   assert.deepEqual(wire.map(message => message.role), ['user', 'assistant', 'system', 'user'])
   assert.equal(wire[2]?.clear_at, 'next_user_message')
+})
+
+/** One account session; this test never reaches the transport. */
+const SESSION: ClaudeSession = {
+  // A realistic token is never a substring of another header value, which the builder's
+  // token-isolation check refuses.
+  accessToken: 'synthetic-access-token-0123456789abcdef0123456789abcdef0123456789abcdef',
+  refreshToken: 'refresh-token',
+  expiresAt: Date.now() + 3_600_000,
+  scopes: 'user:inference',
+  accountUuid: 'uuid-1',
+  deviceId: 'dev-1',
+  subscriptionType: 'max',
+}
+
+/** The client declares its session as a UUID in both places it appears. */
+const WIRE_SESSION_ID = '11111111-1111-4111-8111-111111111111'
+
+test('a built request keeps clear_at through the cache-control pass and composes its beta', async () => {
+  // The pass runs with caching enabled, exactly as the route sends every request, and rebuilds
+  // each message to strip its blocks' cache_control. `clear_at` is the message's own field, so
+  // dropping it would leave the wire declaring a beta whose body field is absent.
+  const options: GenerateOptions = {
+    provider: 'claude',
+    model: 'claude-opus-5',
+    messages: conversation() as never,
+    system: 'be terse',
+  }
+  const built = await buildClaudeWireRequest(
+    options,
+    SESSION,
+    conversation(),
+    32_000,
+    undefined,
+    undefined,
+    { sessionId: WIRE_SESSION_ID, atisPin: undefined, previousRequestId: undefined },
+    'acct',
+  )
+
+  const body = JSON.parse(built.body) as {
+    messages: { role: string; content: unknown; clear_at?: string }[]
+  }
+  const system = body.messages.filter(message => message.role === 'system')
+  assert.equal(system.length, 1)
+  const systemMessage = system[0]
+  assert.ok(systemMessage)
+  assert.equal(systemMessage.content, 'mid-conversation context')
+  assert.equal(systemMessage.clear_at, 'next_user_message')
+  assert.deepEqual(Object.keys(systemMessage), ['role', 'content', 'clear_at'])
+  assert.equal('cache_control' in systemMessage, false, 'no breakpoint is placed on the system message')
+
+  // The pass still places its single message breakpoint on the newest user block.
+  const newest = body.messages.at(-1)
+  assert.ok(newest)
+  assert.equal(newest.role, 'user')
+  const content = newest.content
+  assert.ok(Array.isArray(content), 'the newest user message carries blocks')
+  const lastBlock = content.at(-1)
+  assert.ok(lastBlock !== null && typeof lastBlock === 'object')
+  assert.equal((lastBlock as { text?: string }).text, 'again')
+  // The breakpoint's ttl follows the session's scope grant; this case pins its placement.
+  assert.equal((lastBlock as { cache_control?: { type?: string } }).cache_control?.type, 'ephemeral')
+
+  const beta = String(built.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? '')
+  assert.equal(
+    beta.split(',').map(value => value.trim()).includes(BETA_REGISTRY_2_1_288.MID_CONVERSATION_SYSTEM_CLEAR_AT.header),
+    true,
+    'the request declares the beta that carries the field',
+  )
 })
