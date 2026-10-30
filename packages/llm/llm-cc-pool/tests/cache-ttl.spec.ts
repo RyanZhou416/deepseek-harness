@@ -320,6 +320,16 @@ describe('pool prompt-cache policy', () => {
   })
 
   it('accepts the caching-disabled lifetime and drops the marker policy', async () => {
+    // The route resolves the policy before building the profile: a none lifetime
+    // must not inherit the caller's cc3 markers or extended beta.
+    const profile = resolvePoolProfiles(undefined, {
+      cacheTtl: 'none',
+      extendedCacheBeta: true,
+      cacheMarkerPolicy: 'cc3',
+    }).get(PROVIDER)
+    expect(profile).toMatchObject({ cacheRetention: 'none', extendedCacheBeta: false })
+    expect(profile?.cacheMarkerPolicy).toBeUndefined()
+
     const ctx = new Context()
     context = ctx
     await ctx.plugin(LlmRuntime)

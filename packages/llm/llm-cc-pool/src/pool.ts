@@ -375,17 +375,17 @@ export function poolProviderProfile(
   policy: CcPoolCachePolicy = DEFAULT_CACHE_POLICY,
   ccWireParity = false,
 ): PiAiProviderProfile {
-  resolvePoolCachePolicy(policy)
+  const resolved = resolvePoolCachePolicy(policy)
   return {
     displayName: DISPLAY_NAME,
     apiKeyEnv: API_KEY_REF,
     api: 'anthropic-messages',
     baseURL: BASE_URL,
     headers: { ...REQUEST_HEADERS },
-    cacheRetention: CACHE_RETENTION[policy.cacheTtl],
-    extendedCacheBeta: policy.extendedCacheBeta,
-    ...policy.cacheMarkerPolicy === undefined ? {} : { cacheMarkerPolicy: policy.cacheMarkerPolicy },
-    ...ccWireParity ? { ccWireParity: true, ccWireParityCache: wireParityCacheIntent(policy) } : {},
+    cacheRetention: CACHE_RETENTION[resolved.cacheTtl],
+    extendedCacheBeta: resolved.extendedCacheBeta,
+    ...resolved.cacheMarkerPolicy === undefined ? {} : { cacheMarkerPolicy: resolved.cacheMarkerPolicy },
+    ...ccWireParity ? { ccWireParity: true, ccWireParityCache: wireParityCacheIntent(resolved) } : {},
     retryPolicy: retryPolicy(),
     models: models.map(model => ({
       id: model.id,
