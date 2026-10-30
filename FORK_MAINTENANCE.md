@@ -1404,88 +1404,139 @@ second Anthropic route's unchanged pi-ai field order and retention and absent
 identity block, DeepSeek with no marker or cache beta, the refusal of `cc3` on a
 non-Anthropic route, and the Loader composition.
 
-## CC parity A (accepted design, not implemented)
+## CC parity A (accepted final design, not implemented)
 
-**Status.** A is the accepted target for the cc-pool route: reproduce the
+**Status.** A is the accepted final target for the cc-pool route: reproduce the
 genuine Claude Code 2.1.288 first-party desktop wire as a conservative subset.
-It supersedes the earlier deliberate omissions (no scope, no cache-diagnosis,
-no request class, helper calls keeping 1h). The authoritative evidence table,
-body/header rules, code delta and acceptance corpus live in
-`mac-pool:development/CC-PARITY-A-DESIGN.md`; this section is the DSH-side
+It replaces every earlier A draft and is not staged. The authoritative evidence,
+body/header rules, code delta, corpus and exclusions live in
+`mac-pool:development/CC-PARITY-A-DESIGN.md` (v4); this section is the DSH-side
 summary and must stay consistent with it.
 
-**Anchor rule.** DSH and the pool emit only what the carve supports and take the
-less-emitting branch when a fact is unknown: no global scope, no one-hour TTL,
-no cache-diagnosis, no class header, no helper markers. Server acceptance is
-not a design input; a rejection removes a token or fails the request, never
-adds one.
+**Anchor rule.** Emit only what the carve supports, and take the less-emitting
+branch when a fact is unknown: no global scope, no one-hour TTL, no
+cache-diagnosis, no class header, no helper markers. Server acceptance is not a
+design input; a rejection removes a token or fails, never adds one.
 
-**Ownership and capability.** The worker is the executable cache-policy owner;
-the Swift pool is transport only; DSH supplies structure and class. A-on DSH
-must require a pool capability advertisement (`ccParityA`) before enabling A.
-The current v2 pool silently ignores unknown member headers, so new DSH against
-old pool is refused, not silently served uncached. Roll out the new pool with A
-off first; disable DSH A before any pool rollback.
+**Scope.** A covers `main` and `subagent` with a real static/dynamic boundary,
+and helpers (compaction/auxiliary) only in the conservative form: no billing, no
+identity insertion, no markers. A main/subagent request with no boundary, an
+empty static/dynamic run, an in-history prompt mismatch or an unclassified
+one-shot is A-off for that request (current non-A body/headers), not a 400.
+Custom base URL, gateway, non-firstParty, experimental off, HIPAA
+tainted/unknown, caching off, `workflow`, agent-type and `disabled` are outside
+A.
 
-**Member contract.** Three bounded headers, all present or all absent:
-`x-cc-request-class` (`main|compaction|auxiliary|subagent`; `workflow` reserved
-and not produced), `x-cc-system-layout` (`boundary|none`), `x-cc-cache-intent`
-(`main|helper`). No `mcpTools`/`disabled` header or value. Partial, repeated,
-empty, oversize, unknown or wrong-prefix names are typed 400s; v1 refusal is
-required at member API, pool encoder and worker parser. A-off keeps today's
-`x-claude-code-request-class: main` and byte-identical behavior; A-on replaces
-the plan value with the frame class.
+**Capability and ownership.** The worker is the executable cache-policy owner;
+the Swift pool is transport and member validation. Add member
+`GET /v1/capabilities` (same member auth) returning
+`{protocol:2,ccParityA:1}`; any 404/timeout/malformed/absent value means A-off
+in DSH. The server accepts A headers only when the selected worker advertises
+`ccParityA` in the separate `wire_profile_capabilities` frame, not `hello_ok`;
+otherwise return `503 cc_parity_a_unavailable` before forwarding bytes. Old
+pool + new DSH is A-off; new pool + old worker is 503; rollback disables DSH A
+and invalidates the positive probe before rolling back the pool. A positive
+probe is cached only for the same endpoint and pool build.
 
-**Body.** Main body is `[identity, static, dynamic]`, only when the section join
-equals the effective system text; in-history updates or any mismatch set layout
-`none`, and main+none is refused (the no-boundary fallback marks identity `org`
-and is out of A). Use the subscription route's stable partition/reorder, drop
-`harness:source`/`app:web-surface`, replace `harness:identity` with the CC line.
-DSH sends no cache markers; the worker writes identity unmarked, static and
-dynamic and last-user with the same single TTL decision. On 5m the static marker
-is `{type:"ephemeral",scope:"global"}` with no ttl. Scope is independent of TTL;
-TTL is never 1h under unknown eligibility/overage/allowlist. Helper compaction
-and title have layout `none` and no markers. Billing/identity are main-only;
-side-query bodies do not get them.
+**Member contract.** Three headers, all present or all absent:
+`x-cc-request-class` (`main|compaction|auxiliary|subagent`; `workflow`
+rejected), `x-cc-system-layout` (`none|boundary:<n>`, n=1-8 static blocks after
+identity), `x-cc-cache-intent` (`main|helper`; no `disabled`). Values are exact
+lower-case tokens, 1-32 printable ASCII bytes, no trim/case folding, exactly one
+occurrence; repeated/empty/oversize/unknown/non-printable is a typed 400 after
+session-name validation and before body decode. The v2 request frame adds
+`requestClass`, `systemLayout`, `cacheIntent`, `staticBlockCount`; explicit
+null, partial/all-null, empty or unknown is invalid; absent keeps the frame
+byte-identical. v1 refusal is three layers: member API 400, pool encoder,
+worker parser; v1 bytes/goldens stay unchanged. A-off keeps today's upstream
+`x-claude-code-request-class: main` only when the caller supplied none; A-on
+replaces it with the frame class.
 
-**Beta and thinking.** The carve order is extended, context-hint, evict,
-diagnosis, keepalive, message-threads; A emits only the subset it can anchor:
-scope when `Tse` holds, extended only on the 1h decision, diagnosis only when
-armed, context-hint omitted (profile disables it), evict/keepalive/threads
-omitted as a documented deviation. Do not call the vendored plan "full
-canonical". Strip member cache markers and `anthropic-beta` cache tokens in A;
-DSH deletes `payload.betas` rather than sending an empty header. `rejectedBeta`
-is a v2-only error-record fact with a v1 absence rule and a per-`sessionKey`
-latch; the first cut is fact+latch, not transparent replay. DSH writes
-`thinking.display:"updates"` only with the capability/summaries gate; the
-worker probe keeps display inactive so site 16 plans the beta; the forwarded
-body keeps `updates`.
+**Body.** Main/subagent: `[identity, static, dynamic]` only when the
+pre-transform section join equals the effective leading system text; identity
+is the exact interactive CLI line `Gw`, first and unmarked; static is the
+reordered set of all `stable:true` sections except identity (drop
+`harness:source`/`app:web-surface`, replace `harness:identity`); dynamic is the
+non-stable remainder. Do not reuse the subscription route's single-shared block
+or `DEFAULT_CLAUDE_IDENTITY_LINE`; A has its own builder. In-history mismatch,
+empty static/dynamic, no-system or unknown class is A-off. Helpers send the
+existing member system with no identity/billing, layout none, no markers. DSH
+sends no `cache_control`; the worker strips member markers and writes identity
+unmarked, static/dynamic/last-user with one TTL decision. Static scope only when
+the body scope gate (`Tse` + boundary/static) holds; 5m static is
+`{type:"ephemeral",scope:"global"}` with no ttl. Empty static is not a boundary.
+Billing/identity are main/subagent only; helpers get neither. The worker uses
+`staticBlockCount` and the identity text, not a leading-prefix guess.
 
-**Facts.** HIPAA is tainted/clear/unknown/not-applicable, not the worker's
-`settled` bit; pro/max are not-applicable for the policy read but still need
-separate 1h eligibility. Overage needs a lease-level last-observed fact; until
-then A is 5m. `XNe` is only the allowlist fallback, never proof of the live
-gate. Fix the policy-limits URL to `/api/claude_code/policy_limits` before
-claiming HIPAA parity. Add a typed worker cache plan and thread `cacheTtl` to
-the engine; if engine modules change, widen the digest or bump
-`expectedEngineBuild`.
+**TTL and facts.** 1h requires all of: first-party OAuth/committed token with
+`user:inference` (pro/max included), a lease overage fact positively saying
+overage is not in use (accountEpoch/credentialRevision/proxyRevision/observedAt/
+status; stale/absent => 5m), an explicit worker allowlist config that is known
+true (default absent), and no force-5m/env/settings/frontmatter override. `XNe`
+is carve's fallback that grants 1h; A does not use it. Unknown => 5m; the first
+release is 5m-only unless the allowlist is explicitly declared (those tests are
+override, not parity). HIPAA is tainted/clear/unknown/not-applicable: clear is a
+fresh accepted document with no hipaa taint, not `settled`; not-applicable is
+pro/max policy-read-ineligible; scope only for clear/not-applicable. Fix the
+policy-limits URL to `/api/claude_code/policy_limits` everywhere.
 
-**DSH implementation.** Add `GenerateOptions.requestClass`; derive from
-`requestClass ?? purpose` and stamp `subagent` from the session origin;
-compaction/title are helper/auxiliary. Add a pool-scoped `ccParityA` flag; do not
-extend the global `cacheMarkerPolicy`, and ignore/refuse `cacheTtl`,
-`extendedCacheBeta` and `cacheRetention` under A. Install one payload hook that
-strips markers, applies field order/metadata, thinks updates, strips
-`eager_input_streaming` (without enabling the fine-grained beta), deletes
-`payload.betas`, and adds the three headers. Adapter-owned names must not be
-injectable through profile headers. The old four-header `x-dsh-cc-*` summary
-must not be implemented.
+**Beta/thinking.** Keep every non-cache plan identifier. Keep scope site 9 only
+when the body scope gate holds; extended site 19 only on 1h; diagnosis site 21
+only when the session latch is armed; suppress context-hint always; omit evict,
+keepalive and message-threads (declared deviation). Ignore member cache tokens
+and body `betas`; never append a member token. Thread a typed worker cache plan
+into the sealed engine via a new `cacheTtl` input; this needs a `vendor/engine`
+patch and re-seal. DSH sets `thinking.display:"updates"` only under the
+capability/summaries gate; the worker probe keeps `{type,budget_tokens}` and
+drops only `display`, so site 16 fires; forwarded body keeps `updates`. Strip
+`eager_input_streaming`; do not flip the compat flag. Delete `payload.betas`
+instead of sending an empty `anthropic-beta`. `rejectedBeta` is v2-only with the
+three A cache identifiers, set only for an upstream 400 naming a forwarded token
+with `issued=true`; v1 must not send/receive it; latch only cache-diagnosis per
+`sessionKey`; first cut is fact+latch, not transparent replay.
 
-**Preservation.** Current three-marker/no-scope behavior remains shipped until
-A lands with its differential corpus, raw-byte flag-off proof, simulation and
-old/new capability matrix. A future merge must not revert the compaction
-overflow fix, request-log default-off, migration guard, or pool error contract.
-When A lands, rewrite this preservation rule and the referenced design together.
+**Engine/pins.** The digest covers only `index.ts`; changing
+`request.ts`/`request-policy.ts` is invisible and "bump expectedEngineBuild"
+alone causes `engine_incompatible`. Widen `engineBuildOf` and
+`digestOfUnique`/`entryPointsOf` to all engine modules, regenerate
+written/remote-worker-src/artifact manifests, update `dependency-pins.json`,
+`version-matrix.json`, `ServiceManifestHealthTests`, installed
+`direct-config.json` and the runbook in the same release.
+
+**DSH implementation.** Add `GenerateOptions.requestClass`
+(`main|compaction|auxiliary|subagent`). Resolve explicit class, then `purpose`
+(compaction/session-title), then session origin/delegationDepth -> subagent,
+then named one-shots -> auxiliary, otherwise A-off; never fall through to main.
+Add producers for auto-review/one-shots. Add a pool-scoped `ccParityA` option in
+`PiAiAdapterOptions`/cc-pool, not a shared profile field. Build one A plan per
+request containing body and headers atomically; `onPayload` cannot add HTTP
+headers, so the adapter header construction must add them. A replaces the
+`withAnthropicPayloadPolicy` branch; it does not add a second `onPayload`, and
+it ignores/removes `cc3`, `cacheTtl`, `extendedCacheBeta`, `cacheRetention` for
+its route with updated load validation. A headers are adapter-owned and stripped
+from profile headers; a profile attempt is a load error. Add headers before
+`sessionIdentityHeaders` returns early for a missing sessionId, or A-off.
+Because A reorders/drops/replaces system text, record the A body/section plan in
+the request log or a prepared-request record.
+
+**Acceptance.** Commit an executable corpus under
+`mac-pool:development/cc-parity-a-corpus/` with cases, injected facts, expected
+status/body SHA/headers/order/markers, raw baseline bytes for flag-off, a
+runner, and the DSH x pool-server x worker matrix including rollback. Name exact
+gates: DSH typecheck/build/doc-sync/config-catalog/focused tests; worker
+`run-tests.mjs` with updated lists/counts; Mac `change-gate.sh`/`MacPoolTests`
+with updated 2893/16; simulation A-on/A-off; real v2 goldens
+(`v2-golden.test.ts`, `CrossLanguageGoldenTests`; fix or exclude the known
+drift); `verify-goldens.py` only for v1; installed acceptance with A headers;
+manifest commands; a named security-review artifact. No install until the
+corpus, raw-byte flag-off, capability matrix, rollback, Mac plan and security
+review pass.
+
+**Explicit exclusions.** Helpers under-emit billing/identity versus the carve
+title/compaction; evict/keepalive/message-threads/context-hint are omitted;
+`workflow`, agent-type and `disabled` are not A; no live capture; live allowlist
+unknown; first request has no overage fact; HIPAA unknown means no scope/5m.
+The current three-marker/no-scope behavior remains shipped until A lands.
 
 ## CC subscription pool settings page (fork)
 
