@@ -1085,9 +1085,10 @@ deliberate retry on a new wire id: a retry that reuses the failed attempt's id i
 answered with `cc_pool_request_closed` and defeats recovery. Keep the attempt
 nonce sourced from the durable retry record, and keep the adapter's attempt
 numbering keyed on the conversation position so advances remain visible in the
-log. Keep adapter-owned session headers winning over a profile header of the same
-name in any casing. Keep the diagnostics free of messages, request bodies,
-credentials, token counts, and session titles.
+log on a route that derives the ledger identity; a route outside that gate must
+not hash messages at all. Keep adapter-owned session headers winning over a
+profile header of the same name in any casing. Keep the diagnostics free of
+messages, request bodies, credentials, token counts, and session titles.
 `TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE` stay out of the deployed explicit
 `retryableCodes` until the deployment decides otherwise: resending a step that
 may already have reached the model remains an open policy question. Do not
@@ -1113,28 +1114,41 @@ file; rotation deletes the oldest rotation first and the retained set is capped
 at 128 MiB (the per-file bound is clamped to that total and the file count to
 the total divided by it). Records carry `ts`, `kind`, provider, model, endpoint,
 session id, client request id, attempt, stream, and the settled status, pool
-request id, failure code, message, and cause chain — never messages, request
-bodies, credentials, tokens, or session titles; the writer projects onto that
-field list, so a later adapter field cannot leak content. Files are created
-`0600` and directories `0700`. Writes are queued off the request path; the first
-failure warns once through the plugin logger and later records keep trying. The
-plugin mount reads loader configuration, so a profile change takes effect at the
-next DSH start.
+request id, and failure code — never messages, request bodies, credentials,
+tokens, session titles, or provider failure text; the writer projects onto that
+field list, so a later adapter field cannot leak content. The endpoint is
+reduced to its origin and path, dropping userinfo and query secrets. Files are
+created `0600` and directories `0700`. Writes are queued off the request path;
+the first failure warns once through the plugin logger and later records keep
+trying. The plugin mount reads loader configuration, so a profile change takes
+effect at the next DSH start. The ledger identity (`clientRequestId` and attempt
+number) is derived only for a route that sends it as a session header or that an
+enabled log persists: `llm-pi-ai` passes `ledgerRoutes` only when `enabled: true`
+covers every route, and every other route performs no message hashing, message
+copying, or attempt bookkeeping. `llm-cc-pool` owns its durable sink separately:
+it is off unless `requestLog` is configured, and an enabled sink without `path`
+writes `$DSH_HOME/logs/llm-cc-pool-requests.jsonl`, so two plugins never share one
+default path.
 
-**Preservation rule.** Keep pool-route diagnostics persisted by default so a
-request that never reaches the pool still leaves client-side evidence, and keep
-the record projection free of messages, request bodies, credentials, token
-counts, and session titles. Keep writes off the synchronous request path and
-keep the one-warning failure behavior: a full disk or read-only path must not
-fail a model request. Do not remove the 128 MiB retained-set bound when changing
-the rotation bounds.
+**Preservation rule.** Keep the pi-ai sink's own default (session-header routes
+write below the harness home), keep the cc-pool sink opt-in, and keep the record
+projection free of messages, request bodies, credentials, token counts, session
+titles, and provider failure text. Keep the endpoint redaction: a durable record
+must never carry userinfo or a query string. Keep the ledger identity lazy: a
+route outside `sessionHeaders` and `ledgerRoutes` must not hash messages or touch
+the attempt map. Keep writes off the synchronous request path and keep the
+one-warning failure behavior: a full disk or read-only path must not fail a model
+request. Do not remove the 128 MiB retained-set bound when changing the rotation
+bounds, and do not give both plugins one default file.
 
 **Focused verification.**
-`pnpm exec vitest run packages/llm/llm-pi-ai/tests/request-log.spec.ts packages/llm/llm-pi-ai/tests/adapter.spec.ts packages/llm/llm-pi-ai/tests/loader-composition.spec.ts`
+`pnpm exec vitest run packages/llm/llm-pi-ai/tests/request-log.spec.ts packages/llm/llm-pi-ai/tests/adapter.spec.ts packages/llm/llm-pi-ai/tests/loader-composition.spec.ts packages/llm/llm-cc-pool`
 covers temporary-directory writes, owner-private modes, size rotation and
-oldest-file eviction, the exact NDJSON field set and excluded content, the
-non-blocking one-warning write failure, disabled and enabled switches, the real
-Loader composition, and per-file 100% coverage of `src/request-log.ts`.
+oldest-file eviction, the exact NDJSON field set and excluded content, endpoint
+redaction including a non-URL fallback, the non-blocking one-warning write
+failure, disabled and enabled switches, the lazy identity gate, the real Loader
+composition, the cc-pool default-off and distinct-default-path behavior, and
+per-file 100% coverage of `src/request-log.ts`.
 
 ## mac-pool per-model reasoning defaults (fork)
 
@@ -1230,9 +1244,9 @@ stages this workspace package beside the four fork plugins and links it with
 by `build.cmd` gets exactly that one `cc-pool` route. A provider block in
 `llm-pi-ai` — including in `fork-runtime/web/portable-profile.patch.yml` — would
 make both adapters claim the route and plugin loading fails.
-Keep the durable sink's default path
-(`$DSH_HOME/logs/llm-pi-ai-requests.jsonl`) so evidence collection survives the
-split.
+Keep the durable sink opt-in and on its own default path
+(`$DSH_HOME/logs/llm-cc-pool-requests.jsonl`): an unconfigured plugin writes
+nothing, and an enabled one never shares `llm-pi-ai`'s file.
 Keep session ordering in this plugin and per session only: different sessions
 must not be serialized or throttled, no global or per-IP queue may be added, the
 retry must cover `POOL_SESSION_BUSY` alone (never `POOL_RATE_LIMITED`, capacity,
@@ -1249,7 +1263,7 @@ missing credential, refused status, malformed body, no adoption), absence of the
 configurable directory, credential-free model listing, the fixed wire
 request (endpoint, `x-api-key`, `x-cc-backend`, session headers, attribution,
 adaptive thinking effort, output cap, no `speed`/`context_management`),
-`MISSING_CREDENTIAL` before network I/O, durable request-log records, fiber
+`MISSING_CREDENTIAL` before network I/O, the opt-in durable request-log records, fiber
 disposal, session ordering (same-session request order, cross-session
 parallelism, abort and abandoned-wait queue cleanup, error release, queued
 request settlement on fiber disposal, the bounded `POOL_SESSION_BUSY` retry

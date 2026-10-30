@@ -64,24 +64,37 @@ export interface PiAiRequestLogSink {
   close(): Promise<void>
 }
 
+/** The route set of a fixed-route plugin that configures no request log. */
+const NO_LOG_ROUTES: ReadonlySet<string> = new Set()
+
 /**
  * Create the durable NDJSON sink for a fixed route set, when one applies.
  *
  * The same defaults the plugin itself uses: a configured `path` locates the
  * file, an unconfigured sink exists while `sessionHeaders` names a route,
  * `enabled: false` disables it, and `enabled: true` widens it to every route.
+ * A fixed-route plugin that must not write implicitly passes `implicit: false`
+ * and its own `defaultPath`, so an unconfigured plugin leaves no file and an
+ * enabled one never shares the pi-ai file.
  * @param options - sink settings and the mounting plugin's warning channel.
  * @param options.config - the operator's request-log settings; `undefined` keeps the route defaults.
  * @param options.sessionHeaders - routes that carry the pool session identity.
  * @param options.warn - receives the first write failure.
+ * @param options.implicit - whether an unconfigured sink follows `sessionHeaders` (default true).
+ * @param options.defaultPath - file used when the configuration names none.
  * @returns the sink, or undefined when no file should be written.
  */
 export function createPiAiRequestLog(options: {
   config: PiAiRequestLogProfile | undefined
   sessionHeaders: ReadonlySet<string>
   warn: (message: string) => void
+  implicit?: boolean
+  defaultPath?: string
 }): PiAiRequestLogSink | undefined {
-  const resolved = resolveRequestLog(options.config, options.sessionHeaders)
+  const routes = options.implicit === false && options.config === undefined
+    ? NO_LOG_ROUTES
+    : options.sessionHeaders
+  const resolved = resolveRequestLog(options.config, routes, options.defaultPath)
   return resolved === undefined ? undefined : new RequestDiagnosticLog(resolved, options.warn)
 }
 

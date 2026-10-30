@@ -10,10 +10,12 @@ import {
   DEFAULT_REQUEST_LOG_MAX_FILE_BYTES,
   DEFAULT_REQUEST_LOG_MAX_FILES,
   MAX_REQUEST_LOG_TOTAL_BYTES,
+  redactEndpoint,
   requestLogLine,
   RequestDiagnosticLog,
 } from '../src/request-log.ts'
 import type { ResolvedRequestLogConfig } from '../src/request-log.ts'
+import { createPiAiRequestLog } from '../src/reuse.ts'
 
 /** A complete request record; optional response facts are added by each case. */
 function request(clientRequestId: string): PiAiRequestDiagnostic {
@@ -93,9 +95,13 @@ describe('request log records', () => {
       cause: 'Error: fetch failed\nCaused by: connect ECONNREFUSED',
     })) as Record<string, unknown>
     expect(Object.keys(full).sort()).toEqual([
-      'attempt', 'cause', 'clientRequestId', 'code', 'endpoint', 'kind', 'message',
-      'model', 'poolRequestId', 'provider', 'sessionId', 'status', 'stream', 'ts',
+      'attempt', 'clientRequestId', 'code', 'endpoint', 'kind', 'model',
+      'poolRequestId', 'provider', 'sessionId', 'status', 'stream', 'ts',
     ].sort())
+    // Provider failure text can echo request content, so the durable record
+    // carries the stable code only; the process logger keeps the message.
+    expect(full).not.toHaveProperty('message')
+    expect(full).not.toHaveProperty('cause')
 
     const minimal = JSON.parse(requestLogLine({ ...request('ledger-3'), kind: 'response' })) as Record<string, unknown>
     expect(Object.keys(minimal).sort()).toEqual([
@@ -105,6 +111,22 @@ describe('request log records', () => {
       requestLogLine({ ...request('ledger-4'), kind: 'response' }, new Date(1_700_000_000_000)),
     ) as Record<string, unknown>
     expect(fixed['ts']).toBe(new Date(1_700_000_000_000).toISOString())
+  })
+
+  it('reduces the endpoint to its origin and path', () => {
+    const parsed = JSON.parse(requestLogLine({
+      ...request('ledger-6'),
+      endpoint: 'https://member:pool-secret@ccpool.test/v1/messages?api_key=query-secret&x=1#fragment',
+      kind: 'response',
+      status: 200,
+      message: 'upstream rejected: member:pool-secret and query-secret',
+    })) as Record<string, unknown>
+
+    expect(parsed['endpoint']).toBe('https://ccpool.test/v1/messages')
+    const text = JSON.stringify(parsed)
+    for (const secret of ['member', 'pool-secret', 'api_key', 'query-secret', 'fragment', 'upstream rejected']) {
+      expect(text).not.toContain(secret)
+    }
   })
 
   it('projects away content, bodies, credentials, and other foreign fields', () => {
@@ -126,6 +148,60 @@ describe('request log records', () => {
     for (const secret of ['secret prompt', 'sk-secret', 'session=secret', 'proxy-secret', 'secret session title', '{"messages":[]}']) {
       expect(text).not.toContain(secret)
     }
+  })
+})
+
+describe('endpoint redaction', () => {
+  it.each([
+    ['https://ccpool.test', 'https://ccpool.test'],
+    ['https://ccpool.test/v1/messages', 'https://ccpool.test/v1/messages'],
+    ['https://user:secret@ccpool.test/v1/messages', 'https://ccpool.test/v1/messages'],
+    ['https://ccpool.test/v1?token=secret#frag', 'https://ccpool.test/v1'],
+    ['https://user@ccpool.test', 'https://ccpool.test'],
+  ])('keeps %s as %s', (input, expected) => {
+    expect(redactEndpoint(input)).toBe(expected)
+  })
+
+  it('strips userinfo and query from a value fetch would refuse', () => {
+    // Not a URL, but the durable file still must not outlive a pasted secret.
+    expect(redactEndpoint('not a url://user:secret@host/path?token=secret'))
+      .toBe('not a url://host/path')
+  })
+})
+
+describe('fixed-route request log', () => {
+  it('follows session headers by default and requires configuration when opted out', async () => {
+    const home = await temporaryRoot()
+    vi.stubEnv('DSH_HOME', home)
+    const warn = vi.fn()
+
+    // The pi-ai plugin's own rule: a session-header route persists by default.
+    const implicit = createPiAiRequestLog({
+      config: undefined,
+      sessionHeaders: new Set(['cc-pool']),
+      warn,
+    })
+    expect(implicit).toBeDefined()
+    await implicit?.close()
+
+    // A fixed-route plugin opts out: no configuration means no sink.
+    expect(createPiAiRequestLog({
+      config: undefined,
+      sessionHeaders: new Set(['cc-pool']),
+      warn,
+      implicit: false,
+    })).toBeUndefined()
+
+    // An explicit configuration turns it back on, at the plugin's own default.
+    const explicit = createPiAiRequestLog({
+      config: {},
+      sessionHeaders: new Set(['cc-pool']),
+      warn,
+      implicit: false,
+      defaultPath: join(home, 'logs', 'llm-cc-pool-requests.jsonl'),
+    })
+    expect(explicit).toBeDefined()
+    await explicit?.close()
   })
 })
 
@@ -159,6 +235,18 @@ describe('request log resolution', () => {
       path: 'requests.jsonl',
       allRoutes: true,
     })
+  })
+
+  it('lets a fixed-route plugin name its own default file', async () => {
+    const home = await temporaryRoot()
+    vi.stubEnv('DSH_HOME', home)
+    expect(resolveRequestLog(undefined, new Set(['cc-pool']), join(home, 'logs', 'llm-cc-pool-requests.jsonl')))
+      .toMatchObject({ path: join(home, 'logs', 'llm-cc-pool-requests.jsonl') })
+    expect(resolveRequestLog({}, new Set(['cc-pool']), 'pool.jsonl'))
+      .toMatchObject({ path: 'pool.jsonl' })
+    // An explicit path still wins over the plugin's default.
+    expect(resolveRequestLog({ path: 'configured.jsonl' }, new Set(['cc-pool']), 'pool.jsonl'))
+      .toMatchObject({ path: 'configured.jsonl' })
   })
 
   it('keeps the retained set within the total bound', () => {

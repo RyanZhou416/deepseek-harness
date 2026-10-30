@@ -338,7 +338,7 @@ describe('mac-pool wire contract', () => {
     }, { timeout: 5000 })
   })
 
-  it('persists pool-route diagnostics below the harness home by default', async () => {
+  it('writes no request log unless requestLog is configured', async () => {
     vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
     const home = await temporaryDirectory()
     vi.stubEnv('DSH_HOME', home)
@@ -351,15 +351,44 @@ describe('mac-pool wire contract', () => {
 
     await assemble(ctx, {
       model: 'claude-sonnet-5-5',
-      messages: [user('default sink')],
-      sessionId: 'session-cc-pool-default' as never,
+      messages: [user('no default sink')],
+      sessionId: 'session-cc-pool-no-default' as never,
     })
-    const logPath = join(home, 'logs', 'llm-pi-ai-requests.jsonl')
+
+    // The pool route carries session headers, but that is not an implicit
+    // request to persist anything: neither this plugin's file nor the pi-ai
+    // default exists.
+    for (const name of ['llm-cc-pool-requests.jsonl', 'llm-pi-ai-requests.jsonl']) {
+      await expect(readFile(join(home, 'logs', name), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  })
+
+  it('persists below its own file name when requestLog is explicitly enabled', async () => {
+    vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+    const home = await temporaryDirectory()
+    vi.stubEnv('DSH_HOME', home)
+    const ctx = new Context()
+    context = ctx
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(CcPool, { requestLog: {} })
+    const capture = capturePoolFetch()
+    vi.stubGlobal('fetch', capture.fetch)
+
+    await assemble(ctx, {
+      model: 'claude-sonnet-5-5',
+      messages: [user('explicit sink')],
+      sessionId: 'session-cc-pool-explicit' as never,
+    })
+
+    const logPath = join(home, 'logs', 'llm-cc-pool-requests.jsonl')
     await vi.waitFor(async () => {
       const records = (await readFile(logPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
       expect(records.map(record => record['kind'])).toEqual(['request', 'response'])
-      expect(records[0]).toMatchObject({ sessionId: 'session-cc-pool-default' })
+      expect(records[0]).toMatchObject({ sessionId: 'session-cc-pool-explicit' })
     }, { timeout: 5000 })
+    // The pi-ai default file stays untouched, so one path never has two writers.
+    await expect(readFile(join(home, 'logs', 'llm-pi-ai-requests.jsonl'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('resolves the member credential through the mounted credentials service', async () => {

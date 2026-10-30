@@ -98,9 +98,9 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 ### 请求诊断
 
-每次尝试在开始时写一条结构化日志记录，在结束时再写一条：路由、模型、端点、session id、本次尝试的 ledger id、该逻辑请求内的尝试序号、响应状态、响应带有的池 `x-cc-pool-request-id`，以及失败的 code、message 与 cause 链。排过队的请求若在池释放上一租约时被拒绝，会作为同一逻辑请求的下一次尝试重试：尝试序号推进，且重试发送新的 ledger id，因此它是池中新的 ledger 条目而不是 replay。记录绝不包含消息、请求体、凭据、token 数或会话标题。
+每次尝试在开始时写一条结构化日志记录，在结束时再写一条：路由、模型、端点、session id、本次尝试的 ledger id、该逻辑请求内的尝试序号、响应状态、响应带有的池 `x-cc-pool-request-id`，以及失败的稳定 code；进程 logger 另带失败的 message 与 cause 链。ledger 身份只在会发送或持久化它的路由上派生，门外的路由不支付消息哈希与尝试记账的开销。排过队的请求若在池释放上一租约时被拒绝，会作为同一逻辑请求的下一次尝试重试：尝试序号推进，且重试发送新的 ledger id，因此它是池中新的 ledger 条目而不是 replay。记录绝不包含消息、请求体、凭据、token 数或会话标题。
 
-`requestLog` 把同样的记录持久化为 NDJSON。未配置时池路由写入 `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`——沿用通用 pi-ai 适配器的路径，使既有证据收集在插件拆分后仍然有效。`path` 移动文件，`maxFileBytes`（默认 16 MiB）设定轮转点，`maxFiles`（默认 8）设定保留数量；轮转先删除最旧文件，保留集合不超过 128 MiB。写入排在请求路径之外，首次失败经插件 logger 报告一次，且不会使请求失败。
+`requestLog` 把同样的记录持久化为 NDJSON。它默认关闭：池路由携带会话身份并不等于要求写文件。配置 `requestLog`——`enabled: true`，或 `path` 等任一字段——才会启用，`enabled: false` 保持关闭。未配置 `path` 时池路由写入 `$DSH_HOME/logs/llm-cc-pool-requests.jsonl`；这个独立文件保证启用后的 `llm-pi-ai` sink 不会在其默认路径上出现第二个写入者。持久记录把端点缩减为 origin 与 path，因此 userinfo 与 query 秘密不会进入文件，并且完全不持久化 provider 失败文本。`path` 移动文件，`maxFileBytes`（默认 16 MiB）设定轮转点，`maxFiles`（默认 8）设定保留数量；轮转先删除最旧文件，保留集合不超过 128 MiB。写入排在请求路径之外，首次失败经插件 logger 报告一次，且不会使请求失败。
 
 <a id="understand-the-implementation"></a>
 ## 理解实现
@@ -141,7 +141,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 <a id="known-limitations-and-deferred-work"></a>
 
 - **池失败分类仍位于 `dsh-llm-pi-ai`**——本插件复用通用适配器的 pool-error 分类器与 `dsh-llm-retry` 的执行器，因此没有 `dsh-llm-pi-ai` 的组合无法挂载该路由。把 mac 池专属分类移入本包属于后续工作；迁移不得向通用包加入 mac 池分支。
-- **持久化日志沿用通用文件名**——未配置 `path` 时记录写入 `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`，使既有证据收集继续有效。希望使用池命名文件的部署应设置 `requestLog.path`。
+- **持久化日志需显式启用并使用自己的文件名**——未配置的插件不写任何文件，因为会话 header 本身不隐含 sink。配置 `requestLog` 但未给 `path` 时写入 `$DSH_HOME/logs/llm-cc-pool-requests.jsonl`，从而避开通用 pi-ai 文件，也不会在同一默认路径上出现两个写入者。
 - **目录经本插件自己的字段编辑**——部署通过 `models` 改动自己的模型集，而池同步只报告候选：采纳需要一次显式的设置写入并经过目录校验，绝不会静默覆盖，该读取也无法采纳进通用 Models 页面。新增档位、移除 adaptive thinking 或修改路由事实都随插件版本发布。
 - **只公布生效目录中的 id**——服务层仍接受未列出的模型 id，但选择器表面展示该列表，配置后的目录是唯一事实来源。
 - **图片模态是声明而非探测**——每个目录条目都会得到 `text` 与 `image`；拒绝图片的池端点会在轮次中途以 provider 拒绝的形式浮现。
