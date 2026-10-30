@@ -1523,23 +1523,23 @@ written/remote-worker-src/artifact manifests, update `dependency-pins.json`,
 `version-matrix.json`, `ServiceManifestHealthTests`, installed
 `direct-config.json` and the runbook in the same release.
 
-**DSH implementation.** A is owned by `llm-cc-pool`, not shared `llm-pi-ai`.
-`llm-pi-ai` keeps its current cc3 behavior for every route; other providers are
-untouched. Add `GenerateOptions.requestClass`
-(`main|compaction|auxiliary|subagent`). Resolve explicit class, then `purpose`
-(compaction/session-title), then session origin/delegationDepth -> subagent,
-then named one-shots -> auxiliary, otherwise A-off; never fall through to main.
-Add producers for auto-review/one-shots. The `llm-cc-pool` wrapper receives
-`systemSections`, normalizes `options.system` into identity/static/dynamic runs
-with a private sentinel, and installs a pool-private `fetch` override. The
-override splits/removes the sentinel, strips all `cache_control`, applies the A
-field order/metadata/thinking/eager/beta rules, and adds the three `x-cc-*`
-headers. The sentinel never reaches the pool/model. `ccParityA` is a pool-route
-option default off; when off the wrapper is absent and `llm-pi-ai` bytes are
-unchanged. If the wrapper cannot obtain sections/class/header seam, A-off. A
-headers are wrapper-owned and stripped from profile headers. The capability
-probe is a member HTTP request at profile load/reconnect, not a model/account
-request. Record the A body/section plan in the pool-route request log or a
+**DSH implementation.** A is implemented once in `llm-pi-ai`, gated by
+`PiAiProviderProfile.ccParityA` default false; only `llm-cc-pool` sets it.
+`llm-cc-pool` remains a `PiAiAdapter` subclass for profile/catalogue/session
+ordering and does not rewrite body or headers. Add
+`GenerateOptions.requestClass` (`main|compaction|auxiliary|subagent`). Resolve
+explicit class, then `purpose` (compaction/session-title), then session
+origin/delegationDepth -> subagent, then named one-shots -> auxiliary, otherwise
+A-off; never fall through to main. Add producers for auto-review/one-shots. In
+`withAnthropicPayloadPolicy`, the A branch uses `options.systemSections`, builds
+`[identity, static, dynamic]`, strips every `cache_control`, applies the A
+field order/metadata/thinking/eager/beta rules, and adds no markers; if sections
+or class are absent, A-off. The three `x-cc-*` headers are added in the
+adapter's existing per-request header construction; they are adapter-owned and
+stripped from profile headers. `llm-cc-pool` only adds the profile field and
+capability probe. The probe is a member HTTP request at load/reconnect, not a
+model/account request. Non-A routes and other providers keep their current
+bytes. Record the A body/section plan in the pool-route request log or a
 prepared-request record.
 
 **Acceptance.** The A change commits
