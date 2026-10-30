@@ -93,6 +93,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a detached provider, model, and optional reasoning selection.',
       },
       {
+        signature: 'sessionCreateOverride(): SessionCreateModelOverride | undefined',
+        description: 'Read the optional forced route for independently created Sessions.',
+        parameters: [],
+        returns: 'a detached route, or undefined when the user selected no override.',
+      },
+      {
         signature: 'async saveSelection(next: ModelSelection): Promise<void>',
         description: 'Save the complete default model selection. A deployment without a configuration editor keeps its composition entry. Saves commit in submission order; a failed save rejects its caller without blocking later saves.',
         parameters: [{ name: 'next', description: 'resolved selection accepted by an entry point.' }],
@@ -919,31 +925,31 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'abstract getState(): Promise<AccountView>',
         description: 'Read stored-account presence and the latest login attempt.',
         parameters: [],
-        returns: 'a snapshot without credentials or PKCE secrets.',
+        returns: 'a snapshot without credentials or PKCE secrets; `needs-reauth` names a parked grant that was retained.',
       },
       {
         signature: 'abstract getProfile(client: AccountClientMetadata): Promise<AccountDetails[\'profile\'] | null>',
         description: 'Query Platform profile independently of wallet balances. A ready result whose stable profile ID first becomes available or changes notifies identity-enabled watch consumers, so they re-read getPlatformSession; repeated IDs stay silent.',
         parameters: [{ name: 'client', description: 'identity of the requesting UI for this call.' }],
-        returns: 'profile outcome, or null if signed out or the grant changed during the query.',
+        returns: 'profile outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.',
       },
       {
         signature: 'abstract getBalance(client: AccountClientMetadata): Promise<AccountDetails[\'balance\'] | null>',
         description: 'Query Platform recharge and bonus wallet balances independently of profile data.',
         parameters: [{ name: 'client', description: 'identity of the requesting UI for this call.' }],
-        returns: 'balance outcome, or null if signed out or the grant changed during the query.',
+        returns: 'balance outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.',
       },
       {
         signature: 'abstract getUnnotifiedBonuses(client: AccountClientMetadata): Promise<AccountBonusBatch | null>',
         description: 'Query the granted bonuses Platform has not yet recorded as displayed.',
         parameters: [{ name: 'client', description: 'identity of the requesting UI for this call; its language selects the server-authored message.' }],
-        returns: 'bonuses with their account, or null if signed out or the grant changed during the query.',
+        returns: 'bonuses with their account, or null if signed out, the grant changed during the query, or the stored grant is parked.',
       },
       {
         signature: 'abstract ackBonusNotified(accountId: AccountUserId, orderId: AccountBonusOrderId, client: AccountClientMetadata): Promise<boolean>',
         description: 'Record one displayed bonus as notified for the account it belongs to.',
         parameters: [{ name: 'accountId', description: 'account the notification was read for; a different current account is never acknowledged.' }, { name: 'orderId', description: 'granted bonus order the user saw.' }, { name: 'client', description: 'identity of the requesting UI for this call.' }],
-        returns: 'true once Platform records the acknowledgement; false if signed out or the account changed.',
+        returns: 'true once Platform records the acknowledgement; false if signed out, the stored grant is parked, or the account changed.',
       },
       {
         signature: 'abstract startSignIn(client: AccountClientMetadata, callbackOrigin: string, loginSource: \'web\' | \'desktop\'): Promise<AccountView>',
@@ -977,15 +983,15 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'abstract rejectToken(token: string): Promise<void>',
-        description: 'Remove an inference-rejected token only while it still matches the stored login.',
+        description: 'Park an inference-rejected token while it still matches the stored login.',
         parameters: [{ name: 'token', description: 'token captured by the rejected inference request.' }],
-        returns: 'after matching credentials are removed and the expiry notification is emitted.',
+        returns: 'after the matching grant is marked invalid for reauthentication; the stored bytes are retained.',
       },
       {
         signature: 'abstract getPlatformSession(): Promise<PlatformSession | null>',
         description: 'Read credentials for the configured Platform origin, bound to their issuing environment, and pair them with the account ID from the last successful profile read; no profile request is made.',
         parameters: [],
-        returns: 'a Host-only snapshot, or null while signed out or when the credential changed during the read.',
+        returns: 'a Host-only snapshot, or null while signed out, parked, or when the credential changed during the read.',
       },
       {
         signature: 'abstract getDeviceIdentity(): Promise<{ deviceId?: string; userId?: AccountUserId; osVersion: string }>',
@@ -4161,7 +4167,7 @@ export const EVENT_API: readonly EventApiEntry[] = [
     mode: 'waterfall',
     signature: '\'agent/request-error\'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; provider: string; failure: LlmFailure; retryPolicy: ResolvedRetryPolicy | undefined; signal: AbortSignal }, next: () => Promise<RequestErrorAction>): Promise<RequestErrorAction>',
     summary: 'Handle one failed model-request attempt before the loop retries or closes its step.',
-    description: 'Handle one failed model-request attempt before the loop retries or closes its step. A listener returns `{ kind: \'retry\' }` without calling `next()` when it owns recovery, or calls `next()` to delegate. The default `undefined` leaves the failure terminal.',
+    description: 'Handle one failed model-request attempt before the loop retries or closes its step. A listener returns `{ kind: \'retry\' }` without calling `next()` when it owns recovery, or calls `next()` to delegate. The default `undefined` leaves the failure terminal. A retry action may carry the `attemptNonce` that distinguishes the attempt it opens; without one the loop mints a nonce, so every deliberate retry is a distinct attempt.',
     parameters: [{ name: 'payload', description: '.signal - the turn abort signal. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
   },
   {
@@ -4344,8 +4350,8 @@ export const EVENT_API: readonly EventApiEntry[] = [
     name: 'deepseek-account/session-expired',
     mode: 'emit',
     signature: '\'deepseek-account/session-expired\'(): void',
-    summary: 'Server rejection removed the current account credential; this notification is not replayed.',
-    description: 'Server rejection removed the current account credential; this notification is not replayed.',
+    summary: 'Server rejection parked the current credential; the stored grant is retained.',
+    description: 'Server rejection parked the current credential; the stored grant is retained. This notification is not replayed.',
     parameters: [],
   },
   {
@@ -5642,7 +5648,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'GenerateOptions',
-    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    systemSections?: readonly SystemPromptSection[];\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
+    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    systemSections?: readonly SystemPromptSection[];\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    sessionName?: string;\n    purpose?: \'compaction\' | \'session-title\';\n    attemptNonce?: string;\n}',
   },
   {
     name: 'GenericCallView',
@@ -6866,7 +6872,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RequestErrorAction',
-    declaration: 'export type RequestErrorAction = {\n    kind: \'retry\';\n} | undefined;',
+    declaration: 'export type RequestErrorAction = {\n    kind: \'retry\';\n    attemptNonce?: string;\n} | undefined;',
   },
   {
     name: 'RequestHeaderReason',
@@ -7163,6 +7169,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionControlFrame',
     declaration: 'export type SessionControlFrame = {\n    readonly type: \'baseline\';\n    readonly value: SessionControlBaseline;\n} | ({\n    readonly type: \'projection\';\n} & SessionProjectionUpdate);',
+  },
+  {
+    name: 'SessionCreateModelOverride',
+    declaration: 'export interface SessionCreateModelOverride {\n    provider: string;\n    model: string;\n    reasoningEffort?: string;\n}',
   },
   {
     name: 'SessionCreateRequest',
@@ -7542,7 +7552,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionSelectModelRequest',
-    declaration: 'export interface SessionSelectModelRequest extends ModelSelection {\n    readonly sessionId: SessionId;\n}',
+    declaration: 'export interface SessionSelectModelRequest extends ModelSelection {\n    readonly sessionId: SessionId;\n    readonly saveDefault?: boolean;\n}',
   },
   {
     name: 'SessionSelectModelValue',

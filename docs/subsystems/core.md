@@ -442,6 +442,12 @@ Owns the default model selection independently of any Host or transport. Each op
 currentSelection(): ModelSelection
 
 /**
+ * Read the optional forced route for independently created Sessions.
+ * @returns a detached route, or undefined when the user selected no override.
+ */
+sessionCreateOverride(): SessionCreateModelOverride | undefined
+
+/**
  * Save the complete default model selection. A deployment without a configuration
  * editor keeps its composition entry. Saves commit in submission order; a failed
  * save rejects its caller without blocking later saves.
@@ -1042,14 +1048,16 @@ Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/s
 
 #### `agent/request-error` — waterfall
 
-Handle one failed model-request attempt before the loop retries or closes its step. A listener returns `{ kind: 'retry' }` without calling `next()` when it owns recovery, or calls `next()` to delegate. The default `undefined` leaves the failure terminal.
+Handle one failed model-request attempt before the loop retries or closes its step. A listener returns `{ kind: 'retry' }` without calling `next()` when it owns recovery, or calls `next()` to delegate. The default `undefined` leaves the failure terminal. A retry action may carry the `attemptNonce` that distinguishes the attempt it opens; without one the loop mints a nonce, so every deliberate retry is a distinct attempt.
 
 ```ts cordis-catalog
 /**
  * Handle one failed model-request attempt before the loop retries or closes
  * its step. A listener returns `{ kind: 'retry' }` without calling `next()`
  * when it owns recovery, or calls `next()` to delegate. The default
- * `undefined` leaves the failure terminal.
+ * `undefined` leaves the failure terminal. A retry action may carry the
+ * `attemptNonce` that distinguishes the attempt it opens; without one the
+ * loop mints a nonce, so every deliberate retry is a distinct attempt.
  * @param payload.agent - the agent whose request failed.
  * @param payload.turn - the turn containing the failed request.
  * @param payload.step - the step containing the failed request attempt.
