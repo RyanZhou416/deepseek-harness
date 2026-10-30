@@ -172,6 +172,17 @@ describe('endpoint redaction', () => {
       .toBe('not a url://host/path')
   })
 
+  it('finds the authority after any run of scheme slashes', () => {
+    // `URL` accepts these as carrying credentials, so the durable record must
+    // redact them even though the authority has one or three-plus slashes.
+    expect(redactEndpoint('https:/member:secret@host/v1')).toBe('https:/host/v1')
+    expect(redactEndpoint('https:///member:secret@host/v1')).toBe('https:///host/v1')
+    expect(redactEndpoint('https:////member:secret@host/v1')).toBe('https:////host/v1')
+    expect(redactEndpoint('wss:/member:secret@host/v1')).toBe('wss:/host/v1')
+    // The first `//` is in the path, not the authority.
+    expect(redactEndpoint('member:secret@host//v1')).toBe('host//v1')
+  })
+
   it('never emits a placeholder origin for a non-special scheme', () => {
     // `URL.origin` is the string `null` for these schemes, which must not
     // replace the route's own authority.

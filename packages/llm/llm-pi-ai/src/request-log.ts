@@ -97,12 +97,22 @@ export function defaultRequestLogPath(owner: string = 'llm-pi-ai'): string {
  */
 export function redactEndpoint(endpoint: string): string {
   const address = endpoint.replace(/[?#].*$/s, '')
-  // An authority starts after `//` when the value spells one, and at the start
-  // of the value when it does not: `member:secret@host/v1` has no separator.
+  // A scheme may be followed by any run of slashes (`https:`, `https:/`,
+  // `https://`, `https:///`); all of them start the authority at the same
+  // place. A value with no scheme keeps its whole prefix, including a
+  // protocol-relative `//`, and a scheme-less userinfo such as
+  // `member:secret@host` starts its authority at zero.
+  const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:[/\\]+/.exec(address)
   const separator = address.indexOf('//')
-  const authorityStart = separator === -1 ? 0 : separator + 2
-  const pathStart = address.indexOf('/', authorityStart)
-  const authorityEnd = pathStart === -1 ? address.length : pathStart
+  const authorityStart = scheme !== null
+    ? scheme[0].length
+    : separator === -1
+      ? 0
+      : address.lastIndexOf('@', separator) >= 0
+        ? 0
+        : separator + 2
+  const slash = address.slice(authorityStart).search(/[/\\]/)
+  const authorityEnd = slash === -1 ? address.length : authorityStart + slash
   // The last `@` of the authority separates userinfo from the host, so an
   // endpoint whose password contains `@` still keeps just the host and port.
   const userinfoEnd = address.lastIndexOf('@', authorityEnd - 1)
