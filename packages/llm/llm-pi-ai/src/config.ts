@@ -302,7 +302,11 @@ export interface PiAiProviderProfile {
    * reordered `stable` sections, then the session-specific remainder — and
    * applies the pinned top-level field order, the `updates` thinking display,
    * and the cache-beta removals while keeping `eager_input_streaming`, with no
-   * `cache_control` of its own. A helper class (`compaction`, `auxiliary`)
+   * `cache_control` of its own. The cache-beta removal covers both the request's
+   * `betas` list and a deployment `anthropic-beta` header, which pi-ai would
+   * otherwise send unchanged and from which it derives the list: non-cache betas
+   * stay, and a header with no remaining beta is removed rather than sent empty.
+   * A helper class (`compaction`, `auxiliary`)
    * keeps the caller's system, layout `none`, and no markers; a main or
    * subagent request that cannot state a real boundary, or that names no class
    * at all, is served as the current non-wire-parity request instead of a

@@ -864,6 +864,15 @@ const CACHE_BETA_PREFIXES = [
 ] as const
 
 /**
+ * Whether one beta identifier names a cache behavior the pool's worker plans.
+ * @param beta - one beta name from a payload list or header value.
+ * @returns whether wire parity removes that beta.
+ */
+function isCacheBeta(beta: string): boolean {
+  return CACHE_BETA_PREFIXES.some(prefix => beta.startsWith(prefix))
+}
+
+/**
  * Remove the cache betas the worker plans from a wire-parity request.
  *
  * Every other beta stays: context-window and tool-streaming betas are not cache
@@ -874,8 +883,8 @@ const CACHE_BETA_PREFIXES = [
 function withoutCacheBetas(value: unknown): unknown {
   const betas = arrayOf(value)
   if (betas === undefined) return value
-  const kept = betas.filter(beta => typeof beta !== 'string'
-    || !CACHE_BETA_PREFIXES.some(prefix => beta.startsWith(prefix)))
+  const kept = betas.filter(beta => typeof beta !== 'string' || !isCacheBeta(beta))
+  /* v8 ignore next -- the header cleanup strips every deployment cache beta before pi-ai derives this list */
   return kept.length === 0 ? undefined : kept
 }
 
@@ -1158,6 +1167,35 @@ function withoutHeaders(headers: Record<string, string>, owned: ReadonlySet<stri
  */
 function withoutSessionHeaders(headers: Record<string, string>): Record<string, string> {
   return withoutHeaders(headers, ADAPTER_SESSION_HEADERS)
+}
+
+/** The request header whose value names the Anthropic betas a request declares. */
+const ANTHROPIC_BETA_HEADER = 'anthropic-beta'
+
+/**
+ * Remove the worker-owned cache betas from a deployment `anthropic-beta` header.
+ *
+ * pi-ai derives a request's `betas` list from this header and the Anthropic SDK
+ * also sends the header itself, so removing the cache betas from the payload
+ * member alone leaves the profile's values on the wire whenever no non-cache
+ * beta survives to replace the header. Every other beta keeps its relative
+ * order; when none remain the header is removed rather than sent empty. Header
+ * names are case-insensitive, so every spelling of the name is replaced by the
+ * one remaining value.
+ * @param headers - deployment headers after adapter-owned header removal.
+ * @returns the headers without cache betas in the beta header.
+ */
+function withoutCacheBetaHeader(headers: Record<string, string>): Record<string, string> {
+  const owned = new Set([ANTHROPIC_BETA_HEADER])
+  const entries = Object.entries(headers).filter(([name]) => owned.has(name.toLowerCase()))
+  const first = entries[0]
+  if (first === undefined) return headers
+  const betas = entries.flatMap(([, value]) => Array.from(value.matchAll(/[^,\s]+/gu), match => match[0]))
+  const kept = betas.filter(beta => !isCacheBeta(beta))
+  if (kept.length === betas.length) return headers
+  const rest = withoutHeaders(headers, owned)
+  const remaining = [...new Set(kept)]
+  return remaining.length === 0 ? rest : { ...rest, [first[0]]: remaining.join(',') }
 }
 
 /**
@@ -1488,9 +1526,17 @@ export class PiAiAdapter extends LlmAdapter {
       // wire-parity member headers are adapter-owned and replace a profile header
       // of the same name in any casing on every route, so one field never carries
       // two conflicting values, a non-wire-parity route cannot inject a partial
-      // wire-parity header set, and wire parity never sends one either.
+      // wire-parity header set, and wire parity never sends one either. A
+      // wire-parity request also removes the worker-owned cache betas from a
+      // deployment `anthropic-beta` header: pi-ai derives the payload's betas
+      // list from that header and the Anthropic SDK sends the header itself, so
+      // the payload-only removal would leave the profile's cache betas on the
+      // wire whenever no non-cache beta remains to replace the header.
       const profileHeaders = requestHeaders(profile.headers)
-      const deploymentHeaders = withoutHeaders(profileHeaders, CC_WIRE_PARITY_OWNED_HEADERS)
+      const ownedHeaders = withoutHeaders(profileHeaders, CC_WIRE_PARITY_OWNED_HEADERS)
+      const deploymentHeaders = ccWireParity === undefined
+        ? ownedHeaders
+        : withoutCacheBetaHeader(ownedHeaders)
       const headers = {
         ...sessionHeaders === undefined ? deploymentHeaders : withoutSessionHeaders(deploymentHeaders),
         ...sessionHeaders,

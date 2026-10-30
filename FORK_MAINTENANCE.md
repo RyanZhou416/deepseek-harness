@@ -1614,7 +1614,14 @@ adds no markers; if sections or class are absent, the request is served the
 default wire. The three `x-cc-*` headers are added in the adapter's existing
 per-request header construction; they are adapter-owned on every route, a
 profile that spells one is refused at resolution, and the request construction
-also strips it. `llm-cc-pool` only adds the profile field and the capability
+also strips it. That construction also removes the worker-planned cache betas
+from a deployment `anthropic-beta` header before pi-ai derives the request's
+`betas` list: pi-ai sends the profile header itself and derives the member from
+it, so dropping only the payload member leaves the profile's cache betas on the
+wire. Non-cache betas keep their order, and a header with no remaining beta is
+removed rather than sent empty; `packages/llm/llm-pi-ai/tests/wire-parity-body.spec.ts`
+covers both the parity request and the unchanged non-parity request.
+`llm-cc-pool` only adds the profile field and the capability
 probe. The probe is a member HTTP request at profile load and on a replaced
 member credential, not a model/account request; it requires the pool's build
 identity and never polls. A marked `503` on a request that carries the wire
