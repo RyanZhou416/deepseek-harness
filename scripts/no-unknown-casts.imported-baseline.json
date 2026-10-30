@@ -1,4 +1,85 @@
 {
+  "fork-plugins/claude-code-wire-compat/src/request-body.ts": {
+    "36a6b163b958c6658a1b8981d4f28a3a716b6ed8793bc742580f22b8f6ff0bf1": 1,
+    "586f547f557bbdc6934a7f7bce8c4486c49a880d94d0ce72fc03524217712d23": 1,
+    "c59682733cef7b62e5c57b15c4417f312aac17f432538b702ebae2e77f99e846": 1,
+    "f191c4643858fda37733bfbaa9e43bb5adb56751b390934add3a7c3ba771c3b3": 15
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/additional-betas.test.ts": {
+    "778c9bff8f63d9f33420731bbf286313188a2ee8d89c2114fcde6cd7f4eeac13": 1,
+    "b7f28a91395d51e4957d019b72a382a8be563fc037219fbf0dc8d4db9fdfd0ec": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/anti-verbosity.test.ts": {
+    "06f7a597f131b408c4616b8f942e04b8b4669713f526e699ae6364f980cde2b4": 1,
+    "c81c76a591071c793e11fbe74421c4a2d4660510d064e5dec3d996589dd4beeb": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/beta-overrides-1m.test.ts": {
+    "4cb6127ae003ea5382a680d61874cfde2ca08ad5ce8d9f239ebd524c6a02eb06": 1,
+    "7bb06e91b37e84e829b28c36a34acd442b275cb82f0d12bee639f6213ec0df36": 1,
+    "e51d9c98567e0754c51ee121ea17c93111562bb4ed7caa2f01f3838f3c2f548a": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/betas-2.1.280-push-sites.test.ts": {
+    "1f154cef8f8aa3697268b9c5b653591662db739548c9198bfd4356aca589a3bf": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/billing-prev-req.test.ts": {
+    "3f2202f0819db953320adcec7bd26bb3a6a0e224d5c5e46c4f24ed59383a2439": 1,
+    "d9833122da668afe8b3361fe20689354192fdcf7a7855474d1ee5b184f24f16e": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/count-tokens.test.ts": {
+    "1a9109455054aed8745ea4e8b13f16d58501ad590a028fcf58de2221a16fa36f": 1,
+    "4149ecbd014887f91da377fb17188853ca281ce8885375fc11c44f0abe92a2a0": 1,
+    "6fe9024d30e0d4757a348b83d246925b3f5aeaf2e79a0eff4bf12f3c9fb5826b": 1,
+    "8af8c4f720a583a80103ff1efe5d25ce13b57dc5a22783bffe1241afa5e8ee78": 1,
+    "d024315dc1ec2b957c9d5c7f2a6751b72fb944c7ec62012fd1c21fa6e0c7ca79": 1,
+    "e5abe2eaf7b8681cfa8ad9428191e2998be1ebd007542d20734b5e6da418b5ee": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/experimental-body-fields.test.ts": {
+    "49656313e53f6854e7b0152fb9a1dd4c84f94ed612d61c4582832df4aa88c08b": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/extra-header-policy.test.ts": {
+    "8cea57575b134dd45d0b17b477561cd3bdf4883c80aa58108df0bbc11702b3fc": 1,
+    "9462ae645ca89cffe0a3e5f070c7bb0d4c053cd6be5fd02db9a3f9b759aaa403": 1,
+    "e8966e1a30fde15d6f4fa1fb40aa99f110375464d3173216322317321d532ce6": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/fingerprint-crypto.test.ts": {
+    "cf87a2d1dce1a38f6e012e07a2f231a49183132b364191751a38d7f8c7ac2813": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/fingerprint.test.ts": {
+    "e85a3d5b4a6d2dd0022541b63b660f30c86c533045b6075134c3e0a2d680bcbc": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/metadata.test.ts": {
+    "4f1f3d3e26a413e0afb228f38a086be3edb14f6e38aaf9e41598e50d2e39e22e": 1,
+    "6fe9024d30e0d4757a348b83d246925b3f5aeaf2e79a0eff4bf12f3c9fb5826b": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/preserve-thinking-cache-control.test.ts": {
+    "51a0a8eb1892ef571135ba9c9c419e79c8b6190abc92693710a1175e60658b1c": 1,
+    "94cdda2d01b738994372dfb72b0f22d08571089379d68923443133ee2c6fcc7b": 1,
+    "b2457ef1438538c0f81104be5ea4d187d49127524c77406195a423114eb6eee8": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/redaction-mutants.test.ts": {
+    "6fe9024d30e0d4757a348b83d246925b3f5aeaf2e79a0eff4bf12f3c9fb5826b": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/redaction.test.ts": {
+    "03c396172087484a266a069643b1d494c99512985036e0b553ceb65004d8c1fc": 1,
+    "3e624051e2da81e0bbdb7d8a0e648865dedf419e1f510d57ec49c291fdc4aa0b": 1,
+    "3e7d72fb0ce06a964097cc86fb478a79447cca4dc1d8ba4151ea758ee2c420f6": 1,
+    "4838a45bc1e86140e95281beb95c102c71f1e007a2bf9152a86769f05525f8ef": 4,
+    "52fde344056af1c4190ec98790bc80119a9d39612c009bb8bd025616063f3540": 1,
+    "6fe9024d30e0d4757a348b83d246925b3f5aeaf2e79a0eff4bf12f3c9fb5826b": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/suppress-betas.test.ts": {
+    "75e37491b98a39b210f9624dea0acf014571f9fa60b0dfdd15f1f21d279ea8bd": 1,
+    "778c9bff8f63d9f33420731bbf286313188a2ee8d89c2114fcde6cd7f4eeac13": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/suppress-billing-block.test.ts": {
+    "fd8e252ef8773d53e92886050ce0e0949cfd2a51883b772169624142c94f8f5b": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/suppress-identity-block.test.ts": {
+    "b0d071f65da04f12b4c0305d547b222ee43d31cfbf18bcfc213b96756defcea3": 1
+  },
+  "fork-plugins/claude-code-wire-compat/test/validation/suppress-identity-cache.test.ts": {
+    "1c61e88b386421e778c79c5edf4a0ab1099c0b904a3918eba5450269fb6cfaf7": 1
+  },
   "fork-plugins/dsh-agent-teams/src/events.ts": {
     "5765288679b53dfcca60d9fbc6552e0753fca888d94b39afa3bbd59417fb9df2": 1
   },

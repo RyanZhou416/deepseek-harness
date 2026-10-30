@@ -55,6 +55,8 @@
   },
   "scripts": {
     "build": "tsc && tsdown",
+    "prebuild": "node scripts/ensure-wire-compat.mjs",
+    "pretest": "node scripts/ensure-wire-compat.mjs",
     "test": "tsc -p tsconfig.test.json && node --import ./test/isolate-home.mjs --import tsx/esm --test \"lib-test/test/**/*.spec.js\"",
     "prepare": "tsdown -c tsdown.prepare.config.ts",
     "prepublishOnly": "pnpm build && pnpm test"
@@ -107,7 +109,7 @@
     "typescript": "^5.8.0"
   },
   "dependencies": {
-    "@tormentalabs/claude-code-wire-compat": "file:../releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh15.tgz",
+    "@tormentalabs/claude-code-wire-compat": "file:../claude-code-wire-compat",
     "undici": "^7.0.0"
   },
   "optionalDependencies": {

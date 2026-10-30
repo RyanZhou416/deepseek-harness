@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: publish
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  # contents: write, not read: the release-asset upload below is a write against
+  # the release that triggered this workflow.
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:coverage
+      - run: npm run build
+      - run: npm run pack:check
+      - name: Pack the release artefact once
+        id: pack
+        # This is the ONLY npm pack that produces a real file in this workflow;
+        # pack:check above is --dry-run. Both the registry publish and the
+        # GitHub release upload consume this exact tarball, because a downstream
+        # consumer pins the GitHub asset by URL and must receive byte-for-byte
+        # the artefact the registry received, not a second pack that merely
+        # ought to match. It runs after npm run build so dist/ is present.
+        shell: bash
+        run: |
+          # npm pack --silent prints only the filename, so no version is
+          # hardcoded. The name is passed on as a step output rather than via
+          # $GITHUB_ENV: it is consumed by two named steps, so an explicit
+          # steps.pack.outputs reference documents the dataflow instead of
+          # leaking a variable into the environment of every later step.
+          echo "tarball=$(npm pack --silent)" >> "$GITHUB_OUTPUT"
+      - name: Verify the packed tarball against the reviewed release manifest
+        # The reviewed git reference is the approval boundary. Never generate
+        # a baseline here; missing or mismatching approval blocks publication.
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        shell: bash
+        run: node scripts/verify-release-manifest.mjs "$TARBALL"
+      - name: Publish with npm provenance
+        # Authentication is npm trusted publishing over OIDC, not a token. The
+        # trust is configured on npmjs.com against this repository and this
+        # workflow filename, and the `id-token: write` permission above is what
+        # lets the runner mint the OIDC token npm validates.
+        #
+        # NODE_AUTH_TOKEN must NOT be set here, not even to an empty string.
+        # setup-node writes an .npmrc containing
+        # //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}; if that variable
+        # exists at all, npm authenticates with its value and never attempts the
+        # OIDC exchange. An empty value is still a value, which is why this is a
+        # deletion rather than a blank assignment.
+        #
+        # History worth keeping: v0.1.0-rc.8 and v0.1.0-rc.9 failed because the
+        # variable was absent while the .npmrc placeholder still expected it, and
+        # no trusted publisher existed to fall back to. npm answered E404 rather
+        # than E401 on the scoped package, because the registry hides a package's
+        # existence from unauthorised callers. If publishing breaks again with
+        # E404 or ENEEDAUTH, that is an authentication failure, not a missing
+        # package.
+        #
+        # There is no token fallback. The package has "Require two-factor
+        # authentication and disallow tokens" enabled on npmjs.com and the
+        # publish token was revoked, so restoring a token line here cannot work
+        # until that setting is turned off and a fresh token is minted. Recovery
+        # from an auth failure means repairing the trusted-publisher
+        # configuration (repository name, workflow filename, `id-token: write`),
+        # not reaching for a credential.
+        env:
+          # Trusted publishing generates provenance on its own, so this is
+          # belt-and-braces rather than load-bearing. Kept as an explicit
+          # declaration of intent: provenance is required for this package, and
+          # a future change to the publish path must not silently drop it.
+          NPM_CONFIG_PROVENANCE: true
+        shell: bash
+        run: |
+          # Publishing the prebuilt tarball by path, rather than letting npm
+          # pack implicitly, is what makes the registry artefact and the release
+          # asset the same bytes.
+          VERSION="$(node -p "require('./package.json').version")"
+          TARBALL="${{ steps.pack.outputs.tarball }}"
+          if [[ "$VERSION" == *-* ]]; then
+            npm publish "$TARBALL" --access public --tag beta
+          else
+            npm publish "$TARBALL" --access public --tag latest
+          fi
+      - name: Attach the packed tarball to the GitHub release
+        # Uploads the identical file the publish step just sent to the registry,
+        # taken from steps.pack rather than repacked, so the two artefacts cannot
+        # drift. A downstream consumer pins this package by its GitHub release
+        # tarball URL rather than by registry version, so a release published
+        # without the .tgz asset breaks that consumer: v0.1.0-rc.10 shipped to npm
+        # with an empty release and had to be patched by hand. Only a release
+        # event carries a tag to upload against, so workflow_dispatch runs skip
+        # this step while still packing and publishing above.
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "${{ steps.pack.outputs.tarball }}" --clobber

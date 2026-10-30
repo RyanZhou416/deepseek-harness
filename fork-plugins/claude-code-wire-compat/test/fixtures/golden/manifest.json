@@ -1,0 +1,22 @@
+{
+  "sourceCommit": "466d500084b59651798bf38bf24d21f3cb850db6",
+  "models": {
+    "outgoing-canary-context-hint-off-2.1.233.json": "claude-opus-4-8",
+    "outgoing-canary-context-hint-off-2.1.280.json": "claude-opus-4-8",
+    "outgoing-canary-context-hint-off.json": "claude-opus-4-8",
+    "outgoing-default-path-2.1.280.json": "claude-opus-5-5",
+    "outgoing-foreground-2.1.233.json": "claude-sonnet-4-5",
+    "outgoing-foreground-2.1.280.json": "claude-sonnet-4-5",
+    "outgoing-foreground.json": "claude-sonnet-4-5"
+  },
+  "fixtures": {
+    "decision-context-hint-rejected.json": "6957d363e1e9512eb1a8d2c7170fa208b92e28460e7fb3b8576aa3814cdf4582",
+    "outgoing-canary-context-hint-off-2.1.233.json": "d30fab4f79078ff7c4850264585e4525cb1f7e0aba6235701c80d426204ebd6d",
+    "outgoing-canary-context-hint-off-2.1.280.json": "d50089c10b517f1fc6d08b108bac7128f822e035dcc3088e7fb81c389a3d3ba9",
+    "outgoing-canary-context-hint-off.json": "cf03ed7ca1507a702c7b588c065a517b8e5e69426af9f23175f472b96e2afa0f",
+    "outgoing-default-path-2.1.280.json": "cf9ac7b5f8ae4926e11f3373353856d01acd23d912043e5fa1d07c80b2c0a56b",
+    "outgoing-foreground-2.1.233.json": "dccacfcf13b514430345611d51a3caf94992fc4a704097b07c8c7546fc7c5f5f",
+    "outgoing-foreground-2.1.280.json": "bab4608a5824cc0efc63625b46895608c3db7f368c1613f9a320bdf2b2ff030f",
+    "outgoing-foreground.json": "d3e325d5a5e577027c8b0605d7117f563045eab8923c189584c56dc7910739e5"
+  }
+}

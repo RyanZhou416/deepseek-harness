@@ -1,0 +1,88 @@
+{
+  "name": "@tormentalabs/claude-code-wire-compat",
+  "version": "0.7.2-dsh15",
+  "description": "Runtime-neutral Claude Code Messages wire compatibility primitives",
+  "type": "module",
+  "private": false,
+  "license": "GPL-3.0-or-later",
+  "author": "claude-code-wire-compat contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marco-jardim/claude-code-wire-compat.git"
+  },
+  "bugs": {
+    "url": "https://github.com/marco-jardim/claude-code-wire-compat/issues"
+  },
+  "homepage": "https://github.com/marco-jardim/claude-code-wire-compat#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./profiles/claude-code-2.1.195": {
+      "types": "./dist/profiles/claude-code-2.1.195.d.ts",
+      "import": "./dist/profiles/claude-code-2.1.195.js"
+    },
+    "./profiles/claude-code-2.1.233": {
+      "types": "./dist/profiles/claude-code-2.1.233.d.ts",
+      "import": "./dist/profiles/claude-code-2.1.233.js"
+    },
+    "./profiles/claude-code-2.1.280": {
+      "types": "./dist/profiles/claude-code-2.1.280.d.ts",
+      "import": "./dist/profiles/claude-code-2.1.280.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.types.json --noEmit",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:pack": "npm run build && node scripts/verify-packed-consumers.mjs",
+    "pack:check": "npm pack --dry-run && publint && attw --pack . --profile esm-only",
+    "fixtures:check": "node scripts/seal-golden-fixtures.mjs --check",
+    "fixtures:seal": "node scripts/seal-golden-fixtures.mjs --write",
+    "extract:profile": "node scripts/extract-upstream-profile.mjs"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.2.0",
+    "@vitest/coverage-v8": "4.1.10",
+    "@vitest/eslint-plugin": "1.6.24",
+    "eslint": "10.8.0",
+    "fast-check": "4.9.0",
+    "globals": "17.11.0",
+    "license-checker-rseidelsohn": "5.0.1",
+    "miniflare": "4.20260722.0",
+    "prettier": "3.9.6",
+    "publint": "0.3.22",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0",
+    "vitest": "4.1.10"
+  },
+  "overrides": {
+    "miniflare": {
+      "undici": "7.29.0"
+    },
+    "ip-address": "10.3.1"
+  }
+}

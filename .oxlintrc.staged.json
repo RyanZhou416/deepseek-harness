@@ -16,6 +16,7 @@
     "fork-plugins/dsh-agent-teams/**",
     "fork-plugins/dsh-context/**",
     "fork-plugins/dsh-plugin-subscriptions/**",
+    "fork-plugins/claude-code-wire-compat/**",
     "native/**",
     "**/*.js",
     "**/*.mjs",

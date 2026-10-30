@@ -26,6 +26,7 @@
     "fork-plugins/dsh-agent-teams/**", // Imported plugin source keeps its upstream lint configuration.
     "fork-plugins/dsh-context/**", // Imported plugin source keeps its upstream lint configuration.
     "fork-plugins/dsh-plugin-subscriptions/**", // Imported plugin source keeps its upstream lint configuration.
+    "fork-plugins/claude-code-wire-compat/**", // Imported wire-builder source keeps its upstream ESLint configuration.
     "packages/experimental/claude-code-mods/examples/*/{hooks,tests,types}/**", // Claude Code's published example mods and their tests keep the upstream style; see the headers.
     "native/**", // The imported landlock-run subtree has its own gates; see native/README.md.
     "**/*.js",

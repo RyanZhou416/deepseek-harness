@@ -1,0 +1,333 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+
+const root = process.cwd();
+const ci = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+const publish = readFileSync(
+  join(root, ".github", "workflows", "publish.yml"),
+  "utf8",
+);
+const packageJson = readFileSync(join(root, "package.json"), "utf8");
+const workflowRoot = join(root, ".github", "workflows");
+const workflows = readdirSync(workflowRoot)
+  .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+  .sort()
+  .map((name) => ({
+    name,
+    source: readFileSync(join(workflowRoot, name), "utf8"),
+  }));
+
+const SEALING_COMMANDS = ["fixtures:seal", "seal-golden-fixtures.mjs --write"];
+
+describe("CI policy", () => {
+  it.each(["node-20:", "node-22:", "node-24:", "bun:", "workerd:", "quality:"])(
+    "defines required job %s",
+    (job) => {
+      expect(ci).toContain(job);
+    },
+  );
+
+  it.each([
+    "npm run lint",
+    "npm run typecheck",
+    "npm test",
+    "npm run fixtures:check",
+    "npm run test:coverage",
+    "npm run build",
+    "npm run pack:check",
+    "npm run test:pack",
+    "license-checker-rseidelsohn",
+    "gitleaks",
+  ])("contains quality gate %s", (gate) => {
+    expect(ci).toContain(gate);
+  });
+
+  it("has fully retired the external drift verifier", () => {
+    // The verifier compared this package's pinned profile against a sibling
+    // checkout of a consumer project. That consumer now builds its requests
+    // from this package, so the comparison degenerated into asserting the
+    // package against itself. Upstream drift is caught by the transcription
+    // procedure in docs/plans/UPSTREAM-TRACKING-RUNBOOK.md plus the sealed
+    // golden fixtures. This guard prevents the circular gate from returning.
+    expect(existsSync(join(root, "scripts", "verify-drift.mjs"))).toBe(false);
+    expect(existsSync(join(root, "test", "drift"))).toBe(false);
+    expect(packageJson).not.toContain("drift:check");
+    expect(ci).not.toContain("test/drift");
+  });
+
+  it("has fully removed the Stryker mutation-testing gate", () => {
+    // Stryker mutation testing was retired: a CI run exceeded 2.5 hours and was
+    // too costly. Its cheaper replacement is the @vitest/eslint-plugin rule set
+    // (run inside `npm run lint`) plus the coverage thresholds in
+    // vitest.config.ts. This guard prevents the slow gate from silently
+    // returning.
+    expect(existsSync(join(root, ".github", "workflows", "mutation.yml"))).toBe(
+      false,
+    );
+    expect(existsSync(join(root, "stryker.config.mjs"))).toBe(false);
+    expect(existsSync(join(root, "vitest.mutation.config.ts"))).toBe(false);
+    expect(packageJson).not.toContain("test:mutation");
+    expect(packageJson).not.toContain("stryker");
+    expect(ci).not.toContain("npm run test:mutation");
+  });
+
+  /*
+   * Sealing rewrites the manifest and the trace table from whatever bytes are
+   * on disk, so a workflow that sealed would launder a corrupted or unreviewed
+   * fixture into a fresh, self-consistent integrity claim — and the reviewer
+   * would see a green check. Automation may verify the seal, never mint it.
+   * The scan covers every workflow file, not just ci.yml: the hazard is the
+   * command, not the job it hides in.
+   */
+  it("never seals golden fixtures from a workflow", () => {
+    expect(workflows.length).toBeGreaterThan(0);
+
+    const offenders = workflows
+      .filter(({ source }) =>
+        SEALING_COMMANDS.some((command) => source.includes(command)),
+      )
+      .map(({ name }) => name);
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("detects a sealing command added to any workflow", () => {
+    // Proves the scan above is not vacuously true: it must reject the exact
+    // shapes a contributor would reach for, in a file that is not ci.yml.
+    const scan = (source: string) =>
+      SEALING_COMMANDS.filter((command) => source.includes(command));
+
+    expect(scan("      - run: npm run fixtures:seal")).toEqual([
+      "fixtures:seal",
+    ]);
+    expect(
+      scan("      - run: node scripts/seal-golden-fixtures.mjs --write"),
+    ).toEqual(["seal-golden-fixtures.mjs --write"]);
+    expect(scan("      - run: npm run fixtures:check")).toEqual([]);
+  });
+
+  it("does not consume repository secrets for pull requests", () => {
+    expect(ci).toContain("pull_request:");
+    expect(ci).not.toContain("secrets.");
+  });
+
+  it("restricts publication to provenance-enabled automation", () => {
+    expect(publish).toContain("workflow_dispatch:");
+    expect(publish).toContain("release:");
+    expect(publish).toContain("id-token: write");
+    expect(publish).toContain("contents: write");
+    expect(publish).toContain("NPM_CONFIG_PROVENANCE: true");
+    expect(publish).toContain('npm publish "$TARBALL" --access public');
+    expect(publish).toContain("--tag beta");
+    expect(publish).toContain("--tag latest");
+  });
+
+  it("requires a read-only manifest gate on the same tarball before publication", () => {
+    const steps = publish.split(/\n {6}- /u);
+    const pack = steps.findIndex((step) => step.includes("id: pack"));
+    const gate = steps.findIndex((step) =>
+      step.includes("run: node scripts/verify-release-manifest.mjs"),
+    );
+    const upload = steps.findIndex((step) =>
+      step.includes("gh release upload"),
+    );
+    const publishIndex = steps.findIndex((step) =>
+      step.includes('npm publish "$TARBALL"'),
+    );
+    expect(pack).toBeGreaterThan(0);
+    expect(gate).toBe(pack + 1);
+    expect(publishIndex).toBe(gate + 1);
+    expect(upload).toBeGreaterThan(publishIndex);
+    const gateSource = steps[gate] ?? "";
+    const activeStep = (source: string) =>
+      source
+        .split("\n")
+        .filter((line) => line.trim() && !line.trim().startsWith("#"))
+        .join("\n")
+        .trim();
+    expect(activeStep(gateSource)).toBe(
+      [
+        "name: Verify the packed tarball against the reviewed release manifest",
+        "        env:",
+        "          TARBALL: ${{ steps.pack.outputs.tarball }}",
+        "        shell: bash",
+        '        run: node scripts/verify-release-manifest.mjs "$TARBALL"',
+      ].join("\n"),
+    );
+    expect(activeStep(steps[publishIndex] ?? "")).toBe(
+      [
+        "name: Publish with npm provenance",
+        "        env:",
+        "          NPM_CONFIG_PROVENANCE: true",
+        "        shell: bash",
+        "        run: |",
+        `          VERSION="$(node -p "require('./package.json').version")"`,
+        '          TARBALL="${{ steps.pack.outputs.tarball }}"',
+        '          if [[ "$VERSION" == *-* ]]; then',
+        '            npm publish "$TARBALL" --access public --tag beta',
+        "          else",
+        '            npm publish "$TARBALL" --access public --tag latest',
+        "          fi",
+      ].join("\n"),
+    );
+    expect(activeStep(steps[upload] ?? "")).toBe(
+      [
+        "name: Attach the packed tarball to the GitHub release",
+        "        if: github.event_name == 'release'",
+        "        env:",
+        "          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+        "        shell: bash",
+        "        run: |",
+        '          gh release upload "${{ github.event.release.tag_name }}" \\',
+        '            "${{ steps.pack.outputs.tarball }}" --clobber',
+      ].join("\n"),
+    );
+    expect(gateSource).toContain("TARBALL: ${{ steps.pack.outputs.tarball }}");
+    expect(
+      gateSource.split("\n").filter((line) => /^\s*run:/u.test(line)),
+    ).toEqual([
+      '        run: node scripts/verify-release-manifest.mjs "$TARBALL"',
+    ]);
+    expect(gateSource).not.toMatch(/(?:if:|continue-on-error)/u);
+    const publishSource = steps[publishIndex] ?? "";
+    expect(publishSource).toContain(
+      'TARBALL="${{ steps.pack.outputs.tarball }}"',
+    );
+    expect(publishSource.match(/TARBALL=/gu)).toHaveLength(1);
+    expect(steps[upload]).toContain(
+      '"${{ steps.pack.outputs.tarball }}" --clobber',
+    );
+    const active = publish
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("#"));
+    expect(
+      active.filter((line) => line.includes("npm pack --silent")),
+    ).toHaveLength(1);
+    expect(active.join("\n")).not.toMatch(
+      /release-manifests\/|--write|--update|git commit|git push/u,
+    );
+  });
+
+  it("excludes approval manifests and verification scripts from package contents", () => {
+    const pkg = JSON.parse(packageJson) as { files: string[] };
+    expect(pkg.files).toEqual([
+      "dist",
+      "src",
+      "README.md",
+      "LICENSE",
+      "NOTICE",
+      "CHANGELOG.md",
+    ]);
+  });
+
+  it("authenticates publication with OIDC rather than a long-lived token", () => {
+    // npm trusted publishing is configured on npmjs.com against this repository
+    // and `publish.yml`. The npm CLI only attempts the OIDC exchange when no
+    // token is present: setup-node writes an .npmrc whose auth line expands
+    // ${NODE_AUTH_TOKEN}, and if that variable is defined at all — an empty
+    // string included — npm authenticates with its value instead. So the
+    // assertion has to be that the name is absent from the file entirely, not
+    // that it is unset or blank.
+    //
+    // There is no token fallback to fall back to: the package has
+    // "Require two-factor authentication and disallow tokens" enabled on
+    // npmjs.com and the publish token was revoked. A token line reintroduced
+    // here would not merely downgrade the release path, it would break it
+    // outright — which this guard catches at lint time rather than at release
+    // time.
+    //
+    // The match is deliberately anchored to an active YAML assignment rather
+    // than the bare identifier. The workflow's own comments name the variable
+    // in order to explain why it is absent, so a substring search would flag
+    // the documentation that exists to prevent the very regression being
+    // guarded against.
+    const activeAssignments = publish
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => !line.startsWith("#"));
+    expect(
+      activeAssignments.filter((line) => line.startsWith("NODE_AUTH_TOKEN:")),
+    ).toEqual([]);
+    expect(
+      activeAssignments.filter((line) => line.includes("secrets.NPM_TOKEN")),
+    ).toEqual([]);
+    // Trusted publishing requires the runner to mint an OIDC token, and npm
+    // requires CLI >= 11.5.1 to perform the exchange. Node 24 ships npm 11.
+    expect(publish).toContain("id-token: write");
+    expect(publish).toContain("node-version: 24");
+  });
+
+  it("detects a token assignment that is actually active", () => {
+    // Proves the narrowed matcher in the test above is not vacuously true. A
+    // guard that only ever sees a clean file cannot distinguish "no token" from
+    // "matcher is broken", so the matcher is exercised against both forms here.
+    const activeLines = (workflow: string) =>
+      workflow
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => !line.startsWith("#"));
+
+    const withToken = [
+      "        env:",
+      "          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}",
+      "          NPM_CONFIG_PROVENANCE: true",
+    ].join("\n");
+    expect(
+      activeLines(withToken).filter((line) =>
+        line.startsWith("NODE_AUTH_TOKEN:"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      activeLines(withToken).filter((line) =>
+        line.includes("secrets.NPM_TOKEN"),
+      ),
+    ).toHaveLength(1);
+
+    // An empty assignment must also be caught: npm treats a defined-but-blank
+    // variable as a credential and skips the OIDC exchange entirely.
+    const withBlankToken = ["        env:", "          NODE_AUTH_TOKEN:"].join(
+      "\n",
+    );
+    expect(
+      activeLines(withBlankToken).filter((line) =>
+        line.startsWith("NODE_AUTH_TOKEN:"),
+      ),
+    ).toHaveLength(1);
+
+    // Prose naming the variable must NOT be caught, which is the whole reason
+    // the matcher is anchored rather than a substring search.
+    const commentedOnly = [
+      "        # NODE_AUTH_TOKEN must not be set here.",
+      "        # Recovery: NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}",
+      "        env:",
+      "          NPM_CONFIG_PROVENANCE: true",
+    ].join("\n");
+    expect(
+      activeLines(commentedOnly).filter(
+        (line) =>
+          line.startsWith("NODE_AUTH_TOKEN:") ||
+          line.includes("secrets.NPM_TOKEN"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("pins every GitHub Action to an immutable commit SHA", () => {
+    for (const workflow of [ci, publish]) {
+      const refs = [...workflow.matchAll(/uses:\s*(\S+)/gu)].map(
+        (match) => match[1],
+      );
+      expect(refs.length).toBeGreaterThan(0);
+      for (const ref of refs) {
+        expect(ref).toMatch(/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/u);
+      }
+    }
+  });
+
+  it("verifies the secret scanner download against a pinned checksum", () => {
+    expect(ci).toMatch(/GITLEAKS_SHA256:\s*[0-9a-f]{64}/u);
+    expect(ci).toContain("sha256sum -c -");
+    expect(ci).not.toContain("gitleaks-action");
+  });
+});

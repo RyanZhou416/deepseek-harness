@@ -1,0 +1,2126 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import {
+  MAX_INPUT_ITEMS as MAX_ITEMS,
+  MAX_INPUT_SIZE as MAX_SIZE,
+} from "./limits.js";
+
+import { CLAUDE_CODE_2_1_195_PROFILE } from "./profiles/claude-code-2.1.195.js";
+import { clampMaxTokens, resolveThinking } from "./thinking.js";
+import type { ThinkingDisplay, ThinkingRequest } from "./thinking.js";
+
+import { ClaudeCodeWireError } from "./contracts.js";
+import type {
+  CacheControlEphemeral,
+  ClaudeCodeCacheControlInput,
+  ClaudeCodeProtocolProfile,
+  CitationsConfigParam,
+  DocumentBlock,
+  ImageBlock,
+  JsonValue,
+  Message,
+  MessageContentBlock,
+  RedactedThinkingBlock,
+  SearchResultBlock,
+  ServerToolUseBlock,
+  TextBlock,
+  TextCitationParam,
+  ThinkingBlock,
+  ToolDefinition,
+  ToolReferenceBlock,
+  ToolResultBlock,
+  ToolResultContentBlock,
+  ToolSearchToolResultBlock,
+  ToolUseBlock,
+} from "./contracts.js";
+import { deriveCapabilities } from "./model-capabilities.js";
+import { stripModelMarkers } from "./model-identity.js";
+import { isIdentityText } from "./system-prompt.js";
+import {
+  inspectText,
+  TEXT_POLICY_IDENTIFIER,
+  TEXT_POLICY_PROSE,
+} from "./unicode.js";
+import { violationDetails, type ViolationPathSegment } from "./violation.js";
+
+const MAX_DEPTH = 100;
+const FORBIDDEN_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const MESSAGE_KEYS = new Set(["role", "content", "clear_at"]);
+
+/**
+ * The order the request body's keys are emitted in.
+ *
+ * The wire bytes carry it: the client builds its main-turn parameters object in a single
+ * literal and hands it to the SDK, whose beta resource destructures only the names that
+ * become headers and whose transport serializes the rest with a plain stringify, so the
+ * literal's order is the body's order. Its literal reads `model`, `messages`, `system`,
+ * `tools`, `tool_choice`, `metadata`, `max_tokens`, `thinking`, then the optional
+ * parameters, and its call site appends `stream` last. That order is identical in 2.1.280,
+ * 2.1.288 and 2.1.296.
+ *
+ * Names this package can emit that the literal does not name are grouped with the
+ * parameter they belong beside, and anything unrecognized keeps its own order ahead of
+ * `stream`, which stays last.
+ */
+const BODY_KEY_ORDER: readonly string[] = [
+  "model",
+  "messages",
+  "system",
+  "tools",
+  "tool_choice",
+  "metadata",
+  "max_tokens",
+  "thinking",
+  "temperature",
+  "top_p",
+  "top_k",
+  "stop_sequences",
+  "context_management",
+  "cache_control",
+  "safeguards",
+  "output_config",
+  "service_tier",
+  "output_format",
+  "speed",
+  "thread",
+  "diagnostics",
+  "context_hint",
+  "stream",
+];
+
+/**
+ * Rebuild a body with its keys in the order the client emits them.
+ *
+ * @param body - the assembled body.
+ * @returns the same entries, ordered, with `stream` last.
+ */
+function orderBodyKeys(body: Record<string, unknown>): Record<string, unknown> {
+  const ordered: Record<string, unknown> = {};
+  for (const key of BODY_KEY_ORDER) {
+    if (hasOwn(body, key)) ordered[key] = body[key];
+  }
+  for (const key of Object.keys(body)) {
+    if (key !== "stream" && !hasOwn(ordered, key)) ordered[key] = body[key];
+  }
+  if (hasOwn(body, "stream")) ordered["stream"] = body["stream"];
+  return ordered;
+}
+const CACHE_CONTROL_KEYS = new Set(["type", "ttl"]);
+const LEGACY_TEXT_CACHE_CONTROL_KEYS = new Set(["type", "ttl", "scope"]);
+const CITATIONS_CONFIG_KEYS = new Set(["enabled"]);
+const TEXT_KEYS = new Set(["text", "type", "cache_control", "citations"]);
+const TOOL_USE_KEYS = new Set([
+  "id",
+  "input",
+  "name",
+  "type",
+  "cache_control",
+  "caller",
+]);
+const TOOL_RESULT_KEYS = new Set([
+  "tool_use_id",
+  "type",
+  "cache_control",
+  "content",
+  "is_error",
+]);
+/*
+ * The server-tool blocks carry an opaque result payload and are replayed
+ * verbatim, so these sets are the keys that MUST be present rather than the
+ * only keys allowed: every other key travels back exactly as it arrived.
+ */
+const SERVER_TOOL_USE_KEYS = ["id", "input", "name", "type"];
+const TOOL_SEARCH_TOOL_RESULT_KEYS = ["tool_use_id", "type"];
+const THINKING_BLOCK_KEYS = new Set(["signature", "thinking", "type"]);
+const REDACTED_THINKING_BLOCK_KEYS = new Set(["data", "type"]);
+/*
+ * The `preserveThinkingBlockCacheControl` allowlists. They grow by exactly ONE
+ * key over the strict sets above; every other key stays refused, so the seam
+ * widens the contract by the single field the API itself round-trips and by
+ * nothing else. See the seam's JSDoc on `ClaudeCodeRequestInput`.
+ */
+const THINKING_BLOCK_CACHE_CONTROL_KEYS = new Set([
+  ...THINKING_BLOCK_KEYS,
+  "cache_control",
+]);
+const REDACTED_THINKING_BLOCK_CACHE_CONTROL_KEYS = new Set([
+  ...REDACTED_THINKING_BLOCK_KEYS,
+  "cache_control",
+]);
+const IMAGE_BLOCK_KEYS = new Set(["source", "type", "cache_control"]);
+const BASE64_IMAGE_SOURCE_KEYS = new Set(["data", "media_type", "type"]);
+const FILE_IMAGE_SOURCE_KEYS = new Set(["file_id", "type"]);
+const URL_IMAGE_SOURCE_KEYS = new Set(["type", "url"]);
+const DOCUMENT_BLOCK_KEYS = new Set([
+  "source",
+  "type",
+  "cache_control",
+  "citations",
+  "context",
+  "title",
+]);
+const BASE64_PDF_SOURCE_KEYS = new Set(["data", "media_type", "type"]);
+const CONTENT_BLOCK_SOURCE_KEYS = new Set(["content", "type"]);
+const FILE_DOCUMENT_SOURCE_KEYS = new Set(["file_id", "type"]);
+const PLAIN_TEXT_SOURCE_KEYS = new Set(["data", "media_type", "type"]);
+const URL_PDF_SOURCE_KEYS = new Set(["type", "url"]);
+const SEARCH_RESULT_KEYS = new Set([
+  "content",
+  "source",
+  "title",
+  "type",
+  "cache_control",
+  "citations",
+]);
+const TOOL_REFERENCE_KEYS = new Set(["tool_name", "type", "cache_control"]);
+const DIRECT_CALLER_KEYS = new Set(["type"]);
+const SERVER_TOOL_CALLER_KEYS = new Set(["tool_id", "type"]);
+const CITATION_CHAR_KEYS = new Set([
+  "cited_text",
+  "document_index",
+  "document_title",
+  "end_char_index",
+  "start_char_index",
+  "type",
+]);
+const CITATION_CONTENT_BLOCK_KEYS = new Set([
+  "cited_text",
+  "document_index",
+  "document_title",
+  "end_block_index",
+  "start_block_index",
+  "type",
+]);
+const CITATION_PAGE_KEYS = new Set([
+  "cited_text",
+  "document_index",
+  "document_title",
+  "end_page_number",
+  "start_page_number",
+  "type",
+]);
+const CITATION_SEARCH_RESULT_KEYS = new Set([
+  "cited_text",
+  "end_block_index",
+  "search_result_index",
+  "source",
+  "start_block_index",
+  "title",
+  "type",
+]);
+const CITATION_WEB_SEARCH_KEYS = new Set([
+  "cited_text",
+  "encrypted_index",
+  "title",
+  "type",
+  "url",
+]);
+const CUSTOM_TOOL_KEYS = new Set([
+  "input_schema",
+  "name",
+  "allowed_callers",
+  "cache_control",
+  "defer_loading",
+  "description",
+  "eager_input_streaming",
+  "input_examples",
+  "strict",
+]);
+const BASH_TOOL_KEYS = new Set([
+  "name",
+  "type",
+  "allowed_callers",
+  "cache_control",
+  "defer_loading",
+  "input_examples",
+  "strict",
+]);
+const CODE_EXECUTION_TOOL_KEYS = new Set([
+  "name",
+  "type",
+  "allowed_callers",
+  "cache_control",
+  "defer_loading",
+  "strict",
+]);
+const COMPUTER_TOOL_KEYS = new Set([
+  "display_height_px",
+  "display_width_px",
+  "name",
+  "type",
+  "allowed_callers",
+  "cache_control",
+  "defer_loading",
+  "display_number",
+  "input_examples",
+  "strict",
+]);
+const COMPUTER_ZOOM_TOOL_KEYS = new Set([...COMPUTER_TOOL_KEYS, "enable_zoom"]);
+const MEMORY_TOOL_KEYS = new Set([
+  "name",
+  "type",
+  "allowed_callers",
+  "cache_control",
+  "defer_loading",
+  "input_examples",
+  "strict",
+]);
+const TEXT_EDITOR_TOOL_KEYS = new Set([
+  "name",
+  "type",
+  "allowed_callers",
+  "cache_control",
+  "defer_loading",
+  "input_examples",
+  "strict",
+]);
+const TEXT_EDITOR_MAX_TOOL_KEYS = new Set([
+  ...TEXT_EDITOR_TOOL_KEYS,
+  "max_characters",
+]);
+const WEB_SEARCH_TOOL_KEYS = new Set([
+  "name",
+  "type",
+  "allowed_callers",
+  "allowed_domains",
+  "blocked_domains",
+  "cache_control",
+  "defer_loading",
+  "max_uses",
+  "strict",
+  "user_location",
+]);
+const USER_LOCATION_KEYS = new Set([
+  "type",
+  "city",
+  "country",
+  "region",
+  "timezone",
+]);
+const WEB_FETCH_TOOL_KEYS = new Set([
+  "name",
+  "type",
+  "allowed_callers",
+  "allowed_domains",
+  "blocked_domains",
+  "cache_control",
+  "citations",
+  "defer_loading",
+  "max_content_tokens",
+  "max_uses",
+  "strict",
+]);
+const WEB_FETCH_CACHE_TOOL_KEYS = new Set([
+  ...WEB_FETCH_TOOL_KEYS,
+  "use_cache",
+]);
+const ADVISOR_TOOL_KEYS = new Set([
+  "model",
+  "name",
+  "type",
+  "allowed_callers",
+  "cache_control",
+  "caching",
+  "defer_loading",
+  "max_uses",
+  "strict",
+]);
+const MCP_TOOLSET_KEYS = new Set([
+  "mcp_server_name",
+  "type",
+  "cache_control",
+  "configs",
+  "default_config",
+]);
+const MCP_TOOL_CONFIG_KEYS = new Set(["defer_loading", "enabled"]);
+const CONTEXT_CONFIG_KEYS = new Set(["edits"]);
+const CLEAR_THINKING_KEYS = new Set(["type", "keep"]);
+const ALL_THINKING_KEYS = new Set(["type"]);
+const TYPED_NUMBER_KEYS = new Set(["type", "value"]);
+const CLEAR_TOOL_USES_KEYS = new Set([
+  "type",
+  "clear_at_least",
+  "clear_tool_inputs",
+  "exclude_tools",
+  "keep",
+  "trigger",
+]);
+const COMPACT_KEYS = new Set([
+  "type",
+  "instructions",
+  "pause_after_compaction",
+  "trigger",
+]);
+const OUTPUT_CONFIG_KEYS = new Set(["effort", "maxOutputTokens"]);
+const CACHE_CONTROL_INPUT_KEYS = new Set([
+  "enabled",
+  "ttl",
+  "systemBreakpoint",
+  "toolBreakpoint",
+  "messageBreakpoint",
+  "suppressIdentityBlock",
+]);
+const JSON_OUTPUT_FORMAT_KEYS = new Set(["schema", "type"]);
+const TOOL_CHOICE_PARALLEL_KEYS = new Set([
+  "type",
+  "disable_parallel_tool_use",
+]);
+const TOOL_CHOICE_NONE_KEYS = new Set(["type"]);
+const TOOL_CHOICE_NAMED_KEYS = new Set([
+  "name",
+  "type",
+  "disable_parallel_tool_use",
+]);
+const INPUT_KEYS = [
+  "accessToken",
+  "model",
+  "maxTokens",
+  "messages",
+  "system",
+  "tools",
+  "cacheControl",
+  "runtime",
+  "capabilities",
+  // Package extension: consumed by beta composition and evidence only. The
+  // canonical body carries no trace of it.
+  "betaOverrides",
+  // Package extension: widens the thinking-block allowlist by `cache_control`
+  // alone. The canonical body carries no trace of the FLAG; what it carries is
+  // the caller's own `cache_control`, verbatim.
+  "preserveThinkingBlockCacheControl",
+  "thinking",
+  "effort",
+  "metadata",
+  "experimentalBodyFields",
+  "contextManagement",
+  "outputConfig",
+  "speed",
+  "serviceTier",
+  "outputFormat",
+  "toolChoice",
+  "topP",
+  "topK",
+  "stopSequences",
+  "stream",
+  "temperature",
+] as const;
+const INPUT_KEY_SET = new Set(INPUT_KEYS);
+
+interface InspectionState {
+  readonly active: WeakSet<object>;
+  items: number;
+  size: number;
+}
+
+type ModelResolution = Readonly<{
+  id: string;
+  wireId: string;
+  capabilities: Readonly<{
+    thinking: boolean;
+    adaptiveThinking: boolean;
+    interleavedThinking: boolean;
+    effort: boolean;
+    maxEffort: boolean;
+    xhighEffort: boolean;
+    contextManagement: boolean;
+    temperature: boolean;
+    rejectsDisabledThinking: boolean;
+    midConvToolChange: boolean;
+    perTurnEffort: boolean;
+  }>;
+}>;
+
+function fail(
+  code: ConstructorParameters<typeof ClaudeCodeWireError>[0],
+  safeDetails: Readonly<Record<string, string | number | boolean>> = {},
+): never {
+  throw new ClaudeCodeWireError(code, safeDetails);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOwn(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function inspectString(
+  value: string,
+  state: InspectionState,
+  validateString?: (value: string) => void,
+  path: readonly ViolationPathSegment[] = [],
+  inKey = false,
+): void {
+  state.size += value.length;
+  if (state.size > MAX_SIZE) fail("INPUT_TOO_LARGE", { maximumSize: MAX_SIZE });
+  validateString?.(value);
+
+  // Body prose policy (P1.T1): only a lone surrogate can fail here now, so
+  // the historical INVALID_INPUT-for-controls branch is gone by construction.
+  const violation = inspectText(value, TEXT_POLICY_PROSE);
+  if (violation !== null) {
+    fail(
+      "INVALID_UNICODE",
+      violationDetails(violation, path, value.length, inKey),
+    );
+  }
+}
+
+function inspect(
+  value: unknown,
+  depth: number,
+  state: InspectionState,
+  validateString?: (value: string) => void,
+  path: ViolationPathSegment[] = [],
+): void {
+  if (depth > MAX_DEPTH) fail("INPUT_TOO_DEEP");
+  if (value === null || typeof value === "boolean") return;
+  if (typeof value === "string") {
+    inspectString(value, state, validateString, path, false);
+    return;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) fail("INVALID_INPUT");
+    return;
+  }
+  if (typeof value !== "object") fail("INVALID_INPUT");
+
+  if (state.active.has(value)) fail("CYCLIC_INPUT");
+  state.active.add(value);
+  state.items += 1;
+  if (state.items > MAX_ITEMS) {
+    fail("INPUT_TOO_LARGE", { maximumItems: MAX_ITEMS });
+  }
+
+  if (Array.isArray(value)) {
+    state.size += value.length;
+    if (state.size > MAX_SIZE) {
+      fail("INPUT_TOO_LARGE", { maximumSize: MAX_SIZE });
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      if (!hasOwn(value, String(index))) fail("INVALID_INPUT");
+      path.push(index);
+      inspect(value[index], depth + 1, state, validateString, path);
+      path.pop();
+    }
+  } else {
+    const prototype = Reflect.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      fail("INVALID_INPUT");
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string" || FORBIDDEN_KEYS.has(key)) {
+        fail("INVALID_INPUT");
+      }
+      // Object keys stay strings: digits inside user keys must not become
+      // readable numeric path segments (QA F1).
+      path.push(key);
+      inspectString(key, state, validateString, path, true);
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || !("value" in descriptor)) {
+        fail("INVALID_INPUT");
+      }
+      inspect(descriptor.value, depth + 1, state, validateString, path);
+      path.pop();
+    }
+  }
+  state.active.delete(value);
+}
+
+/** Paths without a caller hint are relative to the inspected value's root. */
+export function inspectJsonInputs(
+  values: readonly unknown[],
+  validateString?: (value: string) => void,
+  paths?: readonly (readonly ViolationPathSegment[])[],
+): void {
+  const state: InspectionState = {
+    active: new WeakSet(),
+    items: 0,
+    size: 0,
+  };
+  for (let index = 0; index < values.length; index += 1) {
+    inspect(values[index], 0, state, validateString, [
+      ...(paths?.[index] ?? []),
+    ]);
+  }
+}
+
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) fail("INVALID_INPUT");
+  return value;
+}
+
+function assertExactKeys(
+  value: Readonly<Record<string, unknown>>,
+  allowed: ReadonlySet<string>,
+): void {
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.has(key)) fail("INVALID_INPUT");
+  }
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== "string") fail("INVALID_INPUT");
+  return value;
+}
+
+function requireIdentifier(value: unknown): string {
+  const text = requireString(value);
+  if (inspectText(text, TEXT_POLICY_IDENTIFIER) !== null)
+    fail("INVALID_UNICODE");
+  return text;
+}
+
+function requirePositiveInteger(value: unknown): number {
+  if (!Number.isSafeInteger(value) || typeof value !== "number" || value <= 0) {
+    fail("INVALID_INPUT");
+  }
+  return value;
+}
+
+export function validatedJsonObject(
+  value: unknown,
+): Readonly<Record<string, JsonValue>> {
+  const record = requireRecord(value);
+  const entries: [string, JsonValue][] = [];
+  for (const key of Object.keys(record)) {
+    entries.push([key, validatedJson(record[key])]);
+  }
+  return Object.fromEntries(entries);
+}
+
+export function validatedJson(value: unknown): JsonValue {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((item) => validatedJson(item));
+  return validatedJsonObject(value);
+}
+
+function requireNumber(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value))
+    fail("INVALID_INPUT");
+  return value;
+}
+
+function requireBoolean(value: unknown): boolean {
+  if (typeof value !== "boolean") fail("INVALID_INPUT");
+  return value;
+}
+
+function requireKeys(
+  record: Record<string, unknown>,
+  required: readonly string[],
+): void {
+  for (const key of required) {
+    if (!hasOwn(record, key)) fail("INVALID_INPUT");
+  }
+}
+
+function nullable<T>(value: unknown, validate: (item: unknown) => T): T | null {
+  return value === null ? null : validate(value);
+}
+
+function cacheControl(
+  value: unknown,
+  allowScope = false,
+): CacheControlEphemeral {
+  const record = requireRecord(value);
+  assertExactKeys(
+    record,
+    allowScope ? LEGACY_TEXT_CACHE_CONTROL_KEYS : CACHE_CONTROL_KEYS,
+  );
+  requireKeys(record, ["type"]);
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") {
+      if (item !== "ephemeral") fail("INVALID_INPUT");
+      entries.push([key, item]);
+    } else if (key === "ttl") {
+      if (item !== "5m" && item !== "1h") fail("INVALID_INPUT");
+      entries.push([key, item]);
+    } else {
+      if (item !== "global") fail("INVALID_INPUT");
+      entries.push([key, item]);
+    }
+  }
+  return Object.fromEntries(entries) as unknown as CacheControlEphemeral;
+}
+
+function cacheControlInput(value: unknown): ClaudeCodeCacheControlInput {
+  const record = requireRecord(value);
+  assertExactKeys(record, CACHE_CONTROL_INPUT_KEYS);
+  const entries: [string, boolean | "5m" | "1h" | null][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "ttl") {
+      if (item !== null && item !== "5m" && item !== "1h") {
+        fail("INVALID_INPUT");
+      }
+      entries.push([key, item]);
+    } else {
+      entries.push([key, item === null ? null : requireBoolean(item)]);
+    }
+  }
+  return Object.fromEntries(entries);
+}
+
+/** A system-block cache marker: the ephemeral marker plus the scope the beta enables. */
+type SystemCacheMarker = CacheControlEphemeral & { readonly scope?: "global" };
+
+function breakpoint(input: ClaudeCodeCacheControlInput): SystemCacheMarker {
+  return input.ttl === undefined || input.ttl === null
+    ? { type: "ephemeral" }
+    : { type: "ephemeral", ttl: input.ttl };
+}
+
+function withoutCacheControl<T>(value: T): T {
+  if (!isRecord(value)) fail("INVALID_INPUT");
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => key !== "cache_control"),
+  ) as unknown as T;
+}
+
+function refreshMarker(
+  existing: SystemCacheMarker,
+  input: ClaudeCodeCacheControlInput,
+): SystemCacheMarker {
+  const ttl = input.ttl ?? existing.ttl;
+  return existing.scope === "global"
+    ? { type: "ephemeral", ...(ttl === undefined || ttl === null ? {} : { ttl }), scope: "global" }
+    : { type: "ephemeral", ...(ttl === undefined || ttl === null ? {} : { ttl }) };
+}
+
+function withBreakpoint<T>(value: T, marker: SystemCacheMarker): T {
+  if (!isRecord(value)) fail("INVALID_INPUT");
+  return Object.fromEntries([
+    ...Object.entries(value).filter(([key]) => key !== "cache_control"),
+    ["cache_control", marker],
+  ]) as unknown as T;
+}
+
+function applySystemCacheControl(
+  value: readonly TextBlock[],
+  input: ClaudeCodeCacheControlInput,
+): readonly TextBlock[] {
+  // The identity block sits at index 1 unless `suppressBillingBlock` removed
+  // the billing block, which promotes it to index 0 — and the reporting block
+  // follows it without a marker of its own. Matching on the pinned texts keeps
+  // every layout correct without threading the seams down here.
+  // A globally scoped marker appears only when the caller's prompt carried the dynamic
+  // separator, and it means this request takes the boundary branch: the identity block is
+  // emitted without a marker, the static side keeps its scope, and the dynamic side takes
+  // a plain ephemeral marker. Without it the assembly keeps the marker on the identity
+  // block, which is the layout of the branch where no separator is present.
+  const hasGlobalScope = value.some((block) => block.cache_control?.scope === "global");
+  const identityIndex = value.findIndex((block) => isIdentityText(block.text));
+  // Package extension: `suppressIdentityBlock` is the only way to emit the
+  // identity block without a marker. Default (`undefined`/`false`) keeps the
+  // unconditional overwrite the genuine client performs.
+  const result = value.map((block, index) => {
+    if (index !== identityIndex) return block;
+    if (hasGlobalScope) return block;
+    return input.suppressIdentityBlock === true
+      ? withoutCacheControl(block)
+      : withBreakpoint(block, breakpoint(input));
+  });
+  if (hasGlobalScope) {
+    // Refresh the ttl of markers this package placed, preserving each scope. The static
+    // side keeps its global scope and the dynamic side stays plain.
+    return result.map((block) =>
+      block.cache_control === undefined || block.cache_control === null
+        ? block
+        : withBreakpoint(block, refreshMarker(block.cache_control, input)),
+    );
+  }
+  if (
+    input.enabled === true &&
+    input.systemBreakpoint === true &&
+    result.length > identityIndex + 1
+  ) {
+    const index = result.length - 1;
+    const block = result[index];
+    if (block !== undefined)
+      result[index] = withBreakpoint(block, breakpoint(input));
+  }
+  return result;
+}
+
+/**
+ * Normalises tool `cache_control` when caching is enabled.
+ *
+ * The strip is gated on `enabled === true`, exactly like the re-add below it.
+ * It used to be unconditional, which made any OTHER member of
+ * `ClaudeCodeCacheControlInput` destructive: passing
+ * `{ suppressIdentityBlock: true }` — the S3 seam on its own — deleted every
+ * `cache_control` the caller had placed on its tools and restored nothing.
+ *
+ * When caching IS enabled the caller's own breakpoints are still normalised
+ * away, because this package owns breakpoint placement in that mode and two
+ * competing sets of breakpoints cannot both be honoured.
+ */
+function applyToolCacheControl(
+  value: readonly ToolDefinition[],
+  input: ClaudeCodeCacheControlInput,
+): readonly ToolDefinition[] {
+  if (input.enabled !== true) return value;
+  const result = value.map((tool) => withoutCacheControl(tool));
+  if (input.toolBreakpoint === true && result.length > 0) {
+    const index = result.length - 1;
+    const tool = result[index];
+    if (tool !== undefined)
+      result[index] = withBreakpoint(tool, breakpoint(input));
+  }
+  return result;
+}
+
+/**
+ * Normalises message `cache_control` when caching is enabled.
+ *
+ * Gated on `enabled === true` for the same reason as `applyToolCacheControl`:
+ * the strip used to run unconditionally, so a caller populating any other
+ * member of `ClaudeCodeCacheControlInput` silently lost the `cache_control` it
+ * had placed on its own message blocks.
+ */
+function applyMessageCacheControl(
+  value: readonly Message[],
+  input: ClaudeCodeCacheControlInput,
+): readonly Message[] {
+  if (input.enabled !== true) return value;
+  // The pass owns `cache_control` on content blocks, not the message's own fields:
+  // rebuilding from role and content alone dropped `clear_at`, so a mid-conversation
+  // system message reached the wire without the field that clears it. Spreading the
+  // message first keeps every field and leaves the key order role, content, clear_at.
+  const result = value.map((message): Message => ({
+    ...message,
+    content:
+      typeof message.content === "string"
+        ? message.content
+        : message.content.map((block) =>
+            block.type === "thinking" || block.type === "redacted_thinking"
+              ? block
+              : withoutCacheControl(block),
+          ),
+  }));
+  if (input.messageBreakpoint !== true) return result;
+
+  for (let index = result.length - 1; index >= 0; index -= 1) {
+    const message = result[index];
+    if (message?.role !== "user") continue;
+    if (typeof message.content === "string" || message.content.length === 0) {
+      return result;
+    }
+    const content: MessageContentBlock[] = [...message.content];
+    const blockIndex = content.length - 1;
+    const block = content[blockIndex];
+    if (
+      block !== undefined &&
+      block.type !== "thinking" &&
+      block.type !== "redacted_thinking"
+    ) {
+      content[blockIndex] = withBreakpoint(block, breakpoint(input));
+      result[index] = { role: message.role, content };
+    }
+    return result;
+  }
+  return result;
+}
+
+function citationsConfig(value: unknown): CitationsConfigParam {
+  const record = requireRecord(value);
+  assertExactKeys(record, CITATIONS_CONFIG_KEYS);
+  requireKeys(record, []);
+  return Object.fromEntries(
+    Object.keys(record).map((key) => [key, requireBoolean(record[key])]),
+  );
+}
+
+function textCitation(value: unknown): TextCitationParam {
+  const record = requireRecord(value);
+  const type = record["type"];
+  let allowed: ReadonlySet<string>;
+  let numbers: readonly string[];
+  let nullableStrings: readonly string[];
+  if (type === "char_location") {
+    allowed = CITATION_CHAR_KEYS;
+    numbers = ["document_index", "end_char_index", "start_char_index"];
+    nullableStrings = ["document_title"];
+  } else if (type === "content_block_location") {
+    allowed = CITATION_CONTENT_BLOCK_KEYS;
+    numbers = ["document_index", "end_block_index", "start_block_index"];
+    nullableStrings = ["document_title"];
+  } else if (type === "page_location") {
+    allowed = CITATION_PAGE_KEYS;
+    numbers = ["document_index", "end_page_number", "start_page_number"];
+    nullableStrings = ["document_title"];
+  } else if (type === "search_result_location") {
+    allowed = CITATION_SEARCH_RESULT_KEYS;
+    numbers = ["end_block_index", "search_result_index", "start_block_index"];
+    nullableStrings = ["title"];
+  } else if (type === "web_search_result_location") {
+    allowed = CITATION_WEB_SEARCH_KEYS;
+    numbers = [];
+    nullableStrings = ["title"];
+  } else {
+    return fail("INVALID_INPUT");
+  }
+  assertExactKeys(record, allowed);
+  requireKeys(record, [...allowed]);
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") entries.push([key, type]);
+    else if (numbers.includes(key)) entries.push([key, requireNumber(item)]);
+    else if (nullableStrings.includes(key))
+      entries.push([key, nullable(item, requireString)]);
+    else entries.push([key, requireString(item)]);
+  }
+  return Object.fromEntries(entries) as unknown as TextCitationParam;
+}
+
+function textBlock(value: unknown): TextBlock {
+  const record = requireRecord(value);
+  assertExactKeys(record, TEXT_KEYS);
+  requireKeys(record, ["text", "type"]);
+  if (record["type"] !== "text") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "text") entries.push([key, requireString(item)]);
+    else if (key === "type") entries.push([key, "text"]);
+    else if (key === "cache_control")
+      entries.push([key, nullable(item, (raw) => cacheControl(raw, true))]);
+    else {
+      if (item === null) entries.push([key, null]);
+      else {
+        if (!Array.isArray(item)) fail("INVALID_INPUT");
+        entries.push([key, item.map((citation) => textCitation(citation))]);
+      }
+    }
+  }
+  return Object.fromEntries(entries) as unknown as TextBlock;
+}
+
+function imageBlock(value: unknown): ImageBlock {
+  const record = requireRecord(value);
+  assertExactKeys(record, IMAGE_BLOCK_KEYS);
+  requireKeys(record, ["source", "type"]);
+  if (record["type"] !== "image") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") entries.push([key, "image"]);
+    else if (key === "cache_control")
+      entries.push([key, nullable(item, cacheControl)]);
+    else entries.push([key, imageSource(item)]);
+  }
+  return Object.fromEntries(entries) as unknown as ImageBlock;
+}
+
+function imageSource(value: unknown): ImageBlock["source"] {
+  const record = requireRecord(value);
+  const type = record["type"];
+  const allowed =
+    type === "base64"
+      ? BASE64_IMAGE_SOURCE_KEYS
+      : type === "file"
+        ? FILE_IMAGE_SOURCE_KEYS
+        : type === "url"
+          ? URL_IMAGE_SOURCE_KEYS
+          : fail("INVALID_INPUT");
+  assertExactKeys(record, allowed);
+  requireKeys(record, [...allowed]);
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") entries.push([key, type]);
+    else if (key === "media_type") {
+      if (
+        item !== "image/jpeg" &&
+        item !== "image/png" &&
+        item !== "image/gif" &&
+        item !== "image/webp"
+      )
+        fail("INVALID_INPUT");
+      entries.push([key, item]);
+    } else entries.push([key, requireIdentifier(item)]);
+  }
+  return Object.fromEntries(entries) as unknown as ImageBlock["source"];
+}
+
+function documentBlock(value: unknown): DocumentBlock {
+  const record = requireRecord(value);
+  assertExactKeys(record, DOCUMENT_BLOCK_KEYS);
+  requireKeys(record, ["source", "type"]);
+  if (record["type"] !== "document") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "source") entries.push([key, documentSource(item)]);
+    else if (key === "type") entries.push([key, "document"]);
+    else if (key === "cache_control")
+      entries.push([key, nullable(item, cacheControl)]);
+    else if (key === "citations")
+      entries.push([key, nullable(item, citationsConfig)]);
+    else entries.push([key, nullable(item, requireString)]);
+  }
+  return Object.fromEntries(entries) as unknown as DocumentBlock;
+}
+
+function documentSource(value: unknown): DocumentBlock["source"] {
+  const record = requireRecord(value);
+  const type = record["type"];
+  let allowed: ReadonlySet<string>;
+  if (type === "base64") allowed = BASE64_PDF_SOURCE_KEYS;
+  else if (type === "text") allowed = PLAIN_TEXT_SOURCE_KEYS;
+  else if (type === "content") allowed = CONTENT_BLOCK_SOURCE_KEYS;
+  else if (type === "url") allowed = URL_PDF_SOURCE_KEYS;
+  else if (type === "file") allowed = FILE_DOCUMENT_SOURCE_KEYS;
+  else return fail("INVALID_INPUT");
+  assertExactKeys(record, allowed);
+  requireKeys(record, [...allowed]);
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") entries.push([key, type]);
+    else if (key === "media_type") {
+      if (
+        (type === "base64" && item !== "application/pdf") ||
+        (type === "text" && item !== "text/plain")
+      )
+        fail("INVALID_INPUT");
+      entries.push([key, item]);
+    } else if (key === "content") {
+      if (typeof item === "string") entries.push([key, item]);
+      else {
+        if (!Array.isArray(item)) fail("INVALID_INPUT");
+        entries.push([
+          key,
+          item.map((block) => {
+            const blockRecord = requireRecord(block);
+            if (blockRecord["type"] === "text") return textBlock(blockRecord);
+            if (blockRecord["type"] === "image") return imageBlock(blockRecord);
+            return fail("INVALID_INPUT");
+          }),
+        ]);
+      }
+    } else
+      entries.push([
+        key,
+        type === "text" ? requireString(item) : requireIdentifier(item),
+      ]);
+  }
+  return Object.fromEntries(entries) as unknown as DocumentBlock["source"];
+}
+
+/**
+ * Validates a `thinking` block.
+ *
+ * @param preserveCacheControl - Opt-in from
+ * `ClaudeCodeRequestInput.preserveThinkingBlockCacheControl`. When `true`,
+ * `cache_control` becomes an accepted key and is copied to the body VERBATIM:
+ * no TTL is applied, no breakpoint is placed, and `applyMessageCacheControl`
+ * already leaves thinking blocks untouched. The value still passes the same
+ * `cacheControl` validator every other block uses, so a malformed marker fails
+ * closed. Default `false` reproduces the strict allowlist byte for byte.
+ */
+function thinkingBlock(
+  value: unknown,
+  preserveCacheControl: boolean,
+): ThinkingBlock {
+  const record = requireRecord(value);
+  assertExactKeys(
+    record,
+    preserveCacheControl
+      ? THINKING_BLOCK_CACHE_CONTROL_KEYS
+      : THINKING_BLOCK_KEYS,
+  );
+  requireKeys(record, ["signature", "thinking", "type"]);
+  if (record["type"] !== "thinking") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") entries.push([key, "thinking"]);
+    else if (key === "cache_control")
+      entries.push([key, nullable(item, cacheControl)]);
+    else
+      entries.push([
+        key,
+        key === "signature" ? requireIdentifier(item) : requireString(item),
+      ]);
+  }
+  return Object.fromEntries(entries) as unknown as ThinkingBlock;
+}
+
+/** Validates a `redacted_thinking` block. See `thinkingBlock` for the seam. */
+function redactedThinkingBlock(
+  value: unknown,
+  preserveCacheControl: boolean,
+): RedactedThinkingBlock {
+  const record = requireRecord(value);
+  assertExactKeys(
+    record,
+    preserveCacheControl
+      ? REDACTED_THINKING_BLOCK_CACHE_CONTROL_KEYS
+      : REDACTED_THINKING_BLOCK_KEYS,
+  );
+  requireKeys(record, ["data", "type"]);
+  if (record["type"] !== "redacted_thinking") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") entries.push([key, "redacted_thinking"]);
+    else if (key === "cache_control")
+      entries.push([key, nullable(item, cacheControl)]);
+    else entries.push([key, requireIdentifier(item)]);
+  }
+  return Object.fromEntries(entries) as unknown as RedactedThinkingBlock;
+}
+
+function searchResultBlock(value: unknown): SearchResultBlock {
+  const record = requireRecord(value);
+  assertExactKeys(record, SEARCH_RESULT_KEYS);
+  requireKeys(record, ["content", "source", "title", "type"]);
+  if (record["type"] !== "search_result") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "content") {
+      if (!Array.isArray(item)) fail("INVALID_INPUT");
+      entries.push([key, item.map((block) => textBlock(block))]);
+    } else if (key === "source") entries.push([key, requireIdentifier(item)]);
+    else if (key === "title") entries.push([key, requireString(item)]);
+    else if (key === "type") entries.push([key, "search_result"]);
+    else if (key === "cache_control")
+      entries.push([key, nullable(item, cacheControl)]);
+    else entries.push([key, citationsConfig(item)]);
+  }
+  return Object.fromEntries(entries) as unknown as SearchResultBlock;
+}
+
+function toolReferenceBlock(value: unknown): ToolReferenceBlock {
+  const record = requireRecord(value);
+  assertExactKeys(record, TOOL_REFERENCE_KEYS);
+  requireKeys(record, ["tool_name", "type"]);
+  if (record["type"] !== "tool_reference") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "tool_name") entries.push([key, requireIdentifier(item)]);
+    else if (key === "type") entries.push([key, "tool_reference"]);
+    else entries.push([key, nullable(item, cacheControl)]);
+  }
+  return Object.fromEntries(entries) as unknown as ToolReferenceBlock;
+}
+
+function toolUseBlock(value: unknown): ToolUseBlock {
+  const record = requireRecord(value);
+  assertExactKeys(record, TOOL_USE_KEYS);
+  requireKeys(record, ["id", "input", "name", "type"]);
+  if (record["type"] !== "tool_use") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "id" || key === "name")
+      entries.push([key, requireIdentifier(item)]);
+    else if (key === "input") entries.push([key, validatedJson(item)]);
+    else if (key === "type") entries.push([key, "tool_use"]);
+    else if (key === "cache_control")
+      entries.push([key, nullable(item, cacheControl)]);
+    else entries.push([key, toolCaller(item)]);
+  }
+  return Object.fromEntries(entries) as unknown as ToolUseBlock;
+}
+
+function toolCaller(value: unknown): ToolUseBlock["caller"] {
+  const record = requireRecord(value);
+  const type = record["type"];
+  if (type === "direct") {
+    assertExactKeys(record, DIRECT_CALLER_KEYS);
+    requireKeys(record, ["type"]);
+    return { type };
+  }
+  if (type !== "code_execution_20250825" && type !== "code_execution_20260120")
+    return fail("INVALID_INPUT");
+  assertExactKeys(record, SERVER_TOOL_CALLER_KEYS);
+  requireKeys(record, ["tool_id", "type"]);
+  return Object.fromEntries(
+    Object.keys(record).map((key) => [
+      key,
+      key === "type" ? type : requireIdentifier(record[key]),
+    ]),
+  ) as unknown as NonNullable<ToolUseBlock["caller"]>;
+}
+
+function toolResultContentBlock(value: unknown): ToolResultContentBlock {
+  const record = requireRecord(value);
+  if (record["type"] === "text") return textBlock(record);
+  if (record["type"] === "image") return imageBlock(record);
+  if (record["type"] === "search_result") return searchResultBlock(record);
+  if (record["type"] === "document") return documentBlock(record);
+  if (record["type"] === "tool_reference") return toolReferenceBlock(record);
+  return fail("INVALID_INPUT");
+}
+
+function toolResultBlock(value: unknown): ToolResultBlock {
+  const record = requireRecord(value);
+  assertExactKeys(record, TOOL_RESULT_KEYS);
+  requireKeys(record, ["tool_use_id", "type"]);
+  if (record["type"] !== "tool_result") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "tool_use_id") entries.push([key, requireIdentifier(item)]);
+    else if (key === "type") entries.push([key, "tool_result"]);
+    else if (key === "cache_control")
+      entries.push([key, nullable(item, cacheControl)]);
+    else if (key === "content") {
+      if (typeof item === "string") entries.push([key, item]);
+      else {
+        if (!Array.isArray(item)) fail("INVALID_INPUT");
+        entries.push([key, item.map((block) => toolResultContentBlock(block))]);
+      }
+    } else entries.push([key, requireBoolean(item)]);
+  }
+  return Object.fromEntries(entries) as unknown as ToolResultBlock;
+}
+
+/**
+ * Validates a `server_tool_use` block, replayed verbatim.
+ *
+ * The genuine client replays this block unchanged and validates no field of it, so the
+ * required keys are checked and every other key travels back as it arrived.
+ */
+function serverToolUseBlock(value: unknown): ServerToolUseBlock {
+  const record = requireRecord(value);
+  requireKeys(record, SERVER_TOOL_USE_KEYS);
+  if (record["type"] !== "server_tool_use") fail("INVALID_INPUT");
+  return {
+    ...record,
+    id: requireIdentifier(record["id"]),
+    input: validatedJson(record["input"]),
+    name: requireIdentifier(record["name"]),
+    type: "server_tool_use",
+  };
+}
+
+/**
+ * Validates a `tool_search_tool_result` block, replayed verbatim.
+ *
+ * Only the pairing key is read; the result payload is opaque, so every other key travels
+ * back exactly as it arrived.
+ */
+function toolSearchToolResultBlock(value: unknown): ToolSearchToolResultBlock {
+  const record = requireRecord(value);
+  requireKeys(record, TOOL_SEARCH_TOOL_RESULT_KEYS);
+  if (record["type"] !== "tool_search_tool_result") fail("INVALID_INPUT");
+  return {
+    ...record,
+    tool_use_id: requireIdentifier(record["tool_use_id"]),
+    type: "tool_search_tool_result",
+  };
+}
+
+function messageContentBlock(
+  value: unknown,
+  preserveThinkingCacheControl: boolean,
+): MessageContentBlock {
+  const record = requireRecord(value);
+  if (record["type"] === "text") return textBlock(record);
+  if (record["type"] === "image") return imageBlock(record);
+  if (record["type"] === "document") return documentBlock(record);
+  if (record["type"] === "search_result") return searchResultBlock(record);
+  if (record["type"] === "thinking")
+    return thinkingBlock(record, preserveThinkingCacheControl);
+  if (record["type"] === "redacted_thinking")
+    return redactedThinkingBlock(record, preserveThinkingCacheControl);
+  return fail("INVALID_INPUT");
+}
+
+function messages(
+  value: unknown,
+  preserveThinkingCacheControl: boolean,
+): readonly Message[] {
+  if (!Array.isArray(value)) fail("INVALID_INPUT");
+  const useIds = new Set<string>();
+  const resultIds: string[] = [];
+  const serverUseIds = new Set<string>();
+  const serverResultIds: string[] = [];
+  const result = value.map((item): Message => {
+    const record = requireRecord(item);
+    assertExactKeys(record, MESSAGE_KEYS);
+    const role = record["role"];
+    if (role !== "user" && role !== "assistant" && role !== "system") fail("INVALID_INPUT");
+    // Only a mid-conversation system message may clear itself, and only with the single
+    // value upstream sends. The message's own beta header is composed separately, and a
+    // cache breakpoint is never placed on it: the server rejects a breakpoint there.
+    const clearAt = record["clear_at"] === "next_user_message" ? "next_user_message" as const : undefined;
+    if (record["clear_at"] !== undefined && (clearAt === undefined || role !== "system")) {
+      fail("INVALID_INPUT");
+    }
+    const rawContent = record["content"];
+    if (typeof rawContent === "string") {
+      return clearAt === undefined ? { role, content: rawContent } : { role, content: rawContent, clear_at: clearAt };
+    }
+    if (!Array.isArray(rawContent)) fail("INVALID_INPUT");
+    const content = rawContent.map((block) => {
+      const blockRecord = requireRecord(block);
+      if (blockRecord["type"] === "text") return textBlock(blockRecord);
+      if (blockRecord["type"] === "tool_use") {
+        const parsed = toolUseBlock(blockRecord);
+        if (useIds.has(parsed.id)) fail("INVALID_INPUT");
+        useIds.add(parsed.id);
+        return parsed;
+      }
+      if (blockRecord["type"] === "tool_result") {
+        const parsed = toolResultBlock(blockRecord);
+        resultIds.push(parsed.tool_use_id);
+        return parsed;
+      }
+      // A server-run call and its result pair the same way a tool call and its result do.
+      if (blockRecord["type"] === "server_tool_use") {
+        const parsed = serverToolUseBlock(blockRecord);
+        serverUseIds.add(parsed.id);
+        return parsed;
+      }
+      if (blockRecord["type"] === "tool_search_tool_result") {
+        const parsed = toolSearchToolResultBlock(blockRecord);
+        serverResultIds.push(parsed.tool_use_id);
+        return parsed;
+      }
+      return messageContentBlock(blockRecord, preserveThinkingCacheControl);
+    });
+    return clearAt === undefined ? { role, content } : { role, content, clear_at: clearAt };
+  });
+  for (const id of resultIds) {
+    if (!useIds.has(id)) fail("INVALID_INPUT");
+  }
+  for (const id of serverResultIds) {
+    if (!serverUseIds.has(id)) fail("INVALID_INPUT");
+  }
+  return result;
+}
+
+function system(value: unknown): readonly TextBlock[] {
+  if (!Array.isArray(value)) fail("INVALID_INPUT");
+  return value.map((item) =>
+    typeof item === "string" ? { type: "text", text: item } : textBlock(item),
+  );
+}
+
+function stringArray(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) fail("INVALID_INPUT");
+  return value.map((item) => requireString(item));
+}
+
+function allowedCallers(value: unknown): readonly string[] {
+  const callers = stringArray(value);
+  for (const caller of callers) {
+    if (
+      caller !== "direct" &&
+      caller !== "code_execution_20250825" &&
+      caller !== "code_execution_20260120"
+    ) {
+      fail("INVALID_INPUT");
+    }
+  }
+  return callers;
+}
+
+function inputExamples(
+  value: unknown,
+): readonly Readonly<Record<string, JsonValue>>[] {
+  if (!Array.isArray(value)) fail("INVALID_INPUT");
+  return value.map((example) => validatedJsonObject(example));
+}
+
+function toolInputSchema(value: unknown): Readonly<Record<string, JsonValue>> {
+  const record = requireRecord(value);
+  if (hasOwn(record, "type") && record["type"] !== "object")
+    fail("INVALID_INPUT");
+  const entries: [string, JsonValue][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") entries.push([key, "object"]);
+    else if (key === "required")
+      entries.push([key, nullable(item, stringArray)]);
+    else entries.push([key, validatedJson(item)]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function userLocation(value: unknown): Readonly<Record<string, unknown>> {
+  const record = requireRecord(value);
+  assertExactKeys(record, USER_LOCATION_KEYS);
+  requireKeys(record, ["type"]);
+  if (record["type"] !== "approximate") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    entries.push([
+      key,
+      key === "type" ? "approximate" : nullable(record[key], requireString),
+    ]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function mcpToolConfig(value: unknown): Readonly<Record<string, boolean>> {
+  const record = requireRecord(value);
+  assertExactKeys(record, MCP_TOOL_CONFIG_KEYS);
+  requireKeys(record, []);
+  return Object.fromEntries(
+    Object.keys(record).map((key) => [key, requireBoolean(record[key])]),
+  );
+}
+
+function mcpConfigs(
+  value: unknown,
+): Readonly<Record<string, Readonly<Record<string, boolean>>>> {
+  const record = requireRecord(value);
+  return Object.fromEntries(
+    Object.keys(record).map((key) => [key, mcpToolConfig(record[key])]),
+  );
+}
+
+interface BuiltInToolSpec {
+  readonly name?: string;
+  readonly allowed: ReadonlySet<string>;
+  readonly required: readonly string[];
+}
+
+function builtInToolSpec(type: unknown): BuiltInToolSpec {
+  if (type === "bash_20241022" || type === "bash_20250124") {
+    return {
+      name: "bash",
+      allowed: BASH_TOOL_KEYS,
+      required: ["name", "type"],
+    };
+  }
+  if (
+    type === "code_execution_20250522" ||
+    type === "code_execution_20250825" ||
+    type === "code_execution_20260120"
+  ) {
+    return {
+      name: "code_execution",
+      allowed: CODE_EXECUTION_TOOL_KEYS,
+      required: ["name", "type"],
+    };
+  }
+  if (
+    type === "computer_20241022" ||
+    type === "computer_20250124" ||
+    type === "computer_20251124"
+  ) {
+    return {
+      name: "computer",
+      allowed:
+        type === "computer_20251124"
+          ? COMPUTER_ZOOM_TOOL_KEYS
+          : COMPUTER_TOOL_KEYS,
+      required: ["display_height_px", "display_width_px", "name", "type"],
+    };
+  }
+  if (type === "memory_20250818") {
+    return {
+      name: "memory",
+      allowed: MEMORY_TOOL_KEYS,
+      required: ["name", "type"],
+    };
+  }
+  if (
+    type === "text_editor_20241022" ||
+    type === "text_editor_20250124" ||
+    type === "text_editor_20250429" ||
+    type === "text_editor_20250728"
+  ) {
+    return {
+      name:
+        type === "text_editor_20241022" || type === "text_editor_20250124"
+          ? "str_replace_editor"
+          : "str_replace_based_edit_tool",
+      allowed:
+        type === "text_editor_20250728"
+          ? TEXT_EDITOR_MAX_TOOL_KEYS
+          : TEXT_EDITOR_TOOL_KEYS,
+      required: ["name", "type"],
+    };
+  }
+  if (type === "web_search_20250305" || type === "web_search_20260209") {
+    return {
+      name: "web_search",
+      allowed: WEB_SEARCH_TOOL_KEYS,
+      required: ["name", "type"],
+    };
+  }
+  if (
+    type === "web_fetch_20250910" ||
+    type === "web_fetch_20260209" ||
+    type === "web_fetch_20260309"
+  ) {
+    return {
+      name: "web_fetch",
+      allowed:
+        type === "web_fetch_20260309"
+          ? WEB_FETCH_CACHE_TOOL_KEYS
+          : WEB_FETCH_TOOL_KEYS,
+      required: ["name", "type"],
+    };
+  }
+  if (type === "advisor_20260301") {
+    return {
+      name: "advisor",
+      allowed: ADVISOR_TOOL_KEYS,
+      required: ["model", "name", "type"],
+    };
+  }
+  if (type === "mcp_toolset") {
+    return {
+      allowed: MCP_TOOLSET_KEYS,
+      required: ["mcp_server_name", "type"],
+    };
+  }
+  return fail("INVALID_INPUT");
+}
+
+function customToolDefinition(record: Record<string, unknown>): ToolDefinition {
+  assertExactKeys(record, CUSTOM_TOOL_KEYS);
+  requireKeys(record, ["input_schema", "name"]);
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "input_schema") entries.push([key, toolInputSchema(item)]);
+    else if (key === "name") entries.push([key, requireIdentifier(item)]);
+    else if (key === "description") entries.push([key, requireString(item)]);
+    else if (key === "allowed_callers")
+      entries.push([key, allowedCallers(item)]);
+    else if (key === "cache_control")
+      entries.push([key, nullable(item, (raw) => cacheControl(raw, true))]);
+    else if (key === "defer_loading" || key === "strict")
+      entries.push([key, requireBoolean(item)]);
+    else if (key === "eager_input_streaming")
+      entries.push([key, nullable(item, requireBoolean)]);
+    else entries.push([key, inputExamples(item)]);
+  }
+  return Object.fromEntries(entries) as unknown as ToolDefinition;
+}
+
+function builtInToolDefinition(
+  record: Record<string, unknown>,
+): ToolDefinition {
+  const type = record["type"];
+  const spec = builtInToolSpec(type);
+  assertExactKeys(record, spec.allowed);
+  requireKeys(record, spec.required);
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") entries.push([key, type]);
+    else if (key === "name") {
+      if (item !== spec.name) fail("INVALID_INPUT");
+      entries.push([key, item]);
+    } else if (key === "mcp_server_name" || key === "model")
+      entries.push([key, requireIdentifier(item)]);
+    else if (key === "allowed_callers")
+      entries.push([key, allowedCallers(item)]);
+    else if (key === "cache_control" || key === "caching")
+      entries.push([key, nullable(item, cacheControl)]);
+    else if (
+      key === "defer_loading" ||
+      key === "strict" ||
+      key === "enable_zoom" ||
+      key === "use_cache"
+    )
+      entries.push([key, requireBoolean(item)]);
+    else if (key === "input_examples") entries.push([key, inputExamples(item)]);
+    else if (key === "display_height_px" || key === "display_width_px")
+      entries.push([key, requireNumber(item)]);
+    else if (
+      key === "display_number" ||
+      key === "max_characters" ||
+      key === "max_content_tokens" ||
+      key === "max_uses"
+    )
+      entries.push([key, nullable(item, requireNumber)]);
+    else if (key === "allowed_domains" || key === "blocked_domains")
+      entries.push([key, nullable(item, stringArray)]);
+    else if (key === "citations")
+      entries.push([key, nullable(item, citationsConfig)]);
+    else if (key === "user_location")
+      entries.push([key, nullable(item, userLocation)]);
+    else if (key === "configs") entries.push([key, nullable(item, mcpConfigs)]);
+    else if (key === "default_config") entries.push([key, mcpToolConfig(item)]);
+    else fail("INVALID_INPUT");
+  }
+  return Object.fromEntries(entries) as unknown as ToolDefinition;
+}
+
+function tools(value: unknown): readonly ToolDefinition[] {
+  if (!Array.isArray(value)) fail("INVALID_INPUT");
+  const names = new Set<string>();
+  return value.map((item) => {
+    const record = requireRecord(item);
+    const result = hasOwn(record, "type")
+      ? builtInToolDefinition(record)
+      : customToolDefinition(record);
+    if (hasOwn(record, "name")) {
+      const name = requireIdentifier(record["name"]);
+      if (names.has(name)) fail("INVALID_INPUT");
+      names.add(name);
+    }
+    return result;
+  });
+}
+
+function capabilityBoolean(value: unknown, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") fail("INVALID_INPUT");
+  return value;
+}
+
+function modelResolution(
+  value: unknown,
+  profile: ClaudeCodeProtocolProfile = CLAUDE_CODE_2_1_195_PROFILE,
+): ModelResolution {
+  const record = requireRecord(value);
+  const capabilityValue = record["capabilities"];
+  // A catalogue-shaped capability array is accepted at this boundary, but its
+  // elements never drive derivation: the active profile's catalogue does,
+  // falling back to the id predicates. See the header of
+  // `model-capabilities.ts`. The elements are still validated so that
+  // malformed input fails closed.
+  if (Array.isArray(capabilityValue)) {
+    for (const capability of capabilityValue) {
+      if (typeof capability !== "string") fail("INVALID_INPUT");
+    }
+  }
+  const capabilities = Array.isArray(capabilityValue)
+    ? deriveCapabilities(String(record["id"]), profile)
+    : requireRecord(capabilityValue);
+  const derived = deriveCapabilities(String(record["id"]), profile);
+  if (
+    (capabilities.thinking !== undefined &&
+      typeof capabilities.thinking !== "boolean") ||
+    (capabilities.adaptiveThinking !== undefined &&
+      typeof capabilities.adaptiveThinking !== "boolean") ||
+    (capabilities.interleavedThinking !== undefined &&
+      typeof capabilities.interleavedThinking !== "boolean") ||
+    (capabilities.effort !== undefined &&
+      typeof capabilities.effort !== "boolean") ||
+    (capabilities.maxEffort !== undefined &&
+      typeof capabilities.maxEffort !== "boolean") ||
+    (capabilities.xhighEffort !== undefined &&
+      typeof capabilities.xhighEffort !== "boolean") ||
+    (capabilities.contextManagement !== undefined &&
+      typeof capabilities.contextManagement !== "boolean") ||
+    (capabilities.temperature !== undefined &&
+      typeof capabilities.temperature !== "boolean") ||
+    (capabilities.rejectsDisabledThinking !== undefined &&
+      typeof capabilities.rejectsDisabledThinking !== "boolean") ||
+    (capabilities.midConvToolChange !== undefined &&
+      typeof capabilities.midConvToolChange !== "boolean") ||
+    (capabilities.perTurnEffort !== undefined &&
+      typeof capabilities.perTurnEffort !== "boolean")
+  ) {
+    fail("INVALID_INPUT");
+  }
+  return {
+    id: requireIdentifier(record["id"]),
+    wireId: requireIdentifier(record["wireId"]),
+    capabilities: {
+      thinking: capabilityBoolean(capabilities.thinking, derived.thinking),
+      adaptiveThinking: capabilityBoolean(
+        capabilities.adaptiveThinking,
+        derived.adaptiveThinking,
+      ),
+      interleavedThinking: capabilityBoolean(
+        capabilities.interleavedThinking,
+        derived.interleavedThinking,
+      ),
+      effort: capabilityBoolean(capabilities.effort, derived.effort),
+      maxEffort: capabilityBoolean(capabilities.maxEffort, derived.maxEffort),
+      xhighEffort: capabilityBoolean(
+        capabilities.xhighEffort,
+        derived.xhighEffort,
+      ),
+      contextManagement: capabilityBoolean(
+        capabilities.contextManagement,
+        derived.contextManagement,
+      ),
+      temperature: capabilityBoolean(
+        capabilities.temperature,
+        derived.temperature,
+      ),
+      rejectsDisabledThinking: capabilityBoolean(
+        capabilities.rejectsDisabledThinking,
+        derived.rejectsDisabledThinking,
+      ),
+      midConvToolChange: capabilityBoolean(
+        capabilities.midConvToolChange,
+        derived.midConvToolChange,
+      ),
+      perTurnEffort: capabilityBoolean(
+        capabilities.perTurnEffort,
+        derived.perTurnEffort,
+      ),
+    },
+  };
+}
+
+function metadata(value: unknown): Readonly<Record<string, JsonValue>> {
+  const record = requireRecord(value);
+  if (
+    hasOwn(record, "user_id") &&
+    record["user_id"] !== null &&
+    typeof record["user_id"] !== "string"
+  ) {
+    fail("INVALID_INPUT");
+  }
+  // validatedJsonObject returns a record by construction.
+  return validatedJsonObject(record);
+}
+
+function typedNumberObject(
+  value: unknown,
+  allowedTypes: readonly string[],
+): Readonly<Record<string, unknown>> {
+  const record = requireRecord(value);
+  assertExactKeys(record, TYPED_NUMBER_KEYS);
+  requireKeys(record, ["type", "value"]);
+  const type = record["type"];
+  if (typeof type !== "string" || !allowedTypes.includes(type))
+    fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    entries.push([key, key === "type" ? type : requireNumber(record[key])]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function clearThinkingKeep(value: unknown): unknown {
+  if (value === "all") return value;
+  const record = requireRecord(value);
+  if (record["type"] === "all") {
+    assertExactKeys(record, ALL_THINKING_KEYS);
+    requireKeys(record, ["type"]);
+    return { type: "all" };
+  }
+  return typedNumberObject(record, ["thinking_turns"]);
+}
+
+function contextManagementEdit(
+  value: unknown,
+): Readonly<Record<string, unknown>> {
+  const record = requireRecord(value);
+  const type = record["type"];
+  let allowed: ReadonlySet<string>;
+  if (type === "clear_thinking_20251015") {
+    allowed = CLEAR_THINKING_KEYS;
+  } else if (type === "clear_tool_uses_20250919") {
+    allowed = CLEAR_TOOL_USES_KEYS;
+  } else if (type === "compact_20260112") {
+    allowed = COMPACT_KEYS;
+  } else {
+    return fail("INVALID_INPUT");
+  }
+  assertExactKeys(record, allowed);
+  requireKeys(record, ["type"]);
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "type") entries.push([key, type]);
+    else if (type === "clear_thinking_20251015") {
+      entries.push([key, clearThinkingKeep(item)]);
+    } else if (type === "clear_tool_uses_20250919") {
+      if (key === "clear_at_least")
+        entries.push([
+          key,
+          nullable(item, (raw) => typedNumberObject(raw, ["input_tokens"])),
+        ]);
+      else if (key === "clear_tool_inputs")
+        entries.push([
+          key,
+          nullable(item, (raw) =>
+            typeof raw === "boolean" ? raw : stringArray(raw),
+          ),
+        ]);
+      else if (key === "exclude_tools")
+        entries.push([key, nullable(item, stringArray)]);
+      else if (key === "keep")
+        entries.push([key, typedNumberObject(item, ["tool_uses"])]);
+      else
+        entries.push([
+          key,
+          typedNumberObject(item, ["input_tokens", "tool_uses"]),
+        ]);
+    } else if (key === "instructions")
+      entries.push([key, nullable(item, requireString)]);
+    else if (key === "pause_after_compaction")
+      entries.push([key, requireBoolean(item)]);
+    else
+      entries.push([
+        key,
+        nullable(item, (raw) => typedNumberObject(raw, ["input_tokens"])),
+      ]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function contextManagement(value: unknown): Readonly<Record<string, unknown>> {
+  const record = requireRecord(value);
+  assertExactKeys(record, CONTEXT_CONFIG_KEYS);
+  requireKeys(record, []);
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (!Array.isArray(item)) fail("INVALID_INPUT");
+    entries.push([key, item.map((edit) => contextManagementEdit(edit))]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function outputFormat(value: unknown): Readonly<Record<string, unknown>> {
+  const record = requireRecord(value);
+  assertExactKeys(record, JSON_OUTPUT_FORMAT_KEYS);
+  requireKeys(record, ["schema", "type"]);
+  if (record["type"] !== "json_schema") fail("INVALID_INPUT");
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    entries.push([
+      key,
+      key === "type" ? "json_schema" : validatedJsonObject(record[key]),
+    ]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function toolChoice(value: unknown): Readonly<Record<string, unknown>> {
+  const record = requireRecord(value);
+  const type = record["type"];
+  const allowed =
+    type === "none"
+      ? TOOL_CHOICE_NONE_KEYS
+      : type === "auto" || type === "any"
+        ? TOOL_CHOICE_PARALLEL_KEYS
+        : type === "tool"
+          ? TOOL_CHOICE_NAMED_KEYS
+          : fail("INVALID_INPUT");
+  assertExactKeys(record, allowed);
+  requireKeys(record, type === "tool" ? ["name", "type"] : ["type"]);
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    if (key === "type") entries.push([key, type]);
+    else if (key === "name")
+      entries.push([key, requireIdentifier(record[key])]);
+    else entries.push([key, requireBoolean(record[key])]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function betaEnabled(profile: ClaudeCodeProtocolProfile | undefined): boolean {
+  return profile?.betaPolicy.experimentalBetasEnabled === true;
+}
+
+function outputConfig(
+  value: unknown,
+  profile: ClaudeCodeProtocolProfile | undefined,
+  adapterEffort: unknown,
+  adapterEffortActive: boolean,
+): Readonly<Record<string, unknown>> {
+  const record = requireRecord(value);
+  assertExactKeys(record, OUTPUT_CONFIG_KEYS);
+  requireKeys(record, []);
+  if (
+    hasOwn(record, "effort") &&
+    adapterEffort !== undefined &&
+    record["effort"] !== adapterEffort
+  ) {
+    fail("INVALID_INPUT");
+  }
+  const entries: [string, unknown][] = [];
+  for (const key of Object.keys(record)) {
+    const item = record[key];
+    if (key === "effort") {
+      if (
+        item !== null &&
+        item !== "low" &&
+        item !== "medium" &&
+        item !== "high" &&
+        item !== "xhigh" &&
+        item !== "max"
+      ) {
+        fail("INVALID_INPUT");
+      }
+      entries.push([key, item]);
+    } else {
+      if (!betaEnabled(profile)) fail("UNSUPPORTED_CAPABILITY");
+      entries.push([
+        "max_output_tokens",
+        item === null ? null : requirePositiveInteger(item),
+      ]);
+    }
+  }
+  if (adapterEffortActive && !hasOwn(record, "effort")) {
+    entries.push(["effort", adapterEffort]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const key of Reflect.ownKeys(value))
+      deepFreeze(Reflect.get(value, key));
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function contextHintEnabled(profile: unknown): boolean {
+  return isRecord(profile) && profile["contextHintEnabled"] === true;
+}
+
+/**
+ * Canonicalises the message and tool lists for the count-tokens endpoint.
+ *
+ * The count-tokens body shares no other field with the messages body, but it
+ * MUST share these two canonicalisers. Reimplementing them would give the two
+ * public entry points different fail-closed guarantees for the same caller
+ * input, which is precisely the class of divergence this package exists to
+ * prevent.
+ */
+export function canonicalCountTokensLists(
+  rawMessages: unknown,
+  rawTools: unknown,
+): {
+  readonly messages: readonly Message[];
+  readonly tools: readonly ToolDefinition[];
+} {
+  return {
+    // The count-tokens endpoint has no seam of its own, so thinking blocks stay
+    // on the strict allowlist here.
+    messages: messages(rawMessages, false),
+    tools: rawTools === undefined ? Object.freeze([]) : tools(rawTools),
+  };
+}
+
+export function buildCanonicalBody(
+  rawInput: unknown,
+  rawResolvedModel: unknown,
+  rawSystemBlocks: unknown,
+  rawMetadata: unknown,
+  profile?: ClaudeCodeProtocolProfile,
+  thinkingDisplayOverride?: "updates",
+): Readonly<Record<string, unknown>> {
+  inspectJsonInputs(
+    [
+      rawInput,
+      rawResolvedModel,
+      rawSystemBlocks,
+      rawMetadata,
+      ...(profile === undefined ? [] : [profile]),
+    ],
+    undefined,
+    [[], ["model"], ["system"], ["metadata"], ["profileOverride"]],
+  );
+
+  const input = requireRecord(rawInput);
+  assertExactKeys(input, INPUT_KEY_SET);
+  requireKeys(input, ["maxTokens", "messages"]);
+  const effectiveProfile = profile ?? CLAUDE_CODE_2_1_195_PROFILE;
+  const resolvedModel = modelResolution(rawResolvedModel, effectiveProfile);
+  if (
+    hasOwn(input, "model") &&
+    (typeof input["model"] !== "string" ||
+      stripModelMarkers(input["model"]) !== resolvedModel.wireId)
+  ) {
+    fail("INVALID_INPUT");
+  }
+
+  const cacheOverride = hasOwn(input, "cacheControl")
+    ? nullable(input["cacheControl"], cacheControlInput)
+    : undefined;
+  // Package extension. Only a boolean states a decision; omission is `false`,
+  // which keeps the strict thinking-block allowlist and the emitted body
+  // byte-identical.
+  const preserveThinkingCacheControl =
+    hasOwn(input, "preserveThinkingBlockCacheControl") &&
+    requireBoolean(input["preserveThinkingBlockCacheControl"]);
+  let systemBlocks = system(rawSystemBlocks);
+  let messageList = messages(input["messages"], preserveThinkingCacheControl);
+  let toolList = hasOwn(input, "tools") ? tools(input["tools"]) : undefined;
+  if (cacheOverride !== undefined && cacheOverride !== null) {
+    systemBlocks = applySystemCacheControl(systemBlocks, cacheOverride);
+    messageList = applyMessageCacheControl(messageList, cacheOverride);
+    if (toolList !== undefined) {
+      toolList = applyToolCacheControl(toolList, cacheOverride);
+    }
+  }
+
+  // D16. The genuine client never sends a `max_tokens` above the model's own
+  // default output limit; a larger caller value is silently capped, not
+  // rejected. The clamped result is reused for the thinking budget below,
+  // because upstream feeds the same `Fi` into both.
+  const maxTokens = clampMaxTokens(
+    requirePositiveInteger(input["maxTokens"]),
+    resolvedModel.id,
+    effectiveProfile,
+  );
+  const result: Record<string, unknown> = {
+    model: resolvedModel.wireId,
+    max_tokens: maxTokens,
+    system: systemBlocks,
+    messages: messageList,
+  };
+
+  if (toolList !== undefined) result["tools"] = toolList;
+
+  let thinkingRequest: ThinkingRequest | undefined;
+  if (hasOwn(input, "thinking")) {
+    const rawThinking = input["thinking"];
+    if (!isRecord(rawThinking) || Array.isArray(rawThinking)) {
+      fail("INVALID_THINKING");
+    }
+    for (const key of Reflect.ownKeys(rawThinking)) {
+      if (key !== "type" && key !== "budgetTokens" && key !== "display") {
+        fail("INVALID_THINKING");
+      }
+    }
+    const type = rawThinking["type"];
+    if (type !== "enabled" && type !== "adaptive" && type !== "disabled") {
+      fail("INVALID_THINKING");
+    }
+    let budgetTokens: number | undefined;
+    if (hasOwn(rawThinking, "budgetTokens")) {
+      const raw = rawThinking["budgetTokens"];
+      if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw <= 0) {
+        fail("INVALID_THINKING");
+      }
+      budgetTokens = raw;
+    }
+    let display: ThinkingDisplay | undefined;
+    if (hasOwn(rawThinking, "display")) {
+      const raw = rawThinking["display"];
+      if (raw !== "summarized" && raw !== "omitted") fail("INVALID_THINKING");
+      // Upstream's schema attaches `display` to the enabled and adaptive
+      // variants only; the disabled variant declares no such property.
+      if (type === "disabled") fail("INVALID_THINKING");
+      display = raw;
+    }
+    thinkingRequest = {
+      type,
+      ...(budgetTokens === undefined ? {} : { budgetTokens }),
+      ...(display === undefined ? {} : { display }),
+    };
+  }
+
+  const resolved = resolveThinking(
+    thinkingRequest,
+    resolvedModel.id,
+    resolvedModel.capabilities,
+    effectiveProfile.betaPolicy,
+    maxTokens,
+    effectiveProfile,
+    thinkingDisplayOverride,
+  );
+  if (resolved.emitted !== undefined) result["thinking"] = resolved.emitted;
+
+  if (!resolved.requestActive && resolvedModel.capabilities.temperature) {
+    result["temperature"] = hasOwn(input, "temperature")
+      ? requireNumber(input["temperature"])
+      : 1;
+  }
+
+  let adapterEffort: unknown;
+  let adapterEffortActive = false;
+  if (hasOwn(input, "effort")) {
+    const effort = input["effort"];
+    if (
+      !resolvedModel.capabilities.effort ||
+      (effort !== "low" &&
+        effort !== "medium" &&
+        effort !== "high" &&
+        effort !== "xhigh" &&
+        effort !== "max")
+    ) {
+      fail("INVALID_EFFORT");
+    }
+    if (
+      (effort === "max" && !resolvedModel.capabilities.maxEffort) ||
+      (effort === "xhigh" && !resolvedModel.capabilities.xhighEffort)
+    ) {
+      fail("INVALID_EFFORT");
+    }
+    adapterEffort = effort;
+    if (
+      isRecord(result["thinking"]) &&
+      result["thinking"]["type"] === "adaptive"
+    ) {
+      adapterEffortActive = true;
+      if (!hasOwn(input, "outputConfig")) {
+        result["output_config"] = { effort };
+      }
+    }
+  }
+
+  for (const key of Object.keys(input)) {
+    const item = input[key];
+    if (key === "contextManagement")
+      result["context_management"] = nullable(item, contextManagement);
+    else if (key === "outputConfig")
+      result["output_config"] = outputConfig(
+        item,
+        profile,
+        adapterEffort,
+        adapterEffortActive,
+      );
+    else if (key === "speed") {
+      if (item !== null && item !== "standard" && item !== "fast")
+        fail("INVALID_INPUT");
+      if (item === "fast" && !betaEnabled(profile))
+        fail("UNSUPPORTED_CAPABILITY");
+      result["speed"] = item;
+    } else if (key === "serviceTier") {
+      if (item !== "auto" && item !== "standard_only") fail("INVALID_INPUT");
+      result["service_tier"] = item;
+    } else if (key === "outputFormat")
+      result["output_format"] = nullable(item, outputFormat);
+    else if (key === "toolChoice") {
+      const validatedToolChoice = toolChoice(item);
+      // The client demotes a forced NAMED tool choice only: extended thinking
+      // rejects `type: "tool"`, and `any`, `auto` and `none` travel unchanged.
+      // Demoting `any` here would alter a field the genuine client passes
+      // through, which is observable on the wire.
+      const forcedToolChoice = validatedToolChoice["type"] === "tool";
+      result["tool_choice"] =
+        forcedToolChoice && resolved.extendedThinkingActive
+          ? { type: "auto" }
+          : validatedToolChoice;
+    } else if (key === "topP") result["top_p"] = requireNumber(item);
+    else if (key === "topK") result["top_k"] = requireNumber(item);
+    else if (key === "stopSequences")
+      result["stop_sequences"] = stringArray(item);
+    else if (key === "stream") result["stream"] = requireBoolean(item);
+  }
+
+  if (contextHintEnabled(profile)) {
+    result["context_hint"] = { enabled: true };
+  }
+  result["metadata"] = metadata(rawMetadata);
+  if (hasOwn(input, "experimentalBodyFields")) {
+    const experimentalBodyFields = validatedJsonObject(
+      input["experimentalBodyFields"],
+    );
+    for (const key of Object.keys(experimentalBodyFields)) {
+      if (hasOwn(result, key)) fail("INVALID_INPUT");
+      result[key] = experimentalBodyFields[key];
+    }
+  }
+  return deepFreeze(orderBodyKeys(result));
+}

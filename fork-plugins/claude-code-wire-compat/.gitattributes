@@ -1,0 +1,12 @@
+* text=auto eol=lf
+*.ts text eol=lf
+*.mts text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+LICENSE text eol=lf
+
+# The ported protocol documents preserve the upstream bytes, including the
+# two-space Markdown hard breaks. The repository whitespace gate ignores them
+# instead of rewriting the ported material.
+docs/protocol/** -whitespace

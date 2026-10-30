@@ -5,13 +5,14 @@ import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  assertStagedArtifacts, assertStagedManifest, buildSubscriptionsTransport, bunPlatformRuntime,
+  assertStagedArtifacts, assertStagedManifest, buildSubscriptionsTransport, buildWireCompat, bunPlatformRuntime,
   copyStagedEntries, DEFAULT_HOST_ADDRESS, DEFAULT_HOST_PORT, dependencyPreparationError, ensurePluginDependencies,
   installAndSeedProfile, LAUNCHER_HOME_DIRECTORY,
   lockfileAutoInstallPeers, localDependencyPath, lockedDependencyVersion, lockedUndiciVersion, parseArguments, PLUGINS,
   pluginInstallArguments, privateDependencySpecs, registryPeerRange, resolveHome, sourceHash, sourcePaths,
   stageBunRuntime, stagedManifest, stagedWorkspaceManifest, stageWorkspacePlugin, stagingIsCurrent,
-  subscriptionsRuntimeArtifacts, SUBSCRIPTIONS_TRANSPORT_MODULES, WORKSPACE_PLUGINS, writeStagedManifest,
+  subscriptionsRuntimeArtifacts, SUBSCRIPTIONS_TRANSPORT_MODULES, WIRE_COMPAT_DIRECTORY, WIRE_COMPAT_PACKAGE,
+  wireCompatSourceHash, wireCompatSourcePaths, WORKSPACE_PLUGINS, writeStagedManifest,
   type BuildState, type PluginCommandRunner, type PluginDefinition, type PluginManifest,
 } from './fork-plugins-build.ts'
 import type { SeedResult } from './fork-profile-seed.ts'
@@ -46,7 +47,7 @@ const subscriptionsSource = {
   },
   scripts: { build: 'tsc && tsdown' },
   dependencies: {
-    '@tormentalabs/claude-code-wire-compat': 'file:../releases/wire.tgz',
+    '@tormentalabs/claude-code-wire-compat': 'file:../claude-code-wire-compat',
     undici: '^7.0.0',
   },
   devDependencies: { typescript: '^5.8.0' },
@@ -197,6 +198,65 @@ describe('fork plugin build recipe', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('resolves the inlined wire builder from the fork source checkout', async () => {
+    expect(WIRE_COMPAT_DIRECTORY).toBe(join(REPOSITORY_ROOT, 'fork-plugins', 'claude-code-wire-compat'))
+    const manifest = JSON.parse(await readFile(join(WIRE_COMPAT_DIRECTORY, 'package.json'), 'utf8')) as PluginManifest
+    expect(manifest.name).toBe(WIRE_COMPAT_PACKAGE)
+    expect(manifest.version).toBe('0.7.2-dsh15')
+    expect(wireCompatSourcePaths()).toContain('src')
+    expect(wireCompatSourcePaths()).not.toContain('dist')
+    expect(sourcePaths(plugin('subscriptions'))).not.toContain('dist')
+  })
+
+  it('hashes wire builder sources but not its generated dist output', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-wire-compat-hash-'))
+    try {
+      await mkdir(join(root, 'src'), { recursive: true })
+      await mkdir(join(root, 'dist'), { recursive: true })
+      await writeFile(join(root, 'package.json'), `${JSON.stringify({ name: WIRE_COMPAT_PACKAGE }, undefined, 2)}\n`)
+      await writeFile(join(root, 'src', 'index.ts'), 'export const value = 1\n')
+      await writeFile(join(root, 'dist', 'index.js'), 'generated one\n')
+      const first = await wireCompatSourceHash(root)
+      await writeFile(join(root, 'dist', 'index.js'), 'generated two\n')
+      expect(await wireCompatSourceHash(root)).toBe(first)
+      await writeFile(join(root, 'src', 'index.ts'), 'export const value = 2\n')
+      expect(await wireCompatSourceHash(root)).not.toBe(first)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('compiles wire builder dist from source before subscriptions bundling', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-wire-compat-build-'))
+    try {
+      await mkdir(join(root, 'src'), { recursive: true })
+      await writeFile(join(root, 'package.json'), `${JSON.stringify({ name: WIRE_COMPAT_PACKAGE }, undefined, 2)}\n`)
+      await writeFile(join(root, 'src', 'index.ts'), 'export const value = 1\n')
+      await writeFile(join(root, 'tsconfig.json'), JSON.stringify({
+        compilerOptions: {
+          target: 'ES2022',
+          module: 'NodeNext',
+          moduleResolution: 'NodeNext',
+          declaration: true,
+          outDir: 'dist',
+          rootDir: 'src',
+          strict: true,
+          types: [],
+        },
+        include: ['src/**/*.ts'],
+      }, undefined, 2))
+      buildWireCompat(root)
+      expect(existsSync(join(root, 'dist', 'index.js'))).toBe(true)
+      expect(existsSync(join(root, 'dist', 'index.d.ts'))).toBe(true)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails when the wire builder source checkout is missing', () => {
+    expect(() => { buildWireCompat(join(tmpdir(), 'dsh-missing-wire-compat')) }).toThrow(/wire builder is missing/)
   })
 
   it('stages built files from the isolated work copy, never from the source lib', async () => {

@@ -12,7 +12,7 @@ Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把四�
 
 `scripts/fork-plugins-build.ts` 优先使用 `--dsh-home`，其次 `DSH_HOME`，再其次平台启动器默认 home（Windows 为 `<仓库父目录>\deepseek-harness-data`，macOS/Linux 为 `~/.dsh`；开头的 `~` 会展开），目标是 `profiles/web`。它把包 staging 到被忽略的 `.build/fork-plugins/`，再用 `dsh plugin --profile web add <绝对 staging 目录>` 安装，记录为 pnpm `link:`；源码 key 使未变化的第二次运行既不重建也不重装，全新的 profile 在安装成功后才 seed。不会读取或写入任何 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
 
-- Subscriptions 从源码编译 `lib/index.js` 与 `lib/client.js`。staged manifest 内联 `@tormentalabs/claude-code-wire-compat`（来自仓库 tgz）与 `undici`，删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer，且不声明运行时依赖。公开的 optional provider 条目（`@cursor/sdk`、`@oven/bun-*`）保留声明；link 安装不会安装被链接包的 optional 依赖，因此这些 provider 需要另行提供对应包。staged 包不附带声明文件；源码检出仍是类型来源。
+- Subscriptions 从源码编译 `lib/index.js` 与 `lib/client.js`。staged manifest 内联 `@tormentalabs/claude-code-wire-compat`（来自 `fork-plugins/claude-code-wire-compat` 源码，构建时用仓库 TypeScript 编译器生成其 `dist/`）与 `undici`，删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer，且不声明运行时依赖。公开的 optional provider 条目（`@cursor/sdk`、`@oven/bun-*`）保留声明；link 安装不会安装被链接包的 optional 依赖，因此这些 provider 需要另行提供对应包。staged 包不附带声明文件；源码检出仍是类型来源。
 - AetherShell 从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.1-rc.2`。
 - AgentTeams 与 Context 在 `.build/fork-plugins/work/` 的隔离副本中构建；staging 只读取该副本的构建产物，不读取提交的 `lib/`。Context 保留 `zod` 运行时依赖，由仓库安装解析。
 

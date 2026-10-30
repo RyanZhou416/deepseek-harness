@@ -6,7 +6,10 @@
  * built from source: subscriptions and aether-shell emit their bundles directly
  * into the staging directory, while agent-teams and context are copied into an
  * isolated work directory under `.build/fork-plugins/work/` and run their own
- * `build` script there. The workspace llm-cc-pool package is copied from the
+ * `build` script there. Before the subscriptions bundle is emitted, its inlined
+ * Claude wire builder (`fork-plugins/claude-code-wire-compat`) is compiled from
+ * source with the repository TypeScript compiler, so no tarball is a build
+ * input. The workspace llm-cc-pool package is copied from the
  * root build output into the same staging root, with its `workspace:` peer
  * ranges converted to the versions a profile install can resolve. Staged
  * packages live under the ignored `.build/fork-plugins/` directory, are
@@ -54,6 +57,14 @@ const STATE_FILE = join(BUILD_ROOT, 'state.json')
 const CONFIG_ROOT = join(BUILD_ROOT, 'configs')
 const DEPENDENCY_ROOT = join(BUILD_ROOT, 'build-deps')
 const WORK_ROOT = join(BUILD_ROOT, 'work')
+/**
+ * Source checkout of the Claude wire builder the subscriptions bundle inlines.
+ * Its `dist/` is built from this directory before the bundle is emitted, so
+ * the repository tarball is no longer a build input.
+ */
+export const WIRE_COMPAT_DIRECTORY = join(REPOSITORY_ROOT, 'fork-plugins', 'claude-code-wire-compat')
+/** Package name the inlined wire builder must declare. */
+export const WIRE_COMPAT_PACKAGE = '@tormentalabs/claude-code-wire-compat'
 const PROFILE_NAME = 'web'
 /** Loopback address the Host guard probes unless `--host` names another one. */
 export const DEFAULT_HOST_ADDRESS = '127.0.0.1'
@@ -66,7 +77,7 @@ export const DEFAULT_HOST_PORT = 3080
 export const LAUNCHER_HOME_DIRECTORY = 'deepseek-harness-data'
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
-const SCRIPT_VERSION = 7
+const SCRIPT_VERSION = 8
 const WORK_MARKER_FILE = '.fork-plugin-build.json'
 const DEPENDENCY_MARKER_FILE = '.fork-plugin-deps.json'
 
@@ -619,8 +630,8 @@ async function hashFile(path: string): Promise<string> {
   return createHash('sha256').update(await readFile(path)).digest('hex')
 }
 
-/** Hash the files that change the staged output, excluding docs, tests, dependencies, and prior builds. */
-export async function sourceHash(plugin: PluginDefinition): Promise<string> {
+/** Hash the files under `entries`, excluding docs, tests, dependencies, and prior builds. */
+async function hashEntries(directory: string, entries: readonly string[]): Promise<string> {
   const lines: string[] = []
   const visit = async (path: string, relative: string): Promise<void> => {
     const info = await stat(path)
@@ -634,12 +645,56 @@ export async function sourceHash(plugin: PluginDefinition): Promise<string> {
     if (!info.isFile()) return
     lines.push(`${relative}\0${await hashFile(path)}`)
   }
-  for (const entry of sourcePaths(plugin)) {
-    const path = join(plugin.directory, entry)
+  for (const entry of entries) {
+    const path = join(directory, entry)
     if (existsSync(path)) await visit(path, entry)
   }
   lines.sort()
   return createHash('sha256').update(lines.join('\n')).digest('hex')
+}
+
+/** Hash the files that change the staged output, excluding docs, tests, dependencies, and prior builds. */
+export async function sourceHash(plugin: PluginDefinition): Promise<string> {
+  return hashEntries(plugin.directory, sourcePaths(plugin))
+}
+
+/** Source entries of the inlined wire builder that decide the staged bundle. */
+export function wireCompatSourcePaths(): string[] {
+  return ['src', 'package.json', 'tsconfig.json']
+}
+
+/**
+ * Hash the wire-builder sources that the subscriptions bundle inlines.
+ *
+ * The staged bundle must be rebuilt when this package changes, so its content
+ * is part of the subscriptions staging key. `dist/` stays out of the hash: it
+ * is rebuilt from these sources before the bundle.
+ * @param directory - wire-compat package directory; defaults to the checkout.
+ * @returns the source hash.
+ */
+export async function wireCompatSourceHash(directory = WIRE_COMPAT_DIRECTORY): Promise<string> {
+  return hashEntries(directory, wireCompatSourcePaths())
+}
+
+/**
+ * Compile the inlined wire builder's `dist/` from source with the repository
+ * TypeScript compiler.
+ *
+ * The subscriptions bundle aliases `@tormentalabs/claude-code-wire-compat` to
+ * `dist/index.js`, so the build must run before tsdown reads that entry. The
+ * emitted files are verified because a compiler that exits zero without
+ * emitting would otherwise leave the previous generation in place.
+ * @param directory - wire-compat package directory; defaults to the checkout.
+ */
+export function buildWireCompat(directory = WIRE_COMPAT_DIRECTORY): void {
+  if (!existsSync(join(directory, 'package.json'))) {
+    fail(`the inlined wire builder is missing from ${directory}; the fork expects its source checkout`)
+  }
+  log(`building ${WIRE_COMPAT_PACKAGE} from source`)
+  run(process.execPath, [rootTypeScript(), '-p', join(directory, 'tsconfig.json')], { cwd: directory })
+  for (const output of ['dist/index.js', 'dist/index.d.ts']) {
+    if (!existsSync(join(directory, output))) fail(`the wire builder build did not produce ${output}`)
+  }
 }
 
 /**
@@ -980,8 +1035,6 @@ interface BuildDependencies {
 /** Install the build-time runtime packages that staging inlines or copies into the staged package. */
 async function ensureBuildDependencies(): Promise<BuildDependencies> {
   const bunRuntimeTarget = bunPlatformRuntime(process.platform, process.arch)
-  const wireTarball = join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh15.tgz')
-  if (!existsSync(wireTarball)) fail(`missing inlined dependency artifact ${wireTarball}`)
   const lockfile = await readFile(join(SUBSCRIPTIONS_PLUGIN.directory, 'pnpm-lock.yaml'), 'utf8')
   const undiciVersion = lockedDependencyVersion(lockfile, 'undici', '^7.0.0')
   const bunVersion = lockedDependencyVersion(lockfile, bunRuntimeTarget.packageName, '^1.4.0')
@@ -990,7 +1043,6 @@ async function ensureBuildDependencies(): Promise<BuildDependencies> {
     private: true,
     type: 'module',
     dependencies: {
-      '@tormentalabs/claude-code-wire-compat': `file:${wireTarball.replaceAll('\\', '/')}`,
       undici: undiciVersion,
       [bunRuntimeTarget.packageName]: bunVersion,
     },
@@ -1002,11 +1054,9 @@ async function ensureBuildDependencies(): Promise<BuildDependencies> {
   const manifestChanged = existing !== desired
   if (manifestChanged) await writeFile(manifestPath, desired)
 
-  const wireDirectory = join(DEPENDENCY_ROOT, 'node_modules', '@tormentalabs', 'claude-code-wire-compat')
   const undiciDirectory = join(DEPENDENCY_ROOT, 'node_modules', 'undici')
   const bunDirectory = join(DEPENDENCY_ROOT, 'node_modules', ...bunRuntimeTarget.packageName.split('/'))
   const installed = !manifestChanged
-    && existsSync(join(wireDirectory, 'package.json'))
     && existsSync(join(undiciDirectory, 'package.json'))
     && existsSync(join(bunDirectory, 'package.json'))
     && existsSync(join(bunDirectory, bunRuntimeTarget.executable))
@@ -1023,16 +1073,16 @@ async function ensureBuildDependencies(): Promise<BuildDependencies> {
       '--config.confirm-modules-purge=false',
     ], { cwd: DEPENDENCY_ROOT })
   }
-  const wire = await readJson<WorkspacePackage['manifest']>(join(wireDirectory, 'package.json'))
+  const wire = await readJson<WorkspacePackage['manifest']>(join(WIRE_COMPAT_DIRECTORY, 'package.json'))
   const undici = await readJson<WorkspacePackage['manifest']>(join(undiciDirectory, 'package.json'))
   const bun = await readJson<PluginManifest>(join(bunDirectory, 'package.json'))
-  if (wire.name !== '@tormentalabs/claude-code-wire-compat') fail('build dependency resolution did not install the pinned wire-compat package')
+  if (wire.name !== WIRE_COMPAT_PACKAGE) fail(`the inlined wire builder at ${WIRE_COMPAT_DIRECTORY} does not declare ${WIRE_COMPAT_PACKAGE}`)
   if (undici.name !== 'undici') fail('build dependency resolution did not install undici')
   if (bun.name !== bunRuntimeTarget.packageName) fail(`build dependency resolution did not install ${bunRuntimeTarget.packageName}`)
   return {
-    wireEntry: join(wireDirectory, 'dist', 'index.js'),
+    wireEntry: join(WIRE_COMPAT_DIRECTORY, 'dist', 'index.js'),
     undiciEntry: join(undiciDirectory, 'index.js'),
-    wire: { name: wire.name, directory: wireDirectory, manifest: wire },
+    wire: { name: wire.name, directory: WIRE_COMPAT_DIRECTORY, manifest: wire },
     undici: { name: undici.name, directory: undiciDirectory, manifest: undici },
     bunRuntime: {
       packageName: bunRuntimeTarget.packageName,
@@ -1556,6 +1606,7 @@ async function buildPlugin(
       const config = plugin.builder === 'subscriptions'
         ? await subscriptionsConfig(temporary, dependencies.wireEntry, dependencies.undiciEntry)
         : await aetherConfig(temporary)
+      if (plugin.builder === 'subscriptions') buildWireCompat()
       log(`building ${plugin.name} from source`)
       run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
       if (plugin.builder === 'subscriptions') buildSubscriptionsTransport(plugin.directory, temporary)
@@ -1736,7 +1787,7 @@ export async function main(options: BuildOptions): Promise<void> {
     if (version === undefined) fail(`${plugin.name} source manifest has no version`)
     const keyParts = [String(SCRIPT_VERSION), await sourceHash(plugin), version, toolchain]
     if (plugin.id === 'subscriptions') {
-      keyParts.push(await hashFile(join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh15.tgz')))
+      keyParts.push(await wireCompatSourceHash())
       keyParts.push(dependencies.wire.manifest.version ?? '', dependencies.undici.manifest.version ?? '')
       keyParts.push(dependencies.bunRuntime.packageName, dependencies.bunRuntime.version)
     }

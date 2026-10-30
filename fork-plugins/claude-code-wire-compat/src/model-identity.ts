@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import type { ClaudeCodeModelFamily } from "./contracts.js";
+
+/** Ports upstream `dp` (binary offset 226644497). */
+export function stripModelMarkers(model: string): string {
+  return model.replace(/\[(1|2)m\]/gi, "");
+}
+
+/**
+ * Rewrites dotted version separators to the hyphenated form upstream uses on
+ * the wire (`claude-opus-4.7` -> `claude-opus-4-7`). Only a digit-dot-digit
+ * run is rewritten, so ids with no dotted version (`gpt-4o`, `""`) and
+ * unrelated dots are left byte-identical.
+ *
+ * The plugin performs the same rewrite at its wire seam
+ * (`lib/mimicry/wire-compat.mjs`); the plugin's own family predicates accept
+ * `[._-]` interchangeably, so this keeps package classification in parity.
+ */
+function dottedToDashedVersion(model: string): string {
+  return model.replace(/(\d)\.(\d)/g, "$1-$2");
+}
+
+/**
+ * Ports upstream `$_` (binary offset 226639025); in the 2.1.280 bundle the
+ * function is `GF` at byte offset 7413751. The two offsets are in different
+ * address spaces: the first indexes the 2.1.195 platform binary, the second
+ * the carved 2.1.280 JavaScript bundle, so neither can be found in the other.
+ *
+ * Rung order is load-bearing: each test is a substring test, so a longer id
+ * must precede the shorter id it contains or the shorter rung swallows it.
+ */
+export function normalizeModelId(model: string): string {
+  model = dottedToDashedVersion(model.toLowerCase());
+  if (model.includes("claude-fable-5-1")) return "claude-fable-5-1";
+  if (model.includes("claude-fable-5")) return "claude-fable-5";
+  if (model.includes("claude-mythos-5-1")) return "claude-mythos-5-1";
+  if (model.includes("claude-mythos-5")) return "claude-mythos-5";
+  if (model.includes("claude-opus-5-5")) return "claude-opus-5-5";
+  if (model.includes("claude-opus-5")) return "claude-opus-5";
+  if (model.includes("claude-opus-4-8")) return "claude-opus-4-8";
+  if (model.includes("claude-opus-4-7")) return "claude-opus-4-7";
+  if (model.includes("claude-opus-4-6")) return "claude-opus-4-6";
+  if (model.includes("claude-opus-4-5")) return "claude-opus-4-5";
+  if (model.includes("claude-opus-4-1")) return "claude-opus-4-1";
+  if (/claude-opus-4(?!-\d(?!\d))/.test(model)) return "claude-opus-4-0";
+  // The longer id must precede the shorter one it contains, as upstream orders them.
+  if (model.includes("claude-sonnet-5-5")) return "claude-sonnet-5-5";
+  if (model.includes("claude-sonnet-5")) return "claude-sonnet-5";
+  if (model.includes("claude-sonnet-4-6")) return "claude-sonnet-4-6";
+  if (model.includes("claude-sonnet-4-5")) return "claude-sonnet-4-5";
+  if (/claude-sonnet-4(?!-\d(?!\d))/.test(model)) return "claude-sonnet-4-0";
+  if (model.includes("claude-haiku-4-5")) return "claude-haiku-4-5";
+  if (model.includes("claude-3-7-sonnet")) return "claude-3-7-sonnet";
+  if (model.includes("claude-3-5-sonnet")) return "claude-3-5-sonnet";
+  if (model.includes("claude-3-5-haiku")) return "claude-3-5-haiku";
+  if (model.includes("claude-3-opus")) return "claude-3-opus";
+  if (model.includes("claude-3-sonnet")) return "claude-3-sonnet";
+  if (model.includes("claude-3-haiku")) return "claude-3-haiku";
+  return model.replace(/-\d{8}$/, "");
+}
+
+/**
+ * Derives the package-local family classification used only by
+ * `RedactedRequestEvidence`; upstream has no corresponding family concept.
+ */
+export function modelFamilyOf(normalizedId: string): ClaudeCodeModelFamily {
+  if (normalizedId.includes("fable")) return "fable";
+  if (normalizedId.includes("mythos")) return "mythos";
+  if (normalizedId.includes("haiku")) return "haiku";
+  if (normalizedId.includes("sonnet")) return "sonnet";
+  if (normalizedId.includes("opus")) return "opus";
+  return "unknown";
+}

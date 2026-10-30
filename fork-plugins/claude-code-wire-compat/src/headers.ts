@@ -1,0 +1,555 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import type {
+  ClaudeCodeExtraHeaderPolicy,
+  ClaudeCodeProtocolProfile,
+  ClaudeCodeRequestClass,
+  HeaderPair,
+} from "./contracts.js";
+import { ClaudeCodeWireError } from "./contracts.js";
+import { isPromptId } from "./fingerprint.js";
+import { CLAUDE_CODE_2_1_195_PROFILE } from "./profiles/claude-code-2.1.195.js";
+import { CLAUDE_CODE_2_1_233_PROFILE } from "./profiles/claude-code-2.1.233.js";
+import { CLAUDE_CODE_2_1_280_PROFILE } from "./profiles/claude-code-2.1.280.js";
+import { CLAUDE_CODE_2_1_288_PROFILE } from "./profiles/claude-code-2.1.288.js";
+
+/*
+ * Field names exactly as the client writes them on the wire.
+ *
+ * The SDK merges its own headers through `new Headers` with `set`/`append` on
+ * the literal keys of its header objects, and the runtime this package targets
+ * preserves the caller's casing, so the client's mixed casing reaches the peer
+ * unchanged: the SDK's platform block is `X-Stainless-*`, its request builders
+ * write `Accept`, `User-Agent`, `Authorization`, and `anthropic-version`, and
+ * Claude Code's own block writes `X-Claude-Code-Session-Id` beside the
+ * lower-case `x-app`, `x-claude-code-prompt-id` and
+ * `x-claude-code-request-class`. The transport may reorder fields; it does not
+ * re-spell them, so a lower-cased plan is a different byte string from every
+ * genuine request.
+ */
+const HEADER_NAMES = Object.freeze({
+  accept: "Accept",
+  anthropicBeta: "anthropic-beta",
+  browserAccess: "anthropic-dangerous-direct-browser-access",
+  anthropicVersion: "anthropic-version",
+  authorization: "Authorization",
+  contentType: "content-type",
+  userAgent: "User-Agent",
+  app: "x-app",
+  sessionId: "X-Claude-Code-Session-Id",
+  clientRequestId: "x-client-request-id",
+  promptId: "x-claude-code-prompt-id",
+  requestClass: "x-claude-code-request-class",
+  arch: "X-Stainless-Arch",
+  lang: "X-Stainless-Lang",
+  os: "X-Stainless-OS",
+  packageVersion: "X-Stainless-Package-Version",
+  retryCount: "X-Stainless-Retry-Count",
+  runtime: "X-Stainless-Runtime",
+  runtimeVersion: "X-Stainless-Runtime-Version",
+  timeout: "X-Stainless-Timeout",
+  stainlessHelper: "x-stainless-helper",
+  remoteContainerId: "x-claude-remote-container-id",
+  remoteSessionId: "x-claude-remote-session-id",
+  clientApp: "x-client-app",
+  additionalProtection: "x-anthropic-additional-protection",
+} as const);
+
+/**
+ * The names this package owns, folded for comparison.
+ *
+ * HTTP field names are case-insensitive, so ownership, duplication and lookup
+ * are all decided on the folded form while the wire spelling above is what a
+ * caller sees.
+ */
+function foldHeaderName(name: string): string {
+  return name.toLowerCase();
+}
+
+const CANONICAL_NAMES: ReadonlySet<string> = new Set(
+  Object.values(HEADER_NAMES).map(foldHeaderName),
+);
+
+/** The request classes the client's `x-claude-code-request-class` reports. */
+const REQUEST_CLASSES: ReadonlySet<string> = new Set([
+  "main",
+  "subagent",
+  "auxiliary",
+  "compaction",
+  "workflow",
+]);
+
+interface HeaderRuntime {
+  readonly sessionId: string;
+  readonly runtime: string;
+  readonly runtimeVersion: string;
+  readonly os: string;
+  readonly arch: string;
+}
+
+interface ValidatedInput {
+  readonly accessToken: string;
+  readonly runtime: HeaderRuntime;
+  readonly clientRequestId: string;
+  readonly betaFeatures: readonly string[];
+  readonly app: "cli" | "cli-bg";
+  readonly stainlessRetryCount: number;
+  readonly stainlessTimeoutSeconds: number;
+  readonly stainlessHelper?: string;
+  readonly claudeRemoteContainerId?: string;
+  readonly claudeRemoteSessionId?: string;
+  readonly clientApp?: string;
+  readonly anthropicAdditionalProtection?: string;
+  readonly requestClass?: ClaudeCodeRequestClass;
+  readonly promptId?: string;
+  readonly extraHeaders: readonly HeaderPair[];
+  readonly extraHeaderPolicy: ClaudeCodeExtraHeaderPolicy;
+  readonly profile: ClaudeCodeProtocolProfile;
+}
+
+/** Reports the headers placed on the wire plus what the policy discarded. */
+export interface OrderedHeaderPlan {
+  readonly headers: readonly HeaderPair[];
+  /**
+   * Lists the folded names `dropConflicting` discarded, in caller order.
+   *
+   * Always empty under `strict`, which throws instead of dropping.
+   */
+  readonly droppedExtraHeaderNames: readonly string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint !== undefined &&
+      (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function assertHeaderText(name: string, value: string): void {
+  if (hasControlCharacter(name) || hasControlCharacter(value)) {
+    throw new ClaudeCodeWireError("HEADER_INJECTION");
+  }
+}
+
+function requiredString(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  return value;
+}
+
+function parseRuntime(value: unknown): HeaderRuntime {
+  if (!isRecord(value)) {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  return {
+    sessionId: requiredString(value, "sessionId"),
+    runtime: requiredString(value, "runtime"),
+    runtimeVersion: requiredString(value, "runtimeVersion"),
+    os: requiredString(value, "os"),
+    arch: requiredString(value, "arch"),
+  };
+}
+
+function parseBetaFeatures(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  const features: string[] = [];
+  for (const feature of value) {
+    if (typeof feature !== "string" || feature.length === 0) {
+      throw new ClaudeCodeWireError("INVALID_INPUT");
+    }
+    features.push(feature);
+  }
+  return features;
+}
+
+function parseExtraHeaders(value: unknown): readonly HeaderPair[] {
+  if (!Array.isArray(value)) {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  const headers: HeaderPair[] = [];
+  for (const candidate of value) {
+    if (
+      !Array.isArray(candidate) ||
+      candidate.length !== 2 ||
+      typeof candidate[0] !== "string" ||
+      typeof candidate[1] !== "string"
+    ) {
+      throw new ClaudeCodeWireError("INVALID_INPUT");
+    }
+    headers.push([candidate[0], candidate[1]]);
+  }
+  return headers;
+}
+
+function parseExtraHeaderPolicy(value: unknown): ClaudeCodeExtraHeaderPolicy {
+  if (value !== "strict" && value !== "dropConflicting") {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  return value;
+}
+
+/**
+ * Accepts a pinned profile by REFERENCE, never by shape, and returns the
+ * singleton itself so nothing downstream can be handed a look-alike. Each
+ * pinned profile widens the accepted set by exactly one object;
+ * anything else, including a structural clone, still fails closed.
+ */
+function parseProfile(value: unknown): ClaudeCodeProtocolProfile {
+  if (value === CLAUDE_CODE_2_1_195_PROFILE) return CLAUDE_CODE_2_1_195_PROFILE;
+  if (value === CLAUDE_CODE_2_1_233_PROFILE) return CLAUDE_CODE_2_1_233_PROFILE;
+  if (value === CLAUDE_CODE_2_1_280_PROFILE) return CLAUDE_CODE_2_1_280_PROFILE;
+  if (value === CLAUDE_CODE_2_1_288_PROFILE) return CLAUDE_CODE_2_1_288_PROFILE;
+  throw new ClaudeCodeWireError("INVALID_INPUT");
+}
+
+function parseApp(value: unknown): "cli" | "cli-bg" {
+  if (value !== "cli" && value !== "cli-bg") {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  return value;
+}
+
+/**
+ * Narrows a value to a request class this package emits.
+ *
+ * @param value - the value to narrow.
+ * @returns the class, or undefined when the value is not one of them.
+ */
+export function requestClassOf(
+  value: string,
+): ClaudeCodeRequestClass | undefined {
+  return REQUEST_CLASSES.has(value)
+    ? (value as ClaudeCodeRequestClass)
+    : undefined;
+}
+
+function parseRequestClass(value: unknown): ClaudeCodeRequestClass {
+  const parsed = typeof value === "string" ? requestClassOf(value) : undefined;
+  if (parsed === undefined) {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  return parsed;
+}
+
+function parseRetryCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  return value;
+}
+
+/**
+ * The client's timeout in seconds, as the header reports it.
+ *
+ * @param value - the caller-supplied value.
+ * @returns the value when it is a positive whole number of seconds.
+ */
+function parseTimeoutSeconds(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  return value;
+}
+
+function optionalHeaderString(
+  input: Readonly<Record<string, unknown>>,
+  key: string,
+): string | undefined {
+  const value = input[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  return value;
+}
+
+function parseInput(input: unknown): ValidatedInput {
+  if (!isRecord(input)) {
+    throw new ClaudeCodeWireError("INVALID_INPUT");
+  }
+  const stainlessHelper = optionalHeaderString(input, "stainlessHelper");
+  const claudeRemoteContainerId = optionalHeaderString(
+    input,
+    "claudeRemoteContainerId",
+  );
+  const claudeRemoteSessionId = optionalHeaderString(
+    input,
+    "claudeRemoteSessionId",
+  );
+  const clientApp = optionalHeaderString(input, "clientApp");
+  const anthropicAdditionalProtection = optionalHeaderString(
+    input,
+    "anthropicAdditionalProtection",
+  );
+  const promptId = optionalHeaderString(input, "promptId");
+  const requestClass =
+    input["requestClass"] === undefined
+      ? undefined
+      : parseRequestClass(input["requestClass"]);
+  return {
+    accessToken: requiredString(input, "accessToken"),
+    runtime: parseRuntime(input["runtime"]),
+    clientRequestId: requiredString(input, "clientRequestId"),
+    betaFeatures: parseBetaFeatures(input["betaFeatures"]),
+    app: parseApp(input["app"] === undefined ? "cli" : input["app"]),
+    stainlessRetryCount: parseRetryCount(
+      input["stainlessRetryCount"] === undefined
+        ? 0
+        : input["stainlessRetryCount"],
+    ),
+    stainlessTimeoutSeconds:
+      input["stainlessTimeoutSeconds"] === undefined
+        ? 600
+        : parseTimeoutSeconds(input["stainlessTimeoutSeconds"]),
+    extraHeaders: parseExtraHeaders(input["extraHeaders"] ?? []),
+    extraHeaderPolicy: parseExtraHeaderPolicy(
+      input["extraHeaderPolicy"] ?? "strict",
+    ),
+    profile: parseProfile(input["profile"]),
+    ...(stainlessHelper === undefined ? {} : { stainlessHelper }),
+    ...(claudeRemoteContainerId === undefined
+      ? {}
+      : { claudeRemoteContainerId }),
+    ...(claudeRemoteSessionId === undefined ? {} : { claudeRemoteSessionId }),
+    ...(clientApp === undefined ? {} : { clientApp }),
+    ...(anthropicAdditionalProtection === undefined
+      ? {}
+      : { anthropicAdditionalProtection }),
+    // The client guards this header on the same UUID shape it guards the
+    // billing block's `cc_prompt_id` segment with, on the same value, so a
+    // caller value the block drops is dropped here too.
+    ...(promptId === undefined || !isPromptId(promptId) ? {} : { promptId }),
+    ...(requestClass === undefined ? {} : { requestClass }),
+  };
+}
+
+/**
+ * Names a caller may never place on the wire through `extraHeaders`.
+ *
+ * Two disjoint reasons, both non-negotiable.
+ *
+ * CREDENTIAL AND ROUTING DISCLOSURE. `x-api-key`, `cookie`, `set-cookie`,
+ * `proxy-*`, `forwarded` and `x-forwarded-*` carry authentication that would
+ * contradict the OAuth bearer this package emits, or disclose the caller's
+ * network topology upstream.
+ *
+ * HOP-BY-HOP AND ENTITY HEADERS (RFC 9110 section 7.6.1). `connection`,
+ * `transfer-encoding`, `te`, `upgrade`, `keep-alive` and `host` govern a single
+ * connection and belong to the transport, not to the caller. `content-length`
+ * is the worst of them: this package RECONSTRUCTS the request body canonically,
+ * so a length copied from an inbound request describes a different byte string.
+ * A wrong `content-length` corrupts the request SILENTLY — no local error is
+ * raised, the peer truncates or stalls. Blocking these is a defect fix, valid
+ * independently of any consumer.
+ */
+const FORBIDDEN_HEADER_NAMES: ReadonlySet<string> = new Set([
+  "x-api-key",
+  "cookie",
+  "set-cookie",
+  "forwarded",
+  "content-length",
+  "host",
+  "connection",
+  "transfer-encoding",
+  "te",
+  "upgrade",
+  "keep-alive",
+]);
+
+function isForbiddenHeader(name: string): boolean {
+  return (
+    FORBIDDEN_HEADER_NAMES.has(name) ||
+    name.startsWith("proxy-") ||
+    name.startsWith("x-forwarded-")
+  );
+}
+
+function safeDiagnosticName(name: string, accessToken: string): string {
+  return name.includes(accessToken) ? "[redacted]" : name;
+}
+
+interface ResolvedExtraHeaders {
+  readonly kept: readonly HeaderPair[];
+  readonly droppedNames: readonly string[];
+}
+
+/**
+ * Applies the caller policy to the supplied extra headers.
+ *
+ * `strict` is the original behaviour, unchanged: the first conflict throws, and
+ * nothing reaches the wire. `dropConflicting` discards the offending pair and
+ * records its lowercased name, so a consumer forwarding a heterogeneous host
+ * header map is not defeated by a single header this package owns.
+ *
+ * The relaxation covers OWNERSHIP conflicts only — a canonical name or a
+ * denylisted name. Two guarantees survive in both policies:
+ *
+ * - Header syntax is validated FIRST and never relaxed. A control character in
+ *   a name or a value raises `HEADER_INJECTION` whatever the policy says;
+ *   smuggling is never silently tolerated.
+ * - A caller that duplicates one of ITS OWN extra headers still gets
+ *   `DUPLICATE_HEADER`. That collision is a caller bug, not an ownership
+ *   conflict this package is entitled to resolve on the caller's behalf.
+ */
+function resolveExtraHeaders(
+  extraHeaders: readonly HeaderPair[],
+  accessToken: string,
+  policy: ClaudeCodeExtraHeaderPolicy,
+): ResolvedExtraHeaders {
+  const seenExtras = new Set<string>();
+  const kept: HeaderPair[] = [];
+  const droppedNames: string[] = [];
+  for (const [name, value] of extraHeaders) {
+    assertHeaderText(name, value);
+    const normalizedName = name.toLowerCase();
+    const safeName = safeDiagnosticName(normalizedName, accessToken);
+    const ownershipConflict = isForbiddenHeader(normalizedName)
+      ? "FORBIDDEN_HEADER"
+      : CANONICAL_NAMES.has(normalizedName)
+        ? "DUPLICATE_HEADER"
+        : undefined;
+    if (ownershipConflict !== undefined) {
+      if (policy === "strict") {
+        throw new ClaudeCodeWireError(ownershipConflict, {
+          headerName: safeName,
+        });
+      }
+      droppedNames.push(normalizedName);
+      continue;
+    }
+    if (seenExtras.has(normalizedName)) {
+      throw new ClaudeCodeWireError("DUPLICATE_HEADER", {
+        headerName: safeName,
+      });
+    }
+    seenExtras.add(normalizedName);
+    kept.push([name, value]);
+  }
+  return { kept, droppedNames };
+}
+
+function freezePair(name: string, value: string): HeaderPair {
+  const pair: HeaderPair = [name, value];
+  return Object.freeze(pair);
+}
+
+const AUTHORIZATION_NAME = foldHeaderName(HEADER_NAMES.authorization);
+
+function assertTokenIsolation(
+  pairs: readonly HeaderPair[],
+  accessToken: string,
+): void {
+  for (const [name, value] of pairs) {
+    if (
+      foldHeaderName(name) !== AUTHORIZATION_NAME &&
+      value.includes(accessToken)
+    ) {
+      throw new ClaudeCodeWireError("INVALID_INPUT");
+    }
+  }
+}
+
+/**
+ * Builds the pinned canonical logical header list together with the audit of
+ * whatever the extra-header policy discarded.
+ *
+ * Transport order is not guaranteed.
+ */
+export function buildOrderedHeaderPlan(input: unknown): OrderedHeaderPlan {
+  const appendExtraHeaders =
+    isRecord(input) &&
+    (Object.hasOwn(input, "app") ||
+      Object.hasOwn(input, "stainlessRetryCount") ||
+    Object.hasOwn(input, "stainlessTimeoutSeconds") ||
+      Object.hasOwn(input, "stainlessHelper") ||
+      Object.hasOwn(input, "claudeRemoteContainerId") ||
+      Object.hasOwn(input, "claudeRemoteSessionId") ||
+      Object.hasOwn(input, "clientApp") ||
+      Object.hasOwn(input, "anthropicAdditionalProtection") ||
+      Object.hasOwn(input, "requestClass") ||
+      Object.hasOwn(input, "promptId"));
+  const validated = parseInput(input);
+  const resolvedExtras = resolveExtraHeaders(
+    validated.extraHeaders,
+    validated.accessToken,
+    validated.extraHeaderPolicy,
+  );
+
+  const beta = validated.betaFeatures.join(",");
+  const values = [
+    // The SDK sets this first, on every request, before the user agent.
+    [HEADER_NAMES.accept, "application/json"],
+    [HEADER_NAMES.anthropicBeta, beta],
+    [HEADER_NAMES.browserAccess, "true"],
+    [HEADER_NAMES.anthropicVersion, validated.profile.anthropicVersion],
+    [HEADER_NAMES.authorization, `Bearer ${validated.accessToken}`],
+    [HEADER_NAMES.contentType, "application/json"],
+    [HEADER_NAMES.userAgent, validated.profile.userAgent],
+    [HEADER_NAMES.app, validated.app],
+    [HEADER_NAMES.sessionId, validated.runtime.sessionId],
+    [HEADER_NAMES.clientRequestId, validated.clientRequestId],
+    [HEADER_NAMES.arch, validated.runtime.arch],
+    [HEADER_NAMES.lang, "js"],
+    [HEADER_NAMES.os, validated.runtime.os],
+    [HEADER_NAMES.packageVersion, validated.profile.sdkVersion],
+    [HEADER_NAMES.retryCount, String(validated.stainlessRetryCount)],
+    [HEADER_NAMES.runtime, validated.runtime.runtime],
+    [HEADER_NAMES.runtimeVersion, validated.runtime.runtimeVersion],
+    [HEADER_NAMES.timeout, String(validated.stainlessTimeoutSeconds)],
+  ] as const;
+
+  const pairs: HeaderPair[] = [];
+  for (const [name, value] of values) {
+    assertHeaderText(name, value);
+    pairs.push(freezePair(name, value));
+  }
+  const dynamicValues = [
+    [HEADER_NAMES.stainlessHelper, validated.stainlessHelper],
+    [HEADER_NAMES.remoteContainerId, validated.claudeRemoteContainerId],
+    [HEADER_NAMES.remoteSessionId, validated.claudeRemoteSessionId],
+    [HEADER_NAMES.clientApp, validated.clientApp],
+    [HEADER_NAMES.requestClass, validated.requestClass],
+    [HEADER_NAMES.promptId, validated.promptId],
+    [
+      HEADER_NAMES.additionalProtection,
+      validated.anthropicAdditionalProtection,
+    ],
+  ] as const;
+  for (const [name, value] of dynamicValues) {
+    if (value === undefined) continue;
+    assertHeaderText(name, value);
+    pairs.push(freezePair(name, value));
+  }
+  if (appendExtraHeaders) {
+    for (const [name, value] of resolvedExtras.kept) {
+      pairs.push(freezePair(name, value));
+    }
+  }
+  assertTokenIsolation(pairs, validated.accessToken);
+  return Object.freeze({
+    headers: Object.freeze(pairs),
+    droppedExtraHeaderNames: Object.freeze([...resolvedExtras.droppedNames]),
+  });
+}
+
+/** Builds the pinned canonical logical header list. Transport order is not guaranteed. */
+export function buildOrderedHeaders(input: unknown): readonly HeaderPair[] {
+  return buildOrderedHeaderPlan(input).headers;
+}

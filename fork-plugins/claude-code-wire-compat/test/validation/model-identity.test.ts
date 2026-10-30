@@ -1,0 +1,283 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import { describe, expect, it } from "vitest";
+
+import { ClaudeCodeWireError } from "../../src/contracts.js";
+import {
+  modelFamilyOf,
+  normalizeModelId,
+  stripModelMarkers,
+} from "../../src/model-identity.js";
+import { resolveModel } from "../../src/models.js";
+import { describeEachProfile } from "../support/profile-matrix.js";
+
+describe("model identity", () => {
+  it.each([
+    ["claude-fable-5", "claude-fable-5"],
+    ["claude-mythos-5", "claude-mythos-5"],
+    ["claude-opus-4-8", "claude-opus-4-8"],
+    ["claude-opus-4-7", "claude-opus-4-7"],
+    ["claude-opus-4-6", "claude-opus-4-6"],
+    ["claude-opus-4-5", "claude-opus-4-5"],
+    ["claude-opus-4-1", "claude-opus-4-1"],
+    ["claude-opus-4", "claude-opus-4-0"],
+    // The 2.1.288 release adds this id, and the client tests it before the shorter
+    // one it contains; ordered the other way the shorter test swallows it.
+    ["claude-sonnet-5-5", "claude-sonnet-5-5"],
+    ["claude-sonnet-5", "claude-sonnet-5"],
+    ["claude-sonnet-4-6", "claude-sonnet-4-6"],
+    ["claude-sonnet-4-5", "claude-sonnet-4-5"],
+    ["claude-sonnet-4", "claude-sonnet-4-0"],
+    ["claude-haiku-4-5", "claude-haiku-4-5"],
+    ["claude-3-7-sonnet", "claude-3-7-sonnet"],
+    ["claude-3-5-sonnet", "claude-3-5-sonnet"],
+    ["claude-3-5-haiku", "claude-3-5-haiku"],
+    ["claude-3-opus", "claude-3-opus"],
+    ["claude-3-sonnet", "claude-3-sonnet"],
+    ["claude-3-haiku", "claude-3-haiku"],
+  ])("ports the upstream normalization branch for %s", (input, expected) => {
+    expect(normalizeModelId(input)).toBe(expected);
+  });
+
+  it("preserves upstream branch order", () => {
+    expect(normalizeModelId("claude-opus-4-5/claude-opus-4-8")).toBe(
+      "claude-opus-4-8",
+    );
+    // Upstream checks the sonnet-4 regex before the claude-haiku-4-5 branch.
+    expect(normalizeModelId("claude-sonnet-4-haiku-4-5")).toBe(
+      "claude-sonnet-4-0",
+    );
+  });
+
+  // Substring-prefix pairs: each shorter id is contained in the longer one, so
+  // a ladder written in the wrong order silently returns the containing id.
+  // These bare-id assertions catch an order regression, but they cannot catch
+  // the removal of a rung whose id no other rung matches: the fallback date
+  // strip returns a bare id unchanged, so the assertion still passes. The
+  // decorated cases in the case-insensitivity table below exist to catch that.
+  it("keeps each five-family id distinct from the id that contains it", () => {
+    expect(normalizeModelId("claude-fable-5-1")).toBe("claude-fable-5-1");
+    expect(normalizeModelId("claude-fable-5")).toBe("claude-fable-5");
+    expect(normalizeModelId("claude-mythos-5-1")).toBe("claude-mythos-5-1");
+    expect(normalizeModelId("claude-mythos-5")).toBe("claude-mythos-5");
+    expect(normalizeModelId("claude-opus-5-5")).toBe("claude-opus-5-5");
+    expect(normalizeModelId("claude-opus-5")).toBe("claude-opus-5");
+    expect(normalizeModelId("claude-sonnet-5")).toBe("claude-sonnet-5");
+  });
+
+  it.each([
+    ["CLAUDE-OPUS-4-6", "claude-opus-4-6"],
+    ["anthropic/claude-opus-4-6", "claude-opus-4-6"],
+    ["claude-opus-4-6-preview", "claude-opus-4-6"],
+    ["anthropic/claude-opus-5", "claude-opus-5"],
+    ["claude-opus-5-preview", "claude-opus-5"],
+    ["anthropic/claude-sonnet-5", "claude-sonnet-5"],
+    ["claude-opus-5-5-preview", "claude-opus-5-5"],
+    ["claude-fable-5-1-preview", "claude-fable-5-1"],
+    ["claude-mythos-5-1[1m]", "claude-mythos-5-1"],
+  ])("matches case-insensitively and without anchors", (input, expected) => {
+    expect(normalizeModelId(input)).toBe(expected);
+  });
+
+  it.each([
+    ["claude-opus-4-20250514", "claude-opus-4-0"],
+    ["claude-opus-4-2", "claude-opus-4-2"],
+    ["claude-sonnet-4-20250514", "claude-sonnet-4-0"],
+    ["claude-sonnet-4-2", "claude-sonnet-4-2"],
+  ])(
+    "preserves the upstream negative-lookahead behavior",
+    (input, expected) => {
+      expect(normalizeModelId(input)).toBe(expected);
+    },
+  );
+
+  it.each([
+    ["some-model-20250101", "some-model"],
+    ["some-model-2025010", "some-model-2025010"],
+  ])("strips only an eight-digit fallback date", (input, expected) => {
+    expect(normalizeModelId(input)).toBe(expected);
+  });
+
+  it("derives mythos and unknown families", () => {
+    expect(modelFamilyOf(normalizeModelId("claude-mythos-5"))).toBe("mythos");
+    expect(modelFamilyOf(normalizeModelId("gpt-4o"))).toBe("unknown");
+  });
+
+  /**
+   * Whether a profile catalogues `claude-mythos-5` in `supportedModels`.
+   *
+   * Product decision D-1 says capability resolution is independent of
+   * catalogue membership, so mythos resolves to a full capability set on every
+   * profile. Membership itself is per-profile: 2.1.195 ships mythos as a
+   * catalogue-less capability bearer, 2.1.233 catalogues it. Keyed by profile
+   * id so a new profile fails loudly here instead of silently inheriting the
+   * wrong literal.
+   */
+  const MYTHOS_CATALOGUED_BY_PROFILE: Readonly<Record<string, boolean>> =
+    Object.freeze({
+      "claude-code-2.1.195-sdk-0.94.0": false,
+      "claude-code-2.1.233-sdk-0.112.1": true,
+      "claude-code-2.1.280-sdk-0.112.1": true,
+    });
+
+  describeEachProfile("catalogue coupling", (entry) => {
+    it("guards product decision D-1: claude-mythos-5 bears capabilities independently of catalogue membership", () => {
+      expect(normalizeModelId("claude-mythos-5")).toBe("claude-mythos-5");
+      expect(() => resolveModel("claude-mythos-5")).not.toThrow();
+      expect(resolveModel("claude-mythos-5")).toEqual({
+        id: "claude-mythos-5",
+        wireId: "claude-mythos-5",
+        family: "mythos",
+        capabilities: {
+          thinking: true,
+          adaptiveThinking: true,
+          interleavedThinking: true,
+          effort: true,
+          maxEffort: true,
+          xhighEffort: true,
+          contextManagement: true,
+          temperature: false,
+          rejectsDisabledThinking: true,
+          midConvToolChange: false,
+          perTurnEffort: false,
+        },
+      });
+      const catalogued = MYTHOS_CATALOGUED_BY_PROFILE[entry.id];
+      expect(
+        typeof catalogued,
+        `no D-1 catalogue expectation registered for profile "${entry.id}"`,
+      ).toBe("boolean");
+      expect(
+        Object.hasOwn(entry.profile.supportedModels, "claude-mythos-5"),
+      ).toBe(catalogued);
+    });
+
+    it("keeps catalogue families aligned with normalized ids", () => {
+      for (const [id, definition] of Object.entries(
+        entry.profile.supportedModels,
+      )) {
+        expect(modelFamilyOf(id)).toBe(definition.family);
+        expect(normalizeModelId(id)).toBe(id);
+      }
+    });
+  });
+
+  it.each([
+    ["an empty string", () => resolveModel("")],
+    [
+      "a non-string value",
+      () => {
+        Reflect.apply(resolveModel, undefined, [42]);
+      },
+    ],
+  ])("rejects %s with INVALID_INPUT", (_description, resolve) => {
+    try {
+      resolve();
+      throw new Error("Expected model resolution to fail.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ClaudeCodeWireError);
+      if (error instanceof ClaudeCodeWireError) {
+        expect(error.code).toBe("INVALID_INPUT");
+      }
+    }
+  });
+
+  it.each(["claude-opus-4-6[1m]", "claude-opus-4-6[2M]"])(
+    "strips wire markers without disturbing normalization for %s",
+    (model) => {
+      expect(stripModelMarkers(model)).toBe("claude-opus-4-6");
+      expect(normalizeModelId(model)).toBe("claude-opus-4-6");
+      expect(resolveModel(model)).toMatchObject({
+        id: "claude-opus-4-6",
+        wireId: "claude-opus-4-6",
+      });
+    },
+  );
+
+  it("passes a fully unknown model through with default capabilities", () => {
+    expect(resolveModel("gpt-4o")).toEqual({
+      id: "gpt-4o",
+      wireId: "gpt-4o",
+      family: "unknown",
+      capabilities: {
+        thinking: true,
+        adaptiveThinking: true,
+        interleavedThinking: true,
+        effort: true,
+        maxEffort: true,
+        xhighEffort: true,
+        contextManagement: true,
+        temperature: false,
+        rejectsDisabledThinking: true,
+        midConvToolChange: false,
+        perTurnEffort: false,
+      },
+    });
+  });
+
+  it("resolves a dated sonnet form with claude-sonnet-4-5 capabilities", () => {
+    expect(resolveModel("claude-sonnet-4-5-20250929").capabilities).toEqual(
+      resolveModel("claude-sonnet-4-5").capabilities,
+    );
+  });
+
+  describe("dotted version ids", () => {
+    it.each([
+      ["claude-opus-4.8", "claude-opus-4-8"],
+      ["claude-opus-4.7", "claude-opus-4-7"],
+      ["claude-opus-4.6", "claude-opus-4-6"],
+      ["claude-opus-4.5", "claude-opus-4-5"],
+      ["claude-opus-4.1", "claude-opus-4-1"],
+      ["claude-sonnet-4.6", "claude-sonnet-4-6"],
+      ["claude-sonnet-4.5", "claude-sonnet-4-5"],
+      ["claude-haiku-4.5", "claude-haiku-4-5"],
+      ["claude-3.7-sonnet", "claude-3-7-sonnet"],
+      ["claude-3.5-sonnet", "claude-3-5-sonnet"],
+      ["claude-3.5-haiku", "claude-3-5-haiku"],
+    ])("normalizes %s to the hyphenated id", (input, expected) => {
+      expect(normalizeModelId(input)).toBe(expected);
+    });
+
+    it.each([
+      "claude-opus-4.7",
+      "claude-sonnet-4.5",
+      "claude-haiku-4.5",
+      "CLAUDE-OPUS-4.6",
+      "claude-opus-4.6[1m]",
+      "claude-sonnet-4.5-20250929",
+      "claude-opus-4.7-eap",
+      "claude-opus-4.7-EAP[foo]",
+    ])(
+      "classifies %s byte-identically to its dashed spelling",
+      (dottedModel) => {
+        const dashedModel = dottedModel.replace(/(\d)\.(\d)/gu, "$1-$2");
+
+        expect(normalizeModelId(dottedModel)).toBe(
+          normalizeModelId(dashedModel),
+        );
+        expect(modelFamilyOf(normalizeModelId(dottedModel))).toBe(
+          modelFamilyOf(normalizeModelId(dashedModel)),
+        );
+        expect(resolveModel(dottedModel).capabilities).toEqual(
+          resolveModel(dashedModel).capabilities,
+        );
+      },
+    );
+
+    it("keeps the eight-digit date strip after the dotted rewrite", () => {
+      expect(normalizeModelId("some-model-20250929")).toBe("some-model");
+      expect(normalizeModelId("claude-opus-4.7-20250929")).toBe(
+        "claude-opus-4-7",
+      );
+    });
+
+    it("leaves dots that are not version separators untouched", () => {
+      expect(normalizeModelId("gpt-4o")).toBe("gpt-4o");
+      expect(normalizeModelId("")).toBe("");
+      expect(normalizeModelId("vendor.example/model-x")).toBe(
+        "vendor.example/model-x",
+      );
+      expect(normalizeModelId("model-4.x")).toBe("model-4.x");
+    });
+  });
+});
