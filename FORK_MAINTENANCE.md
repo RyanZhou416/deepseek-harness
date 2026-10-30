@@ -1386,10 +1386,11 @@ route, `llm-deepseek`, or the subscription routes. Keep every other pi-ai
 Anthropic route's `cacheRetention` explicit; do not add a global payload or
 header hook, a `fetch` rewrite, or a mac-pool branch to `llm-pi-ai`. Keep both
 transformations on the one `onPayload` assignment; a second assignment on the
-same route would silently drop the other policy. The layout deliberately stops
-at the three authentic markers: do not reproduce CC's `markerIndices`
-fork/compaction planner, its previous-message planning, its static/dynamic
-prompt split, or infer one hour from a subscription.
+same route would silently drop the other policy. This layout is the current
+behavior; the accepted A parity design below replaces it, but is not implemented
+yet. Until A lands, keep the three markers, pinned order and current
+route-scoped behavior: do not reproduce CC's `markerIndices` fork/compaction
+planner or infer one hour from a subscription.
 
 **Focused verification.**
 `pnpm exec vitest run packages/llm/llm-cc-pool packages/llm/llm-pi-ai/tests/cache-policy.spec.ts`
@@ -1402,6 +1403,75 @@ marker and of the removed field, the load-time refusal of
 second Anthropic route's unchanged pi-ai field order and retention and absent
 identity block, DeepSeek with no marker or cache beta, the refusal of `cc3` on a
 non-Anthropic route, and the Loader composition.
+
+## CC parity A (accepted design, not implemented)
+
+**Status.** A is the accepted target for the cc-pool route: reproduce the
+genuine Claude Code 2.1.288 first-party desktop wire as closely as the
+deployment permits. It supersedes the earlier deliberate omissions: no scope,
+no cache-diagnosis, no request class, and helper calls keeping 1h. The full
+evidence table, target body/header, ownership split, required interface facts,
+implementation order and open items live in
+`mac-pool:development/CC-PARITY-A-DESIGN.md`; this section is the DSH-side
+summary and must stay consistent with it.
+
+**Evidence, not profile constants.** The 2.1.288 carve proves the predicates;
+the pinned `claude-code-wire-compat` profile only hardcodes a first-party
+default branch and is not evidence. In particular:
+
+- `scope: "global"` is written only on the static system run, and only when
+  `Tse()` holds (firstParty or anthropicAws, official base URL or explicit
+  first-party assumption), experimental betas are enabled, no HIPAA taint,
+  prompt caching is enabled, a dynamic boundary exists, and at least one
+  shared section produced it. `skipGlobalCacheForSystemPrompt` does not remove
+  an existing global marker; the MCP fact only changes the no-boundary
+  fallback. Google Cloud, Foundry, Bedrock, Vertex, Mantle and gateway never
+  get the scope.
+- `cache-diagnosis-2026-04-07` is armed per conversation by `zWo()` on
+  firstParty/Google-Cloud default base URLs with experimental betas and no
+  HIPAA; it is latched, and a 400 naming the beta clears it. It is not
+  unconditional, and anthropicAws does not receive it.
+- `ttl:"1h"` and `extended-cache-ttl-2025-04-11` follow the `loe(querySource)`
+  allowlist: `repl_main_thread*`, `sdk`, `auto_mode`, `memdir_relevance`.
+  `compact` and `generate_session_title` default to 5m, omit the ttl key and
+  the extended beta; the title helper and compact fallback send no markers.
+  Environment/settings/frontmatter overrides can force 1h.
+- `x-claude-code-request-class` has five 2.1.288 values: `main`,
+  `compaction`, `auxiliary`, `subagent`, `workflow`. Compaction is the main
+  client with `source:"compact"`; session-title is the main client with
+  `source:"generate_session_title"` and class `auxiliary` via `es`, not the
+  `side_query` client. `side_reply` does not exist in 2.1.288. The header is
+  emitted only when `$pn()` allows it.
+- HIPAA is an org-policy taint from `/api/claude_code/policy_limits`, cached
+  with a principal-bound stamp and latched in-process; it is not an env var or
+  settings key. `i$()` is exactly `anthropicAws` and `anthropicGoogleCloud`;
+  `Fm()` = `Nse()` and not experimental-off/HIPAA; `Tse()` adds the provider
+  and base-URL gates.
+
+**Target.** Body: billing (pool), unmarked identity, static shared run with
+`{type:"ephemeral",ttl:"1h",scope:"global"}`, dynamic run with
+`{type:"ephemeral",ttl:"1h"}`, last user block with `{type:"ephemeral",ttl:"1h"}`;
+no previous-message or tool marker; pinned top-level order with `metadata` in
+its canonical slot; `thinking.display:"updates"` plus its beta; no eager tool
+streaming. Header: pool-composed canonical beta membership/order including
+scope and cache-diagnosis; request class from the declared source; cache-diagnosis
+latch/rejection state; one-hour only on allowlisted main sources.
+
+**Inputs required before coding.** DSH must expose the request source/purpose,
+the system static/dynamic boundary and whether it exists, caching enabled, and
+the MCP tool fact. The pool must expose first-party mode, official base URL,
+HIPAA taint, `user:inference`/overage eligibility, and the cache-diagnosis
+latch/rejection state. Without these, A cannot be implemented honestly; the
+current code must not be changed to emit scope/cache-diagnosis/class on
+assumption.
+
+**Preservation during implementation.** The current three-marker/no-scope
+behavior remains the shipped behavior until the A change lands with its
+differential corpus and tests. A future merge must not revert the compaction
+overflow fix, the request-log default-off behavior, the one-time migration
+guard, or the pool error contract. When A lands, rewrite this preservation
+rule to the A target and update the referenced design document; do not leave
+both the old "no scope" rule and the A target as simultaneous requirements.
 
 ## CC subscription pool settings page (fork)
 
