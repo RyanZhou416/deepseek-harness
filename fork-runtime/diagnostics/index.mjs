@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { freemem } from 'node:os'
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { Session } from 'node:inspector'
 import { constants, monitorEventLoopDelay, PerformanceObserver } from 'node:perf_hooks'
 import { getHeapStatistics, writeHeapSnapshot } from 'node:v8'
@@ -14,8 +14,7 @@ import { MiB, snapshotBlocked, validateConfig } from './policy.mjs'
 /** Cordis plugin name. */
 export const name = 'fork-memory-recorder'
 
-function sourceIdentity() {
-  const root = fileURLToPath(new URL('../../', import.meta.url))
+function sourceIdentity(root) {
   const hashes = {}
   for (const name of ['run.cmd', 'fork-runtime/diagnostics/index.mjs', 'fork-runtime/diagnostics/lifetime.mjs', 'fork-runtime/diagnostics/policy.mjs', 'fork-runtime/diagnostics/cordis.patch.yml']) {
     hashes[name] = createHash('sha256').update(readFileSync(join(root, name))).digest('hex')
@@ -38,13 +37,33 @@ function sourceIdentity() {
       }
     }
   }
-  try {
-    const options = { cwd: root, encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }
-    return { hashes, installed, revision: execFileSync('git', ['rev-parse', 'HEAD'], options).trim(),
-      dirtyFiles: execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], options).trim().split('\n').filter(Boolean).length }
-  } catch (error) {
-    return { hashes, installed, gitError: error.code ?? error.name }
-  }
+  return { hashes, installed }
+}
+
+/**
+ * Resolve the checkout identity without blocking Host startup. The manifest
+ * records `git.state: 'pending'` until this settles.
+ * @param {string} root Repository root the recorder was launched from.
+ * @returns {Promise<object>} Resolved revision and dirty-file count, or why git is unavailable.
+ */
+function gitIdentity(root) {
+  const options = { cwd: root, encoding: 'utf8', timeout: 3000, windowsHide: true }
+  return new Promise(resolve => {
+    execFile('git', ['rev-parse', 'HEAD'], options, (error, revision) => {
+      if (error) {
+        resolve({ state: 'unavailable', error: error.code ?? error.name })
+        return
+      }
+      execFile('git', ['status', '--porcelain', '--untracked-files=no'], options, (statusError, status) => {
+        if (statusError) {
+          resolve({ state: 'unavailable', error: statusError.code ?? statusError.name })
+          return
+        }
+        resolve({ state: 'resolved', revision: revision.trim(),
+          dirtyFiles: status.trim().split('\n').filter(Boolean).length })
+      })
+    })
+  })
 }
 
 function captureBytes(root) {
@@ -68,6 +87,7 @@ export async function apply(ctx, options) {
   mkdirSync(root, { recursive: true })
   const dir = mkdtempSync(join(root, `run-${new Date().toISOString().replaceAll(':', '-')}-${process.pid}-`))
   const log = join(dir, 'events.ndjson')
+  const manifestPath = join(dir, 'manifest.json')
   let logBytes = 0
   let closed = false
   let ioFailed = false
@@ -109,6 +129,8 @@ export async function apply(ctx, options) {
   let lifetime
   let timer
   let sampling = false
+  let connected = false
+  let identityStarted = false
   let busy = false
   let profiles = 0
   let snapshots = 0
@@ -117,27 +139,51 @@ export async function apply(ctx, options) {
   let lastSkip = ''
   let retainedAfterGc = false
   const started = Date.now()
+  const repository = fileURLToPath(new URL('../../', import.meta.url))
+  const manifest = { format: 1, startedAt: new Date(started).toISOString(),
+    pid: process.pid, node: process.version, platform: process.platform, arch: process.arch,
+    config, source: { ...sourceIdentity(repository), git: { state: 'pending' } },
+    snapshotWarning: 'Full heap snapshots contain private runtime data and pause the Host.' }
+  function writeManifest() {
+    const pending = `${manifestPath}.pending`
+    writeFileSync(pending, JSON.stringify(manifest, null, 2) + '\n')
+    renameSync(pending, manifestPath)
+  }
+  async function publishGitIdentity() {
+    const git = await gitIdentity(repository)
+    if (closed || ioFailed) return
+    manifest.source.git = git
+    try {
+      writeManifest()
+    } catch (error) {
+      ioFailed = true
+      console.error(`[memory-recorder] manifest update disabled: ${error.code ?? error.name}`)
+      return
+    }
+    emit({ phase: 'source-identity', git })
+  }
   ctx.effect(() => () => {
     closed = true
     clearInterval(timer)
     observer.disconnect()
     delay.disable()
     lifetime?.dispose()
-    inspector.disconnect()
+    if (connected) inspector.disconnect()
     emit({ phase: 'stopped', memory: process.memoryUsage(), gc })
   })
   try {
-    writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ format: 1, startedAt: new Date(started).toISOString(),
-      pid: process.pid, node: process.version, platform: process.platform, arch: process.arch,
-      config, source: sourceIdentity(), snapshotWarning: 'Full heap snapshots contain private runtime data and pause the Host.' }, null, 2) + '\n')
+    writeManifest()
     observer.observe({ entryTypes: ['gc'] })
     delay.enable()
-    inspector.connect()
-    await post('HeapProfiler.enable')
-    if (closed) return
-    await post('HeapProfiler.startSampling', { samplingInterval: config.samplingIntervalBytes })
-    if (closed) return
-    sampling = true
+    if (config.sampling) {
+      inspector.connect()
+      connected = true
+      await post('HeapProfiler.enable')
+      if (closed) return
+      await post('HeapProfiler.startSampling', { samplingInterval: config.samplingIntervalBytes })
+      if (closed) return
+      sampling = true
+    }
   } catch (error) {
     if (!closed) emit({ phase: 'sampling-unavailable', error: error.code ?? error.name })
   }
@@ -150,27 +196,36 @@ export async function apply(ctx, options) {
     busy = true
     try {
       const memory = process.memoryUsage()
-      const wanted = Date.now() - started >= config.snapshotDelayMs && snapshots < 2 &&
-        (snapshots === 0 || memory.heapUsed - baselineHeap >= config.snapshotGrowthMiB * MiB || retainedAfterGc)
-      // No WeakRef is dereferenced in this job before V8 captures the graph.
-      if (wanted) {
-        const disk = statfsSync(dir)
-        const reason = snapshotBlocked(config, { ...memory, freeMemory: freemem(),
-          freeDisk: disk.bavail * disk.bsize, capturedBytes: captureBytes(root) })
-        if (reason) {
-          if (reason !== lastSkip) emit({ phase: 'snapshot-skipped', reason, memory })
-          lastSkip = reason
-        } else {
-          const stage = snapshots === 0 ? 'baseline' : 'growth'
-          const start = Date.now()
-          emit({ phase: 'snapshot-start', stage, memory })
-          // Failed captures consume the attempt too: repeated pauses cannot help a failing recorder.
-          snapshots++
-          const destination = join(dir, `${stage}.heapsnapshot`)
-          writeFileSync(destination, '', { flag: 'wx', mode: 0o600 })
-          const file = writeHeapSnapshot(destination)
-          baselineHeap = memory.heapUsed
-          emit({ phase: 'snapshot-saved', stage, file: file.slice(dir.length + 1), bytes: statSync(file).size, durationMs: Date.now() - start })
+      // Git identity costs two child processes; it runs after the first sample
+      // so it never competes with Host boot. The manifest stays `pending`
+      // until this settles, and a Host stopped earlier leaves it pending.
+      if (!identityStarted) {
+        identityStarted = true
+        void publishGitIdentity()
+      }
+      if (config.snapshots) {
+        const wanted = Date.now() - started >= config.snapshotDelayMs && snapshots < 2 &&
+          (snapshots === 0 || memory.heapUsed - baselineHeap >= config.snapshotGrowthMiB * MiB || retainedAfterGc)
+        // No WeakRef is dereferenced in this job before V8 captures the graph.
+        if (wanted) {
+          const disk = statfsSync(dir)
+          const reason = snapshotBlocked(config, { ...memory, freeMemory: freemem(),
+            freeDisk: disk.bavail * disk.bsize, capturedBytes: captureBytes(root) })
+          if (reason) {
+            if (reason !== lastSkip) emit({ phase: 'snapshot-skipped', reason, memory })
+            lastSkip = reason
+          } else {
+            const stage = snapshots === 0 ? 'baseline' : 'growth'
+            const start = Date.now()
+            emit({ phase: 'snapshot-start', stage, memory })
+            // Failed captures consume the attempt too: repeated pauses cannot help a failing recorder.
+            snapshots++
+            const destination = join(dir, `${stage}.heapsnapshot`)
+            writeFileSync(destination, '', { flag: 'wx', mode: 0o600 })
+            const file = writeHeapSnapshot(destination)
+            baselineHeap = memory.heapUsed
+            emit({ phase: 'snapshot-saved', stage, file: file.slice(dir.length + 1), bytes: statSync(file).size, durationMs: Date.now() - start })
+          }
         }
       }
       const summary = lifetime.sample()
@@ -197,7 +252,7 @@ export async function apply(ctx, options) {
       if (!closed) emit({ phase: 'recorder-error', error: error.code ?? error.name })
     } finally { busy = false }
   }
-  emit({ phase: 'started', sampling, memory: process.memoryUsage() })
+  emit({ phase: 'started', sampling, snapshots: config.snapshots, memory: process.memoryUsage() })
   console.error(`[memory-recorder] evidence: ${dir}`)
   timer = setInterval(() => { void tick() }, config.intervalMs)
   timer.unref()

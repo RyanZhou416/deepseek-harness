@@ -13,7 +13,7 @@ const config = {
   intervalMs: 5000, profileIntervalMs: 30000, samplingIntervalBytes: 65536,
   maxTracked: 20, maxDetails: 10, minDisposedAgeMs: 1000,
   logFileMiB: 1, logFiles: 2, profileFileMiB: 1, profileFiles: 2,
-  snapshots: true, snapshotDelayMs: 1000, snapshotGrowthMiB: 10,
+  sampling: true, snapshots: true, snapshotDelayMs: 1000, snapshotGrowthMiB: 10,
   snapshotMaxHeapMiB: 100, snapshotMaxHeapTotalMiB: 200,
   reserveMiB: 10, reserveHeapMultiplier: 2, captureBudgetMiB: 1000,
 }
@@ -52,6 +52,7 @@ class ContextFixture {
 }
 const ctx = new ContextFixture()
 let disconnected = 0
+let connected = 0
 let observerStopped = 0
 let delayStopped = 0
 let observedGc
@@ -74,7 +75,7 @@ if (!scenario.startsWith('inspector')) {
   v8.getHeapStatistics = () => ({ heap_size_limit: 4000 * MiB })
   process.memoryUsage = () => ({ ...memory })
   inspectorModule.Session = class {
-    connect() {}
+    connect() { connected += 1 }
     disconnect() { disconnected += 1 }
     post(method, params, callback) {
       postedMethods.push(method)
@@ -111,6 +112,7 @@ try {
     assert.equal(validateConfig(config), config)
     assert.throws(() => validateConfig({ ...config, maxDetails: 21 }), /maxDetails/u)
     assert.throws(() => validateConfig({ ...config, intervalMs: 100 }), /intervalMs/u)
+    assert.throws(() => validateConfig({ ...config, sampling: 1 }), /sampling/u)
     assert.throws(() => validateConfig({ ...config, snapshots: 1 }), /snapshots/u)
     const state = { ...memory, freeMemory, freeDisk, capturedBytes: 0 }
     assert.equal(snapshotBlocked(config, state), null)
@@ -123,7 +125,9 @@ try {
     assert.equal(snapshotBlocked(config, { ...state, capturedBytes: 930 * MiB, freeDisk: 70 * MiB, freeMemory: 70 * MiB }), null)
   } else {
     const { apply } = await import('../../fork-runtime/diagnostics/index.mjs')
-    const starting = apply(ctx, { ...config, snapshots: !scenario.startsWith('inspector') && !scenario.startsWith('dispose') })
+    const sampling = scenario !== 'sampling-off'
+    const starting = apply(ctx, { ...config, sampling,
+      snapshots: sampling && !scenario.startsWith('inspector') && !scenario.startsWith('dispose') })
     if (scenario === 'startup-dispose') {
       assert.equal(typeof pendingEnable, 'function')
       ctx.dispose()
@@ -136,8 +140,12 @@ try {
     assert.equal(unrefed, scenario === 'startup-dispose' ? 0 : 1)
     const manifest = JSON.parse(fs.readFileSync(join(runDir, 'manifest.json'), 'utf8'))
     assert.equal(manifest.config.maxTracked, 20)
+    assert.equal(manifest.config.sampling, sampling)
     assert.equal(Object.keys(manifest.source.hashes).length, 5)
-    if (scenario !== 'startup-dispose') assert.equal(records().find(record => record.phase === 'started').sampling, true)
+    assert.equal(manifest.source.git.state, 'pending')
+    if (scenario !== 'startup-dispose' && scenario !== 'sampling-off') {
+      assert.equal(records().find(record => record.phase === 'started').sampling, true)
+    }
     if (scenario === 'startup-dispose') {
       assert.deepEqual(postedMethods, ['HeapProfiler.enable'])
       assert.equal(records().at(-1).phase, 'stopped')
@@ -212,6 +220,18 @@ try {
       await tick()
       assert.equal(snapshotCalls.length, 2)
       assert.equal(session.seq, 123)
+    } else if (scenario === 'sampling-off') {
+      assert.equal(connected, 0)
+      assert.deepEqual(postedMethods, [])
+      const started = records().find(record => record.phase === 'started')
+      assert.equal(started.sampling, false)
+      assert.equal(started.snapshots, false)
+      memory.heapUsed = 80 * MiB
+      await tick()
+      await tick()
+      assert.equal(snapshotCalls.length, 0)
+      assert.equal(records().some(record => record.phase === 'snapshot-skipped'), false)
+      assert.ok(records().filter(record => record.phase === 'sample').length >= 2)
     } else if (scenario === 'dispose' || scenario === 'dispose-error') {
       holdProfile = true
       await tick()
@@ -234,7 +254,7 @@ try {
     assert.equal([...ctx.listeners.values()].every(listeners => listeners.size === 0), true)
     assert.equal(cleared, 1)
     if (!scenario.startsWith('inspector')) {
-      assert.equal(disconnected, 1)
+      assert.equal(disconnected, scenario === 'sampling-off' ? 0 : 1)
       assert.equal(observerStopped, 1)
       assert.equal(delayStopped, 1)
     }

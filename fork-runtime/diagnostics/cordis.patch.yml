@@ -3,6 +3,11 @@
       name: './index.mjs'
       config:
         intervalMs: 30000
+        # Continuous allocation sampling and automatic heap snapshots slow the
+        # Host. Both stay off unless the launcher environment opts in with
+        # DSH_MEMORY_RECORDER_SAMPLING=1 or DSH_MEMORY_RECORDER_SNAPSHOTS=1.
+        sampling: !!js process.env.DSH_MEMORY_RECORDER_SAMPLING === '1'
+        snapshots: !!js process.env.DSH_MEMORY_RECORDER_SNAPSHOTS === '1'
         profileIntervalMs: 120000
         samplingIntervalBytes: 1048576
         maxTracked: 10000
@@ -12,7 +17,6 @@
         logFiles: 4
         profileFileMiB: 32
         profileFiles: 4
-        snapshots: true
         snapshotDelayMs: 30000
         snapshotGrowthMiB: 768
         snapshotMaxHeapMiB: 1536

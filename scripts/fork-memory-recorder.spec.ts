@@ -5,7 +5,7 @@ import { expect, it } from 'vitest'
 
 const fixture = fileURLToPath(new URL('./fixtures/fork-memory-recorder.mjs', import.meta.url))
 
-it.each(['policy', 'inspector', 'inspector-gc', 'guards', 'retention-trigger', 'dispose', 'dispose-error', 'startup-dispose'])(
+it.each(['policy', 'inspector', 'inspector-gc', 'guards', 'retention-trigger', 'dispose', 'dispose-error', 'startup-dispose', 'sampling-off'])(
   'records bounded private evidence and releases its observers: %s',
   (scenario) => {
     const result = spawnSync(process.execPath, ['--expose-gc', fixture, scenario], {

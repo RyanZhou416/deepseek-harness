@@ -20,6 +20,7 @@ export function validateConfig(config) {
       throw new Error(`Memory recorder ${key} must be an integer >= ${min}`)
     }
   }
+  if (typeof config.sampling !== 'boolean') throw new Error('Memory recorder sampling must be boolean')
   if (typeof config.snapshots !== 'boolean') throw new Error('Memory recorder snapshots must be boolean')
   if (config.maxDetails > config.maxTracked) throw new Error('Memory recorder maxDetails exceeds maxTracked')
   return config
