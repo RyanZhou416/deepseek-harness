@@ -872,14 +872,15 @@ export async function stagedWorkspaceManifest(
 }
 
 /**
- * Link a workspace package's runtime dependencies into its staging directory.
+ * Link a workspace package's runtime dependencies and peers into its staging directory.
  *
  * The staged manifest drops `dependencies` so the profile install does not try
  * to resolve workspace ranges from a registry. The package's `lib/` still
- * imports those packages, so each runtime dependency must stay resolvable from
- * the staged directory. The repository install only exposes hoisted packages;
- * a package that is linked into one workspace package (for example the vendored
- * schemastery) is not necessarily at the repository root.
+ * imports those packages (and its peer services), so each runtime dependency and
+ * peer must stay resolvable from the staged directory. The repository install
+ * only exposes hoisted packages; a package that is linked into one workspace
+ * package (for example the vendored schemastery) is not necessarily at the
+ * repository root.
  * @param plugin - workspace plugin definition.
  * @param source - source package manifest.
  * @param staging - staging directory being populated.
@@ -892,6 +893,7 @@ async function linkWorkspaceRuntimeDependencies(
   const names = new Set([
     ...Object.keys(source.dependencies ?? {}),
     ...Object.keys(source.optionalDependencies ?? {}),
+    ...Object.keys(source.peerDependencies ?? {}),
   ])
   for (const name of names) {
     const segments = name.split('/')

@@ -670,6 +670,9 @@ describe('workspace plugin staging', () => {
       await mkdir(join(source, 'node_modules', '@deepseek-ai', 'schemastery'), { recursive: true })
       await writeFile(join(source, 'node_modules', '@deepseek-ai', 'schemastery', 'package.json'),
         '{"name":"@deepseek-ai/schemastery","version":"3.18.5"}\n')
+      await mkdir(join(source, 'node_modules', '@deepseek-ai', 'dsh-llm'), { recursive: true })
+      await writeFile(join(source, 'node_modules', '@deepseek-ai', 'dsh-llm', 'package.json'),
+        '{"name":"@deepseek-ai/dsh-llm","version":"0.2.1-rc.2"}\n')
       await writeFile(join(source, 'package.json'), `${JSON.stringify({
         name: '@deepseek-ai/dsh-llm-cc-pool',
         version: '0.2.1-rc.2',
@@ -688,6 +691,10 @@ describe('workspace plugin staging', () => {
         join(staging, 'node_modules', '@deepseek-ai', 'schemastery', 'package.json'), 'utf8',
       )) as PluginManifest
       expect(stagedDependency.name).toBe('@deepseek-ai/schemastery')
+      const stagedPeer = JSON.parse(await readFile(
+        join(staging, 'node_modules', '@deepseek-ai', 'dsh-llm', 'package.json'), 'utf8',
+      )) as PluginManifest
+      expect(stagedPeer.name).toBe('@deepseek-ai/dsh-llm')
       const staged = JSON.parse(await readFile(join(staging, 'package.json'), 'utf8')) as PluginManifest
       expect(staged.peerDependencies).toEqual({ '@deepseek-ai/dsh-llm': '0.2.1-rc.2' })
     } finally {
