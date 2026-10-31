@@ -160,11 +160,21 @@
       provider: deepseek-official
       model: deepseek-flash
       reasoningEffort: high
+# 侧栏不读取的目录提示键；与 fork-runtime/web/perf.patch.yml 保持一致，
+# run.cmd 启动时以该 perf 覆盖层为准。
 - id: session-controller
   config:
     listProjectionExcludeKeys:
       - contextHeaders
       - turnOutline
+      - sessionStats
+      - todos
+      - userQuestions
+      - plan
+      - goal
+      - permissions
+      - modelSelection
+      - imageLimits
 - id: llm-pi-ai
   name: "@deepseek-ai/dsh-llm-pi-ai"
   config:

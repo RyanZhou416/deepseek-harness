@@ -45,11 +45,31 @@ describe('Windows fork launchers', () => {
   })
 
   it('does not route Windows launchers through Corepack', () => {
-    for (const launcher of [buildLauncher, cleanLauncher, runLauncher]) {
+    for (const launcher of [buildLauncher, cleanLauncher]) {
       const source = readFileSync(launcher, 'utf8')
       expect(source).not.toContain('corepack enable')
       expect(source).toContain('scripts\\fork-windows-pnpm.cmd" --version')
     }
+    // The run launcher only reaches pnpm through the source fallback.
+    expect(readFileSync(runLauncher, 'utf8')).not.toContain('corepack')
+  })
+
+  it('launches the built CLI directly with the fork patches', () => {
+    const source = readFileSync(runLauncher, 'utf8')
+    expect(source).toContain('set "DSH_BUILT_ENTRY=%~dp0apps\\cli\\lib\\bin.js"')
+    expect(source).toContain('node --expose-internals "%DSH_BUILT_ENTRY%" web')
+    expect(source).toContain('--patch "%~dp0fork-runtime\\diagnostics\\cordis.patch.yml"')
+    expect(source).toContain('--patch "%~dp0fork-runtime\\web\\perf.patch.yml"')
+    expect(source).toContain('--max-old-space-size=32768')
+  })
+
+  it('keeps the source launch as a fallback with a build hint', () => {
+    const source = readFileSync(runLauncher, 'utf8')
+    const fallback = source.indexOf(':source_launch')
+    expect(fallback).toBeGreaterThan(-1)
+    const section = source.slice(fallback)
+    expect(section).toContain('scripts\\fork-windows-pnpm.cmd" exec node --expose-internals --import tsx/esm "%~dp0apps\\cli\\src\\bin.ts" web')
+    expect(section).toContain('echo Run build.cmd to build the project')
   })
 
   it('builds the fork plugins from source after the ordinary build', () => {
@@ -99,7 +119,13 @@ describe('Windows fork launchers', () => {
     return { root, bin, log, entry }
   }
 
-  function launch(launcher: string, root: string, bin: string, log: string) {
+  function launch(
+    launcher: string,
+    root: string,
+    bin: string,
+    log: string,
+    extraEnvironment: Record<string, string> = {},
+  ) {
     const command = process.env.ComSpec
     if (command === undefined || !existsSync(command)) throw new Error('ComSpec does not name cmd.exe')
     return spawnSync(command, ['/d', '/c', launcher], {
@@ -114,8 +140,23 @@ describe('Windows fork launchers', () => {
         COREPACK_HOME: join(root, 'broken-corepack-cache'),
         DSH_HOME: join(root, 'dsh-home'),
         DSH_TEST_LOG: log,
+        ...extraEnvironment,
       },
     })
+  }
+
+  /** A stand-in for `apps/cli/lib/bin.js` that records the launcher arguments and heap limit. */
+  function builtEntry(root: string): string {
+    const script = join(root, 'built-entry.mjs')
+    writeFileSync(script, [
+      "import { appendFileSync } from 'node:fs'",
+      "import { getHeapStatistics } from 'node:v8'",
+      'appendFileSync(process.env.DSH_TEST_LOG, JSON.stringify({',
+      '  args: process.argv.slice(2), heapLimit: getHeapStatistics().heap_size_limit,',
+      '}) + "\\n")',
+      '',
+    ].join('\n'))
+    return script
   }
 
   it.skipIf(process.platform !== 'win32')('repairs a broken private pnpm install without reading the Corepack cache', () => {
@@ -131,37 +172,28 @@ describe('Windows fork launchers', () => {
     expect(calls).toHaveLength(2)
   })
 
-  it.skipIf(process.platform !== 'win32')('reuses a verified pnpm and drives build and run entry points', () => {
+  it.skipIf(process.platform !== 'win32')('reuses a verified pnpm and drives build and the source fallback', () => {
     const { root, bin, log, entry } = fixture(false)
     mkdirSync(join(root, `dsh-pnpm-${pnpmVersion}`, 'node_modules', 'pnpm', 'bin'), { recursive: true })
     writeFileSync(entry, readFileSync(join(root, 'pnpm-stub.mjs')))
 
     const build = launch(buildLauncher, root, bin, log)
-    const run = launch(runLauncher, root, bin, log)
+    const run = launch(runLauncher, root, bin, log, { DSH_CLI_ENTRY: join(root, 'missing-built-entry.js') })
 
     expect(build.status, build.stderr || build.stdout).toBe(0)
     expect(run.status, run.stderr || run.stdout).toBe(0)
+    expect(run.stdout).toContain('Run build.cmd to build the project')
     expect(readFileSync(log, 'utf8').trim().split(/\r?\n/)).toEqual([
       'pnpm install --child-concurrency=4 --optimistic-repeat-install=false',
       'pnpm run build',
       `pnpm exec tsx ${join(repositoryRoot, 'scripts', 'fork-plugins-build.ts')}`,
-      `pnpm exec node --expose-internals --import tsx/esm ${join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts')} web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')}`,
+      `pnpm exec node --expose-internals --import tsx/esm ${join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts')} web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')} --patch ${join(repositoryRoot, 'fork-runtime', 'web', 'perf.patch.yml')}`,
     ])
   })
 
   it.skipIf(process.platform !== 'win32').each([false, true])(
-    'starts with a 32 GiB heap and an optional next-launch memory overlay (overlay=%s)', (withOverlay) => {
-      const { root, bin, log, entry } = fixture(false)
-      mkdirSync(join(root, `dsh-pnpm-${pnpmVersion}`, 'node_modules', 'pnpm', 'bin'), { recursive: true })
-      writeFileSync(entry, [
-        "import { appendFileSync } from 'node:fs'",
-        "import { getHeapStatistics } from 'node:v8'",
-        `if (process.argv[2] === '--version') console.log(${JSON.stringify(pnpmVersion)})`,
-        'else appendFileSync(process.env.DSH_TEST_LOG, JSON.stringify({',
-        '  args: process.argv.slice(2), heapLimit: getHeapStatistics().heap_size_limit,',
-        '}) + "\\n")',
-        '',
-      ].join('\n'))
+    'starts the built CLI with a 32 GiB heap and an optional next-launch memory overlay (overlay=%s)', (withOverlay) => {
+      const { root, bin, log } = fixture(false)
       const profile = join(root, 'dsh-home', 'profiles', 'web')
       const overlay = join(profile, 'memory-limits.patch.yml')
       if (withOverlay) {
@@ -169,15 +201,15 @@ describe('Windows fork launchers', () => {
         writeFileSync(overlay, '- id: local-memory-watchdog\n  config:\n    rssRestartMiB: 40960\n')
       }
 
-      const result = launch(runLauncher, root, bin, log)
+      const result = launch(runLauncher, root, bin, log, { DSH_CLI_ENTRY: builtEntry(root) })
 
       expect(result.signal, result.stderr || result.stdout).toBeNull()
       expect(result.status, result.stderr || result.stdout).toBe(0)
       const captured = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; heapLimit: number }
       expect(captured.args).toEqual([
-        'exec', 'node', '--expose-internals', '--import', 'tsx/esm',
-        join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts'), 'web', '--patch', join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml'),
+        'web', '--patch', join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml'),
         ...withOverlay ? ['--patch', overlay] : [],
+        '--patch', join(repositoryRoot, 'fork-runtime', 'web', 'perf.patch.yml'),
       ])
       expect(captured.heapLimit).toBeGreaterThanOrEqual(32 * 1024 ** 3)
       expect(captured.heapLimit).toBeLessThan(33 * 1024 ** 3)

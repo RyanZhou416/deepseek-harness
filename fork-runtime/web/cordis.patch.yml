@@ -7,8 +7,18 @@
     maxNodes: 400
     maxArchiveNodes: 100
     maxFileOps: 100
+# Catalog-hint keys the sidebar never reads; keep this list in step with
+# fork-runtime/web/perf.patch.yml, which owns the value for run.cmd launches.
 - id: session-controller
   config:
     listProjectionExcludeKeys:
       - contextHeaders
       - turnOutline
+      - sessionStats
+      - todos
+      - userQuestions
+      - plan
+      - goal
+      - permissions
+      - modelSelection
+      - imageLimits

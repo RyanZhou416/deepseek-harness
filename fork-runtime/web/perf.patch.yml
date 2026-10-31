@@ -1,0 +1,58 @@
+# Fork Web startup-cost overlay. run.cmd applies it last, after the profile's
+# own patch, the diagnostics overlay and any memory-limit overlay, so a row
+# restated here wins for that launch. `pnpm run dev:web` and other `dsh web`
+# launches do not read this file: the development rebuild watcher keeps its
+# default bundle polling.
+#
+# A patch target replaces the row's whole `config`. Every deployment-specific
+# value a row needs must therefore be restated here; see FORK_MAINTENANCE.md.
+
+# Production builds never rewrite client bundles, so the 500 ms stat poll over
+# every graph row's bundle only costs file-system work. An hour keeps a manual
+# rebuild of a long-running Host detectable without polling a few dozen files
+# twenty times a second; graph changes still arrive over /plugins/events.
+- id: client-hmr
+  config:
+    pollIntervalMs: 3600000
+
+# Catalog hints for unopened Sessions. Each key below is read only by a surface
+# of the opened Session (chat, composer, context meter), which receives complete
+# control/follow projections and on-demand `session.projections` reads. Keys the
+# list reads stay in the hints and are not excluded: `title`,
+# `sessionListMetadata`, `agentPreset`, `subagent`, `subagentCatalog`,
+# `subagentTiming`, and `tokenUsage` (subagent header rows of unopened children),
+# plus `contextPressure` and `contextBreakdown`, which the dsh-context agent
+# graph reads from catalog rows (fork-plugins/dsh-context/src/client/agentTree.ts).
+#
+# `historyPageMaxBytes` bounds each history page (Session open, live opening,
+# and Load earlier) to about 2 MiB of serialized records, trimmed at message
+# boundaries with the newest message always kept. Unbounded first frames of
+# 40-80 MB took 10-17 s to parse and render in the browser and block remote
+# use on slower links.
+- id: session-controller
+  config:
+    historyPageMaxBytes: 2097152
+    listProjectionExcludeKeys:
+      - contextHeaders
+      - turnOutline
+      - sessionStats
+      - todos
+      - userQuestions
+      - plan
+      - goal
+      - permissions
+      - modelSelection
+      - imageLimits
+
+# Downlink WebSocket compression for large stream frames (history pages, big
+# tool results) so remote browsers over tunnels or reverse proxies receive a
+# fraction of the bytes. Frames under 1 MiB stay plain; level 1, four
+# concurrent deflate contexts and no context takeover bound CPU and zlib memory.
+- id: typert-gateway
+  config:
+    streamCompression:
+      enabled: true
+      threshold: 1048576
+      level: 1
+      concurrencyLimit: 4
+      serverNoContextTakeover: true
