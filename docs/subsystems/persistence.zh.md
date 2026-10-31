@@ -293,7 +293,7 @@ declare class SessionPreparation implements Disposable {
 
 ## 轻量源修订号
 
-派生读取模型的消费方会在加载完整事件日志之前比较一个低开销的不透明修订号。该修订号是来自 `stat`/`list` 的逐后端实例变更令牌：修订号相等可视为日志未变；不相等则不作任何承诺，且写所有权的变动绝不会改变修订号。session-query 以它为键管理冷读缓存；该令牌在 open、read 或 resume 中不起任何作用。
+派生读取模型的消费方会在加载完整事件日志之前比较一个低开销的不透明修订号。该修订号是来自 `stat`/`list` 的逐后端实例变更令牌：修订号相等可视为日志未变；不相等则不作任何承诺，且写所有权的变动绝不会改变修订号。session-query 以它为键管理冷读缓存；该令牌在 open、read 或 resume 中不起任何作用。只建立头部索引的调用方不比较任何修订号，因此使用 `listHeaders`：其选中集合与 `list` 一致但不返回修订号，因为 JSONL 后端会把相关产物的身份折进历史修订号，而头部索引不该承担这项全库工作。
 
 ```ts type-equiv
 /**
@@ -406,10 +406,31 @@ abstract stat(id: SessionId, options?: SessionPersistenceStatOptions): Promise<S
 
 /**
  * List every stored session visible to this process, in no promised order.
+ *
+ * A snapshot revision may require work proportional to the stored corpus:
+ * the shipped JSONL backend folds the identities of a historical session's
+ * related artifacts into its revision, so its logical events invalidate
+ * when any of them changes. A caller that only reads headers therefore
+ * uses {@link listHeaders} instead.
  * @param options - optional cancellation.
  * @returns one snapshot per stored session.
  */
 abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>
+
+/**
+ * List every stored session visible to this process as header observations.
+ *
+ * Selection matches {@link list}: the same exclusions, the same
+ * created-but-unmaterialized visibility, and no promised order. No revision
+ * is returned, so a backend may skip revision work — including a
+ * corpus-wide scan — that only a compared change token justifies.
+ *
+ * The default delegates to {@link list} and drops revisions; a backend
+ * whose revisions are cheap keeps this implementation.
+ * @param options - optional cancellation and listing exclusions.
+ * @returns one header observation per stored session.
+ */
+async listHeaders(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceHeader[]>
 
 /**
  * Read one bounded history window from a stored generation.

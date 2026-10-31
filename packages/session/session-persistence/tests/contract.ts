@@ -610,5 +610,35 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
         await dispose()
       }
     })
+
+    it('listHeaders reports the same selection as list without revisions', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        const stored = meta('headers', '/work')
+        const writer = await persistence.create(stored)
+        await writer.append(oneTurnLog())
+        const pending = await persistence.create(meta('headers-pending'))
+
+        const snapshots = await persistence.list()
+        const headers = await persistence.listHeaders()
+
+        expect(headers.map(row => row.header.id).sort()).toEqual(snapshots.map(row => row.header.id).sort())
+        for (const row of headers) {
+          expect(Object.hasOwn(row, 'revision')).toBe(false)
+          const snapshot = snapshots.find(item => item.header.id === row.header.id)
+          expect(row.header).toEqual(snapshot?.header)
+          expect(row.formatStatus).toBe(snapshot?.formatStatus)
+        }
+
+        const excluded = await persistence.listHeaders({ excludeSessionIds: new Set([stored.id]) })
+        expect(excluded.map(row => row.header.id)).not.toContain(stored.id)
+        expect(excluded.map(row => row.header.id)).toContain(pending.header.id)
+
+        await pending.close()
+        await writer.close()
+      } finally {
+        await dispose()
+      }
+    })
   })
 }

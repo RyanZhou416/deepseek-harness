@@ -758,6 +758,7 @@ describe('session.list projections column', () => {
       expect(ctx.sessions.get(id)).toBeUndefined()
       ctx.provide('sessionPersistence', {
         list: async () => [{ header, revision: 'test:cold-host-state:1' }],
+        listHeaders: async () => [{ header }],
       } as never)
 
       const response = await gateway.list(request({}))

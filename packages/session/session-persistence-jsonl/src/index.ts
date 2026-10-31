@@ -29,11 +29,11 @@ import {
   type SessionHandleReadResult,
   type SessionLocation, type SessionPersistenceCreateOptions,
   type SessionPersistenceListOptions, type SessionPersistenceOpenOptions,
-  type SessionPersistenceSnapshot, type SessionPersistenceStatOptions,
+  type SessionPersistenceHeader, type SessionPersistenceSnapshot, type SessionPersistenceStatOptions,
   type SessionPersistenceRevision as PersistenceRevision,
   type SessionWindow, type SessionWindowRequest,
 } from '@deepseek-ai/dsh-session-persistence'
-import { JsonlBackendTracker, JsonlSessionHandle, type StorageHandleState } from './storage.ts'
+import { JsonlBackendTracker, JsonlSessionHandle, type PendingSession, type StorageHandleState } from './storage.ts'
 import { SessionCatalog, type SessionCatalogEntry } from './catalog.ts'
 import { SessionWriteLease } from './lease.ts'
 import { SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
@@ -624,29 +624,22 @@ class JsonlSessionPersistence extends SessionPersistence {
   /**
    * List every stored session visible to this process: materialized artifacts
    * plus this process's created-but-unmaterialized sessions.
+   *
+   * A historical artifact's logical events also depend on the subagent
+   * artifacts under the same root, so its revision folds in one corpus
+   * fingerprint. Callers that index headers use `listHeaders` and avoid that
+   * scan.
    * @param options - optional cancellation.
    * @returns one snapshot per session, in no promised order.
    */
   async list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]> {
-    const excluded = options?.excludeSessionIds
-    const excludeSubagentSessions = options?.excludeSubagentSessions === true
-    const signal = options?.signal
-    await this.catalog.load()
-    const skip = new Set<string>()
-    if (excluded !== undefined) for (const id of excluded) skip.add(encodeSegment(id))
-    if (excludeSubagentSessions) for (const segment of this.catalog.subagentSegments()) skip.add(segment)
-    const skipSegments = skip.size === 0 ? undefined : skip
+    const { excluded, excludeSubagentSessions, artifacts, pending } = await this.selectListed(options)
+    const corpusRevision = artifacts.some(artifact => artifact.sourceVersion < SESSION_FORMAT_VERSION)
+      ? await this.historicalCorpusRevision(options?.signal) : undefined
     const snapshots: SessionPersistenceSnapshot[] = []
     const listed = new Set<SessionId>()
-    // Snapshot pending entries BEFORE scanning storage: a session whose first
-    // append lands mid-scan is then still in this snapshot (its artifact may
-    // predate the scan), so create-to-list visibility never has a hole.
-    const pending = [...this.tracker.pendingEntries()]
-    const artifacts = await this.listArtifacts(signal, skipSegments, excludeSubagentSessions, scanKeyOf(options))
-    const corpusRevision = artifacts.some(artifact => artifact.sourceVersion < SESSION_FORMAT_VERSION)
-      ? await this.historicalCorpusRevision(signal) : undefined
     for (const artifact of artifacts) {
-      signal?.throwIfAborted()
+      options?.signal?.throwIfAborted()
       if (excludeSubagentSessions && artifact.header.origin === 'subagent') continue
       listed.add(artifact.header.id)
       snapshots.push({
@@ -665,8 +658,67 @@ class JsonlSessionPersistence extends SessionPersistence {
       if (excludeSubagentSessions && entry.header.origin === 'subagent') continue
       if (!listed.has(id)) snapshots.push({ header: entry.header, revision: entry.revision })
     }
-    signal?.throwIfAborted()
+    options?.signal?.throwIfAborted()
     return snapshots
+  }
+
+  /**
+   * List every stored session visible to this process as header observations.
+   *
+   * A historical artifact's logical content includes its subagent children's
+   * catalog facts, so `list` folds a corpus fingerprint into its revision.
+   * A caller that compares no revision — the Workspace startup header index,
+   * the Session Query corpus — must not pay that scan for headers alone, so
+   * this listing skips the fingerprint and returns no revision. Selection and
+   * created-but-unmaterialized visibility match `list`.
+   * @param options - optional cancellation and listing exclusions.
+   * @returns one header observation per session, in no promised order.
+   */
+  override async listHeaders(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceHeader[]> {
+    const { excluded, excludeSubagentSessions, artifacts, pending } = await this.selectListed(options)
+    const headers: SessionPersistenceHeader[] = []
+    const listed = new Set<SessionId>()
+    for (const artifact of artifacts) {
+      options?.signal?.throwIfAborted()
+      if (excludeSubagentSessions && artifact.header.origin === 'subagent') continue
+      listed.add(artifact.header.id)
+      headers.push({ header: artifact.header, formatStatus: artifact.formatStatus })
+    }
+    for (const [id, entry] of pending) {
+      if (excluded?.has(id) === true) continue
+      if (excludeSubagentSessions && entry.header.origin === 'subagent') continue
+      if (!listed.has(id)) headers.push({ header: entry.header })
+    }
+    options?.signal?.throwIfAborted()
+    return headers
+  }
+
+  /**
+   * Resolve the artifacts and pending sessions one listing returns.
+   * @param options - the listing request, when the caller passed one.
+   * @returns the resolved exclusions, selected artifacts, and pending entries
+   *   observed before the scan, so a session created mid-scan stays listed.
+   */
+  private async selectListed(options?: SessionPersistenceListOptions): Promise<{
+    readonly excluded: ReadonlySet<SessionId> | undefined
+    readonly excludeSubagentSessions: boolean
+    readonly artifacts: readonly ScannedArtifact[]
+    readonly pending: readonly (readonly [SessionId, PendingSession])[]
+  }> {
+    const excluded = options?.excludeSessionIds
+    const excludeSubagentSessions = options?.excludeSubagentSessions === true
+    const signal = options?.signal
+    await this.catalog.load()
+    const skip = new Set<string>()
+    if (excluded !== undefined) for (const id of excluded) skip.add(encodeSegment(id))
+    if (excludeSubagentSessions) for (const segment of this.catalog.subagentSegments()) skip.add(segment)
+    const skipSegments = skip.size === 0 ? undefined : skip
+    // Snapshot pending entries BEFORE scanning storage: a session whose first
+    // append lands mid-scan is then still in this snapshot (its artifact may
+    // predate the scan), so create-to-list visibility never has a hole.
+    const pending = [...this.tracker.pendingEntries()]
+    const artifacts = await this.listArtifacts(signal, skipSegments, excludeSubagentSessions, scanKeyOf(options))
+    return { excluded, excludeSubagentSessions, artifacts, pending }
   }
 
   /**

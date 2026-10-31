@@ -411,6 +411,26 @@ describe('archived Session filtering', () => {
     expect(all.map(item => item.sessionId).sort()).toEqual(['archived-one', 'keep-one'])
     expect(h.listSessions).toHaveBeenLastCalledWith(undefined, { excludeSubagentSessions: true })
   })
+
+  it('reuses the listing exclusions for the cold-title fold instead of relisting hidden rows', async () => {
+    const h = await harness([
+      { id: 'keep-one', phase: 'cold' },
+      { id: 'archived-one', phase: 'cold' },
+    ], 1, 8, ['archived-one'], {
+      sizes: { 'keep-one': 4096 },
+      titles: { 'keep-one': 'Kept title' },
+    })
+
+    const items = await h.list.list()
+
+    expect(h.readTitleSnapshots).toHaveBeenCalledExactlyOnceWith(
+      [SessionId('keep-one')], undefined, {
+        excludeSessionIds: new Set([SessionId('archived-one')]),
+        excludeSubagentSessions: true,
+      },
+    )
+    expect(items.find(item => item.sessionId === 'keep-one')?.projections?.values.title).toBe('Kept title')
+  })
 })
 
 describe('cold-row title backfill', () => {
@@ -425,7 +445,9 @@ describe('cold-row title backfill', () => {
     const items = await h.list.list()
 
     expect(h.stat).toHaveBeenCalledExactlyOnceWith(SessionId('named'), undefined)
-    expect(h.readTitleSnapshots).toHaveBeenCalledExactlyOnceWith([SessionId('named')], undefined)
+    expect(h.readTitleSnapshots).toHaveBeenCalledExactlyOnceWith(
+      [SessionId('named')], undefined, { excludeSubagentSessions: true },
+    )
     expect(items[0]?.projections).toEqual({
       kind: 'cached',
       asOfSeq: -1,
@@ -477,7 +499,9 @@ describe('cold-row title backfill', () => {
     const items = await h.list.list()
 
     expect(items).toHaveLength(2)
-    expect(h.readTitleSnapshots).toHaveBeenCalledExactlyOnceWith([SessionId('named')], undefined)
+    expect(h.readTitleSnapshots).toHaveBeenCalledExactlyOnceWith(
+      [SessionId('named')], undefined, { excludeSubagentSessions: true },
+    )
     expect(items.map(item => item.projections?.values.title)).toEqual([undefined, 'Named title'])
   })
 
@@ -528,7 +552,9 @@ describe('cold-row title backfill', () => {
     sizes.changed = 8192
     const third = await h.list.list()
     expect(h.readTitleSnapshots).toHaveBeenCalledTimes(2)
-    expect(h.readTitleSnapshots).toHaveBeenLastCalledWith([SessionId('changed')], undefined)
+    expect(h.readTitleSnapshots).toHaveBeenLastCalledWith(
+      [SessionId('changed')], undefined, { excludeSubagentSessions: true },
+    )
     expect(third.map(item => item.projections?.values.title)).toEqual(['Stable title', 'Changed title'])
   })
 

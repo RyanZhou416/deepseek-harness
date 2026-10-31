@@ -211,7 +211,10 @@ export class ApiSessionList {
       }
     }
     // Cache first: only rows the cache could not name pay the bounded title read.
-    const backfilledTitles = await this.coldTitleHints(cold, coldBlocks, signal)
+    const backfilledTitles = await this.coldTitleHints(cold, coldBlocks, signal, {
+      ...(excludeSessionIds === undefined ? {} : { excludeSessionIds }),
+      excludeSubagentSessions: true,
+    })
     for (const record of cold) {
       signal?.throwIfAborted()
       const projections = withBackfilledTitle(
@@ -240,12 +243,15 @@ export class ApiSessionList {
    * @param cold - cold rows in list order (newest first).
    * @param blocks - the cache block already resolved for each cold row.
    * @param signal - cancellation for metadata and log reads.
+   * @param exclusions - the listing's own archived and subagent exclusions, so
+   *   the title fold never pulls the rows this listing already hid.
    * @returns title hints keyed by Session id; empty when nothing was read.
    */
   private async coldTitleHints(
     cold: readonly SessionRecord[],
     blocks: ReadonlyMap<SessionId, SessionProjectionHints | undefined>,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    exclusions: { readonly excludeSessionIds?: ReadonlySet<SessionId>; readonly excludeSubagentSessions: boolean },
   ): Promise<ReadonlyMap<SessionId, SessionProjectionHints>> {
     const hints = new Map<SessionId, SessionProjectionHints>()
     // The deployment removed title from list hints; a backfilled one would
@@ -304,7 +310,7 @@ export class ApiSessionList {
     if (unmemoized.length === 0) return hints
     let observations: readonly SessionTitleObservationResult[]
     try {
-      observations = await query.readTitleSnapshots(unmemoized, signal)
+      observations = await query.readTitleSnapshots(unmemoized, signal, exclusions)
     } catch (error: unknown) {
       if (signal?.aborted) signal.throwIfAborted()
       this.ctx.logger.warn(

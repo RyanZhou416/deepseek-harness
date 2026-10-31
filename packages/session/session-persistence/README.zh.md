@@ -33,7 +33,7 @@ seam 随产品交付 [JSONL](../session-persistence-jsonl/README.zh.md) 后端�
 
 ### 服务提供什么
 
-挂载后端后，五个服务方法寻址已存储会话：
+挂载后端后，六个服务方法寻址已存储会话：
 
 ```text
 const handle = await ctx.sessionPersistence.create(header)     // store a new session, take write ownership
@@ -41,8 +41,11 @@ const handle = await ctx.sessionPersistence.open(id, 'write')  // claim single-w
 const reader = await ctx.sessionPersistence.open(id, 'read')   // observe without ownership
 const snap = await ctx.sessionPersistence.stat(id)             // header + revision (+ eventCount / sizeBytes) without a log read
 const all = await ctx.sessionPersistence.list()                // one snapshot per visible stored session
+const headers = await ctx.sessionPersistence.listHeaders()     // the same selection as headers, without revisions
 await ctx.sessionPersistence.flush()                           // backend-wide durability barrier over every active write handle
 ```
+
+`listHeaders` 选出的集合与 `list` 完全相同——同样的排除项、同样包含已创建但未实体化的会话、同样不承诺顺序——但只返回每个会话的头部与 `formatStatus`。它存在的原因是修订号可能需要与存储语料规模成正比的代价：随产品交付的 JSONL 后端会把相关产物的身份折进历史会话的修订号。只建立头部索引的调用方不比较任何修订号，因此不该承担那次扫描；需要比较修订号的调用方继续使用 `list` 或 `stat`。
 
 服务级 `flush()` 排空每个活跃写句柄已路由的事件并把其会话实体化，效果与各句柄自己的 `flush` 完全相同；失败按会话聚合为一个 `AggregateError` 而不中途放弃清扫，清扫途中被关闭的句柄视同已 flush，因为 close 本身会持久排空。
 
@@ -64,7 +67,7 @@ await ctx.sessionPersistence.flush()                           // backend-wide d
 
 ### 失败与恢复
 
-对于版本化产物，`stat` 与 `list` 通过 `formatStatus` 暴露 `current` 或 `migration-required`。独立的 `header` 仍是当前逻辑元数据。该状态描述存储，不描述内存准备或迁移任务；没有这项信息的提供方省略该字段。
+对于版本化产物，`stat`、`list` 与 `listHeaders` 通过 `formatStatus` 暴露 `current` 或 `migration-required`。独立的 `header` 仍是当前逻辑元数据。该状态描述存储，不描述内存准备或迁移任务；没有这项信息的提供方省略该字段。
 
 当前构建无法忠实解读的存储日志会被拒绝，并返回指明拒绝方向的错误，绝不会被误读。`SessionHandle` 只暴露由 `SESSION_FORMAT_VERSION` 标识的当前逻辑记录；提供方必须在返回句柄前转换任何受支持的历史存储，随产品交付的 JSONL 提供方会通过静态 catalog 迁移受支持的历史代际。更新的格式会要求操作者升级 harness。本构建不认识的事件类型会被拒绝，除非其信封标记为 `ignorable`；已提交前缀中的损坏以 `SessionPersistenceCorruptionError` 拒绝。
 
@@ -154,7 +157,7 @@ seam 不添加提示词或 schema。恢复会将已存储的表层事件还原�
 - **在有活跃会话时重载后端插件会使其写入器明确报错**——重载后的后端无法服务旧实例签发的句柄；写入会持续失败直到会话重启，没有任何机制静默重新接管日志。
 - **只有通过句柄获取的会话才会持久化**——仅靠 `ctx.sessions.create` + `session/flush` 不存储任何内容；agent-loop 是生产环境的获取点，测试通过 `create`/`append`/`close` 写入初始存储数据。
 - **无删除或保留接口**——剪枝已存储会话属于带外后端维护。
-- **`list()` 无分页，仅按显式 id 排除**——它返回其余每个已存储会话的快照；`excludeSessionIds` 会在任何逐会话读取之前跳过对应目录（Host 用它传入归档集合），`excludeSubagentSessions` 则在目录清单或头部校验之后丢弃子智能体来源的会话。适合本地存储；Host 的默认列表排除归档与子智能体行，使监听数据保持较小。
+- **`list()` 无分页，仅按显式 id 排除**——它返回其余每个已存储会话的快照；`excludeSessionIds` 会在任何逐会话读取之前跳过对应目录（Host 用它传入归档集合），`excludeSubagentSessions` 则在目录清单或头部校验之后丢弃子智能体来源的会话。适合本地存储；Host 的默认列表排除归档与子智能体行，使监听数据保持较小。`listHeaders(options)` 选中同样的集合但不返回修订号：头部索引不比较任何变更令牌，因此不该承担后端可能按整个语料计费的修订工作，而按修订号缓存的派生数据仍使用 `stat`/`list`。
 - **合成 closer 是唯一崩溃方案**——恢复通过写句柄追加 `interruptedTurnClosers`；没有继续中断轮次而不先关闭它的部分轮次恢复。
 
 <a id="dev-note"></a>

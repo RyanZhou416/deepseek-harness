@@ -33,12 +33,12 @@ Use `ctx.sessionQuery` from application code when you need to read or search ses
 |---|---|
 | `observeSession(id, options?)` | One exact live-preferred immutable cut with a caller-owned lease; cold reads retain a prepared Session until disposal |
 | `observeSessionMetadata(id, options?)` | The header plus log-free projection hints: a live Session's current cut, or a stored Session's retained checkpoint rows for the requested keys; never opens the stored log |
-| `listSessions()` | Every logical session, newest first, with `live` and `persisted` availability flags and optional `formatStatus`; an explicit `excludeSessionIds` set skips those ids before any persistence read (the Host uses it for archived Sessions), and `excludeSubagentSessions` omits subagent-origin Sessions (the Host's default list does, because subagent rows are reached through their parent's catalog) |
+| `listSessions()` | Every logical session, newest first, with `live` and `persisted` availability flags and optional `formatStatus`; an explicit `excludeSessionIds` set skips those ids before any persistence read (the Host uses it for archived Sessions), and `excludeSubagentSessions` omits subagent-origin Sessions (the Host's default list does, because subagent rows are reached through their parent's catalog). The persistence pull is a header listing, so a backend never derives snapshot revisions this engine does not compare |
 | `readSession(id)` | The complete replay-validated raw event log, without making the session live |
 | `readWindow(id, request?)` | One bounded stored-history window plus its complete checkpoint projection baseline when available, or `undefined` when persistence or the window capability is absent |
 | `filterSessions(filters)` | Sessions matching ANDed metadata and availability predicates |
 | `filterEvents(id, filters)` | Semantic event documents matching metadata and literal-text predicates |
-| `readTitleSnapshots(ids)` | The latest folded title per session, bound to its source header |
+| `readTitleSnapshots(ids, signal?, options?)` | The latest folded title per session, bound to its source header; a caller that already listed a visible corpus passes the same exclusions, so the fold does not list the hidden rows again |
 | `listEvents(id)` / `readSurface(id)` | Lightweight per-event records, or the complete current model surface |
 | `readEvent(request)` | One full event plus a bounded raw-log window around it |
 | `traceSession(id)` | The known ancestor chain and recursive descendant trees |

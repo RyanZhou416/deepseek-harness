@@ -33,7 +33,7 @@ The seam ships the [JSONL](../session-persistence-jsonl/README.md) backend: one 
 
 ### What the service provides
 
-With a backend mounted, five service methods address stored sessions:
+With a backend mounted, six service methods address stored sessions:
 
 ```text
 const handle = await ctx.sessionPersistence.create(header)     // store a new session, take write ownership
@@ -41,8 +41,11 @@ const handle = await ctx.sessionPersistence.open(id, 'write')  // claim single-w
 const reader = await ctx.sessionPersistence.open(id, 'read')   // observe without ownership
 const snap = await ctx.sessionPersistence.stat(id)             // header + revision (+ eventCount / sizeBytes) without a log read
 const all = await ctx.sessionPersistence.list()                // one snapshot per visible stored session
+const headers = await ctx.sessionPersistence.listHeaders()     // the same selection as headers, without revisions
 await ctx.sessionPersistence.flush()                           // backend-wide durability barrier over every active write handle
 ```
+
+`listHeaders` selects exactly what `list` selects — same exclusions, same created-but-unmaterialized visibility, no promised order — and returns only each Session's header and `formatStatus`. It exists because a revision can cost work proportional to the stored corpus: the shipped JSONL backend folds related artifacts' identities into a historical Session's revision. A caller that indexes headers compares no revision, so it must not pay that scan; a caller that compares revisions keeps using `list` or `stat`.
 
 Service-level `flush()` drains every active write handle's routed events and materializes its session, exactly as each handle's own `flush` would; failures aggregate per session as an `AggregateError` without abandoning the sweep, and a handle closed mid-sweep counts as flushed because close itself drains durably.
 
@@ -64,7 +67,7 @@ Persistence returns the physically valid log; semantic repair belongs to the rea
 
 ### Failures and recovery
 
-For versioned artifacts, `stat` and `list` expose `formatStatus` as `current` or `migration-required`. The separate `header` remains current logical metadata. This status describes storage, not an in-memory preparation or migration task; providers without this information omit it.
+For versioned artifacts, `stat`, `list`, and `listHeaders` expose `formatStatus` as `current` or `migration-required`. The separate `header` remains current logical metadata. This status describes storage, not an in-memory preparation or migration task; providers without this information omit it.
 
 A stored log the current build cannot faithfully interpret is refused with a direction-aware error, never misread. `SessionHandle` exposes only current logical records identified by `SESSION_FORMAT_VERSION`; a provider must convert any supported historical storage before returning a handle, and the shipped JSONL provider migrates supported historical generations through its static catalog. A newer format instructs the operator to upgrade the harness. An event type unknown to this build refuses unless its envelope marks it `ignorable`, and committed-prefix corruption rejects as `SessionPersistenceCorruptionError`.
 
@@ -154,7 +157,7 @@ These limits define where the seam's guarantees stop. They are current package c
 - **A backend plugin reload under live sessions fails their writers loudly** — a reloaded backend cannot serve handles the old instance issued; writes fail until the sessions restart, and nothing silently re-adopts the logs.
 - **Only handle-acquired sessions persist** — `ctx.sessions.create` + `session/flush` alone stores nothing; agent-loop is the production acquisition point, and tests seed storage through `create`/`append`/`close`.
 - **No deletion or retention API** — pruning stored sessions is out-of-band backend maintenance.
-- **`list()` is unpaginated and excludes only explicit ids** — it returns every other stored session's snapshot; `excludeSessionIds` skips those directories before any per-session read (the Host passes the archived set), and `excludeSubagentSessions` drops subagent-origin Sessions after a catalog or header check. Fine for local stores; the Host's default list excludes archived and subagent rows so its listeners stay small.
+- **`list()` is unpaginated and excludes only explicit ids** — it returns every other stored session's snapshot; `excludeSessionIds` skips those directories before any per-session read (the Host passes the archived set), and `excludeSubagentSessions` drops subagent-origin Sessions after a catalog or header check. Fine for local stores; the Host's default list excludes archived and subagent rows so its listeners stay small. `listHeaders(options)` applies the same selection while returning no revision: a header index compares no change token, so it must not pay revision work a backend may charge to the whole corpus, and a derived cache keyed by a revision keeps using `stat`/`list`.
 - **Synthetic closers are the only crash story** — resume appends `interruptedTurnClosers` through the write handle; there is no partial-turn resume that continues an interrupted turn instead of closing it.
 
 <a id="dev-note"></a>

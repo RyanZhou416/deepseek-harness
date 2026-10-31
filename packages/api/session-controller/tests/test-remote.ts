@@ -172,8 +172,9 @@ function testReadHandle(
 /**
  * Adapt a compact header/inspect persistence double onto the handle-based
  * abstract the production readers consume: `list` snapshots wrap the double's
- * headers, `stat` derives a metadata-less snapshot from the listing, and
- * `open` serves immutable read handles over the double's `inspect` result.
+ * headers, `listHeaders` serves the same headers without a revision, `stat`
+ * derives a metadata-less snapshot from the listing, and `open` serves
+ * immutable read handles over the double's `inspect` result.
  */
 export function testSessionPersistence(
   _ctx: Context,
@@ -188,6 +189,10 @@ export function testSessionPersistence(
         header,
         revision: SessionPersistenceRevision(`test:${header.id}:list`),
       })),
+    // The double models headers only, so exclusions cannot narrow it further;
+    // its listings already ignore them.
+    listHeaders: async (options?: SessionPersistenceListOptions) =>
+      (await listHeaders(options?.signal)).map(header => ({ header })),
   }
   if (persistence.stat === undefined) {
     adapted.stat = async (

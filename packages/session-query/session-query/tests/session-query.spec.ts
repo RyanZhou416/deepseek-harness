@@ -16,6 +16,7 @@ import type {
   SessionHandle,
   SessionHandleReadOptions,
   SessionHandleReadResult,
+  SessionPersistenceHeader,
   SessionPersistenceSnapshot,
 } from '@deepseek-ai/dsh-session-persistence'
 import SessionQueryEngine, {
@@ -125,6 +126,12 @@ class TestPersistence extends SessionPersistence {
   ) => Promise<{ meta: SessionHeader; events: SessionEvent[] }>) | undefined
   static afterList: (() => void) | undefined
   static listCalls = 0
+  static headerListCalls = 0
+  static headerListOptions: Array<{
+    signal?: AbortSignal
+    excludeSessionIds?: ReadonlySet<SessionIdType>
+    excludeSubagentSessions?: boolean
+  } | undefined> = []
   static readCalls: SessionIdType[] = []
   static listSignals: Array<AbortSignal | undefined> = []
   static readSignals: Array<AbortSignal | undefined> = []
@@ -138,6 +145,8 @@ class TestPersistence extends SessionPersistence {
     this.readOverride = undefined
     this.afterList = undefined
     this.listCalls = 0
+    this.headerListCalls = 0
+    this.headerListOptions = []
     this.readCalls = []
     this.listSignals = []
     this.readSignals = []
@@ -181,6 +190,18 @@ class TestPersistence extends SessionPersistence {
       }))
     TestPersistence.afterList?.()
     return Promise.resolve(snapshots)
+  }
+
+  override async listHeaders(options?: {
+    signal?: AbortSignal
+    excludeSessionIds?: ReadonlySet<SessionIdType>
+    excludeSubagentSessions?: boolean
+  }): Promise<readonly SessionPersistenceHeader[]> {
+    TestPersistence.headerListCalls += 1
+    TestPersistence.headerListOptions.push(options)
+    return (await this.list(options)).map(({ header, formatStatus }) => formatStatus === undefined
+      ? { header }
+      : { header, formatStatus })
   }
 }
 
@@ -635,6 +656,42 @@ describe('session-query exact reads', () => {
     expect(TestPersistence.readCalls).toEqual([second.id, first.id])
     expect(TestPersistence.listSignals).toEqual([signal])
     expect(TestPersistence.readSignals).toEqual([signal, signal])
+  })
+
+  it('reuses caller listing exclusions and the header listing for a title fold', async () => {
+    const visible = header('visible-title', 1)
+    const archived = header('archived-title', 2)
+    TestPersistence.reset([
+      { meta: visible, events: eventLog('visible') },
+      { meta: archived, events: eventLog('archived') },
+    ])
+    const ctx = await liveContext()
+    await ctx.plugin(TestPersistence)
+    const signal = new AbortController().signal
+
+    const results = await ctx.sessionQuery.readTitleSnapshots(
+      [visible.id],
+      signal,
+      { excludeSessionIds: new Set([archived.id]), excludeSubagentSessions: true },
+    )
+
+    expect(results.map(result => [result.sessionId, result.status])).toEqual([[visible.id, 'fulfilled']])
+    // Header listing, not snapshots: the fold compares no revision, so it must
+    // not make the backend derive one.
+    expect(TestPersistence.headerListCalls).toBe(1)
+    expect(TestPersistence.listCalls).toBe(1)
+    expect(TestPersistence.headerListOptions[0]).toMatchObject({
+      signal,
+      excludeSessionIds: new Set([archived.id]),
+      excludeSubagentSessions: true,
+    })
+
+    // Negative control: a caller that passes no exclusions still lists the
+    // whole corpus, including the archived row it did not name.
+    TestPersistence.headerListOptions = []
+    await ctx.sessionQuery.readTitleSnapshots([visible.id])
+    expect(TestPersistence.headerListOptions).toEqual([undefined])
+    expect(TestPersistence.listCalls).toBe(2)
   })
 
   it('bounds persisted title inspection concurrency while preserving ordered results', async () => {

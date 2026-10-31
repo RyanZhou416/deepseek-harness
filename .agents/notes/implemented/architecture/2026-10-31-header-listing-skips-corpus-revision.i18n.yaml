@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-31-header-listing-skips-corpus-revision.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-31-header-listing-skips-corpus-revision.md
+/agent-note-header-listings-skip-the-historical-corpus-revision:
+  en: 20bc6eacff732aa8
+  zh: 09dcf6cf0439be10
+/agent-note-header-listings-skip-the-historical-corpus-revision/problem:
+  en: da2dfe8da5d836aa
+  zh: 78e3b9c04970300a
+/agent-note-header-listings-skip-the-historical-corpus-revision/decision:
+  en: b280d2a6b077cb42
+  zh: 276e43ef76f220b3
+/agent-note-header-listings-skip-the-historical-corpus-revision/alternatives-considered:
+  en: 06b3327eaa7df457
+  zh: 659e5ace5fd2763c
+/agent-note-header-listings-skip-the-historical-corpus-revision/consequences:
+  en: ea258474d67ae4e9
+  zh: 6eebf8d56dc8416b

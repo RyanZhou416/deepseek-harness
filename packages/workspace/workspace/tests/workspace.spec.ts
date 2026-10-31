@@ -11,7 +11,7 @@ import type { DomainChanged } from '@deepseek-ai/dsh-storage-domain'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
-import type { SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionPersistenceHeader, SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
 import { MemoryMediaPool, MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 import WorkspaceRegistry, {
   WorkspaceId,
@@ -59,9 +59,15 @@ async function harness(options: HarnessOptions = {}) {
       .filter(header => listOptions?.excludeSessionIds?.has(header.id) !== true)
       .filter(header => listOptions?.excludeSubagentSessions !== true || header.origin !== 'subagent')
       .map(header => ({ header, revision: SessionPersistenceRevision(`rev-${header.id}`) })))
+  // The default header listing; the registry must never need the snapshot
+  // revisions this fake derives.
+  const listHeaders = vi.fn(async (
+    listOptions?: { excludeSessionIds?: ReadonlySet<string>; excludeSubagentSessions?: boolean },
+  ): Promise<SessionPersistenceHeader[]> => (await list(listOptions))
+    .map(({ header, formatStatus }) => formatStatus === undefined ? { header } : { header, formatStatus }))
   const open = vi.fn(() => { throw new Error('event bodies must not be opened') })
   const stat = vi.fn(() => { throw new Error('per-session stat must not be needed') })
-  ctx.provide('sessionPersistence', { list, open, stat } as never)
+  ctx.provide('sessionPersistence', { list, listHeaders, open, stat } as never)
 
   if (options.sessionStore === true) {
     await ctx.plugin(SessionStore)
@@ -86,6 +92,7 @@ async function harness(options: HarnessOptions = {}) {
     changes,
     initChanges,
     list,
+    listHeaders,
     open,
     stat,
     setSessions: (headers: SessionHeader[]) => { listed = headers },
@@ -205,10 +212,12 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
     expect(pool.media.has('workspace')).toBe(false)
 
     const list = vi.fn(async () => [] as SessionPersistenceSnapshot[])
-    ctx.provide('sessionPersistence', { list } as never)
+    const listHeaders = vi.fn(async () => [])
+    ctx.provide('sessionPersistence', { list, listHeaders } as never)
     await fiber.await()
     expect(ctx.workspaceRegistry.list()).toEqual([])
-    expect(list).toHaveBeenCalledTimes(1)
+    expect(listHeaders).toHaveBeenCalledTimes(1)
+    expect(list).not.toHaveBeenCalled()
     expect(storedState(pool)).toEqual({ initialized: true, workspaceIds: [], archivedSessionIds: [], pinnedSessionIds: [] })
   })
 
@@ -294,6 +303,9 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
       ],
     })
 
+    // Startup indexes headers only: a snapshot revision is never compared, so
+    // the registry must ask for the header listing.
+    expect(result.listHeaders).toHaveBeenCalledTimes(1)
     expect(result.list).toHaveBeenCalledTimes(1)
     const options = result.list.mock.calls[0]?.[0] as {
       excludeSessionIds?: ReadonlySet<string>

@@ -293,7 +293,7 @@ declare class SessionPreparation implements Disposable {
 
 ## Lightweight source revisions
 
-Consumers of derived read models compare a cheap opaque revision before loading a full event log. The revision is a per-backend-instance change token from `stat`/`list`: equal revisions may be treated as an unchanged log; unequal revisions promise nothing, and write-ownership churn never changes one. session-query keys its cold-read cache on it; the token plays no part in open, read, or resume.
+Consumers of derived read models compare a cheap opaque revision before loading a full event log. The revision is a per-backend-instance change token from `stat`/`list`: equal revisions may be treated as an unchanged log; unequal revisions promise nothing, and write-ownership churn never changes one. session-query keys its cold-read cache on it; the token plays no part in open, read, or resume. A caller that indexes headers compares no revision, so it uses `listHeaders`, whose selection matches `list` but which returns none: the JSONL backend folds related artifacts' identities into a historical revision, and a header index must not pay that corpus-wide work.
 
 ```ts type-equiv
 /**
@@ -406,10 +406,31 @@ abstract stat(id: SessionId, options?: SessionPersistenceStatOptions): Promise<S
 
 /**
  * List every stored session visible to this process, in no promised order.
+ *
+ * A snapshot revision may require work proportional to the stored corpus:
+ * the shipped JSONL backend folds the identities of a historical session's
+ * related artifacts into its revision, so its logical events invalidate
+ * when any of them changes. A caller that only reads headers therefore
+ * uses {@link listHeaders} instead.
  * @param options - optional cancellation.
  * @returns one snapshot per stored session.
  */
 abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>
+
+/**
+ * List every stored session visible to this process as header observations.
+ *
+ * Selection matches {@link list}: the same exclusions, the same
+ * created-but-unmaterialized visibility, and no promised order. No revision
+ * is returned, so a backend may skip revision work — including a
+ * corpus-wide scan — that only a compared change token justifies.
+ *
+ * The default delegates to {@link list} and drops revisions; a backend
+ * whose revisions are cheap keeps this implementation.
+ * @param options - optional cancellation and listing exclusions.
+ * @returns one header observation per stored session.
+ */
+async listHeaders(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceHeader[]>
 
 /**
  * Read one bounded history window from a stored generation.

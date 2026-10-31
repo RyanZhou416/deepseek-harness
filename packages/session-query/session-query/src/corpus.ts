@@ -3,7 +3,7 @@
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent, SessionHeader, SessionId , SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type SessionPersistence from '@deepseek-ai/dsh-session-persistence'
-import type { SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionPersistenceHeader } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionRecord } from './types.ts'
 import { SessionQueryError } from './config.ts'
 import { readColdSessionLog, type ColdSessionLog } from './cold-read.ts'
@@ -148,12 +148,20 @@ export class SessionCorpus {
    * @param sessionIds - sessions to resolve in first-occurrence order.
    * @param project - synchronous fold that owns/clones every retained value.
    * @param signal - cancellation shared by listing and every persisted inspection.
+   * @param options - exclusions for the stored pull, which must not exclude a
+   *   requested id (such an id would resolve as not found). Callers that
+   *   already listed a visible corpus pass the same exclusions to avoid a
+   *   second full listing.
    * @returns one fulfilled or rejected projected result per unique requested id.
    */
   async projectMany<Value>(
     sessionIds: readonly SessionId[],
     project: (source: LogicalSessionSource) => Value,
     signal?: AbortSignal,
+    options?: {
+      readonly excludeSessionIds?: ReadonlySet<SessionId>
+      readonly excludeSubagentSessions?: boolean
+    },
   ): Promise<LogicalProjectionResult<Value>[]> {
     const ids = [...new Set(sessionIds)]
     signal?.throwIfAborted()
@@ -177,9 +185,9 @@ export class SessionCorpus {
       return orderedResults(ids, resolved)
     }
 
-    let persisted: readonly SessionPersistenceSnapshot[]
+    let persisted: readonly SessionPersistenceHeader[]
     try {
-      persisted = await listPersisted(persistence, signal)
+      persisted = await listPersisted(persistence, signal, options)
       signal?.throwIfAborted()
     } catch (error: unknown) {
       if (signal?.aborted) signal.throwIfAborted()
@@ -275,6 +283,17 @@ function orderedResults<Value>(
   return ids.map(sessionId => resolved.get(sessionId) as LogicalProjectionResult<Value>)
 }
 
+/**
+ * List stored headers with the caller's exclusions.
+ *
+ * The corpus consumes only headers and format status, never snapshot
+ * revisions, so it asks for the header listing: a historical revision can cost
+ * a corpus-wide scan that no record here compares.
+ * @param persistence - mounted persistence service.
+ * @param signal - optional cancellation for the listing.
+ * @param options - optional archived/subagent id and origin exclusions.
+ * @returns stored header observations from the backend.
+ */
 async function listPersisted(
   persistence: SessionPersistence,
   signal?: AbortSignal,
@@ -282,18 +301,18 @@ async function listPersisted(
     readonly excludeSessionIds?: ReadonlySet<SessionId>
     readonly excludeSubagentSessions?: boolean
   },
-): Promise<readonly SessionPersistenceSnapshot[]> {
+): Promise<readonly SessionPersistenceHeader[]> {
   try {
     const excludeSessionIds = options?.excludeSessionIds
     const excludeSubagentSessions = options?.excludeSubagentSessions === true
     const query = signal === undefined && excludeSessionIds === undefined && !excludeSubagentSessions
       ? undefined
       : {
-          ...(signal === undefined ? {} : { signal }),
-          ...(excludeSessionIds === undefined ? {} : { excludeSessionIds }),
-          ...(excludeSubagentSessions ? { excludeSubagentSessions: true } : {}),
-        }
-    return await persistence.list(query)
+        ...(signal === undefined ? {} : { signal }),
+        ...(excludeSessionIds === undefined ? {} : { excludeSessionIds }),
+        ...(excludeSubagentSessions ? { excludeSubagentSessions: true } : {}),
+      }
+    return await persistence.listHeaders(query)
   } catch (error: unknown) {
     if (signal?.aborted) signal.throwIfAborted()
     throw new SessionQueryError(

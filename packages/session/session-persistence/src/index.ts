@@ -62,6 +62,18 @@ export interface SessionPersistenceSnapshot {
   readonly sizeBytes?: number
 }
 
+/**
+ * Header-level stored-Session observation returned by
+ * {@link SessionPersistence.listHeaders}: what a caller that indexes headers
+ * needs, without the change token `list` computes for it.
+ */
+export interface SessionPersistenceHeader {
+  /** Detached metadata for one stored session. */
+  readonly header: SessionHeader
+  /** Header-only format classification; absent without versioned artifact metadata. */
+  readonly formatStatus?: 'current' | 'migration-required'
+}
+
 /** Options for {@link SessionPersistence.create}. */
 export interface SessionPersistenceCreateOptions {
   /** Optional cancellation observed before backend work starts. */
@@ -246,10 +258,35 @@ export abstract class SessionPersistence extends Service {
 
   /**
    * List every stored session visible to this process, in no promised order.
+   *
+   * A snapshot revision may require work proportional to the stored corpus:
+   * the shipped JSONL backend folds the identities of a historical session's
+   * related artifacts into its revision, so its logical events invalidate
+   * when any of them changes. A caller that only reads headers therefore
+   * uses {@link listHeaders} instead.
    * @param options - optional cancellation.
    * @returns one snapshot per stored session.
    */
   abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>
+
+  /**
+   * List every stored session visible to this process as header observations.
+   *
+   * Selection matches {@link list}: the same exclusions, the same
+   * created-but-unmaterialized visibility, and no promised order. No revision
+   * is returned, so a backend may skip revision work — including a
+   * corpus-wide scan — that only a compared change token justifies.
+   *
+   * The default delegates to {@link list} and drops revisions; a backend
+   * whose revisions are cheap keeps this implementation.
+   * @param options - optional cancellation and listing exclusions.
+   * @returns one header observation per stored session.
+   */
+  async listHeaders(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceHeader[]> {
+    return (await this.list(options)).map(({ header, formatStatus }) => formatStatus === undefined
+      ? { header }
+      : { header, formatStatus })
+  }
 
   /**
    * Read one bounded history window from a stored generation.

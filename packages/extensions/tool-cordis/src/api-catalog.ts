@@ -2289,9 +2289,15 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>',
-        description: 'List every stored session visible to this process, in no promised order.',
+        description: 'List every stored session visible to this process, in no promised order.\n\nA snapshot revision may require work proportional to the stored corpus: the shipped JSONL backend folds the identities of a historical session\'s related artifacts into its revision, so its logical events invalidate when any of them changes. A caller that only reads headers therefore uses listHeaders instead.',
         parameters: [{ name: 'options', description: 'optional cancellation.' }],
         returns: 'one snapshot per stored session.',
+      },
+      {
+        signature: 'async listHeaders(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceHeader[]>',
+        description: 'List every stored session visible to this process as header observations.\n\nSelection matches list: the same exclusions, the same created-but-unmaterialized visibility, and no promised order. No revision is returned, so a backend may skip revision work — including a corpus-wide scan — that only a compared change token justifies.\n\nThe default delegates to list and drops revisions; a backend whose revisions are cheap keeps this implementation.',
+        parameters: [{ name: 'options', description: 'optional cancellation and listing exclusions.' }],
+        returns: 'one header observation per stored session.',
       },
       {
         signature: 'readWindow?(id: SessionId, request?: SessionWindowRequest): Promise<SessionWindow | undefined>',
@@ -2485,9 +2491,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'cloned source header and optional latest title snapshot.',
       },
       {
-        signature: 'async readTitleSnapshots( sessionIds: readonly SessionId[], signal?: AbortSignal, ): Promise<SessionTitleObservationResult[]>',
+        signature: 'async readTitleSnapshots( sessionIds: readonly SessionId[], signal?: AbortSignal, options?: { readonly excludeSessionIds?: ReadonlySet<SessionId> readonly excludeSubagentSessions?: boolean }, ): Promise<SessionTitleObservationResult[]>',
         description: 'Fold titles for unique sessions from one cancellable corpus observation.\n\nResults preserve first-occurrence input order. Operational failures stay isolated per session, while cancellation rejects the complete operation.',
-        parameters: [{ name: 'sessionIds', description: 'live or persisted session ids to observe.' }, { name: 'signal', description: 'optional cancellation shared by all source reads.' }],
+        parameters: [{ name: 'sessionIds', description: 'live or persisted session ids to observe.' }, { name: 'signal', description: 'optional cancellation shared by all source reads.' }, { name: 'options', description: 'exclusions for the stored pull. A caller that already listed a visible corpus passes the same exclusions so this fold does not list the hidden rows again; the options must not exclude a requested id.' }],
         returns: 'one fulfilled or rejected result per unique requested id.',
       },
       {
@@ -7421,6 +7427,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionPersistenceCreateOptions',
     declaration: 'export interface SessionPersistenceCreateOptions {\n    readonly signal?: AbortSignal;\n    readonly inheritedEventCount?: SessionLogOffset;\n}',
+  },
+  {
+    name: 'SessionPersistenceHeader',
+    declaration: 'export interface SessionPersistenceHeader {\n    readonly header: SessionHeader;\n    readonly formatStatus?: \'current\' | \'migration-required\';\n}',
   },
   {
     name: 'SessionPersistenceListOptions',

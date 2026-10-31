@@ -843,7 +843,12 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
-   * Every stored session's header, projected from the persistence snapshot listing.
+   * Every stored session's header, projected from the persistence header listing.
+   *
+   * The registry never compares snapshot revisions, so it lists headers rather
+   * than snapshots: a backend whose historical revision fingerprints related
+   * artifacts would otherwise scan the whole corpus before answering a startup
+   * index that reads only headers.
    * @param options - `excludeArchived` skips archived headers no Workspace record
    * references: archived rows stay out of every default list, so indexing them
    * would only repeat the persistence scan at startup. `excludeSubagentSessions`
@@ -857,15 +862,15 @@ export class WorkspaceRegistry extends Service {
   }): Promise<SessionHeader[]> {
     const excluded = options?.excludeArchived === true ? this.archivedHeaderExclusions() : undefined
     const excludeSubagentSessions = options?.excludeSubagentSessions === true
-    const snapshots = excluded === undefined || excluded.size === 0
+    const headers = excluded === undefined || excluded.size === 0
       ? excludeSubagentSessions
-        ? await this.ctx.sessionPersistence.list({ excludeSubagentSessions: true })
-        : await this.ctx.sessionPersistence.list()
-      : await this.ctx.sessionPersistence.list({
-          excludeSessionIds: excluded,
-          ...(excludeSubagentSessions ? { excludeSubagentSessions: true } : {}),
-        })
-    return snapshots.map(snapshot => snapshot.header)
+        ? await this.ctx.sessionPersistence.listHeaders({ excludeSubagentSessions: true })
+        : await this.ctx.sessionPersistence.listHeaders()
+      : await this.ctx.sessionPersistence.listHeaders({
+        excludeSessionIds: excluded,
+        ...(excludeSubagentSessions ? { excludeSubagentSessions: true } : {}),
+      })
+    return headers.map(header => header.header)
   }
 
   private async indexLiveSessions(): Promise<void> {

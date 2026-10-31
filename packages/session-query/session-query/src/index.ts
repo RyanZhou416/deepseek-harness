@@ -332,11 +332,18 @@ export abstract class SessionQueryEngine extends Service {
    * isolated per session, while cancellation rejects the complete operation.
    * @param sessionIds - live or persisted session ids to observe.
    * @param signal - optional cancellation shared by all source reads.
+   * @param options - exclusions for the stored pull. A caller that already
+   *   listed a visible corpus passes the same exclusions so this fold does not
+   *   list the hidden rows again; the options must not exclude a requested id.
    * @returns one fulfilled or rejected result per unique requested id.
    */
   async readTitleSnapshots(
     sessionIds: readonly SessionId[],
     signal?: AbortSignal,
+    options?: {
+      readonly excludeSessionIds?: ReadonlySet<SessionId>
+      readonly excludeSubagentSessions?: boolean
+    },
   ): Promise<SessionTitleObservationResult[]> {
     return this._corpus.projectMany(sessionIds, (source): SessionTitleObservation => {
       const title = foldSessionTitle(source.events)
@@ -344,7 +351,7 @@ export abstract class SessionQueryEngine extends Service {
         session: structuredClone(source.header),
         ...title === undefined ? {} : { title },
       }
-    }, signal)
+    }, signal, options)
   }
 
   /**

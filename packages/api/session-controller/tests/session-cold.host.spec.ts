@@ -94,9 +94,13 @@ describe('sessions.list cold merge', () => {
         { ...statSnapshot(shared), formatStatus: 'migration-required' },
       ]
       const list = vi.fn(async () => snapshots)
+      const listHeaders = vi.fn(async () => snapshots.map(({ header, formatStatus }) => ({
+        header,
+        ...formatStatus === undefined ? {} : { formatStatus },
+      })))
       const stat = vi.fn()
       const open = vi.fn()
-      ctx.provide('sessionPersistence', { list, stat, open } as never)
+      ctx.provide('sessionPersistence', { list, listHeaders, stat, open } as never)
       const remote = createSessionTestRemote(ctx, {
         defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
         cwd: '/tmp',
@@ -112,7 +116,9 @@ describe('sessions.list cold merge', () => {
         expect(byId.get(unknown.id)).not.toHaveProperty('formatStatus')
         expect(byId.get(shared.id)).toMatchObject({ formatStatus: 'current' })
         expect(byId.get(liveOnly.id)).toMatchObject({ formatStatus: 'current' })
-        expect(list).toHaveBeenCalledTimes(1)
+        expect(listHeaders).toHaveBeenCalledTimes(1)
+        // A header index compares no revision, so it never takes the snapshot listing.
+        expect(list).not.toHaveBeenCalled()
         // The listing may read cheap metadata to judge whether a title fold is
         // affordable (an absent size keeps the row unnamed); it never opens or
         // inspects a body.

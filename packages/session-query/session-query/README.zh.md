@@ -33,12 +33,12 @@ kind: "package-reference"
 |---|---|
 | `observeSession(id, options?)` | 一份精确、优先实时的不可变切点，附调用方持有的租约；冷读取会保留 prepared Session 直到释放 |
 | `observeSessionMetadata(id, options?)` | header 加上不读日志的投影提示：实时会话的当前切点，或存储会话为所请求键保留的检查点行；绝不打开始储日志 |
-| `listSessions()` | 每个逻辑会话，最新的在前，带 `live` 与 `persisted` 可用性标志及可选 `formatStatus`；显式 `excludeSessionIds` 会在任何持久化读取之前跳过这些 id（Host 用它传入归档集合），`excludeSubagentSessions` 则省略子智能体来源的会话（Host 默认列表这样做，因为子智能体行通过其母会话的目录访问） |
+| `listSessions()` | 每个逻辑会话，最新的在前，带 `live` 与 `persisted` 可用性标志及可选 `formatStatus`；显式 `excludeSessionIds` 会在任何持久化读取之前跳过这些 id（Host 用它传入归档集合），`excludeSubagentSessions` 则省略子智能体来源的会话（Host 默认列表这样做，因为子智能体行通过其母会话的目录访问）。持久化拉取使用头部清单，因此后端不会为引擎并不比较的快照修订号做推导 |
 | `readSession(id)` | 经过回放校验的完整原始事件日志，且不会让该会话变为实时 |
 | `readWindow(id, request?)` | 一个有界存储历史窗口，以及可用时其完整检查点投影基线；持久化或窗口能力缺失时为 `undefined` |
 | `filterSessions(filters)` | 匹配 AND 连接的元数据与可用性谓词的会话 |
 | `filterEvents(id, filters)` | 匹配元数据与字面文本谓词的语义事件文档 |
-| `readTitleSnapshots(ids)` | 每个会话的最新折叠标题，绑定到其来源 header |
+| `readTitleSnapshots(ids, signal?, options?)` | 每个会话的最新折叠标题，绑定到其来源 header；已列出可见语料的调用方传入相同的排除项，折叠就不会再次列出被隐藏的行 |
 | `listEvents(id)` / `readSurface(id)` | 轻量逐事件记录，或完整的当前模型表层 |
 | `readEvent(request)` | 一个完整事件加其周围有界的原始日志窗口 |
 | `traceSession(id)` | 已知祖先链与递归后代树 |
