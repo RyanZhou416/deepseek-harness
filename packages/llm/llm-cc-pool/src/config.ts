@@ -19,8 +19,11 @@
  * parity writes no cache marker itself, so the marker policy does not have to
  * be `cc3` for it. A one-hour policy on the non-parity wire needs the deployed
  * pool build to advertise `aOffHipaaCache: "downgrade"`; the plugin probes for
- * it even when wire parity is not requested, and refuses such a request rather
- * than sending the one-hour marker unlicensed or substituting five minutes.
+ * it even when wire parity is not requested, treats the grant as a short lease
+ * inside the probe answer, and refuses such a request rather than sending the
+ * one-hour marker unlicensed or substituting five minutes. The lease is
+ * revalidated before expiry so a silent pool swap bounds how long the one-hour
+ * wire can outlive the build that licensed it.
  *
  * @module dsh-llm-cc-pool/config
  */
@@ -133,11 +136,11 @@ export interface Config {
    * carries no marker in either case, so wire parity does not constrain which
    * policy the route may configure. The default `false` keeps the current wire
    * exactly. It does not disable the capability probe: a one-hour policy needs
-   * the pool build's `aOffHipaaCache: "downgrade"` permission for the non-parity
+   * the pool build's live `aOffHipaaCache: "downgrade"` lease for the non-parity
    * wire, so the same probe asks for both facts and a reply without that
-   * permission refuses the one-hour A-off request before it reaches the pool.
-   * Only a caching-disabled (`cacheTtl: none`) route that also leaves this
-   * `false` sends no probe.
+   * permission (or with one whose lease expired) refuses the one-hour A-off
+   * request before it reaches the pool. Only a caching-disabled
+   * (`cacheTtl: none`) route that also leaves this `false` sends no probe.
    */
   ccWireParity: boolean
   /**

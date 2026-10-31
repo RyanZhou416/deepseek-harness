@@ -29,23 +29,27 @@
  * rewrites a request body or header for it. A failed probe retries with bounded
  * backoff, the first routed request waits for the initial probe's outcome under
  * a bounded deadline, and a `503` the endpoint marks with
- * `x-cc-wire-parity-unavailable: 1` on a wire-parity-on request drops the proof
- * and schedules another probe after a cooldown instead of leaving the route
+ * `x-cc-wire-parity-unavailable: 1` on a wire-parity-on request withdraws the
+ * whole capability answer — wire proof and A-off cache grant together — and
+ * schedules another probe after a cooldown instead of leaving the route
  * permanently on the non-parity wire.
  *
  * The same probe answers whether the pool build advertises
  * `aOffHipaaCache: "downgrade"`. On the route's non-parity wire — wire parity
  * not requested, or requested and not proved — a main or subagent request under
  * a one-hour policy would send one-hour `cache_control` markers. The pool owns
- * the HIPAA downgrade for that wire, so the route sends it only when the
- * answering build advertises the field, and otherwise refuses the dispatch with
- * `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` before any provider request: it neither
- * sends the one-hour markers nor silently substitutes five minutes. A helper
- * request keeps the API's default five-minute lifetime and is unaffected. The
- * capability is read from the same reply as the proof and shares its lifecycle:
- * a probe generation clears both, an answer replaces both, and a replaced
- * credential reopens the question. The wire-parity proof still grants the wire
- * on its own; an absent or malformed A-off field never weakens it.
+ * the HIPAA downgrade for that wire, so the route sends it only while the
+ * current answer carries a live grant for that build, and otherwise refuses the
+ * dispatch with `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` before any provider
+ * request: it neither sends the one-hour markers nor silently substitutes five
+ * minutes. A helper request keeps the API's default five-minute lifetime and is
+ * unaffected. The grant is one optional lease inside the answer state, replaced
+ * atomically with the answer and bounded by a short TTL, because an A-off
+ * request cannot observe a silent pool swap through the wire headers; a live
+ * lease is revalidated before it expires and an expired one refuses the
+ * dispatch until a fresh answer carries the exact token again. The wire-parity
+ * proof still grants the wire on its own; an absent or malformed A-off field
+ * never weakens it.
  *
  * Wire parity declares its own cache intent, which the profile carries:
  * `cacheTtl: none` — this route's caching-disabled state — makes a main or
@@ -179,6 +183,34 @@ const WIRE_PARITY_REFUSAL_COOLDOWN_MS = 30_000
 const WIRE_PARITY_READY_TIMEOUT_MS = 6_000
 
 /**
+ * How long one `aOffHipaaCache: "downgrade"` grant stays live after the answer
+ * that carried it, in milliseconds.
+ *
+ * The permission belongs to the pool build that answered, and an A-off request
+ * never carries the wire headers or receives the marked 503 that would reveal a
+ * silent swap to an older build. A finite lease therefore bounds how long this
+ * route can keep sending unlicensed one-hour markers after the pool changes
+ * under it: at most one TTL, and the proactive revalidation below normally
+ * replaces the answer well before expiry.
+ */
+const A_OFF_HIPAA_CACHE_TTL_MS = 120_000
+
+/**
+ * Age at which a live A-off grant is revalidated, in milliseconds. It is half
+ * the lease, so a probe failure or two still leaves room for the retry backoff
+ * to recover the answer before the lease expires.
+ */
+const A_OFF_HIPAA_CACHE_REFRESH_MS = 60_000
+
+/**
+ * Recheck delay after an answer that did not grant the A-off permission. The
+ * route refuses its one-hour non-parity dispatch meanwhile, so this only decides
+ * how soon a newly upgraded pool build can be noticed without a credential or
+ * wire event.
+ */
+const A_OFF_HIPAA_CACHE_RECHECK_MS = 120_000
+
+/**
  * The pi-ai adapter with two mac-pool differences: the model catalogue is the
  * plugin's configured catalogue, not a credential-gated discovery result, and
  * streams for one session are ordered before they reach the pool.
@@ -232,6 +264,11 @@ class CcPoolAdapter extends PiAiAdapter {
   /**
    * Run one dispatch under its session's queue. A request without a session has
    * no pool binding to order against and opens directly.
+   *
+   * The A-off admission check runs immediately before every upstream open —
+   * including a queued request after its session wait and a retry after a
+   * session-busy pause — so a credential refresh that withdraws the permission
+   * while this request waits cannot let it open under the stale grant.
    * @param options - the assembled request carrying the session identity.
    * @param open - opens this dispatch's upstream stream for one attempt.
    * @returns the session-ordered stream.
@@ -240,42 +277,38 @@ class CcPoolAdapter extends PiAiAdapter {
     options: GenerateOptions,
     open: (attempt: GenerateOptions) => AsyncIterable<StreamChunk>,
   ): AsyncIterable<StreamChunk> {
-    if (options.sessionId === undefined) return open(options)
+    const checked = (attempt: GenerateOptions): AsyncIterable<StreamChunk> => {
+      this.admit(attempt)
+      return open(attempt)
+    }
+    if (options.sessionId === undefined) return checked(options)
     return this.sessions.serialize({
       sessionId: String(options.sessionId),
       signal: options.signal,
-      open: retryNonce => open(retryNonce === undefined ? options : retriedAttempt(options, retryNonce)),
+      open: retryNonce => checked(retryNonce === undefined ? options : retriedAttempt(options, retryNonce)),
     })
   }
 
   /**
-   * Await the load probe, admit the request, then open one dispatch.
+   * Await the load probe, then open one dispatch.
    *
    * The probe decides whether the route profile carries the wire-parity flag
    * and whether the A-off HIPAA cache lifetime is available, and the adapter's
    * snapshot is captured at dispatch preparation. Waiting on the probe's first
    * outcome — bounded by the caller's deadline — keeps the first request from
-   * deciding either before the endpoint answered. The admission check runs
-   * after that wait and before `open`, so a refused dispatch sends no provider
-   * request.
-   * @param options - the assembled request the admission check reads.
+   * deciding either before the endpoint answered. Admission runs in
+   * {@link ordered}, immediately before the upstream opens.
    * @param open - opens the dispatch after the probe's first outcome.
    * @param signal - the request's cancellation; a cancelled request stops waiting.
    * @returns the deferred stream.
    */
-  private async * afterReadiness(
-    options: GenerateOptions,
-    open: () => AsyncIterable<StreamChunk>,
-    signal?: AbortSignal,
-  ): AsyncIterable<StreamChunk> {
+  private async * afterReadiness(open: () => AsyncIterable<StreamChunk>, signal?: AbortSignal): AsyncIterable<StreamChunk> {
     await this.readiness(signal)
-    this.admit(options)
     yield* open()
   }
 
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     return this.afterReadiness(
-      options,
       () => this.ordered(options, attempt => super.stream(attempt)),
       options.signal,
     )
@@ -304,7 +337,6 @@ class CcPoolAdapter extends PiAiAdapter {
     return {
       model: call.model,
       stream: options => this.afterReadiness(
-        options,
         () => this.ordered(options, attempt => call.stream(attempt)),
         options.signal,
       ),
@@ -357,6 +389,22 @@ interface PoolSnapshot {
 }
 
 /**
+ * The capability facts one committed probe answer licenses, replaced atomically.
+ *
+ * The A-off cache grant lives inside this value rather than beside it, so a
+ * permission can never outlive the answer and build that advertised it: a new
+ * answer replaces the whole value, and any revocation clears it. The optional
+ * expiry makes the grant a lease, bounding a silent pool swap that an A-off
+ * request cannot observe through the wire headers.
+ */
+interface PoolCapabilityState {
+  /** The wire-parity proof scoped to the answering endpoint and build. */
+  readonly proof: PoolCapabilityProof
+  /** When the A-off HIPAA cache grant stops being live; absent when not granted. */
+  readonly aOffHipaaCacheExpiresAt?: number
+}
+
+/**
  * The prompt-cache policy one configuration snapshot declares.
  * @param config - schema-validated loader configuration.
  * @returns the policy fields, with marker placement present only when configured.
@@ -382,21 +430,21 @@ export function apply(ctx: Context, config: Config): void {
   let snapshot: PoolSnapshot | undefined
   // Capabilities are proven only by the member endpoint itself, for the member
   // endpoint and pool build that answered, and only for this plugin instance: no
-  // answer exists at load. The stored proof carries that `buildId`, and the
-  // route profiles are resolved for the build it names, so a new probe replaces
-  // it and a profile built for another build is never reused. A load or
-  // credential probe drops the previous answer before it asks. A failed probe is
-  // retried with bounded backoff instead of leaving the route permanently off; a
-  // probe that answers without a build identity cannot produce one, and a
-  // superseded probe never writes its answer. The A-off HIPAA cache permission
-  // is read from the same answer and replaced with it; a marked wire-parity
-  // refusal withdraws only the wire, because it is evidence about that wire and
-  // not about the build's cache handling.
-  let capabilityProof: PoolCapabilityProof | undefined
-  /** Whether the last capability answer advertised the A-off HIPAA cache downgrade. */
-  let aOffHipaaCache = false
+  // answer exists at load. The stored state carries that `buildId`, and the route
+  // profiles are resolved for the build it names, so a new probe replaces it and
+  // a profile built for another build is never reused. A load or credential
+  // probe drops the previous answer before it asks. A failed probe is retried
+  // with bounded backoff instead of leaving the route permanently off; a probe
+  // that answers without a build identity cannot produce one, and a superseded
+  // probe never writes its answer. The A-off HIPAA cache grant is one optional
+  // lease inside the same state, so it never outlives the answer that advertised
+  // it; a marked wire-parity refusal withdraws the whole state, because the
+  // selected worker has changed and the next answer must re-establish both
+  // facts.
+  let capabilityState: PoolCapabilityState | undefined
   let capabilityProbe: AbortController | undefined
   let probeRetryTimer: ReturnType<typeof setTimeout> | undefined
+  let aOffRefreshTimer: ReturnType<typeof setTimeout> | undefined
   let probeFailures = 0
   // The first routed request waits for the load probe's first outcome, so it
   // cannot prepare its snapshot before the probe decides the wire. The promise
@@ -435,7 +483,7 @@ export function apply(ctx: Context, config: Config): void {
    */
   const wireParityProof = (): PoolCapabilityProof | undefined => {
     if (!config.ccWireParity) return undefined
-    return capabilityProof
+    return capabilityState?.proof
   }
   /** Whether the route profile currently carries the wire parity flag. */
   const wireParity = (): boolean => wireParityProof() !== undefined
@@ -481,6 +529,34 @@ export function apply(ctx: Context, config: Config): void {
     probeRetryTimer = undefined
   }
 
+  /** Cancel the proactive A-off revalidation; a new probe and disposal both do. */
+  const clearAOffRefresh = (): void => {
+    if (aOffRefreshTimer === undefined) return
+    clearTimeout(aOffRefreshTimer)
+    aOffRefreshTimer = undefined
+  }
+
+  /**
+   * Schedule the next A-off capability answer, which is also the fresh check
+   * that bounds a silent pool swap.
+   *
+   * A live grant is revalidated at half its lease; an answer that withheld the
+   * permission is rechecked after a full lease. Both paths only ask; the current
+   * state stays in force until the new answer replaces it, and a grant that
+   * outlives its expiry is refused by admission instead.
+   */
+  const scheduleAOffRefresh = (): void => {
+    clearAOffRefresh()
+    if (!requiresAOffHipaaCache) return
+    const delay = capabilityState?.aOffHipaaCacheExpiresAt === undefined
+      ? A_OFF_HIPAA_CACHE_RECHECK_MS
+      : A_OFF_HIPAA_CACHE_REFRESH_MS
+    aOffRefreshTimer = setTimeout(() => {
+      aOffRefreshTimer = undefined
+      startProbe(false)
+    }, delay)
+  }
+
   /** The bounded backoff before the next probe attempt after the failures seen. */
   const nextProbeDelay = (): number => Math.min(
     WIRE_PARITY_RETRY_INITIAL_MS * 2 ** Math.max(probeFailures - 1, 0),
@@ -508,14 +584,17 @@ export function apply(ctx: Context, config: Config): void {
    * a stale proof or A-off permission never outlives the endpoint, pool build,
    * or member credential it described.
    */
-  const startProbe = (): void => {
+  const startProbe = (revoke: boolean): void => {
     if (!probesCapabilities) return
     clearProbeRetry()
+    clearAOffRefresh()
     capabilityProbe?.abort()
     const controller = new AbortController()
     capabilityProbe = controller
-    capabilityProof = undefined
-    aOffHipaaCache = false
+    // A load, credential, or refusal probe invalidates the current answer before
+    // asking. A revalidation keeps it in force until the answer replaces it, so a
+    // transient probe failure does not withdraw a live lease early.
+    if (revoke) capabilityState = undefined
     void (async () => {
       let apiKey: string
       try {
@@ -534,7 +613,7 @@ export function apply(ctx: Context, config: Config): void {
           + ` ${config.ccWireParity ? 'serving the non-parity wire' : 'refusing the one-hour A-off wire'};`
           + ` retrying in ${delay}ms`,
         )
-        scheduleProbe(delay)
+        scheduleProbe(delay, revoke)
         return
       }
       const answer = await probePoolCapabilities(apiKey, controller.signal)
@@ -543,8 +622,12 @@ export function apply(ctx: Context, config: Config): void {
       if (controller.signal.aborted) return
       capabilityProbe = undefined
       if (answer !== undefined) {
-        capabilityProof = answer.proof
-        aOffHipaaCache = answer.aOffHipaaCache
+        capabilityState = {
+          proof: answer.proof,
+          ...answer.aOffHipaaCache
+            ? { aOffHipaaCacheExpiresAt: Date.now() + A_OFF_HIPAA_CACHE_TTL_MS }
+            : {},
+        }
         probeFailures = 0
         markInitialProbeSettled()
         if (config.ccWireParity) {
@@ -565,6 +648,7 @@ export function apply(ctx: Context, config: Config): void {
             )
           }
         }
+        scheduleAOffRefresh()
         return
       }
       probeFailures += 1
@@ -575,7 +659,7 @@ export function apply(ctx: Context, config: Config): void {
         + ` ${config.ccWireParity ? 'serving the non-parity wire' : 'refusing the one-hour A-off wire'};`
         + ` retrying in ${delay}ms`,
       )
-      scheduleProbe(delay)
+      scheduleProbe(delay, revoke)
     })()
   }
 
@@ -583,12 +667,13 @@ export function apply(ctx: Context, config: Config): void {
    * Schedule one probe generation after `delayMs`. Callers only reach this while
    * the route probes capabilities, and disposal clears a pending timer.
    * @param delayMs - bounded wait before the next attempt.
+   * @param revoke - whether the attempt invalidates the current answer before asking.
    */
-  const scheduleProbe = (delayMs: number): void => {
+  const scheduleProbe = (delayMs: number, revoke: boolean): void => {
     clearProbeRetry()
     probeRetryTimer = setTimeout(() => {
       probeRetryTimer = undefined
-      startProbe()
+      startProbe(revoke)
     }, delayMs)
   }
 
@@ -599,7 +684,27 @@ export function apply(ctx: Context, config: Config): void {
    */
   const refreshCapabilities = (): void => {
     probeFailures = 0
-    startProbe()
+    startProbe(true)
+  }
+
+  /**
+   * Ask for a fresh A-off capability answer when admission finds the current one
+   * unusable.
+   *
+   * No answer, no live lease, or an expired lease all mean the next request must
+   * be refused; this only starts the revalidation that can restore the grant. A
+   * probe or retry already in flight is the fresher question, and an answer that
+   * withheld the permission keeps its own scheduled recheck instead of turning
+   * every refused request into a probe. An expired lease is different: the
+   * scheduled refresh has already failed to arrive in time, so it is discarded
+   * and the question is asked immediately.
+   * @param expired - whether the current answer carried a grant that has expired.
+   */
+  const requestAOffRevalidation = (expired: boolean): void => {
+    if (capabilityProbe !== undefined || probeRetryTimer !== undefined) return
+    if (!expired && aOffRefreshTimer !== undefined) return
+    clearAOffRefresh()
+    startProbe(false)
   }
 
   /**
@@ -662,6 +767,7 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.effect(() => () => {
     clearProbeRetry()
+    clearAOffRefresh()
     capabilityProbe?.abort()
     // A request already waiting on the load probe must not hang behind a fiber
     // that can no longer prove anything.
@@ -710,10 +816,14 @@ export function apply(ctx: Context, config: Config): void {
    *
    * The status alone is not that signal: any other `503` — an upstream failure, a
    * restart, a proxy error — leaves wire parity exactly as it was. Only the
-   * response carrying `x-cc-wire-parity-unavailable: 1` is evidence against the
-   * capability, so only that response drops the proof and the next request uses
-   * the three-marker wire. The refusal schedules another probe after a cooldown
-   * instead of leaving the route permanently off; the cooldown means a burst of
+   * response carrying `x-cc-wire-parity-unavailable: 1` is evidence that the
+   * selected worker changed, so that response withdraws the whole capability
+   * answer: the wire proof and the A-off HIPAA cache grant together. Keeping the
+   * grant would let an older pool build, swapped in under a request that no
+   * longer carries the wire headers, receive unlicensed one-hour markers
+   * indefinitely. The next request is therefore refused on the A-off wire until
+   * a cooldown probe answers with the exact token again, and that probe is the
+   * only thing that can restore either fact. The cooldown means a burst of
    * refusals cannot become a probe storm. The standard request-log and logging
    * callback runs first and is not replaced.
    * @param event - one request or settled-response diagnostic.
@@ -721,19 +831,33 @@ export function apply(ctx: Context, config: Config): void {
   const observeWireParityFailure = (event: PiAiRequestDiagnostic): void => {
     diagnostics.onRequestDiagnostic?.(event)
     if (event.kind === 'response' && event.status === 503 && event.wireParityUnavailable === true && wireParity()) {
-      // Withdraw only the wire: the marked refusal says the selected worker does
-      // not serve the parity wire, which is no statement about the pool build's
-      // A-off cache handling, and the next request needs that permission on the
-      // non-parity wire.
-      capabilityProof = undefined
+      // A lease revalidation can be in flight while the wire proof is still live;
+      // abort it so its pre-refusal answer cannot restore the grant after this
+      // withdrawal. The cooldown probe is the only question that may re-grant.
+      capabilityProbe?.abort()
+      capabilityProbe = undefined
+      capabilityState = undefined
+      clearAOffRefresh()
       ctx.logger.warn(
         'llm-cc-pool: pool refused CC wire parity with 503 on a wire-parity-on request;'
-        + ' dropping the proof and serving the non-parity wire until the endpoint proves it again',
+        + ' withdrawing the wire proof and the A-off cache grant until the endpoint answers again',
       )
-      // The proof was on, so no probe generation and no retry timer can be
-      // pending: every probe start clears the state. Ask again after the cooldown.
-      scheduleProbe(WIRE_PARITY_REFUSAL_COOLDOWN_MS)
+      scheduleProbe(WIRE_PARITY_REFUSAL_COOLDOWN_MS, true)
     }
+  }
+
+  /**
+   * Whether the current capability answer carries a live A-off HIPAA cache lease.
+   *
+   * The grant is stored inside {@link capabilityState}, so it is automatically
+   * scoped to the build and probe answer that advertised it; the deadline is the
+   * remaining bound against a silent pool swap that no A-off request can see on
+   * the wire.
+   * @returns whether the one-hour non-parity dispatch may open.
+   */
+  const aOffHipaaCacheGrantLive = (): boolean => {
+    const expiresAt = capabilityState?.aOffHipaaCacheExpiresAt
+    return expiresAt !== undefined && Date.now() < expiresAt
   }
 
   /**
@@ -743,25 +867,32 @@ export function apply(ctx: Context, config: Config): void {
    * subagent, or unclassified request under a one-hour policy sends one-hour
    * `cache_control` markers, and only a pool build that advertises
    * `aOffHipaaCache: "downgrade"` accepts that lifetime for HIPAA traffic. The
-   * route therefore refuses before opening a provider request when that
-   * permission is absent, instead of sending the marker the pool has not
-   * licensed or silently substituting five minutes. A helper request keeps the
-   * API's default five-minute lifetime under `cc3` and needs no permission; a
-   * route whose policy sends no one-hour marker needs none either. On the
-   * proved parity wire the worker owns the cache plan, so the unchanged A-on
-   * path applies.
+   * route therefore refuses before opening a provider request unless the current
+   * answer carries a live grant. A missing grant starts a revalidation (subject
+   * to the cooldown and retry state); an expired one starts it immediately. A
+   * helper request keeps the API's default five-minute lifetime under `cc3` and
+   * needs no permission; a route whose policy sends no one-hour marker needs none
+   * either. On the proved parity wire the worker owns the cache plan, so the
+   * unchanged A-on path applies.
+   *
+   * This runs at the dispatch open point — after any session-queue wait and after
+   * the load probe — so a credential refresh that withdraws the grant while a
+   * request waits cannot let that request open under the stale permission.
    * @param options - the assembled request about to open.
    * @throws {LlmError} code `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` when the A-off
-   *   wire would send one-hour markers without the pool's permission.
+   *   wire would send one-hour markers without a live grant.
    */
   const admitAOffHipaaCache = (options: GenerateOptions): void => {
     if (resolvedCachePolicy.cacheTtl !== '1h') return
     if (resolvedCachePolicy.cacheMarkerPolicy === 'cc3' && isHelperRequest(options)) return
     if (wireParity()) return
-    if (aOffHipaaCache) return
+    if (aOffHipaaCacheGrantLive()) return
+    // An expired lease is a failed refresh, not an absent answer: ask again now
+    // instead of waiting for the recheck the old answer scheduled.
+    requestAOffRevalidation(capabilityState?.aOffHipaaCacheExpiresAt !== undefined)
     throw new LlmError(
       'llm-cc-pool: refusing the request because the non-parity wire would send one-hour prompt-cache markers and'
-      + ` the pool at ${BASE_URL} did not advertise aOffHipaaCache: "downgrade" from /v1/capabilities;`
+      + ` the pool at ${BASE_URL} has no live aOffHipaaCache: "downgrade" grant from /v1/capabilities;`
       + ' install a pool build that advertises it, or set cacheTtl: none to disable prompt caching',
       A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE,
       { retryDisposition: 'forbid' },

@@ -776,7 +776,7 @@ describe('CC wire parity capability proof', () => {
     expect(capabilityCalls(capture)).toHaveLength(1)
   })
 
-  it('drops the proof when the pool marks a 503 as wire parity unavailable', async () => {
+  it('withdraws the proof and A-off grant when the pool marks a 503 as wire parity unavailable', async () => {
     let refuse = false
     const { ctx, capture } = await mountProbed((request) => {
       if (request.url === CAPABILITIES_URL) return capabilityReply('pool-build-1')
@@ -789,21 +789,21 @@ describe('CC wire parity capability proof', () => {
     await assemble(ctx, WIRE_PARITY_PROBE)
     expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
 
-    // The next request is back on the three-marker wire immediately. The marked
-    // refusal clears the proof and schedules another probe after the cooldown,
-    // so the route is not permanently off; the separate case below advances that
-    // cooldown and observes the probe.
+    // The marked refusal withdraws the A-off cache grant with the wire proof:
+    // the next request cannot open the one-hour non-parity wire before a fresh
+    // answer carries the exact token again.
     refuse = false
-    await assemble(ctx, WIRE_PARITY_PROBE)
-    const after = modelCalls(capture).at(-1) as CapturedRequest
-    expect(declaresWireParity(after)).toBe(false)
-    const body = JSON.stringify(after.body)
-    expect(body.match(/"cache_control"/gu)).toHaveLength(3)
-    expect(body).toContain('"ttl":"1h"')
+    const opened = modelCalls(capture).length
+    const refused = await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(refused.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+    })
+    expect(modelCalls(capture)).toHaveLength(opened)
     expect(capabilityCalls(capture)).toHaveLength(1)
   })
 
-  it('re-probes after the marked 503 cooldown and serves the wire again', async () => {
+  it('re-probes after the marked 503 cooldown and re-grants the wire and cache permission', async () => {
     vi.useFakeTimers()
     try {
       let refuse = false
@@ -821,10 +821,13 @@ describe('CC wire parity capability proof', () => {
       refuse = true
       await assemble(ctx, WIRE_PARITY_PROBE)
       refuse = false
-      await assemble(ctx, WIRE_PARITY_PROBE)
-      const fallback = modelCalls(capture).at(-1) as CapturedRequest
-      expect(declaresWireParity(fallback)).toBe(false)
-      expectCc3Wire(fallback)
+      const opened = modelCalls(capture).length
+      const refused = await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(refused.finish).toMatchObject({
+        kind: 'error',
+        failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+      })
+      expect(modelCalls(capture)).toHaveLength(opened)
       // The refusal scheduled the next probe, but not before the cooldown.
       expect(capabilityCalls(capture)).toHaveLength(1)
 
@@ -834,6 +837,49 @@ describe('CC wire parity capability proof', () => {
       await assemble(ctx, WIRE_PARITY_PROBE)
       expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
       expect(capabilityCalls(capture)).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('aborts an in-flight lease revalidation when a marked 503 withdraws the answer', async () => {
+    vi.useFakeTimers()
+    try {
+      let probes = 0
+      let refuse = false
+      const refreshAnswer = Promise.withResolvers<Response>()
+      const { ctx, capture } = await mountProbed((request) => {
+        if (request.url === CAPABILITIES_URL) {
+          probes += 1
+          return probes === 2 ? refreshAnswer.promise : capabilityReply(`pool-build-${probes}`)
+        }
+        return refuse ? wireParityRefusal() : anthropicSuccessResponse()
+      })
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      // The proactive lease revalidation is now in flight.
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(capabilityCalls(capture)).toHaveLength(2)
+
+      refuse = true
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      refuse = false
+      // Its answer arrives after the refusal but must not restore the grant.
+      refreshAnswer.resolve(capabilityReply('stale-build'))
+      await vi.advanceTimersByTimeAsync(0)
+      const opened = modelCalls(capture).length
+      const refused = await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(refused.finish).toMatchObject({
+        kind: 'error',
+        failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+      })
+      expect(modelCalls(capture)).toHaveLength(opened)
+      expect(capabilityCalls(capture)).toHaveLength(2)
+
+      // Only the cooldown probe can re-grant.
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(capabilityCalls(capture)).toHaveLength(3)
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
     } finally {
       vi.useRealTimers()
     }
@@ -1222,5 +1268,109 @@ describe('CC pool A-off HIPAA cache capability', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('withdraws a live A-off grant when the proactive refresh answers without the token', async () => {
+    vi.useFakeTimers()
+    try {
+      let probes = 0
+      const { ctx, capture } = await mountProbed((request) => {
+        if (request.url !== CAPABILITIES_URL) return anthropicSuccessResponse()
+        probes += 1
+        return probes === 2
+          ? capabilityReply('pool-build-2', 'missing')
+          : capabilityReply(`pool-build-${probes}`)
+      }, { ccWireParity: false })
+
+      // The first answer licenses the one-hour non-parity wire.
+      expect((await assemble(ctx, WIRE_PARITY_PROBE)).finish).toEqual({ kind: 'stop' })
+      const opened = modelCalls(capture).length
+      expect(capabilityCalls(capture)).toHaveLength(1)
+
+      // The scheduled revalidation sees an older build without the token: the
+      // grant is withdrawn with the answer that replaced it.
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(capabilityCalls(capture)).toHaveLength(2)
+      const refused = await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(refused.finish).toMatchObject({
+        kind: 'error',
+        failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+      })
+      expect(modelCalls(capture)).toHaveLength(opened)
+
+      // The answer without a grant schedules its own recheck; a later token
+      // restores the lease.
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(capabilityCalls(capture)).toHaveLength(3)
+      expect((await assemble(ctx, WIRE_PARITY_PROBE)).finish).toEqual({ kind: 'stop' })
+      expect(modelCalls(capture)).toHaveLength(opened + 1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses an expired A-off grant and revalidates immediately', async () => {
+    vi.useFakeTimers()
+    try {
+      const { ctx, capture } = await mountProbed(
+        request => request.url === CAPABILITIES_URL
+          ? capabilityReply('pool-build-1')
+          : anthropicSuccessResponse(),
+        { ccWireParity: false },
+      )
+      expect((await assemble(ctx, WIRE_PARITY_PROBE)).finish).toEqual({ kind: 'stop' })
+      const opened = modelCalls(capture).length
+
+      // Move the wall clock past the lease without firing the scheduled refresh:
+      // admission must treat the grant as dead and ask again immediately.
+      vi.setSystemTime(Date.now() + 121_000)
+      const refused = await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(refused.finish).toMatchObject({
+        kind: 'error',
+        failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+      })
+      expect(modelCalls(capture)).toHaveLength(opened)
+      expect(capabilityCalls(capture)).toHaveLength(2)
+
+      await vi.advanceTimersByTimeAsync(0)
+      expect((await assemble(ctx, WIRE_PARITY_PROBE)).finish).toEqual({ kind: 'stop' })
+      expect(modelCalls(capture)).toHaveLength(opened + 1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-checks the A-off grant at the queue-open point after a credential refresh', async () => {
+    let probes = 0
+    const firstModel = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed((request) => {
+      if (request.url === CAPABILITIES_URL) {
+        probes += 1
+        return probes === 1
+          ? capabilityReply('pool-build-1')
+          : capabilityReply('pool-build-2', 'missing')
+      }
+      return firstModel.promise
+    }, { ccWireParity: false })
+
+    // Hold the session with the first request; the second request queues behind
+    // it while the credential refresh withdraws the grant.
+    const held = assemble(ctx, { ...WIRE_PARITY_PROBE, sessionId: 'queue-session' as never })
+    await vi.waitFor(() => { expect(modelCalls(capture)).toHaveLength(1) })
+    const queued = assemble(ctx, { ...WIRE_PARITY_PROBE, sessionId: 'queue-session' as never })
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+
+    ctx.emit('credentials/reference-updated', credentialRef(API_KEY_REF))
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(2) }, { timeout: 5_000 })
+
+    firstModel.resolve(anthropicSuccessResponse())
+    await held
+    const refused = await queued
+    expect(refused.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+    })
+    // The queued request was refused before opening any provider request.
+    expect(modelCalls(capture)).toHaveLength(1)
   })
 })

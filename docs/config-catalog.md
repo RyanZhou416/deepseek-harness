@@ -1772,7 +1772,7 @@ export interface Config {
 
 - `inject`: `llm`
 - `refs`: [`PiAiCacheMarkerPolicy`](../packages/llm/llm-pi-ai/src/index.ts) · [`PiAiRequestLogProfile`](../packages/llm/llm-pi-ai/src/index.ts) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-cc-pool/src/config.ts:51`](../packages/llm/llm-cc-pool/src/config.ts)
+- `source`: [`packages/llm/llm-cc-pool/src/config.ts:54`](../packages/llm/llm-cc-pool/src/config.ts)
 
 ```ts config-catalog
 /** Loader configuration for the mac-pool route. */
@@ -1861,11 +1861,11 @@ export interface Config {
    * carries no marker in either case, so wire parity does not constrain which
    * policy the route may configure. The default `false` keeps the current wire
    * exactly. It does not disable the capability probe: a one-hour policy needs
-   * the pool build's `aOffHipaaCache: "downgrade"` permission for the non-parity
+   * the pool build's live `aOffHipaaCache: "downgrade"` lease for the non-parity
    * wire, so the same probe asks for both facts and a reply without that
-   * permission refuses the one-hour A-off request before it reaches the pool.
-   * Only a caching-disabled (`cacheTtl: none`) route that also leaves this
-   * `false` sends no probe.
+   * permission (or with one whose lease expired) refuses the one-hour A-off
+   * request before it reaches the pool. Only a caching-disabled
+   * (`cacheTtl: none`) route that also leaves this `false` sends no probe.
    */
   ccWireParity: boolean
   /**

@@ -1669,12 +1669,14 @@ process permanently on the default wire. The first routed request awaits the
 initial probe under a 6 s deadline and then proceeds on the configured default
 wire if it has not answered, while the retry schedule keeps running; cancelling
 that request ends the wait instead of marking the deadline expired. A marked
-`503` on a request that carries the wire drops the proof immediately and
-schedules another probe after a 30 s cooldown, so the refusal is not a permanent
-fallback; the proof is on, so no probe generation or retry timer can be pending,
-and the cooldown bounds probe traffic. Proven and failed probe transitions are
-logged at info/warning with the build id but no credential. Routes without the
-wire and other providers keep their current
+`503` on a request that carries the wire withdraws the wire proof and the A-off
+cache grant together and schedules another probe after a 30 s cooldown, so the
+refusal is not a permanent fallback and the next answer must re-establish both
+facts; the proof is on, so no probe generation or retry timer can be pending,
+and the cooldown bounds probe traffic. A one-hour A-off route additionally
+revalidates its grant on a lease schedule (see the A-off section below). Proven
+and failed probe transitions are logged at info/warning with the build id but no
+credential. Routes without the wire and other providers keep their current
 bytes. The request log records the attempt's route, model, endpoint, status and
 pool request id; it never carries the body, the headers, or the section plan.
 
@@ -1783,40 +1785,52 @@ main/subagent marker, so the default one-hour route probes even with wire parity
 off; a caching-disabled route that does not request the wire sends no probe.
 
 On the non-parity wire the adapter admits a main, subagent, or unclassified
-dispatch only while the current answer advertises the downgrade; otherwise it
+dispatch only while the current answer carries a live A-off lease; otherwise it
 throws `LlmError` code `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` with
 `retryDisposition: "forbid"` before any provider request. It never sends the
-one-hour marker and never substitutes the five-minute lifetime. A helper
+one-hour marker and never substitutes the five-minute lifetime. The grant lives
+inside the answer state rather than beside it, so it is scoped to the answering
+endpoint and pool build and is replaced atomically with the next answer. Its
+expiry is a two-minute lease: a live lease is revalidated at half its lifetime
+(60 s), an answer that withholds the token clears it, and an expired lease is
+refused until a fresh answer carries the exact token. That bound exists because
+an A-off request sends neither the wire headers nor the marked 503 that would
+reveal a silent swap to an older pool build. Admission runs immediately before
+every upstream open — after the load probe, after a session-queue wait, and
+after a session-busy retry — so a credential refresh that withdraws the grant
+while a request waits cannot let it open under the stale permission. A helper
 (`compaction`, `auxiliary`) keeps the API's default five minutes under `cc3` and
 is exempt; `cacheTtl: none` sends no marker and needs no permission.
 `llm-pi-ai` exports `isHelperRequest` so the gate reuses the adapter's class
 mapping instead of restating it. A proved parity route is unchanged: the worker
 owns its cache plan, and an A-on request or its cc3 fallback is not gated. A
-probe generation clears the answer before asking, an answer replaces both
-facts, a replaced `CC_POOL_API_KEY` reopens the question, and a new build
-replaces it with the new answer; a marked `503` withdraws only the wire proof
-and keeps the A-off permission because the refusal says nothing about the
-build's cache handling. Probe answers log the permission at info when advertised
-and at warning when absent; the typed refusal is the visible failure a
-deployment sees.
+revoking probe (profile load, replaced credential, marked 503) clears the answer
+before asking; a lease revalidation keeps it in force until the answer replaces
+it, so a transient probe failure does not withdraw a live lease early. A marked
+`503` withdraws the wire proof and the A-off grant together because the selected
+worker changed; the cooldown probe re-grants only on the exact token. Probe
+answers log the permission at info when advertised and at warning when absent;
+the typed refusal is the visible failure a deployment sees.
 
 **Preservation rule.** Keep the one probe answer as the sole source of both
 facts; do not add a config field, a per-request heuristic, or a silent fallback
 lifetime. Keep the token comparison exact and case-sensitive, keep the A-off
 grant unavailable without the exact triple, and keep an absent or malformed
 field from failing the A-on proof. Keep the A-off refusal before provider
-dispatch, and keep `cacheTtl: none` and the cc3 helper lifetime outside it. Keep
-the capability cleared with the proof on credential change and probe restart,
-and keep the marked-503 behavior (wire withdrawn, cache permission retained). Do
-not let `cc3` or any other provider route read the capability.
+dispatch at every open point, and keep `cacheTtl: none` and the cc3 helper
+lifetime outside it. Keep the grant inside the answer state with a finite lease,
+keep its refresh/recheck schedule, and keep the marked-503 behavior (wire proof
+and cache grant withdrawn together). Do not let `cc3` or any other provider
+route read the capability.
 
 **Focused verification.** `pnpm exec vitest run packages/llm/llm-cc-pool
 packages/llm/llm-pi-ai` covers the exact-token parse, missing and malformed
 values, the unproved reply, the A-off one-hour dispatch with and without the
 field, the helper exemption, the typed refusal with no provider request, the
-credential reset, the unchanged A-on wire and fallback, the marked-503 fallback,
-and the existing probe triple. `pnpm run typecheck` and oxlint cover the export
-and contracts.
+credential reset, the marked-503 withdrawal and cooldown re-grant, the lease
+revalidation and expiry, the queue-wait re-check, the unchanged A-on wire and
+fallback, and the existing probe triple. `pnpm run typecheck` and oxlint cover
+the export and contracts.
 
 ## CC subscription pool settings page (fork)
 
