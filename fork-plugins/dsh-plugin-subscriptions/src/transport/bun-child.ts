@@ -2,9 +2,11 @@
  * Bun-side transport child.
  *
  * Runs under Bun and issues each framed request with the global `fetch`, so the
- * request leaves the machine through the same runtime the target client uses:
- * the same TLS stack, header serialization, connection handling and runtime
- * self-report. It never listens on a socket.
+ * request leaves the machine through the same TLS stack, header serialization and
+ * connection handling the target client uses. The header plan is the caller's and
+ * crosses unchanged, including the pinned runtime pair: the child reports the
+ * identity the request claims, not the runtime that happens to issue it. It never
+ * listens on a socket.
  *
  * Only Node-compatible APIs are used for stdio; the masquerade comes from the
  * runtime that performs the fetch, not from Bun-specific calls.
@@ -28,16 +30,6 @@ import { resolve } from 'node:path'
 import type { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { FrameDecoder, encodeBody, encodeControl, type Frame } from './frames.js'
-
-/**
- * Header the child owns.
- *
- * Its value must come from the runtime that performs the fetch: the genuine client
- * reports the version of the runtime issuing the request, so a value computed by
- * the caller on a different runtime would name the wrong runtime on the wire.
- * The spelling is the SDK's, which is what reaches the peer.
- */
-const RUNTIME_VERSION_HEADER = 'X-Stainless-Runtime-Version'
 
 /**
  * Issues one request.
@@ -135,20 +127,6 @@ function joinChunks(chunks: readonly Uint8Array[]): Uint8Array {
 
 function describe(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-}
-
-/**
- * Reports whether an incoming field name is the one header this child owns.
- *
- * HTTP field names are case-insensitive, and the plan arrives with the client's
- * own mixed casing, so a literal comparison would let a differently-spelled copy
- * of the runtime-version field through beside the one the child sets.
- *
- * @param name - The incoming field name.
- * @returns Whether the child replaces this field with its own value.
- */
-function ownHeader(name: string): boolean {
-  return name.toLowerCase() === RUNTIME_VERSION_HEADER.toLowerCase()
 }
 
 /**
@@ -328,15 +306,15 @@ class ChildSession {
         if (
           Array.isArray(pair) &&
           typeof pair[0] === 'string' &&
-          typeof pair[1] === 'string' &&
-          !ownHeader(pair[0])
+          typeof pair[1] === 'string'
         ) {
           list.push([pair[0], pair[1]])
         }
       }
-      // The runtime issuing the request reports its own version.
-      const runtimePair: [string, string] = [RUNTIME_VERSION_HEADER, process.version]
-      init.headers = [...list, runtimePair]
+      // The plan carries the pinned desktop identity, including the runtime pair;
+      // the child carries it unchanged rather than reporting the runtime it happens
+      // to run on, which would name a runtime the claimed client is not.
+      init.headers = list
     }
     if (request['body'] === true) {
       const body = joinChunks(state.chunks)

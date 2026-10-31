@@ -39,6 +39,7 @@ import type {
   ClaudeEngineIdentity,
   ClaudeEngineRequest,
   ClaudeEngineRequestEvidence,
+  ClaudeEngineTurn,
 } from './types.js'
 
 /** The wire OS vocabulary the builder expects, mapped from the caller's platform token. */
@@ -563,6 +564,14 @@ export interface ClaudeEngineBuildInput {
   /** The caller's continuation chain, when it keeps one. */
   readonly chain?: ClaudeEngineChain
   /**
+   * The prompt anchor this request serves, when the caller keeps a transcript.
+   *
+   * The engine cannot derive it from the raw body, so an absent field means the caller
+   * states no turn rather than that the request has none; the billing block then omits
+   * the turn segments instead of inventing them.
+   */
+  readonly turn?: ClaudeEngineTurn
+  /**
    * Trusted policy the caller states out of band, from its own policy adapter.
    *
    * Not a request-body field: the DTO has no such member, so a caller cannot suppress a beta by
@@ -662,6 +671,12 @@ export async function buildClaudeEngineRequest(input: ClaudeEngineBuildInput): P
       // The chain the caller already selected: the engine never derives a request id from the
       // conversation, and the billing text carries it rather than a body field of its own.
       ...previousRequestId === undefined ? {} : { previousRequestId },
+      // The prompt anchor is likewise the caller's transcript fact; the builder's own guards
+      // drop a value it cannot state, and an absent turn emits no segment.
+      ...input.turn === undefined ? {} : {
+        ...input.turn.turnOrigin === undefined ? {} : { turnOrigin: input.turn.turnOrigin },
+        ...input.turn.turnPosition === undefined ? {} : { turnPosition: input.turn.turnPosition },
+      },
       // An absent or empty pin is omitted, which is the client's no-header state; an empty string
       // is the caller stating exactly that, not a value to be invented here.
       ...atis === undefined || atis === '' ? {} : { extraHeaders: [['x-cc-atis', atis] as const] },

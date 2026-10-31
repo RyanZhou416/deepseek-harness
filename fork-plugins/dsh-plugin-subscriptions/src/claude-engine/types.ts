@@ -10,6 +10,8 @@
  * @module dsh-plugin-subscriptions/claude-engine/types
  */
 
+import type { ClaudeCodeTurnPosition } from '@tormentalabs/claude-code-wire-compat'
+
 /** The platform the caller's client runs on, as the wire vocabulary spells it. */
 export type ClaudeEngineOs = 'darwin' | 'linux' | 'win32'
 
@@ -46,6 +48,22 @@ export interface ClaudeEngineChain {
   readonly previousRequestId?: string
   /** The account's ATIS token for this session span, when the caller holds one. */
   readonly atis?: string
+}
+
+/**
+ * The prompt anchor one Messages request is attributed to.
+ *
+ * The client reads both values off the transcript message of the prompt the request
+ * serves and repeats them for that prompt's tool-continuation steps. The engine cannot
+ * derive them from a raw body: a body does not say which prompt is the anchor, so the
+ * caller that keeps a transcript states them and a caller that does not omits the field.
+ * The pinned builder applies the client's own guards and omits a value it cannot state.
+ */
+export interface ClaudeEngineTurn {
+  /** `cc_turn_origin`: the prompt's origin (`human`, `sdk`, and the client's other values). */
+  readonly turnOrigin?: string
+  /** `cc_prompt_index` and `cc_turn_index`: the transcript's prompt and turn ordinals. */
+  readonly turnPosition?: ClaudeCodeTurnPosition
 }
 
 /** A header name/value pair as the request builder produces them. */

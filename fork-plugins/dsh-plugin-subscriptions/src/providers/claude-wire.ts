@@ -341,15 +341,23 @@ The tools listed in this request are the complete and authoritative set availabl
  * platform, or an architecture that application is not built for, contradicts itself, and
  * a host-specific value would also identify the operator.
  *
- * The runtime version is deliberately NOT pinned with them. The client reports the
- * version of the runtime that performs the fetch, so a constant names a runtime that
- * issued nothing: this route reports `process.version` of whichever runtime sends the
- * request, and the Bun transport reports its own.
+ * The runtime and its version are pinned with them, as one pair. The desktop spawns a
+ * Node client whose own SDK reports that runtime; reporting this host's Bun or Node
+ * version instead would name a runtime the claimed desktop is not, and pairing the
+ * pinned `node` runtime with a host version is the contradiction the pinned pool
+ * avoids. `v22.19.0` is the Node release this product pins, spelled the way Node reports
+ * its own version; the transport carries it unchanged.
  */
 export const CLAUDE_CLIENT_OS = 'Windows'
 
 /** Architecture the Windows desktop application is built for. */
 export const CLAUDE_CLIENT_ARCH = 'x64'
+
+/** Runtime the pinned desktop client reports for the request it issues. */
+export const CLAUDE_CLIENT_RUNTIME = 'node'
+
+/** Runtime version paired with {@link CLAUDE_CLIENT_RUNTIME}, in Node's own spelling. */
+export const CLAUDE_CLIENT_RUNTIME_VERSION = 'v22.19.0'
 
 const CLAUDE_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max'])
 
@@ -530,6 +538,9 @@ export async function buildClaudeWireRequest(
   // change what this span sends.
   const atis = continuation.atisPin
   const suppressBetas = resolveSuppressBetas(policy)
+  // The ordinal of the user prompt this request serves. A tool continuation repeats the
+  // anchor it started under, so the turn state below and the prompt id always agree.
+  const turn = promptTurn(messages)
   const built = await buildClaudeCodeRequest({
     accessToken: session.accessToken,
     model: options.model,
@@ -564,19 +575,23 @@ export async function buildClaudeWireRequest(
       sessionId,
       deviceId: session.deviceId,
       accountUuid: session.accountUuid,
-      runtime: 'node',
-      // The runtime that issues the request reports itself, as the genuine client's
-      // SDK does. With the Bun transport active the child replaces this with its own
-      // `process.version`; on the direct path this IS the sending runtime's.
-      runtimeVersion: process.version,
+      runtime: CLAUDE_CLIENT_RUNTIME,
+      // The pinned pair, not this host's runtime: the claimed desktop is a Node client,
+      // and the transport carries this value unchanged.
+      runtimeVersion: CLAUDE_CLIENT_RUNTIME_VERSION,
       os: CLAUDE_CLIENT_OS,
       arch: CLAUDE_CLIENT_ARCH,
-      // This route is a programmatic client that supplies its own system prompt: the
-      // headless shape, which selects the standalone agent identity line rather than
-      // the interactive CLI one. The entrypoint and user agent come from the pinned
-      // profile, which records `claude-desktop`.
-      invocation: { isNonInteractive: true, hasAppendSystemPrompt: false },
     },
+    // The desktop is an interactive client. Its identity line is the interactive CLI
+    // one, matching the `claude-desktop` entrypoint the profile bills and the user agent
+    // on the header plan; the headless Agent SDK lines belong to a `sdk-cli` run, which
+    // this profile does not describe. Omitting `invocation` is that interactive mode.
+    // The desktop application's turn is the user's prompt, so the turn origin is `human`;
+    // a host-synthesized continuation origin is not modelled here. The prompt and turn
+    // ordinals come from the same anchor as `cc_prompt_id`, so a tool continuation repeats
+    // its prompt's pair and the next prompt advances both.
+    turnOrigin: 'human',
+    ...turn < 1 ? {} : { turnPosition: { promptIndex: turn, turnIndex: turn } },
     // The display value is a per-version wire fact, so it belongs to the pinned
     // profile rather than to this adapter: overriding it here sent the wrong value
     // for the current release.
@@ -599,7 +614,7 @@ export async function buildClaudeWireRequest(
     // their client classes, and everything else is the conversation's own Messages request.
     requestClass: claudeRequestClass(options.purpose, options.requestClass),
     ...continuation.previousRequestId === undefined ? {} : { previousRequestId: continuation.previousRequestId },
-    promptId: claudePromptId(sessionId, promptTurn(messages)),
+    promptId: claudePromptId(sessionId, turn),
     // Messages carry the desktop platform/version pair, not the application-only
     // memory profile. These extra headers do not alter the body construction.
     extraHeaders: [

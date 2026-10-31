@@ -763,6 +763,31 @@ export interface ClaudeCodeInvocationMode {
   readonly recordedIdentity?: string;
 }
 
+/**
+ * The prompt and turn ordinals the client reports in `cc_prompt_index` and
+ * `cc_turn_index`.
+ *
+ * Both indices are the client's transcript anchors for the prompt a request is
+ * attributed to, not counters this package can derive from an arbitrary
+ * message list: the client stores them on the prompt's own transcript message.
+ * A caller that keeps a transcript supplies them from it; one that does not
+ * omits the field rather than guessing.
+ *
+ * The indices travel as one segment pair: the client emits neither unless both
+ * values pass its guard, which requires integers in `[0, 1e7]` and `[1, 1e7]`
+ * respectively and `promptIndex <= turnIndex`. A pair failing that guard is
+ * silently omitted, exactly as a malformed `promptId` is.
+ */
+export interface ClaudeCodeTurnPosition {
+  /**
+   * Human prompts up to and including this one, starting at `1`; `0` is
+   * possible only for a first prompt of another origin.
+   */
+  readonly promptIndex: number;
+  /** Prompts of any origin up to and including this one, starting at `1`. */
+  readonly turnIndex: number;
+}
+
 export interface ClaudeCodeRuntimeIdentity {
   readonly sessionId: string;
   readonly deviceId: string;
@@ -1142,6 +1167,33 @@ export interface ClaudeCodeRequestInput {
    * `INVALID_INPUT`.
    */
   readonly promptId?: string;
+  /**
+   * Supplies the `cc_turn_origin` segment of the canonical billing block.
+   *
+   * Upstream derives this from the prompt's origin: `human` for a user prompt,
+   * `sdk` for a programmatic one, and the client's other enum values for the
+   * remaining sources. This package cannot observe which one produced the
+   * request, so the caller states it.
+   *
+   * The segment is emitted only while the profile's builder has the parameter
+   * (2.1.280 and later) and only when the value matches upstream's
+   * `/^[a-z][a-z_]{0,31}$/` guard. A value failing that guard is SILENTLY
+   * omitted, exactly as upstream drops a value it cannot vouch for; a
+   * non-string is still `INVALID_INPUT`.
+   */
+  readonly turnOrigin?: string;
+  /**
+   * Supplies the `cc_prompt_index` and `cc_turn_index` segments of the
+   * canonical billing block.
+   *
+   * The client reads both off the transcript message of the prompt the request
+   * is attributed to and repeats them for that prompt's tool-continuation
+   * steps. The pair is emitted together, and only on a profile whose builder
+   * takes it (2.1.288 and later); a pair outside the guard documented on
+   * {@link ClaudeCodeTurnPosition} is SILENTLY omitted. A non-object value, an
+   * unknown key, or a non-number member is `INVALID_INPUT`.
+   */
+  readonly turnPosition?: ClaudeCodeTurnPosition;
   /** Injects the Web Crypto provider used to hash the request body. */
   readonly crypto?: Pick<Crypto, "subtle">;
 }

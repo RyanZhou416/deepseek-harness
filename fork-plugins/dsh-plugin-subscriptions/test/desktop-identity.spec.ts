@@ -7,6 +7,8 @@ import { readFile } from 'node:fs/promises'
 import {
   CLAUDE_CLIENT_ARCH,
   CLAUDE_CLIENT_OS,
+  CLAUDE_CLIENT_RUNTIME,
+  CLAUDE_CLIENT_RUNTIME_VERSION,
 } from '../src/providers/claude-wire.js'
 import { deriveClaudeDeviceId } from '../src/providers/claude.js'
 import {
@@ -106,15 +108,24 @@ test('the request claims the anchored platform rather than this host', () => {
   assert.equal(CLAUDE_CLIENT_ARCH, 'x64')
 })
 
-test('claims no compiled-in runtime version', async () => {
-  // The client reports the version of the runtime that issues the request, so a
-  // constant would name a runtime that issued nothing. `claude-wire.spec.ts`
-  // pins the emitted header to this process's own version.
+test('pins the runtime pair the desktop client reports', async () => {
+  // The claimed desktop is a Node client of a fixed release. Reporting the host's own
+  // runtime version beside the pinned `node` runtime is the contradiction the pinned
+  // pool avoids, and a host-derived pair also identifies the operator.
+  assert.deepEqual(
+    [CLAUDE_CLIENT_RUNTIME, CLAUDE_CLIENT_RUNTIME_VERSION],
+    ['node', 'v22.19.0'],
+  )
   const source = await readFile(
     new URL('../../src/providers/claude-wire.ts', import.meta.url),
     'utf8',
   )
-  assert.match(source, /runtimeVersion: process\.version/u)
+  assert.match(source, /runtime: CLAUDE_CLIENT_RUNTIME/u)
+  assert.match(source, /runtimeVersion: CLAUDE_CLIENT_RUNTIME_VERSION/u)
+  assert.ok(
+    !source.includes('process.version'),
+    'a host version would pair the pinned runtime with a release it is not',
+  )
 })
 
 test('no host value can reach a request', async () => {
@@ -122,7 +133,7 @@ test('no host value can reach a request', async () => {
     new URL('../../src/providers/claude-wire.ts', import.meta.url),
     'utf8',
   )
-  for (const forbidden of ['process.platform', 'process.arch', 'process.versions', 'totalmem']) {
+  for (const forbidden of ['process.platform', 'process.arch', 'process.versions', 'process.version', 'totalmem']) {
     assert.ok(
       !source.includes(forbidden),
       `${forbidden} would publish this host in every request`,

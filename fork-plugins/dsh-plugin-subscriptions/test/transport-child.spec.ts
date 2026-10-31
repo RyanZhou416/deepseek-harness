@@ -468,7 +468,8 @@ test('a repeated body-end does not issue a second request', { timeout: CASE_BOUN
     requestFrame('a', 0, {
       headers: [
         ['content-type', 'application/json'],
-        ['x-stainless-runtime-version', 'caller'],
+        ['X-Stainless-Runtime', 'node'],
+        ['X-Stainless-Runtime-Version', 'v22.19.0'],
       ],
       body: true,
     }),
@@ -495,9 +496,12 @@ test('a repeated body-end does not issue a second request', { timeout: CASE_BOUN
   assert.equal(ended(child.sink.frames, 'a'), true)
   assert.equal(ended(child.sink.frames, 'b'), true)
 
+  // The header plan crosses unchanged: the pinned runtime pair is the identity the
+  // request claims, not the runtime this child happens to run on.
   assert.deepEqual(call.init.headers, [
     ['content-type', 'application/json'],
-    ['X-Stainless-Runtime-Version', process.version],
+    ['X-Stainless-Runtime', 'node'],
+    ['X-Stainless-Runtime-Version', 'v22.19.0'],
   ])
   const sentBody = call.init.body
   assert.ok(sentBody instanceof Blob, 'the uploaded body reaches fetch as one blob')

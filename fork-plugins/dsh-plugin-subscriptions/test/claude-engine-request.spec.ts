@@ -200,6 +200,42 @@ test('both continuation members travel together without a header the caller neve
   assert.equal(injected.ok === false ? injected.failure.kind : undefined, 'invalid-request')
 })
 
+test('the caller-stated prompt anchor rides the billing text in client order', async () => {
+  const built = await buildClaudeEngineRequest({
+    body: body(), accessToken: 'at-synthetic', identity: identity(), clientRequestId: 'client-request-1',
+    turn: { turnOrigin: 'human', turnPosition: { promptIndex: 3, turnIndex: 4 } },
+  })
+  assert.ok(built.ok, JSON.stringify(built))
+  const payload = JSON.parse(built.request.body) as Record<string, unknown>
+  const systemText = (payload['system'] as readonly { text?: string }[]).map(block => block.text ?? '').join('\n')
+  assert.match(
+    systemText,
+    / cc_turn_origin=human; cc_prompt_index=3; cc_turn_index=4;/,
+    'the turn segments follow the chaining segment in the client order',
+  )
+
+  // Absent, each group is omitted rather than invented; the client's own guard drops a value it
+  // cannot vouch for, so a malformed origin reaches no segment while the request still builds.
+  const bare = await buildClaudeEngineRequest({
+    body: body(), accessToken: 'at-synthetic', identity: identity(), clientRequestId: 'client-request-1',
+  })
+  assert.ok(bare.ok)
+  const bareText = (JSON.parse(bare.request.body)['system'] as readonly { text?: string }[])
+    .map(block => block.text ?? '').join('\n')
+  assert.equal(bareText.includes('cc_turn_origin'), false)
+  assert.equal(bareText.includes('cc_prompt_index'), false)
+
+  const dropped = await buildClaudeEngineRequest({
+    body: body(), accessToken: 'at-synthetic', identity: identity(), clientRequestId: 'client-request-1',
+    turn: { turnOrigin: 'Human', turnPosition: { promptIndex: 2, turnIndex: 1 } },
+  })
+  assert.ok(dropped.ok)
+  const droppedText = (JSON.parse(dropped.request.body)['system'] as readonly { text?: string }[])
+    .map(block => block.text ?? '').join('\n')
+  assert.equal(droppedText.includes('cc_turn_origin'), false, 'a value outside the guard is omitted')
+  assert.equal(droppedText.includes('cc_prompt_index'), false, 'as is a pair outside the guard')
+})
+
 test('external URLs and foreign files are refused, and a proved upload is built', async () => {
   const build = (bodyOverride: Record<string, unknown>, files?: { ownsFile: (id: string) => boolean }) =>
     buildClaudeEngineRequest({

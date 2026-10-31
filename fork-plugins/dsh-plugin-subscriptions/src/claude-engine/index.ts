@@ -67,5 +67,6 @@ export type {
   ClaudeEngineScope,
   ClaudeEngineTransport,
   ClaudeEngineTransportResult,
+  ClaudeEngineTurn,
   ClaudeEngineUsage,
 } from './types.js'

@@ -91,6 +91,32 @@ reporting text (still occurring exactly once, at its definition), `cc_turn_origi
 usage-limit header, the atis pair, the caching-scope beta, extended-cache-ttl,
 redact-thinking and the thinking-binding-controls landmarks.
 
+### 2.4 The turn-position segments are new at 2.1.288
+
+The billing builder gains a seventh parameter. In 2.1.288 (`seg_3379.js`, function
+`m4r` at character 2285; the `iHo` call site is `seg_3483.js` at character 728639) the
+optional tail after `cc_prompt_id` reads:
+
+```
+cc_turn_origin=<origin>; cc_prompt_index=<n>; cc_turn_index=<m>;
+```
+
+- `cc_turn_origin` matches `/^[a-z][a-z_]{0,31}$/` and is gated on the first-party
+  predicate. The value is the prompt's origin (`human`, `sdk`, `scheduled`,
+  `task_notification`, `auto_continuation`, `peer`, `host_synthetic`, `system`,
+  `unknown`); the derivation is `mOo` in `seg_3592.js`.
+- `cc_prompt_index` and `cc_turn_index` are emitted **together**, after the origin,
+  when both are integers with `promptIndex >= 0`, `turnIndex >= 1`, each at most
+  `1e7`, and `promptIndex <= turnIndex` (`qG` in `seg_3592.js` applies the same
+  relation to a transcript anchor). `ian` derives them from the last real prompt:
+  the first human prompt is `1`/`1`, a first prompt of another origin is `0`/`1`,
+  and each later real prompt adds one to both. A `tool_result` user message is not
+  a new anchor, so the prompt's tool-continuation requests repeat its pair.
+- The 2.1.280 builder (`seg_2961.js`, function `t0n` at character 2143) has six
+  parameters and no index pair, while its own tail does carry `cc_turn_origin`.
+  The 2.1.233 analysis (section 10) records a block with neither the origin nor the
+  indices. The 2.1.195 builder has no optional tail at all.
+
 ## 3. Version-bearing fields
 
 | Field | Value | Source |

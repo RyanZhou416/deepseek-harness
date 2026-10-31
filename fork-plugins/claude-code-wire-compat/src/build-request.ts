@@ -15,6 +15,7 @@ import type {
   ClaudeCodeCountTokensInput,
   ClaudeCodeRequestInput,
   ClaudeCodeRequestClass,
+  ClaudeCodeTurnPosition,
   HeaderPair,
   RedactedRequestEvidence,
 } from "./contracts.js";
@@ -109,10 +110,13 @@ const INPUT_KEYS = new Set([
   "extraHeaderPolicy",
   "previousRequestId",
   "promptId",
+  "turnOrigin",
+  "turnPosition",
   "requestClass",
   "crypto",
 ]);
 const BETA_OVERRIDE_KEYS = new Set(["use1MContext"]);
+const TURN_POSITION_KEYS = new Set(["promptIndex", "turnIndex"]);
 const METADATA_OVERRIDE_KEYS = new Set(["userId", "userIdFields"]);
 const COUNT_TOKENS_INPUT_KEYS = new Set([
   "accessToken",
@@ -826,6 +830,8 @@ function validateInput(input: ClaudeCodeRequestInput): {
   readonly preserveThinkingBlockCacheControl: boolean;
   readonly previousRequestId: string | undefined;
   readonly promptId: string | undefined;
+  readonly turnOrigin: string | undefined;
+  readonly turnPosition: ClaudeCodeTurnPosition | undefined;
 } {
   if (!isRecord(input)) fail();
   assertExactKeys(input, INPUT_KEYS);
@@ -892,6 +898,12 @@ function validateInput(input: ClaudeCodeRequestInput): {
   const promptId = Object.hasOwn(input, "promptId")
     ? validateBillingChainId(ownValue(input, "promptId"))
     : undefined;
+  const turnOrigin = Object.hasOwn(input, "turnOrigin")
+    ? validateBillingChainId(ownValue(input, "turnOrigin"))
+    : undefined;
+  const turnPosition = Object.hasOwn(input, "turnPosition")
+    ? validateTurnPosition(ownValue(input, "turnPosition"))
+    : undefined;
   return {
     source: input,
     clientRequestId,
@@ -904,6 +916,8 @@ function validateInput(input: ClaudeCodeRequestInput): {
     preserveThinkingBlockCacheControl,
     previousRequestId,
     promptId,
+    turnOrigin,
+    turnPosition,
   };
 }
 
@@ -925,6 +939,27 @@ function validateInput(input: ClaudeCodeRequestInput): {
 function validateBillingChainId(value: unknown): string {
   if (typeof value !== "string") fail();
   return value;
+}
+
+/**
+ * Type and key check only for `turnPosition`.
+ *
+ * Like the chaining ids, the VALUES are deliberately not range-checked here:
+ * upstream guards the pair at the point of emission and drops a pair it cannot
+ * vouch for, silently, so rejecting an out-of-range index here would make this
+ * package fail where the genuine client succeeds. `createBillingBlock` owns the
+ * range guard. A malformed object — a non-object, an unknown key, or a
+ * non-number member — is a caller bug and fails like every other mistyped
+ * field, because the caller cannot state the two indices any other way.
+ */
+function validateTurnPosition(value: unknown): ClaudeCodeTurnPosition {
+  if (!isRecord(value)) fail();
+  assertExactKeys(value, TURN_POSITION_KEYS);
+  const promptIndex = ownValue(value, "promptIndex");
+  const turnIndex = ownValue(value, "turnIndex");
+  if (typeof promptIndex !== "number" || typeof turnIndex !== "number")
+    fail();
+  return { promptIndex, turnIndex };
 }
 
 function validateCountTokensInput(input: ClaudeCodeCountTokensInput): {
@@ -1675,6 +1710,12 @@ export async function buildClaudeCodeRequest(
         }),
         ...(validated.promptId !== undefined && {
           promptId: validated.promptId,
+        }),
+        ...(validated.turnOrigin !== undefined && {
+          turnOrigin: validated.turnOrigin,
+        }),
+        ...(validated.turnPosition !== undefined && {
+          turnPosition: validated.turnPosition,
         }),
       },
     );
