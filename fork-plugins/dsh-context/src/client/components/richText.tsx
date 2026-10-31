@@ -1,15 +1,12 @@
-/** The raw/markdown/JSON body for the Context browser's detail sections: MarkdownText for `md` (the harness's shared
- * GFM renderer), the harness's JsonTree inspector for a whole-text JSON payload, a line-numbered `<pre>` for raw. */
-
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactElement, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement, type RefObject } from 'react'
 import { JsonTree, MarkdownText, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { JsonTreeLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { IconCheck, IconChevronDown, IconChevronUp, IconClose, IconCopy, IconSearch } from '../primitives'
 import type { ViewKit } from '../viewkit'
+import { ClearableInput, isBareEscape } from './clearableInput'
 
 export type RichMode = 'raw' | 'md' | 'json'
 
-/** The `labels` prop MarkdownText requires, typed locally so the plugin needs no primitives dependency. */
 interface MarkdownChrome {
   code: { copyLabel: string; copiedLabel: string }
   footnotes: string
@@ -17,8 +14,6 @@ interface MarkdownChrome {
 
 const Markdown = MarkdownText as (props: { text: string; labels?: MarkdownChrome }) => ReactElement
 
-/** The parsed value of a whole-text JSON payload (the tree's `data`), else null: a `{`/`[` lead parses to an
- * object/array or throws, never a bare primitive — so a failed parse is the only rejection past the lead. */
 export function jsonOf(text: string): object | unknown[] | null {
   const s = text.trim()
   if (s[0] !== '{' && s[0] !== '[') return null
@@ -29,15 +24,12 @@ export function jsonOf(text: string): object | unknown[] | null {
   }
 }
 
-/** Cap on auto-opened second-level nodes: past it the expansion storm (one React toggle per row, each
- * rendering its children) outweighs the overview. */
 const JSON_EXPAND_MAX = 100
 
 export interface RichKit {
   RichText: (props: { text: string; mode: RichMode }) => ReactElement
   RichSwitch: (props: { mode: RichMode; json?: boolean; onPick: (mode: RichMode) => void }) => ReactElement
   RichCopy: (props: { text: string }) => ReactElement
-  /** The section's display mode plus whether the text is JSON-detected (drives RichSwitch's third segment). */
   useRichMode: (text: string) => [RichMode, (mode: RichMode) => void, boolean]
   useRichFind: (text: string, mode: RichMode) => RichFind
 }
@@ -45,15 +37,12 @@ export interface RichKit {
 export interface RichFind {
   button: ReactElement
   bar: ReactElement | null
-  /** Key for the body wrapper: a text change remounts the body so React never diffs over the injected marks. */
   bodyKey: string
   bodyRef: RefObject<HTMLDivElement>
 }
 
-/** Settle window for the query: rapid typing or deleting rescans the body once, not per keystroke. */
 const FIND_DEBOUNCE_MS = 150
-/** Cap on rendered marks: a one-character query must not flood the DOM (the counter reports the cap with a '+'). */
-const FIND_MAX_MARKS = 500
+const FIND_MAX_MATCHES = 500
 
 interface FindMarks {
   count: number
@@ -61,51 +50,65 @@ interface FindMarks {
   restore: () => void
 }
 
-/** Wrap every case-insensitive occurrence of `query` under `root` in a `<mark>`. The restore puts the original text nodes
- * back with their values (splitText keeps the first node in place, so React's node references survive). */
+function textNodesOf(root: HTMLElement): Text[] {
+  const nodes: Text[] = []
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) nodes.push(node as Text)
+  return nodes
+}
+
 function markMatches(root: HTMLElement, query: string, active: number): FindMarks {
   const needle = query.toLowerCase()
-  const texts: Text[] = []
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) texts.push(node as Text)
-  const touched: { node: Text; full: string; created: Node[] }[] = []
-  const marks: HTMLElement[] = []
-  let capped = false
-  for (const textNode of texts) {
-    // CharacterData.data (not nodeValue) is non-nullable, so an empty haystack never matches.
-    const full = textNode.data
-    const created: Node[] = []
-    let rest = textNode
-    let at = full.toLowerCase().indexOf(needle)
-    while (at !== -1) {
-      if (marks.length >= FIND_MAX_MARKS) { capped = true; break }
-      const matchNode = rest.splitText(at)
-      const after = matchNode.splitText(needle.length)
+  const nodes = textNodesOf(root)
+  const starts: number[] = []
+  const ends: number[] = []
+  let text = ''
+  for (const node of nodes) {
+    starts.push(text.length)
+    text += node.data
+    ends.push(text.length)
+  }
+  const lower = text.toLowerCase()
+  const ranges: { from: number; to: number }[] = []
+  for (let at = lower.indexOf(needle); at !== -1 && ranges.length <= FIND_MAX_MATCHES; at = lower.indexOf(needle, at + needle.length)) {
+    ranges.push({ from: at, to: at + needle.length })
+  }
+  const capped = ranges.length > FIND_MAX_MATCHES
+  if (capped) ranges.pop()
+  const full = new Map<Text, string>()
+  const created: Node[] = []
+  const groups: HTMLElement[][] = []
+  for (let index = ranges.length - 1; index >= 0; index--) {
+    const { from, to } = ranges[index]
+    const group: HTMLElement[] = []
+    for (const [at, node] of nodes.entries()) {
+      if (ends[at] <= from || starts[at] >= to) continue
+      const localFrom = Math.max(from, starts[at]) - starts[at]
+      const localTo = Math.min(to, ends[at]) - starts[at]
+      if (!full.has(node)) full.set(node, node.data)
+      const piece = node.splitText(localFrom)
+      const tail = piece.splitText(localTo - localFrom)
       const mark = document.createElement('mark')
       mark.className = 'lc-find-mark'
-      matchNode.before(mark)
-      mark.appendChild(matchNode)
-      marks.push(mark)
-      created.push(mark, after)
-      rest = after
-      at = after.data.toLowerCase().indexOf(needle)
+      piece.before(mark)
+      mark.appendChild(piece)
+      created.push(mark, tail)
+      group.push(mark)
     }
-    if (created.length > 0) touched.push({ node: textNode, full, created })
-    if (capped) break
+    groups[index] = group
   }
-  const on = Math.min(active, marks.length - 1)
+  const on = Math.min(active, ranges.length - 1)
   if (on >= 0) {
-    marks[on].classList.add('lc-find-mark-on')
-    marks[on].scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    const group = groups[on]
+    for (const mark of group) mark.classList.add('lc-find-mark-on')
+    group[0].scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }
   return {
-    count: marks.length,
+    count: ranges.length,
     capped,
     restore: () => {
-      for (const { node, full, created } of touched) {
-        node.data = full
-        for (const c of created) c.parentNode?.removeChild(c)
-      }
+      for (const [node, data] of full) node.data = data
+      for (const c of created) c.parentNode?.removeChild(c)
     },
   }
 }
@@ -113,9 +116,6 @@ function markMatches(root: HTMLElement, query: string, active: number): FindMark
 export function makeRichText(kit: ViewKit): RichKit {
   const { t } = kit
 
-  // The default follows the payload: a JSON-detected body opens on the tree, where markdown is meaningless —
-  // so `md` is not offered there at all, and a pick that no longer fits the body (`json` gone unparseable,
-  // `md` turned JSON) falls back to the payload's own default. An explicit `raw` always sticks.
   function useRichMode(text: string): [RichMode, (mode: RichMode) => void, boolean] {
     const json = useMemo(() => jsonOf(text) !== null, [text])
     const [pick, setPick] = useState<RichMode | null>(null)
@@ -142,8 +142,6 @@ export function makeRichText(kit: ViewKit): RichKit {
     )
   }
 
-  // One block per source line: the number is a counter-fed ::before glued to its line across soft wraps, and pseudo
-  // content never reaches the clipboard.
   function RawText(props: { text: string }): ReactElement {
     const lines = useMemo(() => {
       const parts = props.text.split('\n')
@@ -158,7 +156,6 @@ export function makeRichText(kit: ViewKit): RichKit {
     )
   }
 
-  // Always the raw source, never the rendered markdown; the write and its confirmation follow the harness's own code-block control.
   function RichCopy(props: { text: string }): ReactElement {
     const [copied, setCopied] = useState(false)
     const onCopy = useCallback(() => {
@@ -183,25 +180,21 @@ export function makeRichText(kit: ViewKit): RichKit {
     )
   }
 
-  // Two levels open by default: JsonTree's expandTopLevel covers the root, and the second level opens by
-  // toggling the first-level expanders through the tree's own click path (no depth prop exists). The toggle
-  // claims focus, so the previously focused element is restored afterwards.
   function JsonBody(props: { data: object | unknown[]; labels: JsonTreeLabels }): ReactElement {
     const ref = useRef<HTMLDivElement>(null)
     useLayoutEffect(() => {
       const root = ref.current
-      /* v8 ignore next 2 -- the ref seats with the render this layout effect follows */
+      /* v8 ignore next 2 */
       if (root === null) return
       const previous = document.activeElement as HTMLElement | null
       let clicked = 0
       for (const el of root.querySelectorAll('[role=tree] > [role=treeitem] > [data-json-expander]')) {
         if (clicked >= JSON_EXPAND_MAX) break
-        // Idempotent on a data swap that keeps an entry's key: its node stays mounted and expanded.
         if (el.getAttribute('aria-expanded') !== 'false') continue
         ;(el as HTMLElement).click()
         clicked += 1
       }
-      /* v8 ignore next 1 -- jsdom always seats body as activeElement; null only before document ready */
+      /* v8 ignore next 1 */
       if (clicked > 0) previous?.focus({ preventScroll: true })
     }, [props.data])
     return (
@@ -212,12 +205,10 @@ export function makeRichText(kit: ViewKit): RichKit {
   }
 
   function RichText(props: { text: string; mode: RichMode }): ReactElement {
-    // Reference-stable per locale: `labels` is a MarkdownText dependency, so a fresh object would re-parse the Markdown on every render.
     const mdLabels = useMemo<MarkdownChrome>(() => ({
       code: { copyLabel: t('rich.md.copy'), copiedLabel: t('rich.md.copied') },
       footnotes: t('rich.md.footnotes'),
     }), [t])
-    // Same stability argument for the tree: its rows re-subscribe to hover state per labels identity.
     const jsonLabels = useMemo<JsonTreeLabels>(() => ({
       copyValue: t('rich.json.copyValue'),
       copyJson: t('rich.json.copyJson'),
@@ -234,14 +225,12 @@ export function makeRichText(kit: ViewKit): RichKit {
     if (props.mode === 'json' && json !== null) {
       return <JsonBody data={json} labels={jsonLabels} />
     }
-    // A `json` mode whose text no longer parses (a stale pick after a body swap) degrades to markdown.
     if (props.mode !== 'raw') {
       return <div className="lc-ts-desc-md"><Markdown text={props.text} labels={mdLabels} /></div>
     }
     return <RawText text={props.text} />
   }
 
-  // Find-in-text (ctrl+f style), scoped to one section's body; the mark effect keys on text AND mode so the lens follows a body swap.
   function useRichFind(text: string, mode: RichMode): RichFind {
     const [open, setOpen] = useState(false)
     const [query, setQuery] = useState('')
@@ -281,7 +270,7 @@ export function makeRichText(kit: ViewKit): RichKit {
     }, [count])
     const onKey = useCallback((ev: ReactKeyboardEvent<HTMLInputElement>) => {
       if (ev.key === 'Enter') { ev.preventDefault(); step(ev.shiftKey ? -1 : 1) }
-      else if (ev.key === 'Escape') { ev.preventDefault(); setOpen(false) }
+      else if (isBareEscape(ev) && ev.currentTarget.value === '') { ev.preventDefault(); setOpen(false) }
     }, [step])
 
     const findLabel = t('rich.find')
@@ -306,12 +295,13 @@ export function makeRichText(kit: ViewKit): RichKit {
     )
     const bar = !open ? null : (
       <div className="lc-find">
-        <input
-          ref={inputRef}
-          className="lc-find-input focus:border-(--dsw-alias-label-dimmed)"
+        <ClearableInput
+          inputRef={inputRef}
+          className="lc-find-input"
           value={query}
           placeholder={t('rich.findPlaceholder')}
-          onChange={(ev: ChangeEvent<HTMLInputElement>) => { setQuery(ev.target.value) }}
+          clearLabel={t('field.clear')}
+          onChange={setQuery}
           onKeyDown={onKey}
         />
         {needle !== '' ? (

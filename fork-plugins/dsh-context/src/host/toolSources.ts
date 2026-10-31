@@ -1,17 +1,5 @@
-/**
- * Tool-to-plugin attribution for the Context browser's tool schema rows.
- *
- * The durable `request/header` event logs each tool as a plain `ToolSchema`
- * (`name`/`description`/`parameters` only), so the registering plugin is not in the log. Three
- * recovery sources: a `plugin` field a foreign producer carries on the raw header entry (passed
- * through by headers.ts), the `dsh-mcp-client` name grammar, and a pinned name → package map of
- * the shipped first-party tools. Third-party tools stay unattributed rather than guessed.
- */
-
 export const MCP_PREFIX = 'mcp__'
 
-/** Recover the MCP server label from a proxied tool name: `dsh-mcp-client` names tools
- * `mcp__<server>__<rawName>`, so the server is the text before the LAST `__`, past the prefix. */
 export function mcpServerOf(name: string): string | undefined {
   if (!name.startsWith(MCP_PREFIX)) return undefined
   const cut = name.lastIndexOf('__')
@@ -29,9 +17,6 @@ export function pinnedSourceOf(name: string): string | undefined {
   return FIRST_PARTY_SOURCES[name]
 }
 
-/** Pinned first-party tool → package map: one entry per model-facing name of the shipped tool
- * packages at the supported dsh baseline (tests/baselines.ts). Packages mounting under distinct
- * names per composition (bash/pwsh variants, the `subagent_fork` alias) map to their primary one. */
 export const FIRST_PARTY_SOURCES: Readonly<Record<string, string>> = Object.freeze({
   read: '@deepseek-ai/dsh-tool-fs',
   write: '@deepseek-ai/dsh-tool-fs',

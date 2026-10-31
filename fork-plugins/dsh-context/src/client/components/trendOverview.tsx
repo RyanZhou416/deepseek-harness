@@ -1,18 +1,4 @@
-/**
- * The trend card's Overview face: the WHOLE retained log — steps or turn aggregates — compressed into the pane's
- * visible width as one continuous stacked ribbon, with no horizontal scroll. Continuous bands, not compressed
- * columns, because retention runs to ~1500 steps against a ~360-500px sidebar pane: sub-pixel columns layerize
- * into rounded slivers whose 1px-per-segment floor fakes tiny categories and whose hit targets are unusable,
- * while a ribbon keeps every step's exact figure at its own x and interpolates between them — the same polyline
- * convention the duration overlay already rides. Interaction mirrors the bars': the surface picks the NEAREST
- * record (vertical brand rule + the shared tip), a click pins it, and the turn strip below keeps its zebra blocks
- * proportional (grow ∝ step span), hover-dimmed by a wash over the plot's other turns. Nothing preloads: the
- * component mounts only while the face is on, and its drawing geometry memoizes per data/mode change (a
- * hover-driven parent render never rebuilds the polygons). Mutually exclusive with DNA mode (per-bar fingerprints
- * are illegible at ribbon scale) and Adaptive (the whole log IS the visible window).
- */
-
-import { Fragment, useLayoutEffect, useMemo, useRef, type ReactElement } from 'react'
+import { Fragment, useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import type { Category, ContextEventRecord, RequestRecord } from '../../shared/types'
 import { CATS, CAT_COLOR } from '../categories'
 import { RISE_CLASS, TURN_FILLS, preprocessTrend, trendMaxima, turnStepsOf, trendTipRows } from './trendChart'
@@ -27,75 +13,85 @@ export interface TrendOverviewProps {
   granularity: 'step' | 'turn'
   mode: 'total' | 'delta'
   hoverCat: string | null
-  /** An unrecognized key (a stale or hostile state) degrades to the unfocused ribbon. */
   focusCat?: string | null
   durationCurve?: boolean
   onSelect: (seq: number | null) => void
   onHover: (seq: number | null) => void
   onHoverTurn: (turn: number | null) => void
   onPickTurn: (turn: number) => void
+  onPickCat?: (cat: Category | 'system' | 'tools', seq: number) => void
 }
 
-/** The x flags sit on the three quartiles plus the full span: the log's start reads from the pane edge, so only
- * the collapsed-at-the-start pole is unshowable. */
 const FLAG_FRACS: readonly number[] = [0.25, 0.5, 0.75, 1]
 
 const CHART_H = 112
+
+const PLOT_TOP = 18
+
+const yOf = (cum: number, scale: number, baseline: number, dir: 1 | -1): number =>
+  Math.round((baseline - dir * cum * scale) * 100) / 100
+
+interface RibbonBand {
+  cat: Category | 'system' | 'tools'
+  upper: number[]
+  lower: number[]
+  dir: 1 | -1
+  points: string
+}
 
 interface RibbonGeometry {
   maxTotal: number
   maxUp: number
   maxDown: number
-  /** The zero line: px from the ribbon's top (the bars' own geometry). */
   upPx: number
-  /** The bar area's larger-side span (delta-axis quarter marks). */
   span: number
   maxActiveMs: number
-  polys: { cat: Category | 'system' | 'tools'; points: string }[]
+  baseline: number
+  scale: number
+  bands: RibbonBand[]
   durationRuns: string[]
   durationDots: [number, number][]
 }
 
-/** The ribbon's full drawing geometry in one pure pass over the records: whole-log maxima (the axis scale), the
- * stacked bands' polygons, and the duration overlay's runs/dots. Pure and module-scope so the component memoizes
- * it on [requests, mode, duration] — a hover-driven parent render never rebuilds the O(steps × categories) polygons. */
 function ribbonGeometry(requests: RequestRecord[], delta: boolean, durationOn: boolean): RibbonGeometry {
   const n = requests.length
   const geo: RibbonGeometry = {
-    maxTotal: 1, maxUp: 0, maxDown: 0, upPx: 0, span: 1, maxActiveMs: 0, polys: [], durationRuns: [], durationDots: [],
+    maxTotal: 1,
+    maxUp: 0,
+    maxDown: 0,
+    upPx: 0,
+    span: 1,
+    maxActiveMs: 0,
+    baseline: 0,
+    scale: 1,
+    bands: [],
+    durationRuns: [],
+    durationDots: [],
   }
   if (n === 0) return geo
   ;({ maxTotal: geo.maxTotal, maxUp: geo.maxUp, maxDown: geo.maxDown } = trendMaxima(requests, delta))
-  // The zero line splits the bar area PROPORTIONALLY to the larger side, so px-per-token is identical above and
-  // below it — the bars' own geometry.
   const span = Math.max(1, geo.maxUp + geo.maxDown)
   const deltaScale = CHART_H / span
   geo.span = span
   geo.upPx = Math.round(geo.maxUp * deltaScale)
-  // The svg maps x in viewBox units (one unit per record, stretched edge to edge) and y in px: the viewBox height
-  // 112 equals the ribbon's rendered height, so vertical figures stay px-exact. A single record closes its bands
-  // across the full unit width, so one retained step still paints a full-width ribbon.
   const u = n > 1 ? n - 1 : 1
   const xs: number[] = n === 1 ? [0, u] : Array.from({ length: n }, (_, i) => i)
   const cumAt = (v: number[], x: number): number => v[n === 1 ? 0 : x]
-  const yFor = (cum: number, scale: number, baseline: number, dir: 1 | -1): number =>
-    Math.round((baseline - dir * cum * scale) * 100) / 100
-  /** A band's closed polygon (upper cumulate forward, lower reversed) or '' when zero-width — the neighbor's
-   * fill already paints the shared boundary, and a zero-width band lights nothing to dim. `upper` is the
-   * visually-upper edge at `dir` (+1: the larger cumulate; −1: the smaller, the baseline side). */
-  const ribbon = (upper: number[], lower: number[], scale: number, baseline: number, dir: 1 | -1): string => {
+  const ribbon = (cat: RibbonBand['cat'], upper: number[], lower: number[], dir: 1 | -1): void => {
     let width = 0
     for (let i = 0; i < n; i++) {
       const d = Math.abs(upper[i] - lower[i])
       if (d > width) width = d
     }
-    if (width <= 0) return ''
+    if (width <= 0) return
     const pts: string[] = []
-    for (const x of xs) pts.push(`${x},${yFor(cumAt(upper, x), scale, baseline, dir)}`)
-    for (let k = xs.length - 1; k >= 0; k--) pts.push(`${xs[k]},${yFor(cumAt(lower, xs[k]), scale, baseline, dir)}`)
-    return pts.join(' ')
+    for (const x of xs) pts.push(`${x},${yOf(cumAt(upper, x), geo.scale, geo.baseline, dir)}`)
+    for (let k = xs.length - 1; k >= 0; k--) pts.push(`${xs[k]},${yOf(cumAt(lower, xs[k]), geo.scale, geo.baseline, dir)}`)
+    geo.bands.push({ cat, upper: [...upper], lower: [...lower], dir, points: pts.join(' ') })
   }
   if (delta) {
+    geo.baseline = geo.upPx
+    geo.scale = deltaScale
     const up = new Array<number>(n).fill(0)
     const down = new Array<number>(n).fill(0)
     for (const c of CATS) {
@@ -106,25 +102,20 @@ function ribbonGeometry(requests: RequestRecord[], delta: boolean, durationOn: b
         up[i] += Math.max(0, d)
         down[i] += Math.max(0, -d)
       }
-      const upPts = ribbon(up, upPrev, deltaScale, geo.upPx, 1)
-      if (upPts !== '') geo.polys.push({ cat: c.key, points: upPts })
-      const downPts = ribbon(downPrev, down, deltaScale, geo.upPx, -1)
-      if (downPts !== '') geo.polys.push({ cat: c.key, points: downPts })
+      ribbon(c.key, up, upPrev, 1)
+      ribbon(c.key, downPrev, down, -1)
     }
   } else {
-    const scale = CHART_H / geo.maxTotal
+    geo.baseline = CHART_H
+    geo.scale = CHART_H / geo.maxTotal
     const acc = new Array<number>(n).fill(0)
     for (const c of CATS) {
       const prev = acc.slice()
       for (let i = 0; i < n; i++) acc[i] += requests[i][c.key] || 0
-      const pts = ribbon(acc, prev, scale, CHART_H, 1)
-      if (pts !== '') geo.polys.push({ cat: c.key, points: pts })
+      ribbon(c.key, acc, prev, 1)
     }
   }
   if (durationOn) {
-    // The right-hand axis is mode-independent (the curve plots raw active time), whole-log by construction. A bar
-    // without `activeMs` breaks the run instead of faking a value; an isolated single point needs a dot — a
-    // one-point polyline renders invisible. x rides the same stretched unit space as the bands.
     let maxActiveMs = 0
     for (const req of requests) {
       const m = req.activeMs ?? 0
@@ -144,24 +135,34 @@ function ribbonGeometry(requests: RequestRecord[], delta: boolean, durationOn: b
         flushRun()
         continue
       }
-      run.push([i, Math.round((CHART_H - m * scale) * 100) / 100])
+      run.push([i, yOf(m, scale, CHART_H, 1)])
     }
     flushRun()
   }
   return geo
 }
 
-/** The turn strip's labeled groups: the group holding each WIDTH quartile of the total step span (the strip's
- * blocks grow ∝ span, so a count-quartile label could sit far off the ribbon's quarter marks). Deduped. */
-function wideQuartiles(groups: { span: number }[]): number[] {
-  const total = groups.reduce((s, g) => s + g.span, 0)
+function bandAt(geo: RibbonGeometry, f: number, n: number, y: number): RibbonBand['cat'] | null {
+  const i0 = Math.min(n - 1, Math.floor(f))
+  const i1 = Math.min(n - 1, i0 + 1)
+  const t = f - i0
+  const at = (v: number[]): number => v[i0] + (v[i1] - v[i0]) * t
+  for (const band of geo.bands) {
+    const a = yOf(at(band.upper), geo.scale, geo.baseline, band.dir)
+    const b = yOf(at(band.lower), geo.scale, geo.baseline, band.dir)
+    if (y >= Math.min(a, b) && y <= Math.max(a, b)) return band.cat
+  }
+  return null
+}
+
+function wideQuartiles(groups: { count: number }[]): number[] {
+  const total = groups.reduce((s, g) => s + g.count, 0)
   const picks: number[] = []
   for (const q of FLAG_FRACS) {
     let acc = 0
     let pick = groups.length - 1
-    // A run of undersized heads can carry no quartile inside it: the wide tail group holds the mark.
     for (let g = 0; g + 1 < groups.length; g++) {
-      acc += groups[g].span
+      acc += groups[g].count
       if (acc > q * total) {
         pick = g
         break
@@ -175,8 +176,6 @@ function wideQuartiles(groups: { span: number }[]): number[] {
 export function makeTrendOverview(kit: ViewKit): (props: TrendOverviewProps) => ReactElement | null {
   const { eventLabel, eventAt } = kit
 
-  // Mirrored by .lc-axis-q1/.lc-axis-q3 in trendChart.css: chart top 18 + a quarter/three-quarters of the 112px
-  // ribbon − half the 11px label box.
   const Q3_TOP = 41
   const Q1_TOP = 97
   const fmtSigned = (v: number): string => (v > 0 ? '+' : '') + kit.fmt(v)
@@ -193,35 +192,32 @@ export function makeTrendOverview(kit: ViewKit): (props: TrendOverviewProps) => 
     const surfaceRef = useRef<HTMLDivElement | null>(null)
     const wrapRef = useRef<HTMLDivElement | null>(null)
     const lastIdxRef = useRef<number | null>(null)
+    const lastCatRef = useRef<RibbonBand['cat'] | null>(null)
+    const [localHover, setLocalHover] = useState<number | null>(null)
+    const [localCat, setLocalCat] = useState<RibbonBand['cat'] | null>(null)
+    const hoverSeq = localHover ?? props.hoveredSeq
+    const handleHover = useCallback((seq: number | null): void => {
+      setLocalHover(seq)
+      props.onHover(seq)
+    }, [props.onHover])
     if (n === 0) return null
-    // The stretched-unit x scale: one unit per record; a single record closes its bands across the full width.
     const u = n > 1 ? n - 1 : 1
-    // `span` counts the STEP columns the group covers (step records count one each), so strip blocks stay
-    // proportional to the bars they span in both granularities.
-    const groups: { turn: number; count: number; span: number; first: number }[] = []
+    const groups: { turn: number; count: number; first: number }[] = []
     for (let i = 0; i < n; i++) {
       const req = requests[i]
       let grp = groups.length > 0 ? groups[groups.length - 1] : null
       if (grp === null || grp.turn !== (req.turn ?? 0)) {
-        grp = { turn: req.turn ?? 0, count: 0, span: 0, first: i }
+        grp = { turn: req.turn ?? 0, count: 0, first: i }
         groups.push(grp)
       }
       grp.count++
-      grp.span += req.stepCount ?? 1
     }
-    // Quartile + full-span flags, deduped (see FLAG_FRACS for the collapsed-at-start rule). Step granularity poles
-    // the record list (turn bars skip it — the strip numbers that grid); the strip labels its width quartiles
-    // plus the full-span group in both.
-    const flagSteps = props.granularity === 'step'
-      ? [...new Set(FLAG_FRACS.map(q => Math.round(q * (n - 1))))].filter(idx => idx > 0)
-      : []
+    const flagRecords = [...new Set(FLAG_FRACS.map(q => Math.round(q * (n - 1))))].filter(idx => idx > 0)
+    const flagLabel = (idx: number): number => (props.granularity === 'step' ? idx + 1 : requests[idx].turn ?? 0)
     const flagGroups = wideQuartiles(groups)
-    // A delta quarter mark yields entirely when its 11px label box would overlap the zero label — the bars' check
-    // (shared by the axis label and its dashed guide).
     const q3Clear = Math.abs(Q3_TOP - 13 - geo.upPx) >= 11
     const q1Clear = Math.abs(Q1_TOP - 13 - geo.upPx) >= 11
 
-    // The active turn's plot range: half a step past each end record, clamped to the ribbon's edges.
     let wash: { left: string; right: string } | null = null
     if (props.activeTurn !== null) {
       const wi = groups.findIndex(g => g.turn === props.activeTurn)
@@ -233,47 +229,55 @@ export function makeTrendOverview(kit: ViewKit): (props: TrendOverviewProps) => 
       }
     }
 
-    /** Nearest record to the pointer's x; a zero-width rect (jsdom, detached) picks the first record. */
-    const pick = (e: { clientX: number; currentTarget: HTMLElement }): number => {
-      const rect = e.currentTarget.getBoundingClientRect()
+    const xAt = (rect: { width: number; left: number }, clientX: number): number => {
       if (rect.width <= 0) return 0
-      const fx = (e.clientX - rect.left) / rect.width
-      return Math.min(n - 1, Math.max(0, Math.round(fx * u)))
+      const fx = (clientX - rect.left) / rect.width
+      return Math.min(u, Math.max(0, fx * u))
     }
-    const onMove = (e: { clientX: number; currentTarget: HTMLElement }): void => {
-      const idx = pick(e)
+    const idxOf = (x: number): number => Math.min(n - 1, Math.round(x))
+    const onMove = (e: { clientX: number; clientY: number; currentTarget: HTMLElement }): void => {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const x = xAt(rect, e.clientX)
+      const idx = idxOf(x)
       if (lastIdxRef.current !== idx) {
         lastIdxRef.current = idx
-        props.onHover(requests[idx].seq)
+        handleHover(requests[idx].seq)
+      }
+      const cat = bandAt(geo, x, n, e.clientY - rect.top - PLOT_TOP)
+      if (lastCatRef.current !== cat) {
+        lastCatRef.current = cat
+        setLocalCat(cat)
       }
     }
     const onLeave = (): void => {
       lastIdxRef.current = null
-      props.onHover(null)
+      lastCatRef.current = null
+      setLocalCat(null)
+      handleHover(null)
     }
-    const onClick = (e: { clientX: number; currentTarget: HTMLElement }): void => {
-      const seq = requests[pick(e)].seq
+    const onClick = (e: { clientX: number; clientY: number; currentTarget: HTMLElement }): void => {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const x = xAt(rect, e.clientX)
+      const seq = requests[idxOf(x)].seq
+      const cat = bandAt(geo, x, n, e.clientY - rect.top - PLOT_TOP)
+      if (cat !== null && props.onPickCat !== undefined) props.onPickCat(cat, seq)
       props.onSelect(props.selectedSeq === seq ? null : seq)
     }
 
-    const hoveredIdx = props.hoveredSeq !== null ? requests.findIndex(r => r.seq === props.hoveredSeq) : -1
+    const hoveredIdx = hoverSeq !== null ? requests.findIndex(r => r.seq === hoverSeq) : -1
     const selectedIdx = props.selectedSeq !== null ? requests.findIndex(r => r.seq === props.selectedSeq) : -1
     const stepsOf = useMemo(() => turnStepsOf(props.requests), [props.requests])
-    // Re-position the tip after every commit (it mounts on hover changes); reads batch before paint — the
-    // chart's syncTip idiom with no scroll offset and no observer: the fit surface re-reads its box per commit.
     useLayoutEffect(() => {
       const el = surfaceRef.current
-      /* v8 ignore next 1 -- the surface renders unconditionally while the ribbon
-         renders, so React attaches the ref before layout effects run. */
+      /* v8 ignore next 1 */
       if (el === null) return
       const cw = el.clientWidth
-      /* v8 ignore next 1 -- the wrap renders unconditionally while the ribbon does. */
+      /* v8 ignore next 1 */
       const tip = (wrapRef.current ?? document.body).querySelector<HTMLElement>('.lc-chart-tip')
       if (tip === null) return
       const lw = tip.offsetWidth
       const half = Math.min(lw / 2, cw / 2)
-      // Center over the picked record's x, clamped to the wrap; a tip wider than the wrap centers over it.
-      /* v8 ignore next 1 -- the tip renders only while a record is hovered, so the unwarmed arm cannot fire. */
+      /* v8 ignore next 1 */
       const cx = hoveredIdx >= 0 ? Math.min(Math.max(hoveredIdx / u * cw, half), cw - half) : 0
       const next = `translate(${Math.round(cx - lw / 2)}px, 0)`
       if (tip.style.transform !== next) tip.style.transform = next
@@ -292,7 +296,6 @@ export function makeTrendOverview(kit: ViewKit): (props: TrendOverviewProps) => 
               {q3Clear
                 ? <span className="lc-axis-q3">{fmtSigned(Math.round(geo.maxUp - geo.span / 4))}</span>
                 : null}
-              {/* The 0 label rides the zero line (chart top padding 18px, half the 11px line-height up). */}
               <span className="lc-axis-mid" style={{ top: `${13 + geo.upPx}px` }}>{'0'}</span>
               {q1Clear
                 ? <span className="lc-axis-q1">{fmtSigned(Math.round(geo.maxUp - 3 * geo.span / 4))}</span>
@@ -314,36 +317,30 @@ export function makeTrendOverview(kit: ViewKit): (props: TrendOverviewProps) => 
             <div
               className="lc-chart"
               ref={surfaceRef}
-              // The shared category hover rides a plain attribute: the CSS lights that key's band in place, so
-              // hover relays never re-render the ribbon.
-              data-catdim={props.hoverCat ?? undefined}
+              data-catdim={localCat ?? props.hoverCat ?? undefined}
               onMouseMove={onMove}
               onMouseLeave={onLeave}
               onClick={onClick}
             >
               <div className="lc-grid lc-grid-top" />
-              {/* Dashed guides aligning the ribbon with the axis quarter marks; a delta mark that yielded to the
-                  zero label drops its guide too. */}
               {(!delta || q3Clear) ? <div className="lc-grid lc-grid-q3" /> : null}
               {(!delta || q1Clear) ? <div className="lc-grid lc-grid-q1" /> : null}
               {!delta ? <div className="lc-grid lc-grid-mid" /> : null}
-              <div className="lc-grid lc-grid-zero" style={delta ? { top: `${18 + geo.upPx}px` } : undefined} />
-              {geo.polys.length > 0 || geo.durationRuns.length > 0 || geo.durationDots.length > 0 ? (
+              <div className="lc-grid lc-grid-zero" style={delta ? { top: `${PLOT_TOP + geo.upPx}px` } : undefined} />
+              {geo.bands.length > 0 || geo.durationRuns.length > 0 || geo.durationDots.length > 0 ? (
                 <svg
                   className={'lc-duration lc-fit-svg' + RISE_CLASS}
                   viewBox={`0 0 ${u} ${CHART_H}`}
                   preserveAspectRatio="none"
                   aria-hidden="true"
                 >
-                  {geo.polys.map((p, i) => (
+                  {geo.bands.map((b, i) => (
                     <polygon
                       key={i}
-                      data-cat={p.cat}
+                      data-cat={b.cat}
                       className="lc-cat-seg"
-                      // Presentation attributes don't resolve var(); the fill rides inline style. The self-colored
-                      // stroke seals the antialiasing seam against each neighbor.
-                      style={{ fill: CAT_COLOR[p.cat], stroke: CAT_COLOR[p.cat] }}
-                      points={p.points}
+                      style={{ fill: CAT_COLOR[b.cat], stroke: CAT_COLOR[b.cat] }}
+                      points={b.points}
                     />
                   ))}
                   {geo.durationRuns.map((pts, i) => (
@@ -360,7 +357,7 @@ export function makeTrendOverview(kit: ViewKit): (props: TrendOverviewProps) => 
                   ))}
                 </svg>
               ) : null}
-              {wash !== null ? (
+              {wash !== null && localCat === null ? (
                 <>
                   <div className="lc-fit-wash" style={{ left: 0, width: wash.left, right: 'auto' }} />
                   <div className="lc-fit-wash" style={{ left: 'auto', width: wash.right, right: 0 }} />
@@ -381,16 +378,14 @@ export function makeTrendOverview(kit: ViewKit): (props: TrendOverviewProps) => 
                     >{'✂'}</span>
                   )
                 })}
-                {flagSteps.map(idx => (
+                {flagRecords.map(idx => (
                   <span
                     key={`flag-${idx}`}
-                    className="lc-step-flag"
-                    // The full-span pole hugs inside the pane's right edge: at left 100% the 1px pole falls wholly
-                    // past the scroller's clip, so it insets by its own width while the label still reads leftward.
+                    className="lc-trend-flag"
                     style={{ left: idx === n - 1 ? 'calc(100% - 1px)' : `${idx / u * 100}%` }}
                     aria-hidden="true"
                   >
-                    <span className="lc-step-flag-label">{idx + 1}</span>
+                    <span className="lc-trend-flag-label">{flagLabel(idx)}</span>
                   </span>
                 ))}
               </div>
@@ -402,7 +397,7 @@ export function makeTrendOverview(kit: ViewKit): (props: TrendOverviewProps) => 
                   <span
                     key={`turn-${gi}`}
                     className={'lc-turn' + (on ? ' lc-turn-on' : '')}
-                    style={{ flexGrow: grp.span, flexBasis: 0, background: TURN_FILLS[gi % TURN_FILLS.length] }}
+                    style={{ flexGrow: grp.count, flexBasis: 0, background: TURN_FILLS[gi % TURN_FILLS.length] }}
                     title={`T${grp.turn}`}
                     onMouseEnter={() => { props.onHoverTurn(grp.turn) }}
                     onClick={() => { props.onPickTurn(grp.turn) }}

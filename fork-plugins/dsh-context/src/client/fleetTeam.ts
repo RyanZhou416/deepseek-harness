@@ -1,14 +1,3 @@
-/**
- * The Agent Teams plane of the Fleet tab — the pure model behind the team panel and every
- * member/task badge elsewhere. The harness's experimental `agentTeam` projection rides the LEAD
- * session's wire values (and every session-list row's projection hints with it), so the tab reads
- * the family roster and the shared task board off the snapshot it already holds — no extra fetch.
- *
- * The projection exists only when the deployment composes the experimental agent-team plugin, and
- * its payload is untrusted like every other wire value: absent stays null (the panel hides), and
- * malformed entries drop alone.
- */
-
 import { asRecord } from './services'
 import type { AgentForest, AgentNode } from './agentTree'
 
@@ -16,7 +5,6 @@ export interface FleetTeamMember {
   id: string
   name: string
   role: 'lead' | 'teammate'
-  /** Durable lifecycle; the lead's row is always active. */
   phase: 'provisioning' | 'active' | 'failed'
   error?: string
 }
@@ -26,21 +14,16 @@ export interface FleetTeamTask {
   subject: string
   description: string
   status: 'pending' | 'in_progress' | 'completed'
-  /** Owner membership NAME (the wire view carries names, not ids — join by name). */
   ownerName?: string
   blockedBy: string[]
   writeScopes: string[]
-  /** Server-computed readiness: pending with every blocker completed. Readiness never auto-starts the owner. */
   ready: boolean
   warnings: string[]
 }
 
 export interface FleetTeam {
-  /** Lead first (the harness synthesizes its row), then roster order. */
   members: FleetTeamMember[]
-  /** The non-deleted task board, in board order. */
   tasks: FleetTeamTask[]
-  /** The first rejected durable record; the board then sits at its last valid state. */
   failure?: string
 }
 
@@ -84,7 +67,6 @@ function taskOf(value: unknown): FleetTeamTask | null {
   }
 }
 
-/** Narrow a delivered `agentTeam` projection value; a record without a sound member list degrades whole to null. */
 export function teamOf(value: unknown): FleetTeam | null {
   const rec = asRecord(value)
   if (rec === null || !Array.isArray(rec.members)) return null
@@ -107,7 +89,6 @@ export function teamOf(value: unknown): FleetTeam | null {
   }
 }
 
-/** The membership row of one session id, or null when the session sits outside the roster. */
 export function teamMemberOf(team: FleetTeam | null, sessionId: string): FleetTeamMember | null {
   if (team === null) return null
   for (const member of team.members) {
@@ -116,15 +97,12 @@ export function teamMemberOf(team: FleetTeam | null, sessionId: string): FleetTe
   return null
 }
 
-/** The name a graph card leads with for one node: teammates only — the lead's card keeps the
- * session's own title, the current session's card is the self card, outsiders keep their prompt. */
 export function teammateNameOf(team: FleetTeam | null, node: AgentNode): string | undefined {
   if (node.isCurrent) return undefined
   const member = teamMemberOf(team, node.id)
   return member !== null && member.role === 'teammate' ? member.name : undefined
 }
 
-/** A member's id off their roster NAME — the task board's ownership join key. */
 export function memberIdByName(team: FleetTeam | null, name: string | undefined): string | undefined {
   if (team === null || name === undefined) return undefined
   for (const member of team.members) {
@@ -133,15 +111,11 @@ export function memberIdByName(team: FleetTeam | null, name: string | undefined)
   return undefined
 }
 
-/** The tasks one member owns, in board order. */
 export function tasksOfOwner(team: FleetTeam | null, ownerName: string | undefined): FleetTeamTask[] {
   if (team === null || ownerName === undefined) return []
   return team.tasks.filter(task => task.ownerName === ownerName)
 }
 
-/** The family's nodes outside the team roster — plain subagents, ancestors, siblings. The current
- * session never counts (the members board's "other agents" and the task board's delegations share
- * this scope). */
 export function familyOthersOf(forest: AgentForest | null, team: FleetTeam | null): AgentNode[] {
   if (forest === null) return []
   return forest.nodes.filter(n => !n.isCurrent && teamMemberOf(team, n.id) === null)

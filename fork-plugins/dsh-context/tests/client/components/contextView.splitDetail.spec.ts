@@ -1,4 +1,4 @@
-import { createElement as h } from 'react'
+import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test, vi } from 'vitest'
 import { requestContextFocus, takeContextFocus } from '../../../src/client/viewFocus'
@@ -9,7 +9,6 @@ import { click, flush, mount, query, queryAll, text, until } from '../helpers/ki
 import { makeView, projectionsFor, richTimeline, T0, timeline } from './contextViewHarness'
 
 describe('ContextView — the split generation (slim head + detail channel)', () => {
-  /** A slim wire head: the pushed value with the collections empty and the counters/markers on. */
   function slimHead(over: Record<string, unknown> = {}): ContextTimeline {
     return timeline({
       model: 'deepseek-v4-flash',
@@ -24,7 +23,6 @@ describe('ContextView — the split generation (slim head + detail channel)', ()
     })
   }
 
-  /** The matching detail payload (richTimeline's collections). */
   function slimDetail(rev = 6): Record<string, unknown> {
     const rich = richTimeline()
     return {
@@ -47,9 +45,7 @@ describe('ContextView — the split generation (slim head + detail channel)', ()
     const View = makeView(ctx)
     const m = await mount(h(View, { sessionId: 'sv-slim', useProjection: projectionsFor(slimHead()) }))
 
-    // First paint: the counters are real (no detail needed), the detail cards name the pending read.
-    // The session node reads two figure rows off the head: turns/steps, then skill loads/answers.
-    const values = queryAll(m.container, '.lc-flow-kv b').map(el => text(el))
+    const values = queryAll(m.container, '.lc-core-kv:not(.lc-core-kv-events) b').map(el => text(el))
     assert.deepEqual(values, ['1', '3', '0', '0'], 'turns/steps/skills/answers from the head counters')
     assert.ok(text(m.container).includes(DICT_EN['detail.loading']))
     assert.equal(queryAll(m.container, '.lc-bar').length, 0, 'the chart waits for the detail')
@@ -65,11 +61,14 @@ describe('ContextView — the split generation (slim head + detail channel)', ()
   })
 
   test('the pending trend body reserves the loaded panel, so the detail fills the card instead of growing it', async () => {
-    const ctx = slimCtx(async () => ({ ok: true, value: slimDetail() }))
+    let release!: () => void
+    vi.stubGlobal('fetch', () => new Promise(res => {
+      release = () => { res({ ok: true, status: 200, json: async () => ({ ok: true, value: slimDetail() }) }) }
+    }))
+    const ctx = new TestClientCtx()
     const View = makeView(ctx)
     const m = await mount(h(View, { sessionId: 'sv-reserve', useProjection: projectionsFor(slimHead()) }))
 
-    // Pending: the trend card stands in the same boxes the loaded panel uses, so its arrival changes no card's height.
     assert.equal(queryAll(m.container, '.lc-trend-lane').length, 1, 'the reserved body renders while the read is in flight')
     assert.equal(queryAll(m.container, '.lc-trend-lane .lc-legend .lc-chip').length, 7,
       'the lane reserves one chip per category')
@@ -79,6 +78,8 @@ describe('ContextView — the split generation (slim head + detail channel)', ()
     assert.equal(queryAll(m.container, '.lc-trend-lane .lc-detail-metrics').length, 0,
       'no fabricated figures in the reserved panel')
 
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+    await act(async () => { release() })
     await until(() => queryAll(m.container, '.lc-bar').length === 3, 'the detail never landed')
     assert.equal(queryAll(m.container, '.lc-trend-lane').length, 0, 'the lane yields to the real panel')
     assert.equal(queryAll(m.container, '.lc-chartrow').length, 1, 'the chart took its place')
@@ -109,16 +110,16 @@ describe('ContextView — the split generation (slim head + detail channel)', ()
       return parent
     }
 
-    const cells = queryAll(m.container, '.lc-flow-kv-btn')
-    assert.equal(cells.length, 2)
-    await click(cells[1])
+    const cells = queryAll(m.container, '.lc-core-kv-btn:not(.lc-core-kv-events)')
+    assert.equal(cells.length, 4)
+    await click(query(m.container, '.lc-core-kv-answers.lc-core-kv-btn'))
     await flush()
     const assistantCat = openCat()
     const answerChip = queryAll(assistantCat, '.lc-gran-btn').find(b => text(b).includes('Answer'))
     assert.ok(answerChip !== undefined && answerChip.className.includes('lc-gran-on'), 'the Answer chip is picked')
     assert.equal(queryAll(assistantCat, '.lc-br-elem').length, 3, 'all three textual replies survive the filter')
 
-    await click(cells[0])
+    await click(query(m.container, '.lc-core-kv-skills.lc-core-kv-btn'))
     await flush()
     const skillCat = openCat()
     assert.ok(text(skillCat).includes('pdf'), 'the loaded skill row shows')
@@ -146,13 +147,17 @@ describe('ContextView — the split generation (slim head + detail channel)', ()
   })
 
   test('the jump relay survives the split: held while the detail reads, resolves when it lands', async () => {
-    const ctx = slimCtx(async () => ({ ok: true, value: slimDetail() }))
+    let release!: () => void
+    vi.stubGlobal('fetch', () => new Promise(res => {
+      release = () => { res({ ok: true, status: 200, json: async () => ({ ok: true, value: slimDetail() }) }) }
+    }))
+    const ctx = new TestClientCtx()
     const View = makeView(ctx)
-    // The jump is armed BEFORE the view mounts (the chat action relay) — the
-    // detail read is still pending, so the pin must wait for it (not consume and clamp against an empty record list).
     requestContextFocus('sv-slim-jump', 4)
     const m = await mount(h(View, { sessionId: 'sv-slim-jump', useProjection: projectionsFor(slimHead()) }))
     assert.equal(queryAll(m.container, '.lc-bar-selected').length, 0, 'nothing pins before the detail')
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+    await act(async () => { release() })
     await until(
       () => queryAll(m.container, '.lc-bar[data-seq="4"]')[0]?.className.includes('lc-bar-selected') === true,
       'the jump never resolved',
@@ -176,7 +181,6 @@ describe('ContextView — the op-log generation (fileOps on the detail payload)'
           nodes: [],
           droppedNodes: 0,
           archive: [],
-          // The op log covers the full session — the conversation window join plays no role in this card on this generation.
           fileOps: [
             { seq: 1, path: '/ws/README.md', kind: 'read', tool: 'read', err: false, added: 0, removed: 0, read: { start: 1, count: 12 } },
             { seq: 2, path: '/ws/src/a.ts', kind: 'write', tool: 'edit', err: false, added: 3, removed: 1 },

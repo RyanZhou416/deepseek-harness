@@ -1,12 +1,3 @@
-/**
- * Per-image token estimate for DeepSeek's vision model — a port of the official image-token
- * calculator on the DeepSeek API docs
- * (https://api-docs.deepseek.com/zh-cn/quick_start/token_usage): aspect-preserved rescale, then
- * the 14px patch grid with 3:1 downsampling, capped at 384 tokens per image.
- *
- * Pure math shared by the Host fold (message pricing) and the Client (attachment card badges).
- */
-
 const PATCH_SIZE = 14
 const DOWNSAMPLE_RATIO = 3
 const MAX_TOKENS = 384
@@ -41,12 +32,11 @@ function solveResizeRatio(height: number, width: number, budget: number): Resize
   let bestWidth: number
   if (gridW < 1) {
     let rows = floorDiv(budget - 2, 2)
-    /* v8 ignore else -- the tall solve never decrements, so rows is always odd here. */
+    /* v8 ignore else */
     if (rows % 2 === 1) rows -= 1
     bestWidth = unit
     bestHeight = rows * unit
-  /* v8 ignore start -- unreachable: the MAX_WH_RATIO clamp keeps height/width ≥ 1/8, so
-     gridH can never fall below 2; port kept verbatim from the official calculator. */
+  /* v8 ignore start */
   } else if (gridH < 2) {
     const cols = floorDiv(budget - 2, 2) - 1
     if (cols <= 1) throw new Error('image tokens: budget too small to solve')
@@ -55,7 +45,6 @@ function solveResizeRatio(height: number, width: number, budget: number): Resize
   /* v8 ignore stop */
   } else {
     const cols = Math.trunc(gridW)
-    // The official grid pairs rows: odd counts round down.
     let rows = Math.trunc(gridH)
     if (rows % 2 === 1) rows -= 1
     const scale = Math.min(cols * unit / width, rows * unit / height)
@@ -106,8 +95,6 @@ function calcResizeInner(width: number, height: number): ResizeSolution {
   return safeResize(h, w, paddedHeight, paddedWidth)
 }
 
-/** Estimate one image's DeepSeek vision tokens; null for degenerate dimensions or a
- * non-converging solve, where callers fall back to the structural price. */
 export function estimateImageTokens(width: number, height: number): number | null {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
   try {
@@ -121,8 +108,7 @@ export function estimateImageTokens(width: number, height: number): number | nul
     }
     return null
   } catch {
-    /* v8 ignore next -- the only throw site is the clamped-away budget guard above; keeps a
-       hostile dimension from breaking the fold. */
+    /* v8 ignore next */
     return null
   }
 }

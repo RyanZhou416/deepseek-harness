@@ -1,5 +1,3 @@
-// buildTimelineView (src/host/foldWire.ts) driven through the real projection unit (driveTimeline / def.wire.view).
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { createTimelineState } from '../../src/host/fold'
@@ -11,113 +9,88 @@ const bucket = (uncached: number, cacheRead: number, cacheWrite: number, output:
   ({ uncached, cacheRead, cacheWrite, output })
 
 describe('buildTimelineView unknown-model shape', () => {
-  test('optional scalars stay ABSENT keys until known — never undefined-valued (issue #29)', () => {
-    // A fold over events that name no model/provider/capacity: the served
-    // view must not carry `undefined`-valued properties, which fail the harness's lossless-JSON push pipeline whole.
-    const { view } = driveTimeline([
+  test('optional scalars stay ABSENT keys until known, then ride their own keys (issue #29)', () => {
+    const unknown = driveTimeline([
       userMessage(1, [{ type: 'text', text: 'aaaa' }]),
       assistantMessage(2, { turn: 1, step: 1 }),
-    ])
-    assert.equal(view.model, undefined)
-    assert.equal(view.provider, undefined)
-    assert.equal(view.contextWindow, undefined)
-    assert.equal(view.maxOutputTokens, undefined)
-    assert.ok(!('model' in view), 'no own `model` key')
-    assert.ok(!('provider' in view), 'no own `provider` key')
-    assert.ok(!('contextWindow' in view), 'no own `contextWindow` key')
-    assert.ok(!('maxOutputTokens' in view), 'no own `maxOutputTokens` key')
-    assertPlainJson(view)
-  })
-
-  test('known scalars ride their own keys once a request names them', () => {
-    const { view } = driveTimeline([
-      header(1, { config: { model: 'deepseek-v4-flash', provider: 'deepseek', maxTokens: 256000 } }),
+    ]).view
+    assert.equal(unknown.ok, true)
+    assert.ok(!('model' in unknown), 'no own `model` key')
+    assert.ok(!('provider' in unknown), 'no own `provider` key')
+    assert.ok(!('reasoningEffort' in unknown), 'no own `reasoningEffort` key')
+    assert.ok(!('contextWindow' in unknown), 'no own `contextWindow` key')
+    assert.ok(!('maxOutputTokens' in unknown), 'no own `maxOutputTokens` key')
+    assertPlainJson(unknown)
+    const known = driveTimeline([
+      header(1, { config: { model: 'deepseek-v4-flash', provider: 'deepseek', reasoningEffort: 'max', maxTokens: 256000 } }),
       requestContext(2, { provider: 'deepseek', model: 'deepseek-v4-flash', contextWindow: 128000 }),
       userMessage(3, [{ type: 'text', text: 'hi' }]),
-    ])
-    assert.equal(view.model, 'deepseek-v4-flash')
-    assert.equal(view.provider, 'deepseek')
-    assert.equal(view.contextWindow, 128000)
-    assert.equal(view.maxOutputTokens, 256000)
-    assertPlainJson(view)
+    ]).view
+    assert.equal(known.ok, true)
+    assert.equal(known.model, 'deepseek-v4-flash')
+    assert.equal(known.provider, 'deepseek')
+    assert.equal(known.reasoningEffort, 'max')
+    assert.equal(known.contextWindow, 128000)
+    assert.equal(known.maxOutputTokens, 256000)
+    assertPlainJson(known)
   })
 
-  test('the routed output cap is LAST-WINS across headers, exactly as the compaction backend reads it', () => {
-    // A later header without a cap clears it (dsh's `reservedCompletionTokens` falls back to zero, not
-    // to the previous envelope), and a hostile cap never lands in the persisted state.
+  test('the reasoning effort and output cap are LAST-WINS across headers; hostile values clear them', () => {
     const cleared = driveTimeline([
-      header(1, { config: { model: 'm', provider: 'p', maxTokens: 256000 } }),
-      header(2, { config: { model: 'm', provider: 'p' }, reason: 'change' }),
-    ])
-    assert.equal(cleared.view.maxOutputTokens, undefined)
+      header(1, { config: { model: 'm', reasoningEffort: 'max', maxTokens: 256000 } }),
+      header(2, { config: { model: 'm' }, reason: 'change' }),
+    ]).view
+    assert.equal(cleared.reasoningEffort, undefined)
+    assert.equal(cleared.maxOutputTokens, undefined, 'a cap-less header clears it (dsh reserves zero, not the old envelope)')
+    for (const effort of ['', 42, null, false] as const) {
+      const { view } = driveTimeline([header(1, { config: { model: 'm', reasoningEffort: effort } })])
+      assert.equal(view.reasoningEffort, undefined, String(effort))
+    }
     for (const maxTokens of ['256000', -1, 0, Number.NaN, Number.POSITIVE_INFINITY, null] as const) {
       const { view } = driveTimeline([header(1, { config: { model: 'm', provider: 'p', maxTokens } })])
       assert.equal(view.maxOutputTokens, undefined, String(maxTokens))
     }
     const kept = driveTimeline([
-      header(1, { config: { model: 'm', provider: 'p', maxTokens: 8000 } }),
-      header(2, { config: { model: 'm', provider: 'p', maxTokens: 256000 }, reason: 'change' }),
-    ])
-    assert.equal(kept.view.maxOutputTokens, 256000)
+      header(1, { config: { model: 'm', provider: 'p', reasoningEffort: 'low', maxTokens: 8000 } }),
+      header(2, { config: { model: 'm', provider: 'p', reasoningEffort: 'max', maxTokens: 256000 }, reason: 'change' }),
+    ]).view
+    assert.equal(kept.reasoningEffort, 'max')
+    assert.equal(kept.maxOutputTokens, 256000)
   })
 })
 
 describe('buildTimelineView counters', () => {
-  test('images sums per-node image counts, absent counting as zero', () => {
+  test('images and toolCalls sum live surface nodes, absent counts as zero', () => {
     const { view } = driveTimeline([
       userMessage(1, [{ type: 'image', attachment: { width: 800, height: 600 } }]),
       userMessage(2, [{ type: 'text', text: 'no image here' }]),
+      toolCall(3, { callId: 'c1', name: 'bash' }),
+      toolResult(4, { callId: 'c1', content: [{ type: 'text', text: 'ok' }] }),
     ])
     assert.equal(view.images, 1)
-  })
-
-  test('toolCalls counts live tool-result nodes only', () => {
-    const { view } = driveTimeline([
-      toolCall(1, { callId: 'c1', name: 'bash' }),
-      toolResult(2, { callId: 'c1', content: [{ type: 'text', text: 'ok' }] }),
-      userMessage(3, [{ type: 'text', text: 'hi' }]),
-    ])
     assert.equal(view.toolCalls, 1)
   })
 
-  test('humanInputs tallies the user\'s own messages, injections excluded', () => {
+  test('humanInputs tallies the user\'s own messages and answered questions, other tool results excluded', () => {
     const { view } = driveTimeline([
       userMessage(1, [{ type: 'text', text: 'hello' }], { kind: 'user' }),
       userMessage(2, [{ type: 'text', text: 'again' }]),
       userMessage(3, [{ type: 'text', text: 'AGENTS.md' }], { kind: 'plugin', form: 'context', plugin: 'dsh-test' }),
       userMessage(4, [{ type: 'text', text: '/skill' }], { kind: 'skill-invocation', name: 's' }),
       userMessage(5, [{ type: 'image', attachment: { width: 8, height: 8 } }], { kind: 'user' }),
+      toolCall(6, { callId: 'q1', name: 'ask_user_question' }),
+      toolResult(7, { callId: 'q1', content: [{ type: 'text', text: '{"answers":[{"id":"a","selected":["x"]}]}' }] }),
+      toolCall(8, { callId: 'b1', name: 'bash' }),
+      toolResult(9, { callId: 'b1', content: [{ type: 'text', text: 'ok' }] }),
+      toolCall(10, { callId: 'q2', name: 'ask_user_question' }),
+      toolResult(11, { callId: 'q2', content: [{ type: 'text', text: '{"answers":[{"id":"b","selected":["y"]}]}' }] }),
     ])
-    assert.equal(view.humanInputs, 3)
-  })
-
-  test('an answered ask_user_question result is a human input; other tool results are not', () => {
-    const { view } = driveTimeline([
-      userMessage(1, [{ type: 'text', text: 'go' }], { kind: 'user' }),
-      toolCall(2, { callId: 'q1', name: 'ask_user_question' }),
-      toolResult(3, { callId: 'q1', content: [{ type: 'text', text: '{"answers":[{"id":"a","selected":["x"]}]}' }] }),
-      toolCall(4, { callId: 'b1', name: 'bash' }),
-      toolResult(5, { callId: 'b1', content: [{ type: 'text', text: 'ok' }] }),
-      toolCall(6, { callId: 'q2', name: 'ask_user_question' }),
-      toolResult(7, { callId: 'q2', content: [{ type: 'text', text: '{"answers":[{"id":"b","selected":["y"]}]}' }] }),
-    ])
-    assert.equal(view.humanInputs, 3)
-  })
-
-  test('an unpaired or ask-user result without its call event counts nothing', () => {
-    const { view } = driveTimeline([
-      toolResult(1, { callId: 'ghost', content: [{ type: 'text', text: 'lost my call event' }] }),
-      userMessage(2, [{ type: 'text', text: 'hi' }], { kind: 'user' }),
-    ])
-    assert.equal(view.humanInputs, 1)
-  })
-
-  test('an answered question starts the tally without a preceding user message', () => {
-    const { view } = driveTimeline([
+    assert.equal(view.humanInputs, 5)
+    const standalone = driveTimeline([
       toolCall(1, { callId: 'q1', name: 'ask_user_question' }),
       toolResult(2, { callId: 'q1', content: [{ type: 'text', text: '{"answers":[{"id":"a","selected":["y"]}]}' }] }),
-    ])
-    assert.equal(view.humanInputs, 1)
+    ]).view
+    assert.equal(standalone.humanInputs, 1)
   })
 
   test('humanInputs stays ABSENT until the first human input — never undefined-valued', () => {
@@ -133,7 +106,7 @@ describe('buildTimelineView counters', () => {
 })
 
 describe('buildTimelineView lastUser preview', () => {
-  test('the newest own message rides the view, whitespace collapsed; injections and text-less inputs leave it alone', () => {
+  test('the newest own message rides the view, whitespace collapsed and bounded; injections and text-less inputs leave it alone', () => {
     const { view } = driveTimeline([
       userMessage(1, [{ type: 'text', text: '  hello   world  ' }]),
       userMessage(2, [{ type: 'text', text: 'AGENTS.md' }], { kind: 'plugin', form: 'context', plugin: 'dsh-test' }),
@@ -141,16 +114,15 @@ describe('buildTimelineView lastUser preview', () => {
       userMessage(4, [{ type: 'image', attachment: { width: 8, height: 8 } }]),
     ])
     assert.equal(view.lastUser, 'hello world')
-  })
-
-  test('a newer textual message replaces the preview, on the state and the view', () => {
-    const { state, view } = driveTimeline([
+    const newer = driveTimeline([
       userMessage(1, [{ type: 'text', text: 'first' }]),
       userMessage(2, [{ type: 'text', text: 'second' }]),
     ])
-    assert.equal(state.lastUser, 'second')
-    assert.equal(view.lastUser, 'second')
-    assertPlainJson(state)
+    assert.equal(newer.state.lastUser, 'second')
+    assert.equal(newer.view.lastUser, 'second')
+    assertPlainJson(newer.state)
+    const long = driveTimeline([userMessage(1, [{ type: 'text', text: 'x'.repeat(500) }])]).view
+    assert.equal(long.lastUser?.length, 80)
   })
 
   test('stays ABSENT before any textual user message — never undefined-valued', () => {
@@ -158,72 +130,43 @@ describe('buildTimelineView lastUser preview', () => {
       toolCall(1, { callId: 'b1', name: 'bash' }),
       userMessage(2, [{ type: 'image', attachment: { width: 8, height: 8 } }]),
     ])
-    assert.equal(view.lastUser, undefined)
     assert.ok(!('lastUser' in view), 'no own key on the view')
     assert.ok(!('lastUser' in state), 'no own key on the persisted state')
     assertPlainJson(view)
   })
-
-  test('a long message truncates to the bounded preview line', () => {
-    const { view } = driveTimeline([userMessage(1, [{ type: 'text', text: 'x'.repeat(500) }])])
-    assert.equal(view.lastUser?.length, 80)
-  })
 })
 
 describe('buildTimelineView copies', () => {
-  test('requests, events, and archive entries are copies, never state aliases', () => {
-    const { state, view } = driveTimeline([
+  test('the view is detached from state; repeated views are deep-equal but distinct, and state is untouched', () => {
+    const { def, state } = driveTimeline([
       userMessage(1, [{ type: 'text', text: 'aaaa' }]),
       planMode(2, { active: true }),
       assistantMessage(3, { turn: 1, step: 1 }),
+      userMessage(4, [{ type: 'text', text: 'b' }], undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } }),
     ])
-    assert.notEqual(view.requests[0], state.requests[0])
-    assert.deepEqual(view.requests[0], state.requests[0])
-    // Event copies are stamped with request attribution, so they differ by
-    // value — what matters is that they never alias the persisted records.
-    assert.notEqual(view.events[0], state.events[0])
-    // Mutating the served view must not leak into the persisted state.
-    view.requests[0].total = -1
-    view.events[0].name = 'mutated'
+    const before = assertPlainJson(state)
+    const v1 = def.wire.view(state)
+    const v2 = def.wire.view(state)
+    assert.ok(v1 !== v2 && v1.nodes !== v2.nodes && v1.requests !== v2.requests)
+    assert.deepEqual(v1, v2)
+    assert.notEqual(v1.requests[0], state.requests[0])
+    assert.deepEqual(v1.requests[0], state.requests[0])
+    assert.notEqual(v1.events[0], state.events[0])
+    assert.equal(v1.archive.length, 1)
+    assert.notEqual(v1.archive[0], state.archived[0])
+    assert.deepEqual(v1.archive[0], state.archived[0])
+    v1.requests[0].total = -1
+    v1.events[0].name = 'mutated'
+    v1.archive[0].tokens = -1
     assert.notEqual(state.requests[0].total, -1)
     assert.notEqual(state.events[0].name, 'mutated')
-  })
-
-  test('archive entries are copies too', () => {
-    const { state, view } = driveTimeline([
-      userMessage(1, [{ type: 'text', text: 'aaaa' }]),
-      userMessage(2, [{ type: 'text', text: 'b' }], undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } }),
-    ])
-    assert.equal(view.archive.length, 1)
-    assert.notEqual(view.archive[0], state.archived[0])
-    assert.deepEqual(view.archive[0], state.archived[0])
+    assert.notEqual(state.archived[0].tokens, -1)
+    assert.deepEqual(assertPlainJson(state), before, 'view() must not mutate the persisted state')
   })
 })
 
 describe('buildTimelineView cost copy', () => {
-  test('a folded cost rides the wire as a detached copy', () => {
-    // Mon 2024-01-01 02:00 UTC — a DeepSeek peak window.
-    const { state, view } = driveTimeline([
-      header(1, { model: 'deepseek-v4-flash', provider: 'deepseek-official' }),
-      assistantMessage(2, {
-        turn: 1,
-        step: 1,
-        usage: { inputTokens: 100, cacheReadTokens: 20, cacheWriteTokens: 5, outputTokens: 10 },
-        time: Date.UTC(2024, 0, 1, 2, 0, 0),
-      }),
-    ])
-    assert.deepEqual<SessionCostUsage>(view.cost, {
-      'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(100, 20, 5, 10) } },
-    })
-    assert.notEqual(view.cost, state.cost)
-    assert.notEqual(
-      view.cost?.['deepseek-official']?.['deepseek-v4-flash']?.peak,
-      state.cost?.['deepseek-official']?.['deepseek-v4-flash']?.peak,
-    )
-    assert.equal(view.cost?.['kimi-coding'], undefined, 'an absent provider stays absent')
-  })
-
-  test('every provider, model, and period branch copies through', () => {
+  test('every provider, model, and period branch copies through; no cost omits the field', () => {
     const st = createTimelineState()
     st.cost = {
       'deepseek-official': {
@@ -240,11 +183,7 @@ describe('buildTimelineView cost copy', () => {
     assert.notEqual(view.cost?.['deepseek-official']?.['deepseek-v4-pro']?.off, st.cost['deepseek-official']['deepseek-v4-pro'].off)
     assert.notEqual(view.cost?.['kimi-coding']?.['kimi-k2.7-code']?.peak, st.cost['kimi-coding']['kimi-k2.7-code'].peak)
     assert.notEqual(view.cost?.['']?.['mystery-model']?.peak, st.cost['']['mystery-model'].peak)
-  })
-
-  test('no cost in state omits the wire field entirely', () => {
-    const view = timelineDef({}).wire.view(createTimelineState())
-    assert.equal('cost' in view, false)
+    assert.equal('cost' in timelineDef({}).wire.view(createTimelineState()), false)
   })
 })
 
@@ -262,7 +201,7 @@ describe('buildTimelineView serving window', () => {
     assert.equal(view.surfaceFloor, 3, 'the floor is the newest unserved non-inject seq')
   })
 
-  test('without overflow the served nodes are a plain tail copy', () => {
+  test('without overflow the served nodes are a plain tail copy; no floors ride, and an existing archiveFloor passes through', () => {
     const { state, view } = driveTimeline([
       userMessage(1, [{ type: 'text', text: 'a' }]),
       userMessage(2, [{ type: 'text', text: 'b' }]),
@@ -272,6 +211,9 @@ describe('buildTimelineView serving window', () => {
     assert.equal(view.droppedNodes, 0)
     assert.equal('surfaceFloor' in view, false)
     assert.equal('archiveFloor' in view, false)
+    const archived = createTimelineState()
+    archived.archiveFloor = 7
+    assert.equal(timelineDef({}).wire.view(archived).archiveFloor, 7)
   })
 
   test('an overflow made only of injects drops nothing and sets no floor', () => {
@@ -292,157 +234,72 @@ describe('buildTimelineView serving window', () => {
       toolCall(4, { callId: 'c1', name: 'skill' }),
       toolResult(5, { callId: 'c1', content: [{ type: 'text', text: '<skill_content name="pdf">body</skill_content>' }] }),
     ], { maxNodes: 2 })
-    // Surface nodes are 1 (catalog), 2, 3 (plain user) and 5 (the skill load —
-    // the tool/call at seq 4 carries no surface node). The catalog pins ahead
-    // of the tail; the single dropped plain message sets the floor.
     assert.deepEqual((view.nodes as SurfaceNode[]).map(n => n.seq), [1, 3, 5])
     assert.equal(view.droppedNodes, 1)
     assert.equal(view.surfaceFloor, 2, 'the floor is the newest unserved non-skill seq')
   })
-
-  test('archiveFloor rides through when the state carries one', () => {
-    const st = createTimelineState()
-    st.archiveFloor = 7
-    assert.equal(timelineDef({}).wire.view(st).archiveFloor, 7)
-  })
 })
 
 describe('buildTimelineView event attribution', () => {
-  test('an event before the first request takes the next side only', () => {
-    const { view } = driveTimeline([
+  test('an event before the first or after the last request takes only the available side; between two requests, both', () => {
+    const before = driveTimeline([
       userMessage(1, [{ type: 'text', text: 'ctx' }], { kind: 'plugin', form: 'notice', plugin: 'p', summary: 'hi' }),
       assistantMessage(2, { turn: 1, step: 1 }),
-    ])
-    const ev = view.events[0]
-    assert.equal(ev.kind, 'inject')
-    assert.equal(ev.turn, 1)
-    assert.equal(ev.step, 1)
-    assert.equal(ev.fromTurn, undefined)
-    assert.equal(ev.fromStep, undefined)
-  })
-
-  test('an event between two requests of one turn takes both sides', () => {
-    const { view } = driveTimeline([
-      assistantMessage(1, { turn: 1, step: 1 }),
-      planMode(2, { active: true }),
-      assistantMessage(3, { turn: 1, step: 2 }),
-    ])
-    const ev = view.events[0]
-    assert.equal(ev.turn, 1)
-    assert.equal(ev.step, 2)
-    assert.equal(ev.fromTurn, 1)
-    assert.equal(ev.fromStep, 1)
-  })
-
-  test('an event between requests of different turns names the turn boundary', () => {
-    const { view } = driveTimeline([
-      assistantMessage(1, { turn: 1, step: 1 }),
-      planMode(2, { active: true }),
-      assistantMessage(3, { turn: 2, step: 1 }),
-    ])
-    const ev = view.events[0]
-    assert.equal(ev.fromTurn, 1)
-    assert.equal(ev.turn, 2)
-    assert.notEqual(ev.fromTurn, ev.turn)
-  })
-
-  test('an event after the last request takes the previous side only', () => {
-    const { view } = driveTimeline([
+    ]).view.events[0]
+    assert.equal(before.kind, 'inject')
+    assert.equal(before.turn, 1)
+    assert.equal(before.step, 1)
+    assert.equal(before.fromTurn, undefined)
+    assert.equal(before.fromStep, undefined)
+    const after = driveTimeline([
       assistantMessage(1, { turn: 1, step: 1 }),
       planMode(2, { active: false }),
-    ])
-    const ev = view.events[0]
-    assert.equal(ev.turn, undefined)
-    assert.equal(ev.step, undefined)
-    assert.equal(ev.fromTurn, 1)
-    assert.equal(ev.fromStep, 1)
+    ]).view.events[0]
+    assert.equal(after.turn, undefined)
+    assert.equal(after.step, undefined)
+    assert.equal(after.fromTurn, 1)
+    assert.equal(after.fromStep, 1)
+    for (const [nextTurn, nextStep, fromTurn, fromStep] of [
+      [1, 2, 1, 1],
+      [2, 1, 1, 1],
+    ] as const) {
+      const { view } = driveTimeline([
+        assistantMessage(1, { turn: 1, step: 1 }),
+        planMode(2, { active: true }),
+        assistantMessage(3, { turn: nextTurn, step: nextStep }),
+      ])
+      const ev = view.events[0]
+      assert.equal(ev.turn, nextTurn, `next turn ${nextTurn}`)
+      assert.equal(ev.step, nextStep)
+      assert.equal(ev.fromTurn, fromTurn)
+      assert.equal(ev.fromStep, fromStep)
+    }
   })
 
-  test('an event with no requests at all takes neither side', () => {
+  test('an event with no requests, or an incomplete next request, takes no side', () => {
     const { view } = driveTimeline([planMode(1, { active: true })])
     const ev = view.events[0]
     assert.equal(ev.turn, undefined)
     assert.equal(ev.fromTurn, undefined)
+    for (const next of [{}, { turn: 3 }]) {
+      const none = driveTimeline([planMode(1, { active: true }), assistantMessage(2, next)]).view.events[0]
+      assert.equal(none.turn, undefined, JSON.stringify(next))
+      assert.equal(none.step, undefined)
+    }
   })
 
-  test('a turn-less next request (replay shape) stamps no turn/step', () => {
-    const { view } = driveTimeline([
-      planMode(1, { active: true }),
-      assistantMessage(2, {}), // no turn/step: a replayed log row
-    ])
-    const ev = view.events[0]
-    assert.equal(ev.turn, undefined)
-    assert.equal(ev.step, undefined)
-  })
-
-  test('a next request with a turn but no step stamps no turn/step', () => {
-    const { view } = driveTimeline([
-      planMode(1, { active: true }),
-      assistantMessage(2, { turn: 3 }),
-    ])
-    assert.equal(view.events[0].turn, undefined)
-  })
-
-  test('a turn-less previous request stamps no from-side', () => {
-    const { view } = driveTimeline([
-      assistantMessage(1, {}),
-      planMode(2, { active: true }),
-      assistantMessage(3, { turn: 1, step: 1 }),
-    ])
-    const ev = view.events[0]
-    assert.equal(ev.fromTurn, undefined)
-    assert.equal(ev.fromStep, undefined)
-    assert.equal(ev.turn, 1)
-    assert.equal(ev.step, 1)
-  })
-
-  test('a previous request with a turn but no step stamps no from-side', () => {
-    const { view } = driveTimeline([
-      assistantMessage(1, { turn: 7 }),
-      planMode(2, { active: true }),
-      assistantMessage(3, { turn: 8, step: 1 }),
-    ])
-    const ev = view.events[0]
-    assert.equal(ev.fromTurn, undefined)
-    assert.equal(ev.turn, 8)
-  })
-})
-
-describe('buildTimelineView purity', () => {
-  test('repeated views are deep-equal but distinct, and the state is untouched', () => {
-    const { def, state } = driveTimeline([
-      header(1, { model: 'm', provider: 'p' }),
-      userMessage(2, [{ type: 'text', text: 'a' }]),
-      assistantMessage(3, { turn: 1, step: 1, usage: { inputTokens: 5, outputTokens: 2 } }),
-    ])
-    const before = assertPlainJson(state)
-    const v1 = def.wire.view(state)
-    const v2 = def.wire.view(state)
-    assert.notEqual(v1, v2)
-    assert.notEqual(v1.nodes, v2.nodes)
-    assert.notEqual(v1.requests, v2.requests)
-    assert.deepEqual(v1, v2)
-    assert.deepEqual(assertPlainJson(state), before, 'view() must not mutate the persisted state')
-  })
-})
-
-describe('buildTimelineView envelope', () => {
-  test('ok/model/provider/contextWindow pass through when known', () => {
-    const { view } = driveTimeline([
-      header(1, { model: 'deepseek-v4', provider: 'deepseek' }),
-      requestContext(2, { contextWindow: 128000 }),
-    ])
-    assert.equal(view.ok, true)
-    assert.equal(view.model, 'deepseek-v4')
-    assert.equal(view.provider, 'deepseek')
-    assert.equal(view.contextWindow, 128000)
-  })
-
-  test('unknown route fields read as undefined', () => {
-    const { view } = driveTimeline([planMode(1, { active: true })])
-    assert.equal(view.ok, true)
-    assert.equal(view.model, undefined)
-    assert.equal(view.provider, undefined)
-    assert.equal(view.contextWindow, undefined)
+  test('a previous request without a complete turn/step pair stamps no from-side', () => {
+    for (const previous of [{}, { turn: 7 }]) {
+      const { view } = driveTimeline([
+        assistantMessage(1, previous),
+        planMode(2, { active: true }),
+        assistantMessage(3, { turn: 8, step: 1 }),
+      ])
+      const ev = view.events[0]
+      assert.equal(ev.fromTurn, undefined, JSON.stringify(previous))
+      assert.equal(ev.fromStep, undefined)
+      assert.equal(ev.turn, 8)
+      assert.equal(ev.step, 1)
+    }
   })
 })

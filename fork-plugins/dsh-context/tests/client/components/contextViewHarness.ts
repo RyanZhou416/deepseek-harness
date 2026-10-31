@@ -1,7 +1,6 @@
-// ContextView — the Context tab root, driven by real projection values and real plugin settings.
-
 import { act, createElement as h, type ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
+import assert from 'node:assert/strict'
 import { afterEach, vi } from 'vitest'
 import { makeContextView } from '../../../src/client/components/contextView'
 import { makeAgentHeads } from '../../../src/client/agentHeads'
@@ -10,9 +9,8 @@ import { createContextSettings } from '../../../src/client/settings'
 import type { UseChatLike } from '../../../src/client/services'
 import type { ContextTimeline } from '../../../src/shared/types'
 import { TestClientCtx, asClientCtx } from '../helpers/harness'
-import { makeKit, mount, queryAll, text } from '../helpers/kit'
+import { makeKit, mount, query, queryAll, text } from '../helpers/kit'
 
-// pluginInfo's npm-registry probe stays inert (and '0.0.0-dev' short-circuits it anyway).
 vi.stubGlobal('fetch', () => Promise.resolve({ ok: false } as Response))
 
 const kit = makeKit()
@@ -20,8 +18,6 @@ const kit = makeKit()
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
-  // The cold-start share (timelineSource.ts) is page-lifetime per session:
-  // drop it so one test's cold read never leaks its failed/ready state into a later test that reuses the same session id.
   resetTimelineDetailStores()
 })
 
@@ -40,11 +36,11 @@ export function timeline(over: Record<string, unknown> = {}): ContextTimeline {
 
 export const T0 = 1700000000000
 
-/** Two steps of one turn plus a turn-less trailing step, with their nodes. */
 export function richTimeline(over: Record<string, unknown> = {}): ContextTimeline {
   return timeline({
     model: 'deepseek-v4-flash',
     provider: 'deepseek',
+    reasoningEffort: 'high',
     contextWindow: 128000,
     toolCalls: 3,
     images: 1,
@@ -78,13 +74,50 @@ export function makeView(ctx: TestClientCtx, settings = createContextSettings())
   return makeContextView(asClientCtx(ctx), kit, settings, makeAgentHeads())
 }
 
+export function settingsWith(value: Record<string, unknown>) {
+  const settings = createContextSettings()
+  settings.attach({
+    getSnapshot: () => ({ status: 'ready', writable: true, value }),
+    subscribe: () => () => {},
+    set: async () => {},
+  })
+  return settings
+}
+
 export function buttonByText(container: ParentNode, label: string): HTMLElement {
   const hit = queryAll(container, 'button').find(b => text(b) === label)
   if (hit === undefined) throw new Error(`button not found: ${label}`)
   return hit
 }
 
-/** Mount inside a `[data-conversation-scroll]` scroller so the view's shared-scrollport probes find it. */
+export function makeScroller(): HTMLElement {
+  const scroller = document.createElement('div')
+  scroller.setAttribute('data-conversation-scroll', '')
+  return scroller
+}
+
+export function overflowingScroller(scrollHeight: number, clientHeight = 300): HTMLElement {
+  const scroller = makeScroller()
+  scroller.style.overflowY = 'auto'
+  Object.defineProperty(scroller, 'scrollHeight', { value: scrollHeight })
+  Object.defineProperty(scroller, 'clientHeight', { value: clientHeight })
+  return scroller
+}
+
+export function eventLink(container: ParentNode, label: string): HTMLElement {
+  const row = queryAll(container, '.lc-event').find(r => text(r).includes(label))
+  assert.ok(row !== undefined, `no event row labelled ${label}`)
+  return query(row, '.lc-event-jump')
+}
+
+export function stubRevealRects(scroller: HTMLElement, topOf: (el: Element) => number = () => 0) {
+  return vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const inScroller = !this.hasAttribute('data-conversation-scroll')
+    const top = this.hasAttribute('data-conversation-scroll') ? 100 : topOf(this)
+    return { top: inScroller ? top - scroller.scrollTop : top } as DOMRect
+  })
+}
+
 export async function mountInScroller(el: ReactElement, scroller: HTMLElement) {
   const inner = document.createElement('div')
   scroller.appendChild(inner)
@@ -109,7 +142,6 @@ export async function mountInScroller(el: ReactElement, scroller: HTMLElement) {
   }
 }
 
-/** Full projection over two steps of one turn plus a turn-less step. */
 export async function mountRich(sessionId: string) {
   const View = makeView(new TestClientCtx())
   const m = await mount(h(View, {

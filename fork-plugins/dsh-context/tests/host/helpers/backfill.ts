@@ -1,6 +1,3 @@
-// Shared rig for the backfill specs (tests/host/backfill.spec.ts and backfill-sliced.spec.ts):
-// the trigger route box, the log capture, and the fake cold-path faces.
-
 import assert from 'node:assert/strict'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -20,9 +17,7 @@ export interface RouteBox {
   fetch?: (request: Request) => Promise<Response>
 }
 
-/** Fire the captured trigger route (the client's dashboard-open POST). */
 export async function trigger(route: RouteBox): Promise<Response> {
-  // The route half registers on cordis's deferred inject — settle first.
   for (let i = 0; i < 300 && route.fetch === undefined; i++) {
     await new Promise(resolve => setTimeout(resolve, 1))
   }
@@ -37,7 +32,6 @@ export interface LogLine {
 
 export function captureLogs(ctx: Context): LogLine[] {
   const lines: LogLine[] = []
-  // Lift every source's threshold to debug: the default exporter drops warn/debug records before they reach the sink.
   ctx.logger.exporter({
     levels: { root: 3, 'dsh-context': 3 },
     export(message) {
@@ -47,11 +41,6 @@ export function captureLogs(ctx: Context): LogLine[] {
   return lines
 }
 
-/** One format-refusal face of the persistence seam. The format edge throws
- * `SessionFormatUnsupportedMigrationError`, but the seam translates it — with
- * the "source vN artifact remains unchanged (raw log: …)" suffix — into
- * `SessionFormatUnsupportedError` before the error escapes (issue #75): the pass must classify BOTH faces as the same refusal.
- */
 export function unsupportedFormatError(name: string): Error {
   const error = new Error(
     'subagent/descriptor 0 uses unsupported descriptor version 2'
@@ -61,7 +50,6 @@ export function unsupportedFormatError(name: string): Error {
   return error
 }
 
-/** A connection face whose route registration lands in `route`. */
 export function connectionOf(route: RouteBox): unknown {
   return {
     fetch: {
@@ -83,13 +71,18 @@ export interface FakeState {
   failReads: Map<string, unknown>
 }
 
-export function arm(ctx: Context, state: FakeState): RouteBox {
-  const route: RouteBox = {}
-  ctx.provide('connection', connectionOf(route))
-  ctx.provide('sessionQuery', {
-    listSessions: async () => state.listed,
-  })
-  ctx.provide('sessionProjectionCache', {
+export interface ColdFaceOverrides {
+  sessionQuery?: unknown
+  sessionProjectionCache?: unknown
+  sessionPersistence?: unknown
+  sessions?: unknown
+}
+
+export function coldFaces(ctx: Context, state: FakeState, overrides: ColdFaceOverrides = {}): void {
+  const face = (name: keyof ColdFaceOverrides, fallback: object): object =>
+    name in overrides ? overrides[name] as object : fallback
+  ctx.provide('sessionQuery', face('sessionQuery', { listSessions: async () => state.listed }))
+  ctx.provide('sessionProjectionCache', face('sessionProjectionCache', {
     cachedSnapshot: (header: { id: string }) =>
       state.served.has(header.id)
         ? { asOfSeq: 0, values: { contextActivity: { days: {} }, contextTimeline: { ok: true } } }
@@ -98,8 +91,8 @@ export function arm(ctx: Context, state: FakeState): RouteBox {
       state.coldSnapshots.push(header.id)
       return { asOfSeq: 0, values: {} }
     },
-  })
-  ctx.provide('sessionPersistence', {
+  }))
+  ctx.provide('sessionPersistence', face('sessionPersistence', {
     open: async (id: string) => {
       state.coldReads.push(id)
       if (state.failReads.has(id)) throw state.failReads.get(id)
@@ -111,8 +104,14 @@ export function arm(ctx: Context, state: FakeState): RouteBox {
         close: async () => {},
       }
     },
-  })
-  ctx.provide('sessions', { get: (id: string) => (state.live.has(id) ? { id } : undefined) })
+  }))
+  ctx.provide('sessions', face('sessions', { get: (id: string) => (state.live.has(id) ? { id } : undefined) }))
+}
+
+export function arm(ctx: Context, state: FakeState, overrides: ColdFaceOverrides = {}): RouteBox {
+  const route: RouteBox = {}
+  ctx.provide('connection', connectionOf(route))
+  coldFaces(ctx, state, overrides)
   return route
 }
 

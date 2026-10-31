@@ -1,5 +1,3 @@
-// fleetTeam.ts — the `agentTeam` projection's sanitizing parse and its roster/task helpers.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import {
@@ -29,16 +27,20 @@ function teamValue(over: Record<string, unknown> = {}): Record<string, unknown> 
 }
 
 describe('teamOf — the sanitizing parse', () => {
-  test('a well-formed projection parses whole', () => {
+  test('a well-formed projection parses whole; optional fields stay absent rather than materializing empty', () => {
     const team = teamOf(teamValue({ failure: 'bad record' }))
     assert.ok(team !== null)
     assert.equal(team.members.length, 3)
     assert.equal(team.tasks.length, 4)
     assert.equal(team.failure, 'bad record')
     assert.deepEqual(team.tasks[1].warnings, ['overlap with task-3'])
-  })
 
-  test('absent and shapeless values degrade to null', () => {
+    const bare = teamOf({ members: [{ id: 'r', name: 'lead', role: 'lead', phase: 'active' }] })
+    assert.ok(bare !== null)
+    assert.equal(bare.members[0].error, undefined)
+    assert.equal(bare.failure, undefined)
+    assert.deepEqual(bare.tasks, [])
+
     assert.equal(teamOf(undefined), null)
     assert.equal(teamOf(null), null)
     assert.equal(teamOf('team'), null)
@@ -77,26 +79,15 @@ describe('teamOf — the sanitizing parse', () => {
     assert.equal(team.failure, undefined)
   })
 
-  test('optional fields stay absent rather than materializing empty', () => {
-    const team = teamOf({ members: [{ id: 'r', name: 'lead', role: 'lead', phase: 'active' }] })
-    assert.ok(team !== null)
-    assert.equal(team.members[0].error, undefined)
-    assert.equal(team.failure, undefined)
-    // A missing tasks array serves an empty board.
-    assert.deepEqual(team.tasks, [])
-  })
 })
 
 describe('fleetTeam helpers', () => {
   const team = teamOf(teamValue()) as FleetTeam
 
-  test('teamMemberOf joins by session id', () => {
+  test('the helpers join by id and by name, name teammates only, and keep board order', () => {
     assert.equal(teamMemberOf(team, 'w1')?.name, 'worker-bee')
     assert.equal(teamMemberOf(team, 'nobody'), null)
     assert.equal(teamMemberOf(null, 'w1'), null)
-  })
-
-  test('teammateNameOf names teammates only: the lead, the self card, and outsiders stay plain', () => {
     const current = { isCurrent: true, id: 'w1' } as never
     const teammate = { isCurrent: false, id: 'w1' } as never
     const lead = { isCurrent: false, id: 'root' } as never
@@ -106,16 +97,10 @@ describe('fleetTeam helpers', () => {
     assert.equal(teammateNameOf(team, lead), undefined, 'the lead card keeps the session title')
     assert.equal(teammateNameOf(team, outsider), undefined)
     assert.equal(teammateNameOf(null, teammate), undefined)
-  })
-
-  test('memberIdByName joins the task board onto roster names', () => {
     assert.equal(memberIdByName(team, 'worker-bee'), 'w1')
     assert.equal(memberIdByName(team, 'ghost'), undefined)
     assert.equal(memberIdByName(team, undefined), undefined)
     assert.equal(memberIdByName(null, 'worker-bee'), undefined)
-  })
-
-  test('tasksOfOwner keeps board order', () => {
     assert.deepEqual(tasksOfOwner(team, 'worker-bee').map(task => task.id), ['task-1', 'task-2'])
     assert.deepEqual(tasksOfOwner(team, 'lead'), [])
     assert.deepEqual(tasksOfOwner(team, undefined), [])

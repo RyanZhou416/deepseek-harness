@@ -1,11 +1,7 @@
-// measureDock (src/client/dockMeasure.ts) — the /context modal's sidebar insets: the ancestor walk to the app
-// frame's inline grid template and the leading/trailing px parses with the centre-minimum clamp.
-
 import assert from 'node:assert/strict'
 import { afterEach, describe, test, vi } from 'vitest'
 import { measureDock } from '../../src/client/dockMeasure'
 
-/** A start element buried at the bottom of an ancestor chain (outermost first). */
 function chainOf(...ancestors: HTMLElement[]): HTMLElement {
   for (let i = 0; i < ancestors.length - 1; i++) ancestors[i].appendChild(ancestors[i + 1])
   return ancestors[ancestors.length - 1]
@@ -20,11 +16,8 @@ function frameEl(template: string): HTMLDivElement {
 afterEach(() => { vi.unstubAllGlobals() })
 
 describe('measureDock', () => {
-  test('resolves to the full mask without a start element', () => {
+  test('resolves to the full mask without a start element or without an ancestor carrying an inline template', () => {
     assert.deepEqual(measureDock(null), { left: 0, right: 0, frame: null })
-  })
-
-  test('resolves to the full mask when no ancestor carries an inline template', () => {
     const start = chainOf(document.createElement('div'), document.createElement('div'))
     assert.deepEqual(measureDock(start), { left: 0, right: 0, frame: null })
   })
@@ -49,7 +42,6 @@ describe('measureDock', () => {
     const frame = frameEl('280px minmax(400px, 1fr) minmax(0px, 576px)')
     assert.deepEqual(measureDock(chainOf(frame, document.createElement('div'))), { left: 280, right: 420, frame })
 
-    // A centre minimum the viewport cannot serve degrades the right inset to nothing.
     vi.stubGlobal('innerWidth', 640)
     const starved = frameEl('280px minmax(400px, 1fr) minmax(0px, 360px)')
     assert.deepEqual(measureDock(chainOf(starved, document.createElement('div'))), { left: 280, right: 0, frame: starved })

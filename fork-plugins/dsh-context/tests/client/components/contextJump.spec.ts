@@ -1,7 +1,8 @@
-import { createElement as h } from 'react'
+import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { makeContextJumpButton } from '../../../src/client/components/contextJump'
+import { createContextSettings } from '../../../src/client/settings'
 import type { ConversationNodeLike, UseChatLike } from '../../../src/client/services'
 import { takeContextFocus } from '../../../src/client/viewFocus'
 import { DICT_EN } from '../../../src/client/i18n'
@@ -9,11 +10,10 @@ import { asClientCtx, TestClientCtx } from '../helpers/harness'
 import { click, makeKit, mount, query, queryAll } from '../helpers/kit'
 
 const kit = makeKit()
-const Jump = makeContextJumpButton(asClientCtx(new TestClientCtx()), kit)
+const Jump = makeContextJumpButton(asClientCtx(new TestClientCtx()), kit, createContextSettings())
 
 const SESSION = 'sv-jump'
 
-/** The chat node seat: the ChatSnapshot arm carrying assistant nodes with message ids (hostile shapes forced past the seat type). */
 function chatWith(nodes: unknown): { useChat?: UseChatLike } {
   return { useChat: (sel => sel({ legacy: { nodes: nodes as readonly ConversationNodeLike[] } })) as UseChatLike }
 }
@@ -23,28 +23,19 @@ const toolNode = { kind: 'tool', seq: 3, messageId: 'msg-tool' }
 
 describe('ContextJump — seat guards', () => {
   test('a non-string or empty message id renders nothing', async () => {
-    const m1 = await mount(h(Jump, {}))
-    assert.equal(queryAll(m1.container, 'button').length, 0)
-    await m1.unmount()
-    const m2 = await mount(h(Jump, { messageId: '' }))
-    assert.equal(queryAll(m2.container, 'button').length, 0)
-    await m2.unmount()
-    const m3 = await mount(h(Jump, { messageId: 42 }))
-    assert.equal(queryAll(m3.container, 'button').length, 0)
-    await m3.unmount()
+    for (const messageId of [undefined, '', 42]) {
+      const m = await mount(h(Jump, { messageId }))
+      assert.equal(queryAll(m.container, 'button').length, 0)
+      await m.unmount()
+    }
   })
 
-  test('renders the labelled icon button for a finalized reply', async () => {
-    const m = await mount(h(Jump, { messageId: 'msg-4' }))
+  test('renders the labelled icon button for a finalized reply; a click with no served node seat switches tabs and mints no focus', async () => {
+    const m = await mount(h(Jump, { messageId: 'msg-4', sessionId: SESSION }))
     const btn = query(m.container, 'button.lc-jump')
     assert.equal(btn.getAttribute('aria-label'), DICT_EN['jump.title'])
     assert.ok(btn.querySelector('svg') !== null)
-    await m.unmount()
-  })
-
-  test('a click with no served node seat switches tabs and mints no focus', async () => {
-    const m = await mount(h(Jump, { messageId: 'msg-4', sessionId: SESSION }))
-    await click(query(m.container, 'button.lc-jump'))
+    await click(btn)
     assert.equal(takeContextFocus(SESSION), null)
     await m.unmount()
   })
@@ -146,11 +137,24 @@ describe('ContextJump — click flow', () => {
   })
 })
 
+describe('ContextJump — hidden panel entry', () => {
+  test("the 'hide' placement renders no jump; a flip back to 'all' brings it in", async () => {
+    const settings = createContextSettings()
+    settings.set('defaultPlacement', 'hide')
+    const HiddenJump = makeContextJumpButton(asClientCtx(new TestClientCtx()), kit, settings)
+    const m = await mount(h(HiddenJump, { messageId: 'msg-4' }))
+    assert.equal(queryAll(m.container, 'button').length, 0, 'no Context surface is left to jump to')
+    await act(async () => { settings.set('defaultPlacement', 'all') })
+    assert.equal(queryAll(m.container, 'button').length, 1, 'the jump follows the entry live')
+    await m.unmount()
+  })
+})
+
 describe('ContextJump — sidebar landing', () => {
-  test('a served sidebarRight face opens the Context tab there, leaving the conversation tab alone', async () => {
+  test('a served sidebarRight face opens the Context tab there; an openTab that refuses falls back to the conversation tab', async () => {
     const opened: string[] = []
     const ctx = new TestClientCtx({ services: { sidebarRight: { openTab: (kind: string) => { opened.push(kind) } } } })
-    const SidebarJump = makeContextJumpButton(asClientCtx(ctx), kit)
+    const SidebarJump = makeContextJumpButton(asClientCtx(ctx), kit, createContextSettings())
     const bar = document.createElement('div')
     const context = document.createElement('button')
     context.setAttribute('role', 'tab')
@@ -166,27 +170,13 @@ describe('ContextJump — sidebar landing', () => {
       assert.equal(takeContextFocus(SESSION), 4, 'the clicked reply’s request seq rides the relay')
       assert.equal(contextClicks, 0, 'the conversation tab was not touched')
       await m.unmount()
-    } finally {
-      bar.remove()
-    }
-  })
 
-  test('an openTab that refuses (no mounted surface, unregistered kind) falls back to the tab', async () => {
-    const ctx = new TestClientCtx({ services: { sidebarRight: { openTab: () => { throw new Error('refused') } } } })
-    const SidebarJump = makeContextJumpButton(asClientCtx(ctx), kit)
-    const bar = document.createElement('div')
-    const context = document.createElement('button')
-    context.setAttribute('role', 'tab')
-    context.textContent = 'Context'
-    let contextClicks = 0
-    context.addEventListener('click', () => { contextClicks++ })
-    bar.appendChild(context)
-    document.body.appendChild(bar)
-    try {
-      const m = await mount(h(SidebarJump, { messageId: 'msg-4', sessionId: SESSION, ...chatWith([reply]) }))
-      await click(query(m.container, 'button.lc-jump'))
-      assert.equal(contextClicks, 1, 'the refused open falls back to the conversation tab')
-      await m.unmount()
+      const refusing = new TestClientCtx({ services: { sidebarRight: { openTab: () => { throw new Error('refused') } } } })
+      const RefusingJump = makeContextJumpButton(asClientCtx(refusing), kit, createContextSettings())
+      const fallback = await mount(h(RefusingJump, { messageId: 'msg-4', sessionId: SESSION, ...chatWith([reply]) }))
+      await click(query(fallback.container, 'button.lc-jump'))
+      assert.equal(contextClicks, 1)
+      await fallback.unmount()
     } finally {
       bar.remove()
     }

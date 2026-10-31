@@ -1,9 +1,14 @@
-// The cold-read governor (src/host/coldRead.ts, issue #121): FIFO exclusion across concurrent admits and
-// the two-thirds high-water skip, checked when the read reaches the FRONT of the queue — not when queued.
-
 import assert from 'node:assert/strict'
-import { describe, test } from 'vitest'
+import { describe, test, vi } from 'vitest'
 import { type HeapReading, makeColdReadGate } from '../../src/host/coldRead'
+
+const v8Heap = vi.hoisted(() => ({ used: 100, limit: 1000, calls: 0 }))
+vi.mock('node:v8', () => ({
+  getHeapStatistics: () => {
+    v8Heap.calls++
+    return { used_heap_size: v8Heap.used, heap_size_limit: v8Heap.limit }
+  },
+}))
 
 const LOW: HeapReading = { used: 100, limit: 1000 }
 const HIGH: HeapReading = { used: 800, limit: 1000 }
@@ -41,18 +46,7 @@ describe('makeColdReadGate', () => {
     assert.equal(maxActive, 1, 'never two reads in flight')
   })
 
-  test('a read over the high-water mark is skipped, not run', async () => {
-    const gate = makeColdReadGate(() => HIGH)
-    let ran = 0
-    const value = await gate.admit(async () => {
-      ran++
-      return 42
-    })
-    assert.equal(value, undefined)
-    assert.equal(ran, 0, 'the read never started')
-  })
-
-  test('the headroom check runs at the front of the queue, not at queue time', async () => {
+  test('the headroom check runs at the front of the queue, and its two-thirds boundary is strict', async () => {
     let reading = LOW
     const gate = makeColdReadGate(() => reading)
     const blocker = deferred<string>()
@@ -67,20 +61,16 @@ describe('makeColdReadGate', () => {
       ran++
       return 'b'
     })
-    // Let the first read actually START (its check passed), then let pressure rise while the second read waits behind it.
     await new Promise(resolve => setTimeout(resolve, 10))
     assert.ok(started, 'the front read started under the low reading')
     reading = HIGH
     blocker.resolve('a')
     assert.equal(await first, 'a', 'the running read settles normally')
     assert.equal(await second, undefined, 'the queued read meets the hot heap at its turn')
+    assert.equal(await gate.admit(async () => 'skipped'), undefined, 'a read requested under pressure never starts')
     assert.equal(ran, 0)
-    // And pressure falling again admits the next read.
     reading = LOW
     assert.equal(await gate.admit(async () => 'c'), 'c')
-  })
-
-  test('the boundary is strict: exactly two-thirds full does not admit', async () => {
     const at = makeColdReadGate(() => ({ used: 200, limit: 300 }))
     assert.equal(await at.admit(async () => 'x'), undefined)
     const below = makeColdReadGate(() => ({ used: 199, limit: 300 }))
@@ -113,7 +103,11 @@ describe('makeColdReadGate', () => {
   })
 
   test('the default reading is the process’s own V8 heap', async () => {
-    const gate = makeColdReadGate()
-    assert.equal(await gate.admit(async () => 'x'), 'x')
+    v8Heap.used = 100
+    v8Heap.limit = 1000
+    assert.equal(await makeColdReadGate().admit(async () => 'x'), 'x')
+    assert.ok(v8Heap.calls > 0, 'the default probe reads node:v8 heap statistics')
+    v8Heap.used = 800
+    assert.equal(await makeColdReadGate().admit(async () => 'x'), undefined, 'the default probe applies the two-thirds ceiling')
   })
 })

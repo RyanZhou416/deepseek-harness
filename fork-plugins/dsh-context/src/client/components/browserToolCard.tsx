@@ -1,6 +1,4 @@
-/** The context browser's tool block: schema tables, call cards, and the argument/result text. */
-
-import { useMemo, useState, type ChangeEvent, type ReactElement, type ReactNode } from 'react'
+import { useMemo, useState, type ReactElement, type ReactNode } from 'react'
 import type { SurfaceNode } from '../../shared/types'
 import type { ConversationNodeLike } from '../services'
 import { parseCallArgs } from '../callSummary'
@@ -8,9 +6,11 @@ import { attachmentOf } from '../../shared/attachment'
 import type { AttachmentRef } from '../../shared/attachment'
 import type { AttachmentKit } from './attachments'
 import type { RichKit } from './richText'
+import { ClearableInput } from './clearableInput'
 import { Section } from './section'
 import { typeOf, paramsOf } from './browserSchema'
 import type { ParamSchema } from './browserSchema'
+import { fmt } from '../format'
 
 function ParamRow(props: {
   name: string
@@ -59,7 +59,6 @@ export function TextSection(props: {
       meta={<span className="lc-ts-card-meta">{props.lines(lineCount)}</span>}
     >
       {find.bar}
-      {/* Keyed by the text itself: a content change remounts the body outright, so React never diffs over the find bar's DOM marks. */}
       <div key={find.bodyKey} ref={find.bodyRef}>
         <rich.RichText text={props.text} mode={mode} />
       </div>
@@ -67,7 +66,6 @@ export function TextSection(props: {
   )
 }
 
-/** The raw schema is untrusted log data: a cyclic or throwing value degrades to no matchable text. */
 export function schemaTextOf(schema: unknown): string {
   try {
     return JSON.stringify(schema ?? '')
@@ -76,22 +74,26 @@ export function schemaTextOf(schema: unknown): string {
   }
 }
 
-/** Shared row-filter toolbar; it stays mounted on an empty match so the filter can always be cleared. */
 export function RowToolbar(props: {
   value: string
   placeholder: string
+  clearLabel: string
+  count: number
+  tokens: number
   tip?: string
   onChange: (v: string) => void
   children?: ReactNode
 }): ReactElement {
   return (
     <div className="lc-br-toolctl">
-      <input
-        className="lc-br-tool-search focus:border-(--dsw-alias-label-dimmed)"
+      <ClearableInput
+        className="lc-br-tool-search"
         value={props.value}
         placeholder={props.placeholder}
-        onChange={(ev: ChangeEvent<HTMLInputElement>) => { props.onChange(ev.target.value) }}
+        clearLabel={props.clearLabel}
+        onChange={props.onChange}
       />
+      <span className="lc-br-filter-stat">{'×' + fmt(props.count) + ' ≈' + fmt(props.tokens)}</span>
       {props.children !== undefined
         ? <span className="lc-gran" role="group" title={props.tip}>{props.children}</span>
         : null}
@@ -133,7 +135,6 @@ export function ToolSchema(props: {
     }
     return out
   }, [params])
-  // Pretty-printed only while open: eagerly stringifying every collapsed row dominated the section's render cost.
   const schemaJson = useMemo(
     () => jsonOpen ? JSON.stringify(props.schema, null, 2) : '',
     [props.schema, jsonOpen],
@@ -173,10 +174,6 @@ export interface DetailLabels {
   callState: (err: boolean, exit: number | null) => ReactNode
 }
 
-/** Both block vocabularies normalize here — raw durable blocks (`type`) and snapshot assistant
- * blocks (`kind`). Every attachment block collects into ONE ordered attachment group, rendered where
- * the first of them sits (the chat's own arrangement: attachments above the text); nested
- * tool-result blocks flatten into the same flow. */
 export function BlocksBody(props: {
   blocks: readonly unknown[]
   textLabel: string
@@ -242,10 +239,6 @@ export function BlocksBody(props: {
   return <>{out}</>
 }
 
-/** dsh shell tools append trailing status markers while `isError` stays false: `[exit code: N]` (non-zero only),
- * `[killed by signal: X]`, `[shell killed by signal: X]`, `[shell exited: code N]` (riding last, after the command's
- * own `[exit code: N]`), and job_output's `[status: killed|failed]`. Parsed end-anchored like dsh's own
- * parseExitStatus, so marker text quoted inside the output is not a failure; a clean exit is a notice. */
 function tailStatusOf(conv: ConversationNodeLike | undefined): { fail: boolean; exit: number | null } {
   if (conv === undefined || !Array.isArray(conv.content)) return { fail: false, exit: null }
   for (const b of conv.content) {
@@ -268,8 +261,6 @@ function tailStatusOf(conv: ConversationNodeLike | undefined): { fail: boolean; 
   return { fail: false, exit: null }
 }
 
-/** The fold-stamped `err`/`isError` (infrastructure failures) or the trailing status marker; dsh settles a failing
- * COMMAND as a completed call, so the marker is the only failure signal — a timeout stays a notice, as in the chat. */
 export function toolErrOf(node: SurfaceNode, conv: ConversationNodeLike | undefined): { err: boolean; exit: number | null } {
   const tail = tailStatusOf(conv)
   const err = node.err === true || conv?.isError === true || tail.fail
@@ -300,8 +291,7 @@ export function ToolCallCard(props: {
 
 function CallArgRow(props: { name: string; value: unknown }): ReactElement {
   const v = props.value
-  /* v8 ignore next 2 -- the only caller maps Object.keys of a JSON.parse'd
-     object, which never holds undefined values; defensive. */
+  /* v8 ignore next 2 */
   const text = typeof v === 'string' ? v
     : v === undefined ? ''
       : JSON.stringify(v)

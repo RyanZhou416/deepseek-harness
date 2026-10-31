@@ -25,9 +25,7 @@ describe('CurrentComposition header', () => {
     assert.equal(query(m.container, '.lc-card-sub').textContent, 'deepseek-v4-flash')
     const num = query(m.container, '.lc-overview-num')
     assert.ok(text(num).includes('5.0k / 10.0k tokens'))
-    // The reading keeps one decimal, a whole tenth included (headline.ts).
     assert.equal(query(num, '.lc-overview-pct b').textContent, '50.4%')
-    // The two masks split the reserve: the compaction headroom, then the output reservation.
     const headroom = query(m.container, '.lc-reserve-headroom')
     const output = query(m.container, '.lc-reserve-output')
     assert.equal(headroom.style.left, '80%')

@@ -1,7 +1,3 @@
-// The defensive icon resolver (src/client/primitives.ts): each ui-primitives icon resolves by its export name;
-// a name missing from the module (a future rename) or a namespace that throws on the read degrades to a
-// render-nothing component instead of the React #130 element-type crash.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { FileTypeGlyph, resolveFileGlyph, resolveIcon, IconBranch, IconPlus, IconCheck, IconCopy, IconClose, IconSettings, IconChevronDown } from '../../src/client/primitives'
@@ -9,29 +5,15 @@ import { FileTypeGlyph, resolveFileGlyph, resolveIcon, IconBranch, IconPlus, Ico
 describe('resolveIcon', () => {
   const icon = function SomeIcon(): null { return null }
 
-  test('a present export resolves to the component', () => {
+  test('a present export resolves to the component; a non-component, a missing name, or a hostile read renders nothing', () => {
     assert.equal(resolveIcon('icon', { icon }), icon)
-  })
-
-  test('a name present but not a component renders nothing', () => {
-    const resolved = resolveIcon('icon', { icon: 42 })
-    assert.equal(resolved({}), null, 'the fallback component renders null')
-  })
-
-  test('a missing name renders nothing (a future rename)', () => {
-    const resolved = resolveIcon('IconGhostOutlineRegular', {})
-    assert.equal(resolved({}), null)
-  })
-
-  test('a namespace that throws on property access degrades to the fallback', () => {
-    // Partial module mocks and hostile namespaces throw on the READ itself.
+    assert.equal(resolveIcon('icon', { icon: 42 })({}), null, 'a non-component export')
+    assert.equal(resolveIcon('IconGhostOutlineRegular', {})({}), null, 'a future rename')
     const hostile = new Proxy({}, { get() { throw new Error('hostile export read') } })
-    const resolved = resolveIcon('IconBranchOutlineRegular', hostile)
-    assert.equal(resolved({}), null)
+    assert.equal(resolveIcon('IconBranchOutlineRegular', hostile)({}), null)
   })
 
   test('the module-level exports resolve against the pinned generation', () => {
-    // The devDep carries the supported vocabulary, so these resolved at module load.
     for (const icon of [IconBranch, IconPlus, IconCheck, IconCopy, IconClose, IconSettings, IconChevronDown]) {
       assert.equal(typeof icon, 'function', 'every seam resolves to a component')
     }

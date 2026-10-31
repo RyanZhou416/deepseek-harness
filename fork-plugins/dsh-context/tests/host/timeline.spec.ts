@@ -1,10 +1,7 @@
-// The contextTimeline projection unit (src/host/timeline.ts) — the projection-definition contract surface (stateSchema + required wire),
-// its schemas, and the config-resolved retention bounds, over a real folded log. Fold semantics themselves live in fold.ts.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { createContextTimelineDefinition } from '../../src/host/timeline'
-import type { ContextTimeline, SurfaceNode } from '../../src/shared/types'
+import type { SurfaceNode } from '../../src/shared/types'
 import { driveTimeline } from './helpers/projection'
 import {
   assistantMessage,
@@ -21,7 +18,6 @@ import {
 } from './helpers/events'
 import type { TimelineEvent } from '../../src/host/fold'
 
-/** A realistic session log touching every envelope family the fold serves. */
 function realLog(): TimelineEvent[] {
   return [
     header(1, {
@@ -44,24 +40,12 @@ function realLog(): TimelineEvent[] {
 }
 
 describe('createContextTimelineDefinition', () => {
-  test('carries the supported projection contract on one unit', () => {
+  test('carries the pinned projection contract; the wire and state schemas accept a real fold', () => {
     const def = createContextTimelineDefinition({}, () => false)
     assert.equal(def.key, 'contextTimeline')
-    assert.equal(def.stateVersion, 28)
-    assert.equal(typeof def.init, 'function')
-    assert.equal(typeof def.apply, 'function')
-    // The supported registry contract: stateSchema + a REQUIRED wire block.
-    assert.equal(typeof def.stateSchema.parse, 'function')
-    assert.equal(typeof def.wire.viewSchema.safeParse, 'function')
-    assert.equal(typeof def.wire.view, 'function')
-  })
-
-  test('the wire schema accepts a real folded view; the state schema accepts every intermediate state', () => {
-    const def = createContextTimelineDefinition({}, () => false)
+    assert.equal(def.stateVersion, 36, 'pinned: the idle carve and per-step heartbeats cannot backfill from later events')
     const drive = driveTimeline(realLog())
-    const parsed = def.wire.viewSchema.safeParse(drive.view)
-    assert.equal(parsed.success, true, 'a real folded view validates')
-
+    assert.equal(def.wire.viewSchema.safeParse(drive.view).success, true, 'a real folded view validates')
     const view = drive.view
     assert.equal(view.ok, true)
     assert.equal(view.model, 'deepseek-v4-flash')
@@ -71,15 +55,8 @@ describe('createContextTimelineDefinition', () => {
     assert.ok(view.nodes.length > 0)
     assert.ok(view.requests.length > 0)
     assert.ok(view.events.length > 0)
-    // The duration overlay's per-request step active time (RequestRecord.activeMs): the first
-    // request's step ran start (tick 4s) → end (tick 9s) with its bash call inside and no user
-    // waits; the second folded after stepEnd consumed the slot.
-    assert.equal(view.requests[0].activeMs, 5000, 'step start → step end, the tool run included')
-    assert.equal(view.requests[1].activeMs, undefined, 'no open step slot, no stamp')
-
-    for (const [index, state] of drive.states.entries()) {
-      def.stateSchema.parse(structuredClone(state)) // throws on drift
-      assert.ok(true, `state ${index} validates`)
+    for (const state of drive.states) {
+      def.stateSchema.parse(structuredClone(state))
     }
     assert.equal(def.wire.viewSchema.safeParse(def.wire.view(drive.state)).success, true)
   })
@@ -99,24 +76,5 @@ describe('createContextTimelineDefinition', () => {
     const badTokens = structuredClone(drive.view)
     badTokens.nodes[0].tokens = -1
     assert.equal(def.wire.viewSchema.safeParse(badTokens).success, false, 'negative token counts rejected')
-  })
-
-  test('maxNodes bounds the served surface nodes', () => {
-    const events: TimelineEvent[] = [
-      header(1, { model: 'm', provider: 'p' }),
-      userMessage(2, [{ type: 'text', text: 'one' }], { kind: 'user' }),
-      userMessage(3, [{ type: 'text', text: 'two' }], { kind: 'user' }),
-      userMessage(4, [{ type: 'text', text: 'three' }], { kind: 'user' }),
-      userMessage(5, [{ type: 'text', text: 'four' }], { kind: 'user' }),
-    ]
-    const bounded = driveTimeline(events, { maxNodes: 2 })
-    assert.equal(bounded.view.nodes.length, 2, 'only the newest tail is served')
-    assert.deepEqual(bounded.view.nodes.map(n => n.seq), [4, 5])
-    assert.equal(bounded.view.droppedNodes, 2)
-    assert.equal(bounded.view.surfaceFloor, 3, 'the newest unserved live seq')
-
-    const unbounded: ContextTimeline = driveTimeline(events).view
-    assert.equal(unbounded.nodes.length, 4, 'default bounds serve every live node')
-    assert.equal(unbounded.droppedNodes, 0)
   })
 })

@@ -1,7 +1,3 @@
-// The step-boundary message identity guard (src/host/stepIdentity.ts) — the issue #51 compatibility
-// layer. The harness's load path refuses a session whose log holds an unidentified `user/message`,
-// while the runtime append path never checks; the guard mints ids at the `agent/pre-step` seam.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -17,7 +13,7 @@ describe('identifiedMessages', () => {
     assert.equal(identifiedMessages(messages), undefined)
   })
 
-  test('a missing, empty, null, or non-string id is minted; other fields survive', () => {
+  test('a missing, empty, null, or non-string id is minted; untouched entries keep their references', () => {
     const broken = [
       { role: 'user', source: { kind: 'user' }, content: [] },
       { id: '', role: 'user' },
@@ -35,30 +31,23 @@ describe('identifiedMessages', () => {
       broken.map(message => ({ ...(message as object), id: undefined })),
       'every non-id field passes through',
     )
-  })
-
-  test('untouched entries keep their references; minted ids are unique', () => {
     const good = identified('keep')
-    const fixed = identifiedMessages([good, {}, good])
-    assert.ok(fixed !== undefined)
-    assert.equal(fixed[0], good)
-    assert.equal(fixed[2], good)
-    assert.notEqual((fixed[1] as { id: string }).id, (fixed[0] as { id: string }).id)
+    const mixed = identifiedMessages([good, {}, good])
+    assert.ok(mixed !== undefined)
+    assert.equal(mixed[0], good)
+    assert.equal(mixed[2], good)
+    assert.notEqual((mixed[1] as { id: string }).id, (mixed[0] as { id: string }).id)
+    const tailGood = identified('head')
+    const fixedTail = identifiedMessages([tailGood, tailGood, { role: 'user' }])
+    assert.ok(fixedTail !== undefined)
+    assert.equal(fixedTail[0], tailGood)
+    assert.equal(fixedTail[1], tailGood)
+    assert.match((fixedTail[2] as { id: string }).id, /^dshctx-/)
   })
 
   test('non-object entries stay verbatim (unfixable without inventing a container)', () => {
     const messages = [null, 42, 'x']
     assert.equal(identifiedMessages(messages), undefined)
-  })
-
-  test('a prefix-only mint happens before the first broken entry', () => {
-    const good = identified('head')
-    const broken = { role: 'user' }
-    const fixed = identifiedMessages([good, good, broken])
-    assert.ok(fixed !== undefined)
-    assert.equal(fixed[0], good)
-    assert.equal(fixed[1], good)
-    assert.match((fixed[2] as { id: string }).id, /^dshctx-/)
   })
 })
 
@@ -77,34 +66,25 @@ describe('watchStepIdentity', () => {
     assert.equal((result.messages![0] as { role: string }).role, 'user', 'the rest of the message survives')
   })
 
-  test('an identified decision passes through by reference', async () => {
-    const decision = { kind: 'enter', messages: [identified('m-9')] }
-    assert.equal(await drive(() => Promise.resolve(decision)), decision)
+  test('a decision the guard cannot improve passes through by reference', async () => {
+    const identifiedDecision = { kind: 'enter', messages: [identified('m-9')] }
+    assert.equal(await drive(() => Promise.resolve(identifiedDecision)), identifiedDecision)
+    const reject = { kind: 'reject' }
+    assert.equal(await drive(() => Promise.resolve(reject)), reject)
+    const enter = { kind: 'enter' }
+    assert.equal(await drive(() => Promise.resolve(enter)), enter)
   })
 
-  test('a reject decision passes through untouched', async () => {
-    const decision = { kind: 'reject' }
-    assert.equal(await drive(() => Promise.resolve(decision)), decision)
-  })
-
-  test('a decision without a message list passes through untouched', async () => {
-    const decision = { kind: 'enter' }
-    assert.equal(await drive(() => Promise.resolve(decision)), decision)
-  })
-
-  test('a hostile decision (throwing property access) passes through verbatim', async () => {
-    const decision = {
+  test('a hostile decision or entry fails the guard open, verbatim', async () => {
+    const hostileDecision = {
       get kind(): string { throw new Error('hostile decision') },
     }
-    assert.equal(await drive(() => Promise.resolve(decision)), decision)
-  })
-
-  test('a hostile entry (throwing on id access) fails the whole guard open', async () => {
-    const decision = {
+    assert.equal(await drive(() => Promise.resolve(hostileDecision)), hostileDecision)
+    const hostileMessages = {
       kind: 'enter',
       get messages(): unknown[] { throw new Error('hostile messages') },
     }
-    assert.equal(await drive(() => Promise.resolve(decision)), decision)
+    assert.equal(await drive(() => Promise.resolve(hostileMessages)), hostileMessages)
   })
 
   test('the guard rides outermost: it post-processes what later listeners returned', async () => {

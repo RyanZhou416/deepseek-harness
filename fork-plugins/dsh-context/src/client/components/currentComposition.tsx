@@ -1,6 +1,7 @@
 import { type ReactElement } from 'react'
 import type { Headline } from '../headline'
 import type { ViewKit } from '../viewkit'
+import { IconGauge } from '../primitives'
 import type { StackedBarProps, LegendProps } from './stackedBar'
 
 type LegendFn = (props: LegendProps) => ReactElement
@@ -23,7 +24,10 @@ export function makeCurrentComposition(
     return (
       <div className="lc-card" data-lc-current>
         <div className="lc-card-title">
-          <span className="lc-card-title-text">{t('overview.title')}</span>
+          <span className="lc-card-title-text">
+            <IconGauge size={14} />
+            {t('overview.title')}
+          </span>
           {props.subtitle !== undefined && props.subtitle !== ''
             ? <span className="lc-card-sub">{props.subtitle}</span>
             : null}
@@ -37,7 +41,6 @@ export function makeCurrentComposition(
           </span>
           {head.pct !== null ? (
             <span className="lc-overview-pct">
-              {/* One decimal: the card's reading of the kernel's occupancy percent (headline.ts). */}
               <b>{`${head.pct.toFixed(1)}%`}</b>
               {t('overview.used')}
             </span>

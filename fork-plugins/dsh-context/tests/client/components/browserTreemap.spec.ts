@@ -6,7 +6,6 @@ import type { ContextHeaders } from '../../../src/shared/types'
 import { click, focus, hover, mount, pinRect, query, queryAll, surfaceNode, text, tipRows, unhover, type Mounted } from '../helpers/kit'
 import { Browser, catRow, elemRows, props, tl } from './browserHarness'
 
-/** The map fixtures lay out on the panel's jsdom fallback canvas (640×240) — jsdom never sizes the wrap. */
 const mapHeaders: ContextHeaders = {
   headers: [{ seq: 1, time: 1000, systemTokens: 100, tools: [{ name: 'bash', tokens: 50 }, { name: 'write', tokens: 25 }] }],
 }
@@ -61,7 +60,6 @@ describe('ContextBrowser block map', () => {
     assert.equal(btn.getAttribute('aria-pressed'), 'true')
     assert.ok(btn.className.includes('lc-br-map-btn-on'))
     assert.ok(query(m.container, '.lc-map') !== null)
-    // Regions in size order: tool results, the system prompt, tool schemas, assistant, user, injections.
     assert.deepEqual(regions(m).map(r => queryAll(r, '.lc-map-cat-label')[0]?.textContent ?? '(no head)'), [
       'Tool Results', 'System Prompt', 'Tool Schemas', 'Assistant Messages', 'User Messages', '(no head)',
     ])
@@ -72,29 +70,20 @@ describe('ContextBrowser block map', () => {
     await m.unmount()
   })
 
-  test('blocks: grouped results carry a ×N fold and a figure, tiny blocks render bare', async () => {
+  test('grouped blocks carry a ×N fold and a figure, tiny blocks render bare, and a click opens the group', async () => {
     const m = await mount(h(Browser, props({ data: mapData(), headers: mapHeaders })))
     await click(mapBtn(m))
-    // bash ×2 = the two bash results folded into one block of the tool-results region.
     const bash = blockByText(m, 'bash')
     assert.equal(query(bash, '.lc-map-label').textContent, 'bash×2')
     assert.equal(query(bash, '.lc-map-num').textContent, '≈300')
-    // The injections region is too shallow for its figure: label only, no token line.
     const notice = blockByText(m, 'Notice')
     assert.equal(queryAll(notice, '.lc-map-num').length, 0)
-    // The system region holds one block naming the prompt itself.
     assert.equal(text(blockByText(m, 'System Prompt')).includes('≈100'), true)
-    await m.unmount()
-  })
 
-  test('clicking a grouped block opens its category with the rows filtered to the group', async () => {
-    const m = await mount(h(Browser, props({ data: mapData(), headers: mapHeaders })))
-    await click(mapBtn(m))
-    await click(blockByText(m, 'bash'))
+    await click(bash)
     assert.ok(catRow(m, 'tool').className.includes('lc-br-cat-open'))
     assert.equal(query<HTMLInputElement>(m.container, '.lc-br-tool-search').value, 'bash')
     assert.equal(elemRows(m).length, 2)
-    // The block's own category region stays framed while the category is open.
     assert.ok(regionByHead(m, 'Tool Results').className.includes('lc-map-cat-open'))
     await m.unmount()
   })
@@ -120,21 +109,18 @@ describe('ContextBrowser block map', () => {
     await click(head)
     assert.ok(!catRow(m, 'system').className.includes('lc-br-cat-open'))
     await m.unmount()
-  })
 
-  test('the “more” fold opens the category without a filter', async () => {
-    const data = tl({
+    const moreData = tl({
       current: { system: 0, tools: 0, user: 1183, inject: 0, skill: 0, assistant: 0, tool: 0, total: 1183 },
       nodes: Array.from({ length: 13 }, (_, i) => surfaceNode({ seq: i + 1, tokens: 100 - i, text: `m${i}` })),
     })
-    const m = await mount(h(Browser, props({ data, headers: null })))
-    await click(mapBtn(m))
-    const more = blockByText(m, '2 more')
-    await click(more)
-    assert.ok(catRow(m, 'user').className.includes('lc-br-cat-open'))
-    assert.equal(query<HTMLInputElement>(m.container, '.lc-br-tool-search').value, '')
-    assert.equal(elemRows(m).length, 13)
-    await m.unmount()
+    const more = await mount(h(Browser, props({ data: moreData, headers: null })))
+    await click(mapBtn(more))
+    await click(blockByText(more, '2 more'))
+    assert.ok(catRow(more, 'user').className.includes('lc-br-cat-open'))
+    assert.equal(query<HTMLInputElement>(more.container, '.lc-br-tool-search').value, '')
+    assert.equal(elemRows(more).length, 13)
+    await more.unmount()
   })
 
   test('hover floats the block bubble and reports its category upward; the region head names the whole category', async () => {
@@ -153,13 +139,11 @@ describe('ContextBrowser block map', () => {
     assert.ok(bash.className.includes('lc-map-block-on'))
     assert.deepEqual(hovers, ['tool'])
 
-    // Moving to a region head switches the bubble to the whole category.
     const sysHead = query(regionByHead(m, 'System Prompt'), '.lc-map-cat-head')
     await hover(sysHead)
     assert.deepEqual(tipRows(query(m.container, '.lc-map-tip')), ['System Prompt', '≈100 · 18% of used context', '1 Items'])
     assert.deepEqual(hovers, ['tool', 'system'])
 
-    // The incoming shared hover lights the matching region.
     assert.ok(regionByHead(m, 'System Prompt').className.includes('lc-map-cat-on'))
     await unhover(query(m.container, '.lc-map'))
     assert.ok(!query(m.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
@@ -167,56 +151,50 @@ describe('ContextBrowser block map', () => {
     await m.unmount()
   })
 
-  test('standalone (no shared hover wiring): hovers stay local and keyboard focus floats the bubble too', async () => {
-    const m = await mount(h(Browser, props({ data: mapData(), headers: mapHeaders })))
-    await click(mapBtn(m))
-    const bash = blockByText(m, 'bash')
+  test('standalone hovers stay local, focus floats the bubble, DNA drops the upward link, and a removing push retracts it', async () => {
+    const standalone = await mount(h(Browser, props({ data: mapData(), headers: mapHeaders })))
+    await click(mapBtn(standalone))
+    const bash = blockByText(standalone, 'bash')
     await hover(bash)
-    assert.ok(query(m.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
-    await unhover(query(m.container, '.lc-map'))
-    assert.ok(!query(m.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
-    // A region head hover works standalone as well.
-    await hover(query(regionByHead(m, 'System Prompt'), '.lc-map-cat-head'))
-    assert.deepEqual(tipRows(query(m.container, '.lc-map-tip'))[0], 'System Prompt')
-    await unhover(query(m.container, '.lc-map'))
+    assert.ok(query(standalone.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
+    await unhover(query(standalone.container, '.lc-map'))
+    assert.ok(!query(standalone.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
+    await hover(query(regionByHead(standalone, 'System Prompt'), '.lc-map-cat-head'))
+    assert.deepEqual(tipRows(query(standalone.container, '.lc-map-tip'))[0], 'System Prompt')
+    await unhover(query(standalone.container, '.lc-map'))
     await focus(bash)
-    assert.ok(query(m.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
-    await m.unmount()
-  })
+    assert.ok(query(standalone.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
+    await standalone.unmount()
 
-  test('DNA keeps the map’s link one-way: block hovers stay local while an incoming category key still lights the region', async () => {
     const hovers: (string | null)[] = []
     const wired = (over: Partial<ContextBrowserProps>) => h(Browser, props({
       data: mapData(), headers: mapHeaders, dna: true, onDnaChange: () => {},
       hoverKey: null, onHoverKey: (k) => { hovers.push(k) },
       ...over,
     }))
-    const m = await mount(wired({}))
-    await click(mapBtn(m))
-    await hover(blockByText(m, 'bash'))
+    const dna = await mount(wired({}))
+    await click(mapBtn(dna))
+    await hover(blockByText(dna, 'bash'))
     assert.deepEqual(hovers, [], 'the map reports nothing upward in DNA mode')
-    assert.ok(query(m.container, '.lc-map-tip').className.includes('lc-map-tip-on'), 'the local bubble still works')
-    await hover(blockByText(m, '#2'))
+    assert.ok(query(dna.container, '.lc-map-tip').className.includes('lc-map-tip-on'), 'the local bubble still works')
+    await hover(blockByText(dna, '#2'))
     assert.deepEqual(hovers, [])
-    // The incoming category mirror still lights the matching region's frame.
-    await m.update(wired({ hoverKey: 'tool' }))
-    assert.ok(regionByHead(m, 'Tool Results').className.includes('lc-map-cat-on'))
-    await m.unmount()
-  })
+    await dna.update(wired({ hoverKey: 'tool' }))
+    assert.ok(regionByHead(dna, 'Tool Results').className.includes('lc-map-cat-on'))
+    await dna.unmount()
 
-  test('a push removing the hovered block retracts the bubble instead of floating a stale one', async () => {
-    const m = await mount(h(Browser, props({ data: mapData(), headers: mapHeaders })))
-    await click(mapBtn(m))
-    await hover(blockByText(m, 'bash'))
-    assert.ok(query(m.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
+    const pushedMount = await mount(h(Browser, props({ data: mapData(), headers: mapHeaders })))
+    await click(mapBtn(pushedMount))
+    await hover(blockByText(pushedMount, 'bash'))
+    assert.ok(query(pushedMount.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
     const pushed = mapData()
     pushed.nodes = pushed.nodes.filter(n => n.seq !== 3 && n.seq !== 4)
     pushed.current = { ...pushed.current, tool: 0, total: 245 }
-    await m.update(h(Browser, props({ data: pushed, headers: mapHeaders })))
-    assert.ok(!query(m.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
-    assert.ok(!query(m.container, '.lc-map').className.includes('lc-map-dim'))
-    assert.ok(blocks(m).every(b => !text(b).includes('bash×2')))
-    await m.unmount()
+    await pushedMount.update(h(Browser, props({ data: pushed, headers: mapHeaders })))
+    assert.ok(!query(pushedMount.container, '.lc-map-tip').className.includes('lc-map-tip-on'))
+    assert.ok(!query(pushedMount.container, '.lc-map').className.includes('lc-map-dim'))
+    assert.ok(blocks(pushedMount).every(b => !text(b).includes('bash×2')))
+    await pushedMount.unmount()
   })
 
   test('the bubble clamps inside the panel: shifted at the edges, centered and unflipped mid-panel', async () => {
@@ -228,17 +206,13 @@ describe('ContextBrowser block map', () => {
     pinRect(tip, 300)
     await m.update(h(Browser, props({ data: mapData(), headers: mapHeaders })))
 
-    // Leftmost block: the bubble overhangs the left edge and is shifted right.
     await hover(blockByText(m, 'bash'))
     assert.ok(/translateX\(calc\(-50% \+ \d+px\)\)/.test(tip.style.transform), `left-clamped: ${tip.style.transform}`)
-    // The rightmost region's block (too small for text): shifted left instead.
     const rightmost = regions(m).reduce((a, b) => (parseFloat(a.style.left) > parseFloat(b.style.left) ? a : b))
     await hover(query(rightmost, '.lc-map-block'))
     assert.ok(/translateX\(calc\(-50% - \d+px\)\)/.test(tip.style.transform), `right-clamped: ${tip.style.transform}`)
-    // Dropping the hover while shifted resets the shift along with the bubble.
     await unhover(wrap)
     assert.equal(tip.style.transform, '')
-    // A mid-panel block with a narrower bubble fits: no shift, and far enough from the top to hang ABOVE its block.
     pinRect(tip, 60)
     await hover(blockByText(m, '#5'))
     assert.equal(tip.style.transform, 'translateX(-50%) translateY(-100%)')
@@ -268,23 +242,20 @@ describe('ContextBrowser block map', () => {
     await m.update(h(Browser, props({ data: gone, headers: null })))
     assert.equal(regions(m).length, 1)
     await m.unmount()
-  })
 
-  test('a sub-minimum block inside a region is dropped rather than rendered sub-pixel', async () => {
-    const data = tl({
+    const tiny = tl({
       current: { system: 200, tools: 41, user: 0, inject: 0, skill: 0, assistant: 0, tool: 0, total: 241 },
       systems: [{ seq: 1, time: 1, tokens: 200 }],
     })
-    const headers: ContextHeaders = {
+    const tinyHeaders: ContextHeaders = {
       headers: [{ seq: 1, time: 1000, systemTokens: 200, tools: [{ name: 'bash', tokens: 40 }, { name: 'tiny', tokens: 1 }] }],
     }
-    const m = await mount(h(Browser, props({ data, headers })))
-    await click(mapBtn(m))
-    const toolsRegion = regionByHead(m, 'Tool Schemas')
-    const toolsBlocks = queryAll(toolsRegion, '.lc-map-block')
+    const tinyMap = await mount(h(Browser, props({ data: tiny, headers: tinyHeaders })))
+    await click(mapBtn(tinyMap))
+    const toolsBlocks = queryAll(regionByHead(tinyMap, 'Tool Schemas'), '.lc-map-block')
     assert.equal(toolsBlocks.length, 1, 'the 1-token schema sliver drops out')
     assert.ok(text(toolsBlocks[0]).includes('bash'))
-    await m.unmount()
+    await tinyMap.unmount()
   })
 
   test('an empty step maps to the empty note', async () => {

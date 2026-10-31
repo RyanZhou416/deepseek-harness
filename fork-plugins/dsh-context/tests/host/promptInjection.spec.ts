@@ -1,7 +1,3 @@
-// System-prompt injection (src/host/promptInjection.ts): the two globally registered
-// prompt sections carrying the configured prefix/suffix, their live-text providers,
-// and the feature-detect degradation when the harness prompt registry is absent.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
@@ -14,7 +10,6 @@ type RegisteredSection = {
   interpolate?: boolean
 }
 
-/** A capturing prompt-registry face with the harness's allocated order anchors. */
 function fakeSystemPrompt(): SystemPromptFace & { registered: RegisteredSection[] } {
   const registered: RegisteredSection[] = []
   return {
@@ -30,14 +25,12 @@ function fakeSystemPrompt(): SystemPromptFace & { registered: RegisteredSection[
   }
 }
 
-/** A context whose deferred inject fires synchronously with the given service view. */
 function ctxWith(systemPrompt: unknown): Context {
   return {
     inject: (_names: unknown, cb: (inner: unknown) => void) => { cb({ systemPrompt }) },
   } as unknown as Context
 }
 
-/** A volatile config reference stand-in over a mutable box. */
 function ref(box: { value: unknown }): { get: () => unknown } {
   return { get: () => box.value }
 }
@@ -62,7 +55,7 @@ describe('watchPromptInjection', () => {
     assert.ok(face.registered.every(section => section.interpolate === false), 'the text is literal, never variable-interpolated')
   })
 
-  test('a volatile config reference is read at each assembly; a live edit applies', () => {
+  test('a volatile reference is read at each assembly; a plain string stays static; non-strings and blanks read empty', () => {
     const face = fakeSystemPrompt()
     const box = { value: 'before' as unknown }
     watchPromptInjection(ctxWith(face), { promptPrefix: ref(box), promptSuffix: '' } as never)
@@ -70,25 +63,21 @@ describe('watchPromptInjection', () => {
     assert.equal(textOf(prefix), 'before')
     box.value = 'after'
     assert.equal(textOf(prefix), 'after', 'the loader rewrites the reference in place; the next assembly reads it')
-  })
 
-  test('a plain string config stays static; non-string values read as empty', () => {
-    const face = fakeSystemPrompt()
-    watchPromptInjection(ctxWith(face), { promptPrefix: 'static', promptSuffix: 42 } as never)
-    const [prefix, suffix] = face.registered
-    assert.equal(textOf(prefix), 'static')
-    assert.equal(textOf(suffix), '')
+    const staticFace = fakeSystemPrompt()
+    watchPromptInjection(ctxWith(staticFace), { promptPrefix: 'static', promptSuffix: 42 } as never)
+    const [staticPrefix, staticSuffix] = staticFace.registered
+    assert.equal(textOf(staticPrefix), 'static')
+    assert.equal(textOf(staticSuffix), '')
     const refFace = fakeSystemPrompt()
-    const box = { value: 7 }
-    watchPromptInjection(ctxWith(refFace), { promptPrefix: ref(box), promptSuffix: ref(box) } as never)
+    const nonString = { value: 7 }
+    watchPromptInjection(ctxWith(refFace), { promptPrefix: ref(nonString), promptSuffix: ref(nonString) } as never)
     assert.equal(textOf(refFace.registered[0]), '', 'a reference carrying a non-string reads as empty')
-  })
 
-  test('whitespace-only text collapses to empty; other text stays byte-exact', () => {
-    const face = fakeSystemPrompt()
-    watchPromptInjection(ctxWith(face), { promptPrefix: '  \n\t ', promptSuffix: '\nline one\n\nline two\n' } as never)
-    const [prefix, suffix] = face.registered
-    assert.equal(textOf(prefix), '', 'a blank prompt contributes nothing')
+    const blankFace = fakeSystemPrompt()
+    watchPromptInjection(ctxWith(blankFace), { promptPrefix: '  \n\t ', promptSuffix: '\nline one\n\nline two\n' } as never)
+    const [blank, suffix] = blankFace.registered
+    assert.equal(textOf(blank), '', 'a blank prompt contributes nothing')
     assert.equal(textOf(suffix), '\nline one\n\nline two\n', 'the configured bytes are preserved')
   })
 
@@ -103,7 +92,6 @@ describe('watchPromptInjection', () => {
   test('the deferred inject rides the real cordis: early, late, and never-provided compositions', async () => {
     const { Context } = await import('@deepseek-ai/cordis')
 
-    // Provided before this entry mounts.
     const early = new Context()
     early.provide('systemPrompt', fakeSystemPrompt())
     await new Promise(resolve => setTimeout(resolve, 10))
@@ -111,7 +99,6 @@ describe('watchPromptInjection', () => {
     await new Promise(resolve => setTimeout(resolve, 10))
     assert.equal((early.reflect.get('systemPrompt') as unknown as { registered: RegisteredSection[] }).registered.length, 2, 'the service first: both sections register')
 
-    // Provided after this entry mounts (a composition that starts later).
     const late = new Context()
     watchPromptInjection(late, { promptPrefix: 'P' } as never)
     await new Promise(resolve => setTimeout(resolve, 10))
@@ -120,7 +107,6 @@ describe('watchPromptInjection', () => {
     await new Promise(resolve => setTimeout(resolve, 10))
     assert.equal(lateFace.registered.length, 2, 'the service later: the pending inject fires on the provide')
 
-    // Never provided: no throw, nothing registers.
     const never = new Context()
     assert.doesNotThrow(() => watchPromptInjection(never, {} as never))
     await new Promise(resolve => setTimeout(resolve, 10))

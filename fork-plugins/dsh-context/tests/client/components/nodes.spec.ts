@@ -7,15 +7,10 @@ const kit = makeKit()
 const nodeText = makeNodeText(kit)
 
 describe('makeNodeText', () => {
-  test('tool results name the tool; failures carry the warning glyph', () => {
+  test('tool results name the tool; failures carry the warning glyph; a skill tag leads only off the tool arm', () => {
     assert.equal(nodeText({ seq: 1, cat: 'tool', tokens: 1, tool: 'bash' }), 'Tool Result ← bash')
     assert.equal(nodeText({ seq: 1, cat: 'tool', tokens: 1 }), 'Tool Result')
     assert.equal(nodeText({ seq: 1, cat: 'tool', tokens: 1, tool: 'bash', err: true }), 'Tool Result ← bash ⚠')
-  })
-
-  test('skill-tagged nodes lead with the skill name', () => {
-    // The skill branch follows the tool branch: skill results keep their
-    // tool-result label; the skill name leads on injected nodes.
     assert.equal(nodeText({ seq: 1, cat: 'tool', tokens: 1, skill: 'code-review' }), 'Tool Result')
     assert.equal(nodeText({ seq: 1, cat: 'inject', tokens: 1, skill: 'code-review' }), 'Skill: code-review')
   })

@@ -1,6 +1,3 @@
-// The /context slash command (src/client/command.ts) over a faithful harness ctx. Session ids are unique per test
-// so the module-level modal/consume state never leaks between cases.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { registerContextCommand } from '../../src/client/command'
@@ -43,9 +40,6 @@ describe('registerContextCommand', () => {
   })
 
   test('a service provided with a foreign shape registers nothing', () => {
-    // The inject callback fires on the service NAME; a value that is not a
-    // trigger face (a half-composed module, a producer drift) must degrade
-    // to the no-command state instead of throwing at apply.
     const ctx = new TestClientCtx({ services: { inputTriggers: { registerSource: 42 } } })
     registerContextCommand(asClientCtx(ctx), makeKit())
     ctx.dispose()
@@ -64,14 +58,12 @@ describe('registerContextCommand', () => {
 describe('candidates', () => {
   test('a non-leading position yields no candidates', async () => {
     const { source } = setup()
-    assert.deepEqual(await source.candidates({ sessionId: 'cmd-pos' }, { query: '', position: 'trailing', signal: SIGNAL }), [])
+    assert.deepEqual(await source.candidates({ sessionId: 'cmd-pos' }, { query: '', position: 'inline', signal: SIGNAL }), [])
   })
 
   test('an empty query yields the context candidate', async () => {
     const { source } = setup()
     const candidates = await source.candidates({ sessionId: 'cmd-empty' }, { query: '', position: 'leading', signal: SIGNAL })
-    // The localized section replaces the menu's raw source-name title row;
-    // the localized label and glyph are display-only (older harness builds render the bare name).
     assert.deepEqual(candidates, [{
       name: 'context',
       label: DICT_EN['cmd.label'],
@@ -81,19 +73,14 @@ describe('candidates', () => {
     }])
   })
 
-  test('a matching prefix yields the candidate; a mismatch yields none', async () => {
+  test('a matching prefix yields the candidate; a mismatch or case/whitespace-normalized mismatch yields none', async () => {
     const { source } = setup()
     const session = { sessionId: 'cmd-prefix' }
     const hit = await source.candidates(session, { query: 'con', position: 'leading', signal: SIGNAL })
     assert.equal(hit.length, 1)
     assert.equal(hit[0].name, 'context')
     assert.deepEqual(await source.candidates(session, { query: 'xyz', position: 'leading', signal: SIGNAL }), [])
-  })
-
-  test('the query match is case- and whitespace-insensitive', async () => {
-    const { source } = setup()
-    const candidates = await source.candidates({ sessionId: 'cmd-case' }, { query: ' CONTEXT ', position: 'leading', signal: SIGNAL })
-    assert.equal(candidates.length, 1)
+    assert.equal((await source.candidates(session, { query: ' CONTEXT ', position: 'leading', signal: SIGNAL })).length, 1)
   })
 })
 
@@ -115,8 +102,6 @@ describe('onPick', () => {
 })
 
 describe('matchEnter', () => {
-  // The contract marks matchEnter optional; registerContextCommand always
-  // provides it, and the spec asserts that registration shape once.
   test('the bare /context line arms the bare-token guard, opens the modal, and answers handled', async () => {
     const { source } = setup()
     assert.ok(source.matchEnter, 'the /context source registers matchEnter')
@@ -126,16 +111,11 @@ describe('matchEnter', () => {
     assert.deepEqual(takePendingConsume('cmd-enter'), { kind: 'bare-token', token: '/context' })
   })
 
-  test('a /context line with trailing text is not matched', async () => {
+  test('a line other than the bare /context is not matched', async () => {
     const { source } = setup()
     assert.ok(source.matchEnter)
     assert.equal(await source.matchEnter({ sessionId: 'cmd-extra' }, '/context extra', SIGNAL), undefined)
-    assert.equal(takePendingConsume('cmd-extra'), undefined)
-  })
-
-  test('any other line is not matched', async () => {
-    const { source } = setup()
-    assert.ok(source.matchEnter)
     assert.equal(await source.matchEnter({ sessionId: 'cmd-other' }, 'hello', SIGNAL), undefined)
+    assert.equal(takePendingConsume('cmd-extra'), undefined)
   })
 })

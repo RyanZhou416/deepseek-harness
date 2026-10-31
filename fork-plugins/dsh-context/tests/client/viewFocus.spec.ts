@@ -1,19 +1,13 @@
-// viewFocus (src/client/viewFocus.ts) — the chat→Context jump relay, the sidebar-tab opener, and the
-// conversation-tab activation against a real jsdom tab bar.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { activateViewTab, openContextSidebar, requestContextFocus, subscribeContextFocus, takeContextFocus } from '../../src/client/viewFocus'
 import { asClientCtx, TestClientCtx } from './helpers/harness'
 
 describe('context focus relay', () => {
-  test('one request survives until taken, then the map entry is consumed', () => {
+  test('one request survives until taken; a fresh request replaces it and sessions are isolated', () => {
     requestContextFocus('sv-relay', 42)
     assert.equal(takeContextFocus('sv-relay'), 42)
     assert.equal(takeContextFocus('sv-relay'), null, 'one-shot: a second take finds nothing')
-  })
-
-  test('a fresh request replaces an unconsumed one; sessions are isolated', () => {
     requestContextFocus('sv-race', 7)
     requestContextFocus('sv-race', 9)
     assert.equal(takeContextFocus('sv-race'), 9, 'the latest click wins')
@@ -41,7 +35,6 @@ describe('context focus subscription', () => {
   test('a listener unsubscribing another mid-notify skips it (later records do not re-run it)', () => {
     let late = 0
     let offLate: () => void = () => {}
-    // Insertion order matters: the remover runs first and detaches the victim before Set iteration reaches it.
     const offRemover = subscribeContextFocus(() => { offLate() })
     offLate = subscribeContextFocus(() => { late++ })
     requestContextFocus('sv-mid', 1)
@@ -54,14 +47,12 @@ describe('context focus subscription', () => {
 })
 
 describe('openContextSidebar', () => {
-  test('opens the registered kind through the sidebarRight face', () => {
+  test('opens the registered kind through the sidebarRight face; absent or verb-less faces report false', () => {
     const opened: string[] = []
     const ctx = new TestClientCtx({ services: { sidebarRight: { openTab: (kind: string) => { opened.push(kind) } } } })
     assert.equal(openContextSidebar(asClientCtx(ctx)), true)
     assert.deepEqual(opened, ['dsh-context'])
-  })
 
-  test('no service, or a face without the verb, reports false', () => {
     assert.equal(openContextSidebar(asClientCtx(new TestClientCtx())), false)
     assert.equal(openContextSidebar(asClientCtx(new TestClientCtx({ services: { sidebarRight: {} } }))), false)
     assert.equal(openContextSidebar(asClientCtx(new TestClientCtx({ services: { sidebarRight: null } }))), false)
@@ -104,18 +95,15 @@ describe('activateViewTab', () => {
       assert.equal(context.__clicks(), 1)
       assert.equal(chat.__clicks(), 0)
 
-      // Already-active: reported success without a redundant click.
       context.setAttribute('aria-selected', 'true')
       assert.equal(activateViewTab('Context'), true)
       assert.equal(context.__clicks(), 1)
 
-      // Whitespace-padded label text still matches the trimmed comparison.
       context.setAttribute('aria-selected', 'false')
       context.textContent = '  Context '
       assert.equal(activateViewTab('Context'), true)
       assert.equal(context.__clicks(), 2)
 
-      // No tab carries the label → nothing clicked, false.
       assert.equal(activateViewTab('Missing'), false)
       assert.equal(trajectory.__clicks(), 0)
     } finally {

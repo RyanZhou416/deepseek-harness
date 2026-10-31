@@ -1,9 +1,3 @@
-/**
- * The Fleet tab's overview strip — family-wide stats (agents, running, done, context tokens, cost
- * estimate) with one progress bar whose semantics follow the session shape: the team's shared
- * tasks when they exist, else the subagents' completion, and no bar at all for a solo session.
- */
-
 import type { ReactElement } from 'react'
 import type { AgentForest } from '../agentTree'
 import { estimateSessionCost, formatCost, type CostCurrency, type ModelBook } from '../cost'
@@ -48,7 +42,7 @@ export function FleetSummary(props: FleetSummaryProps): ReactElement {
   return (
     <div className="lc-card lc-summary">
       <div className="lc-summary-chips">
-        <span className="lc-agents-chip">{t('agents.chip.count', { n: nodes.length + forest.overflow })}</span>
+        <span className="lc-agents-chip">{t('agents.chip.count', { n: nodes.length })}</span>
         <span className={'lc-agents-chip' + (running > 0 ? ' lc-agents-chip-on' : '')}>
           {t('agents.chip.running', { n: running })}
         </span>

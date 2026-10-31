@@ -1,12 +1,5 @@
-/**
- * The live registration gate a show/hide preference drives: `mount` registers whatever the preference serves
- * and returns those registrations' handles (the slot registry's own disposers, `unknown` because the face is
- * re-proved at the boundary), and this owner mounts, unmounts, and re-arms them as the store publishes.
- */
-
 import type { ContextSettings } from './settings'
 
-/** @returns the watcher's disposer: unsubscribe, then unwind whatever is mounted. */
 export function watchGate(
   store: ContextSettings['store'],
   wanted: () => boolean,

@@ -1,8 +1,3 @@
-// Staging + probe helpers for the compat matrix (matrix.spec.ts): stage the REAL harness sources at a baseline tag, boot the plugin's BUILT
-// host entry on the tag's real registry + vendored cordis, and read the tag's client seams straight from its sources. The registry probe
-// runs as a small spawned driver INSIDE the staging dir, so the bare `@deepseek-ai/cordis` import resolves to the cordis release that
-// harness line vendors (not this repo's) — one process per baseline, reported as one JSON line.
-
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -14,17 +9,14 @@ export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 export const DSH_REPO = process.env.DSH_REPO || join(homedir(), 'dev', 'deepseek-harness')
 export const STAGE = join(REPO, '.tmp', 'compat')
 
-/** Whether the dsh checkout with the baseline tags is available. */
 export function checkoutMissing(): boolean {
   return !existsSync(join(DSH_REPO, '.git'))
 }
 
-/** Whether the BUILT plugin artifacts are available. */
 export function artifactsMissing(): boolean {
   return !existsSync(join(REPO, 'lib', 'index.js')) || !existsSync(join(REPO, 'lib', 'client.js'))
 }
 
-/** Why the registry matrix cannot run here (empty = it can). */
 export function skipReasons(): string[] {
   const reasons: string[] = []
   if (checkoutMissing()) {
@@ -36,20 +28,17 @@ export function skipReasons(): string[] {
   return reasons
 }
 
-/** `git show <tag>:<path>` from the dsh checkout, as a string. */
 export function dshShow(tag: string, path: string): string {
   const run = spawnSync('git', ['-C', DSH_REPO, 'show', `${tag}:${path}`], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
   if (run.status !== 0) throw new Error(`git show ${tag}:${path} failed: ${(run.stderr ?? '').trim().slice(0, 300)}`)
   return run.stdout
 }
 
-/** `git grep -l <pattern> <tag> -- <pathspec>`: whether the tag's sources carry the string. */
 export function dshHasString(tag: string, pattern: string, pathspec: string): boolean {
   const run = spawnSync('git', ['-C', DSH_REPO, 'grep', '-l', pattern, tag, '--', pathspec], { encoding: 'utf8' })
   return run.status === 0 && run.stdout.trim() !== ''
 }
 
-/** Stage one file from the tag under .tmp/compat/<id>/ and return its path. */
 export function stageFile(baseline: Baseline, tagPath: string, localName: string): string {
   const dir = join(STAGE, baseline.id, dirname(localName))
   mkdirSync(dir, { recursive: true })
@@ -58,15 +47,21 @@ export function stageFile(baseline: Baseline, tagPath: string, localName: string
   return file
 }
 
-/** The host packages the tag's staged sources import at runtime, at this line's own versions. */
+function stageFileIfPresent(baseline: Baseline, tagPath: string, localName: string): boolean {
+  const run = spawnSync('git', ['-C', DSH_REPO, 'cat-file', '-e', `${baseline.tag}:${tagPath}`], { encoding: 'utf8' })
+  if (run.status !== 0) return false
+  stageFile(baseline, tagPath, localName)
+  return true
+}
+
 function hostDepsOf(baseline: Baseline): Record<string, string> {
   return {
     '@deepseek-ai/cordis': baseline.cordis,
     '@deepseek-ai/dsh-session': baseline.session,
+    semver: '^7.8.5',
   }
 }
 
-/** The baseline's host deps, installed once per baseline (npm-cached afterwards). */
 export function ensureHostDeps(baseline: Baseline): void {
   const dir = join(STAGE, baseline.id)
   const deps = hostDepsOf(baseline)
@@ -89,35 +84,58 @@ export function ensureHostDeps(baseline: Baseline): void {
   }
 }
 
+export interface AdmissionReport {
+  baseline: { admitted: boolean; requirements: Record<string, string> | null }
+  dropped: { admitted: boolean; requirements: Record<string, string> | null }
+}
+
+function admissionSource(manifestUrl: string, supportedRuntime: string, droppedRuntime: string): string {
+  return `
+import { readFileSync } from 'node:fs'
+import { evaluatePluginCompatibility } from './boot/plugin-compatibility.ts'
+const manifest = JSON.parse(readFileSync(new URL(${JSON.stringify(manifestUrl)}), 'utf8'))
+const evaluate = version => {
+  const issue = evaluatePluginCompatibility(manifest, {}, version)
+  return { admitted: issue === undefined, requirements: issue === undefined ? null : (issue.requirements ?? issue.peers) }
+}
+process.stdout.write('ADMISSION-JSON ' + JSON.stringify({
+  baseline: evaluate(${JSON.stringify(supportedRuntime)}),
+  dropped: evaluate(${JSON.stringify(droppedRuntime)}),
+}) + '\\n')
+`
+}
+
+export function evaluateAdmission(baseline: Baseline): AdmissionReport {
+  ensureHostDeps(baseline)
+  stageFile(baseline, 'packages/boot/app-boot/src/plugin-compatibility.ts', join('boot', 'plugin-compatibility.ts'))
+  const driver = join(STAGE, baseline.id, 'admission.mjs')
+  writeFileSync(driver, admissionSource(`file://${join(REPO, 'package.json')}`, baseline.version, '0.1.7-rc.2'))
+  const run = spawnSync(process.execPath, [driver], { cwd: STAGE, encoding: 'utf8', timeout: 60_000 })
+  const line = (run.stdout ?? '').split('\n').find(l => l.startsWith('ADMISSION-JSON '))
+  if (line === undefined) throw new Error(`admission driver failed: ${(run.stderr ?? run.stdout ?? '').trim().slice(0, 400)}`)
+  return JSON.parse(line.slice('ADMISSION-JSON '.length)) as AdmissionReport
+}
+
 export interface DriverReport {
-  registered: boolean
   keys: string[]
   gateOk: boolean
   coldMatches: boolean
   developerTokens: number | null
   developerRequestTokens: number | null
-  /** V4 tool-registry `developer/message` changes survive the real cache/read paths. */
   developerRestoreMatches: boolean
-  /** Issue #44: hostile gateway usage keeps the served values schema-valid on the REAL registry. */
   hostileSnapshotOk: boolean
   hostilePrompt: number | null
   hostileCacheRead: number | null
-  /** The registry-side containment gap: throws escaping drive() per poisoned event. */
   poisonedEscapedDrive: number
-  /** …while downstream units starve (no change notification for the poisoned event) … */
   poisonedStarves: boolean
-  /** …and the whole snapshot (every reconnect baseline) throws. */
   poisonedSnapshotThrows: boolean
 }
 
-/** The staged host driver: runs INSIDE the baseline's staging dir, applies the
- * plugin's real host entry into the tag's real registry, drives a canonical
- * log through the registry's own snapshot / checkpoint / restore paths, and reports as one JSON line. */
-function driverSource(pluginUrl: string, developerMessages: boolean): string {
+function driverSource(pluginUrl: string): string {
   return `
 import { Context } from '@deepseek-ai/cordis'
 import { SessionProjectionRegistry } from './registry/index.ts'
-import { snapshotJsonValue } from './dsh/json-values.ts'
+import { snapshotJsonValue } from './dsh/index.ts'
 const plugin = await import(${JSON.stringify(pluginUrl)})
 const ctx = new Context()
 const registry = new SessionProjectionRegistry(ctx)
@@ -152,44 +170,35 @@ const snapshot = registry.snapshot(session)
 const gate = snapshotJsonValue(registry.checkpoint(session))
 const cold = registry.restore({}, log, 0, session.header)
 
-// Tool-registry messages exist only in the supported V4 baselines.
 let developerTokens = null
 let developerRequestTokens = null
 let developerRestoreMatches = false
-if (${developerMessages}) {
-  const ctxC = new Context()
-  const registryC = new SessionProjectionRegistry(ctxC)
-  ctxC.sessionProjections = registryC
-  plugin.apply(ctxC, {})
-  const sessionC = { seq: 0, header: { id: 'registry-change-session', cwd: '/tmp' }, events: [] }
-  ctxC.emit('session/created', sessionC)
-  const registryLog = [
-    ev(0, 'request/header', { header: { tools: [{ name: 'read_file', description: 'read a file', parameters: { type: 'object' } }] }, reason: 'change' }),
-    ev(1, 'user/message', { content: [{ type: 'text', text: 'hello' }] }),
-    ev(2, 'developer/message', { turn: 1, step: 1, headerSeq: 0, message: { role: 'developer', source: { kind: 'tool-registry' }, content: [{ type: 'tool-addition', toolName: 'read_file' }, { type: 'tool-removal', toolName: 'shell' }] } }),
-    ev(3, 'assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'reply' }] } }),
-  ]
-  drive(ctxC, sessionC, registryLog)
-  const values = registryC.snapshot(sessionC).values
-  const node = values.contextTimeline.nodes.find(n => n.seq === 2)
-  developerTokens = node ? node.tokens : null
-  developerRequestTokens = values.contextTimeline.requests[0].inject
-  const rows = snapshotJsonValue(registryC.checkpoint(sessionC))
-  const warm = registryC.restore(rows, registryLog, 0, sessionC.header)
-  // Preserve log offsets while reproducing the old fold's ignored event.
-  const oldLog = registryLog.map(e => e.type === 'developer/message' ? { ...e, type: 'todo/write' } : e)
-  const oldRows = registryC.restore({}, oldLog, 0, sessionC.header).checkpoint
-  oldRows.contextTimeline.ver = 24
-  const rebuilt = registryC.restore(oldRows, registryLog, 0, sessionC.header)
-  developerRestoreMatches = JSON.stringify(warm.snapshot.values) === JSON.stringify(values)
-    && JSON.stringify(rebuilt.snapshot.values) === JSON.stringify(values)
-}
+const ctxC = new Context()
+const registryC = new SessionProjectionRegistry(ctxC)
+ctxC.sessionProjections = registryC
+plugin.apply(ctxC, {})
+const sessionC = { seq: 0, header: { id: 'registry-change-session', cwd: '/tmp' }, events: [] }
+ctxC.emit('session/created', sessionC)
+const registryLog = [
+  ev(0, 'request/header', { header: { tools: [{ name: 'read_file', description: 'read a file', parameters: { type: 'object' } }] }, reason: 'change' }),
+  ev(1, 'user/message', { content: [{ type: 'text', text: 'hello' }] }),
+  ev(2, 'developer/message', { turn: 1, step: 1, headerSeq: 0, message: { role: 'developer', source: { kind: 'tool-registry' }, content: [{ type: 'tool-addition', toolName: 'read_file' }, { type: 'tool-removal', toolName: 'shell' }] } }),
+  ev(3, 'assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'reply' }] } }),
+]
+drive(ctxC, sessionC, registryLog)
+const values = registryC.snapshot(sessionC).values
+const node = values.contextTimeline.nodes.find(n => n.seq === 2)
+developerTokens = node ? node.tokens : null
+developerRequestTokens = values.contextTimeline.requests[0].inject
+const rows = snapshotJsonValue(registryC.checkpoint(sessionC))
+const warm = registryC.restore(rows, registryLog, 0, sessionC.header)
+const oldLog = registryLog.map(e => e.type === 'developer/message' ? { ...e, type: 'todo/write' } : e)
+const oldRows = registryC.restore({}, oldLog, 0, sessionC.header).checkpoint
+oldRows.contextTimeline.ver = 24
+const rebuilt = registryC.restore(oldRows, registryLog, 0, sessionC.header)
+developerRestoreMatches = JSON.stringify(warm.snapshot.values) === JSON.stringify(values)
+  && JSON.stringify(rebuilt.snapshot.values) === JSON.stringify(values)
 
-// ---- Probe A (issue #44): hostile provider usage on the REAL registry. ----
-// A mis-accounting gateway's figures (negative uncached input from
-// cached_tokens > prompt_tokens, fractional counts, string buckets, a NaN a
-// hostile direct-drive could supply) ride the durable log legally; the
-// plugin's served values must stay schema-valid through the registry's own strict parse on every later delivery.
 const hostile = [
   ev(12, 'step/start'),
   ev(13, 'assistant/message', { turn: 1, step: 2, message: { content: [{ type: 'text', text: 'h1' }] }, usage: { inputTokens: -80, cacheReadTokens: 150.7, cacheWriteTokens: '10', outputTokens: 22.4 } }),
@@ -208,12 +217,6 @@ try {
   hostileSnapshotOk = false
 }
 
-// ---- Probe B (issue #44): the registry-side containment gap. ----
-// One upstream wire unit whose view goes schema-invalid on the same gateway
-// data (mimicking an official usage-gated unit; official rows register
-// BEFORE user plugins) starves every unit registered after it and kills the
-// whole snapshot — while the session itself survives (the real Session.append
-// contains per-listener throws, which this raw emit mimics with try/catch).
 const ctxB = new Context()
 const registryB = new SessionProjectionRegistry(ctxB)
 ctxB.sessionProjections = registryB
@@ -255,7 +258,6 @@ let poisonedSnapshotThrows = false
 try { registryB.snapshot(sessionB) } catch { poisonedSnapshotThrows = true }
 
 process.stdout.write('DRIVER-JSON ' + JSON.stringify({
-  registered: true,
   keys: Object.keys(snapshot.values).sort(),
   gateOk: gate !== undefined,
   coldMatches: JSON.stringify(cold.snapshot.values) === JSON.stringify(snapshot.values),
@@ -272,14 +274,14 @@ process.stdout.write('DRIVER-JSON ' + JSON.stringify({
 `
 }
 
-/** Stage the registry sources + the lossless-JSON probe and run the driver for one baseline. */
 export function runDriver(baseline: Baseline): DriverReport {
   ensureHostDeps(baseline)
   stageFile(baseline, 'packages/session/session-projection/src/index.ts', join('registry', 'index.ts'))
   stageFile(baseline, 'packages/session/session-projection/src/types.ts', join('registry', 'types.ts'))
-  stageFile(baseline, 'packages/util/values/src/index.ts', join('dsh', 'json-values.ts'))
+  stageFile(baseline, 'packages/util/values/src/index.ts', join('dsh', 'index.ts'))
+  stageFileIfPresent(baseline, 'packages/util/values/src/partial-json.ts', join('dsh', 'partial-json.ts'))
   const driver = join(STAGE, baseline.id, 'driver.mjs')
-  writeFileSync(driver, driverSource(`file://${join(REPO, 'lib', 'index.js')}`, baseline.foldEventTypes.includes('developer/message')))
+  writeFileSync(driver, driverSource(`file://${join(REPO, 'lib', 'index.js')}`))
   const run = spawnSync(process.execPath, [driver], { cwd: STAGE, encoding: 'utf8', timeout: 60_000 })
   const line = (run.stdout ?? '').split('\n').find(l => l.startsWith('DRIVER-JSON '))
   if (line === undefined) {
@@ -288,24 +290,17 @@ export function runDriver(baseline: Baseline): DriverReport {
   return JSON.parse(line.slice('DRIVER-JSON '.length)) as DriverReport
 }
 
-/** The platform specifiers the built client bundle requires at runtime. */
 export function bundleRequires(): string[] {
   const source = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
   return [...new Set([...source.matchAll(/require\("([^"]+)"\)/g)].map(m => m[1]))]
 }
 
-/** The slot registrations the client half mounts on EVERY baseline (identical
- * spellings in each generation's sources). */
 export const SLOT_SEAMS = [
   'conversation.view',
   'conversation.chat.assistant-actions',
   'conversation.input.overlay',
 ] as const
 
-/** The ui-primitives icon seams the client bundle renders: every supported
- * line ships the `…OutlineRegular`/`…OutlineMedium` vocabulary, and a missing
- * name is `undefined` at the browser's runtime — React error #130.
- * `src/client/primitives.ts` resolves each by name; every one must exist per tag. */
 export const ICON_SEAMS = [
   'IconBranchOutlineRegular',
   'IconPlusOutlineRegular',
@@ -316,12 +311,19 @@ export const ICON_SEAMS = [
   'IconChevronDownOutlineMedium',
   'IconChevronUpOutlineMedium',
   'IconSearchOutlineRegular',
+  'IconDataOutlineRegular',
+  'IconDatabaseOutlineRegular',
+  'IconClockOutlineRegular',
+  'IconGaugeOutlineRegular',
+  'IconCompareSplitOutlineRegular',
+  'IconBrowseOutlineRegular',
+  'IconContextInjectionOutlineRegular',
+  'IconFolderOpenOutlineRegular',
+  'IconApiOutlineRegular',
+  'IconPluginPinwheelOutlineRegular',
   'FileTypeIcon',
 ] as const
 
-/** The event families the host fold actually switches on, read out of `src/host/fold.ts` so the
- * matrix can never check a hand-copied list against itself. Throws when the labels are not found,
- * so a refactor that moves the switch fails loudly instead of going vacuously green. */
 export function foldEventTypesFromSource(): readonly string[] {
   const source = readFileSync(join(REPO, 'src', 'host', 'fold.ts'), 'utf8')
   const labels = [...source.matchAll(/^\s*case '([a-z-]+\/[a-z-]+)':/gm)].map(m => m[1])
@@ -329,14 +331,12 @@ export function foldEventTypesFromSource(): readonly string[] {
   return [...new Set(labels)].sort()
 }
 
-/** The tag's durable-event vocabulary (packages/core/session/src/known-event-types.ts). */
 export async function knownEventTypesOf(baseline: Baseline): Promise<ReadonlySet<string>> {
   const file = stageFile(baseline, 'packages/core/session/src/known-event-types.ts', join('dsh', 'known-event-types.ts'))
   const mod = await import(file)
   return mod.KNOWN_SESSION_EVENT_TYPES as ReadonlySet<string>
 }
 
-/** The module-table keys the tag's web shell seeds (packages/client/web/src/platform.ts). */
 export async function platformModulesOf(baseline: Baseline): Promise<readonly string[]> {
   const file = stageFile(baseline, 'packages/client/web/src/platform.ts', join('dsh', 'platform.ts'))
   const mod = await import(file)

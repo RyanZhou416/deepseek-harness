@@ -1,7 +1,6 @@
 import { rangeWindowOf, type OverviewRange, type OverviewRow } from '../../src/client/overview'
 import type { SessionCostUsage } from '../../src/shared/types'
 
-/** A preset's resolved scope window at `now` — the page's own resolution, spelled the way the panel spells it. */
 export const win = (range: OverviewRange, now: number) => rangeWindowOf(range, now)
 
 export const COST: SessionCostUsage = {

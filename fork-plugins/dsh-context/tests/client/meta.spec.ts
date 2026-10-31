@@ -1,6 +1,3 @@
-// Plugin self-metadata (src/client/meta.ts): the build-time define fallbacks and the define-armed variants, each
-// setting its globals BEFORE the dynamic import (vi.resetModules clears the cache so the constants re-evaluate).
-
 import assert from 'node:assert/strict'
 import { afterEach, describe, test, vi } from 'vitest'
 
@@ -26,23 +23,19 @@ describe('meta', () => {
     assert.equal(meta.PLUGIN_REPO_SHORT, 'bowenliang123/dsh-context')
   })
 
-  test('a version define wins over the dev fallback', async () => {
+  test('build defines win: the short form strips a github prefix and keeps any other URL whole', async () => {
     globals.__DSH_CTX_VERSION__ = '9.9.9'
-    const meta = await importMeta()
+    let meta = await importMeta()
     assert.equal(meta.PLUGIN_VERSION, '9.9.9')
     assert.equal(meta.PLUGIN_REPO, 'https://github.com/bowenliang123/dsh-context')
-  })
 
-  test('a repo define wins and the short form strips the github prefix', async () => {
     globals.__DSH_CTX_REPO__ = 'https://github.com/acme/widget'
-    const meta = await importMeta()
+    meta = await importMeta()
     assert.equal(meta.PLUGIN_REPO, 'https://github.com/acme/widget')
     assert.equal(meta.PLUGIN_REPO_SHORT, 'acme/widget')
-  })
 
-  test('a non-github repo keeps its full URL as the short form', async () => {
     globals.__DSH_CTX_REPO__ = 'http://git.example.com/acme/widget'
-    const meta = await importMeta()
+    meta = await importMeta()
     assert.equal(meta.PLUGIN_REPO_SHORT, 'http://git.example.com/acme/widget')
   })
 })

@@ -1,14 +1,3 @@
-/**
- * The file-operation parser — the ONE derivation of "what the agent did to files" from a settled
- * file-tool call: the host fold books the op log from the durable tool lifecycle, and the
- * client's INLINE-generation fallback re-derives ops from the conversation-window join.
- *
- * Tool coverage matches the harness built-ins on every supported baseline (0.1.7-rc.2+):
- * read / read_image / write / edit (tool-fs), grep / glob (tool-fs-search), plus
- * `str_replace_editor`. Line deltas are estimates read off the call ARGUMENTS, never result
- * payloads.
- */
-
 import type { FileOpRecord } from './types'
 
 export function parseCallArgs(raw: unknown): Record<string, unknown> | null {
@@ -37,24 +26,19 @@ export function kindOfTool(tool: string | undefined): FileOpRecord['kind'] | nul
   return KIND_BY_TOOL[tool] ?? null
 }
 
-/** The file purpose of one executed call: `str_replace_editor` reads on `view`, writes on every
- * other command (an unknown command's call failed and keeps its error flag). */
 export function kindOfCall(tool: string, args: Record<string, unknown> | null): FileOpRecord['kind'] | null {
   if (tool === 'str_replace_editor') return args !== null && args.command === 'view' ? 'read' : 'write'
   return kindOfTool(tool)
 }
 
-/** Whether a call's arguments can yield an op — the gate {@link opsOfCall} short-circuits on. */
 export function opBearingTool(tool: string): boolean {
   return tool === 'str_replace_editor' || kindOfTool(tool) !== null
 }
 
-/** Op-bearing tools plus `run_code`, whose `description` labels the ops its nested dispatches book. */
 export function rawArgsNeeded(tool: string): boolean {
   return opBearingTool(tool) || tool === 'run_code'
 }
 
-/** The operation's target path; for a pathless search it is the searched pattern itself (the workspace-wide search text). */
 export function pathOfArgs(tool: string, args: Record<string, unknown> | null): string | null {
   if (args === null) return null
   if (tool === 'grep' || tool === 'glob') {
@@ -84,8 +68,6 @@ function pairOf(added: unknown, removed: unknown): { added: number; removed: num
   }
 }
 
-/** The signed line footprint of one call: an edit removes its old string and adds its new one; a
- * write adds its content alone — the pre-existing body is unknowable from the arguments. */
 function deltaOf(tool: string, args: Record<string, unknown>): { added: number; removed: number } {
   if (tool === 'edit') return pairOf(args.new_string, args.old_string)
   if (tool === 'write') return pairOf(args.content, undefined)
@@ -97,7 +79,6 @@ function deltaOf(tool: string, args: Record<string, unknown>): { added: number; 
   return { added: 0, removed: 0 }
 }
 
-/** The exact window a read's result meta reports (`offset` plus the retained `lines` array); null for a foreign or malformed meta. */
 function readWindowOf(meta: unknown): { start: number; count: number } | null {
   if (meta === null || typeof meta !== 'object') return null
   const m = meta as { path?: unknown; offset?: unknown; lines?: unknown }
@@ -127,9 +108,6 @@ function searchDetailOf(args: Record<string, unknown> | null): string | undefine
   return typeof include === 'string' && include !== '' ? `${pattern} (${include})` : pattern
 }
 
-/** The files a search demonstrably reached, read off the result's presentation meta (grep groups
- * matched lines by file; glob lists paths). Only a COMPLETE list attributes — a capped or
- * malformed meta names none, and the call falls back to its own target. */
 function searchFilesOf(meta: unknown): { path: string; hits: number }[] | null {
   if (meta === null || typeof meta !== 'object') return null
   const m = meta as { shape?: unknown; truncated?: unknown; files?: unknown; paths?: unknown }
@@ -151,9 +129,6 @@ function searchFilesOf(meta: unknown): { path: string; hits: number }[] | null {
   return files.length > 0 ? files : null
 }
 
-/** The one-shot per-call op assembly, uniform across every producer (the host's call/result
- * pairing, the nested Code-Mode settle, the client's inline join). A dispatch carries no meta,
- * so its read window and per-file attribution degrade to the argument-only forms. */
 export function opsOfCall(input: {
   seq: number
   tool: string
@@ -165,7 +140,6 @@ export function opsOfCall(input: {
   parent?: number
   program?: string
 }): FileOpRecord[] {
-  // A non-op-bearing tool's arguments are never parsed — they can be a large bash/pwsh payload.
   const args = opBearingTool(input.tool) ? parseCallArgs(input.argsRaw) : null
   const kind = kindOfCall(input.tool, args)
   if (kind === null) return []
@@ -182,9 +156,6 @@ export function opsOfCall(input: {
     ...(input.parent !== undefined ? { parent: input.parent } : {}),
     ...(input.program !== undefined ? { program: input.program } : {}),
   }
-  // A search with the COMPLETE matched-file meta rows per real file; the call's own target rows
-  // TOO ("what was searched" and "what got hit" both count), except the degenerate single-file
-  // search whose target IS the sole matched file.
   if (kind === 'search') {
     const files = searchFilesOf(input.meta)
     if (files !== null) {

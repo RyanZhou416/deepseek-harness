@@ -1,6 +1,3 @@
-// host/toolSources.ts — best-effort tool-to-plugin attribution: MCP server recovery from the `mcp__`
-// prefix and the pinned first-party map. (A logged `plugin` field passes through headers.ts first.)
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import {
@@ -11,10 +8,14 @@ import {
 } from '../../src/host/toolSources'
 
 describe('mcpServerOf', () => {
-  test('recovers the server from a plain mcp__server__tool name', () => {
+  test('recovers the server from a plain or hash-appended mcp__server__tool name', () => {
     assert.equal(mcpServerOf('mcp__github__get_issue'), 'github')
     assert.equal(mcpServerOf('mcp__my_server__send_message'), 'my_server')
     assert.equal(mcpServerOf('mcp__a__b__c'), 'a__b', 'server names may themselves contain __')
+    const hex64 = '0123456789abcdef'.repeat(4)
+    assert.equal(mcpServerOf(`mcp__github__tool_${hex64}`), 'github')
+    const cutThrough = `mcp__github__${'y'.repeat(37)}__tail`.slice(0, 51)
+    assert.equal(mcpServerOf(`${cutThrough}_0123456789ab`), `github__${'y'.repeat(37)}`)
   })
 
   test('non-MCP names and malformed prefixes resolve to undefined', () => {
@@ -23,13 +24,6 @@ describe('mcpServerOf', () => {
     assert.equal(mcpServerOf('mcp__alone'), undefined, 'the prefix separator is not a server separator')
     assert.equal(mcpServerOf('mcp____'), undefined, 'a second separator right at the prefix edge')
     assert.equal(mcpServerOf('mcp____tool'), undefined, 'an empty server between separators')
-  })
-
-  test('hash-appended overlong names resolve the server that survived truncation', () => {
-    const hex64 = '0123456789abcdef'.repeat(4)
-    // Overlong names get '_<64-hex>' appended; the last __ separator survives unless the truncation cut into it.
-    assert.equal(mcpServerOf(`mcp__github__tool_${hex64}`), 'github')
-    assert.equal(mcpServerOf(`mcp__github__tool_${'z'.repeat(64)}`), 'github')
   })
 })
 

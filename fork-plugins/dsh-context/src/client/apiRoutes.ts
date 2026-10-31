@@ -1,12 +1,10 @@
-/** The plugin's fetch routes, in their browser-relative spellings — the host halves register the
- * absolute `/api/...` paths under the harness's authenticated fence (host/detail.ts and siblings).
- * Re-declared here because the client bundle inlines every import and must never reach a host module.
- * Relative on purpose (docs/compatibility.md §5.8, issue #159): a root-absolute spelling would drop
- * a reverse proxy's path prefix at the gateway. */
-
 export const DETAIL_ROUTE = 'api/dsh-context/detail'
 
+export const COMMANDS_ROUTE = 'api/dsh-context/commands'
+
 export const BALANCE_ROUTE = 'api/dsh-context/balance'
+
+export const RECOM_ROUTE = 'api/dsh-context/recom'
 
 export const FLEET_ROUTE = 'api/dsh-context/fleet'
 

@@ -1,5 +1,3 @@
-/** Tool-call argument summaries shared by the Context browser's row previews and the step brief. */
-
 import type { ConversationNodeLike } from './services'
 import { parseCallArgs } from '../shared/fileOps'
 
@@ -29,8 +27,6 @@ export function blockSummaryOf(conv: ConversationNodeLike | undefined): string |
   return null
 }
 
-/** All tool-call names in an assistant node: the fold keeps `calls` only for
- * text-less replies, so a reply with both text and calls recovers its call breadcrumb through the conversation join. */
 export function callNamesOf(conv: ConversationNodeLike | undefined): string[] {
   if (conv === undefined || !Array.isArray(conv.blocks)) return []
   const names: string[] = []

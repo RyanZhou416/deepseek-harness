@@ -1,8 +1,4 @@
-// A driver over the session-projection registry's DOCUMENTED semantics — the rules the REAL dsh registries enforce, mirrored
-// from `packages/session/session-projection/src/index.ts` at each supported tag. The real-code matrix (tests/compat/matrix.spec.ts) runs
-// the ACTUAL registry sources per tag; this driver exists so `pnpm test` alone still detects a definition that drifts from any supported
-// generation's rules (a missing wire block, a non-plain-JSON state, an init that cannot take the header…). Every supported line shares
-// one documented contract, so the driver takes no baseline: one run covers them all.
+import { snapshotJson } from '../helpers/projection'
 
 interface ErasedDefinition {
   key: string
@@ -13,7 +9,6 @@ interface ErasedDefinition {
   stateVersion: number
 }
 
-/** The structural face the registry's register overload really reads (the plugin's real definitions satisfy it). */
 export interface DefinitionLike {
   key: string
   stateSchema: { parse(value: unknown): unknown }
@@ -31,7 +26,6 @@ interface UnitCell {
 export interface SessionLike {
   seq: number
   header: unknown
-  /** Inherited events from pre-identity log compaction (registry hands it to init). */
   inheritedEventCount: number
   events: unknown[]
 }
@@ -51,18 +45,12 @@ export interface CheckpointRow {
 
 export type Checkpoint = Record<string, CheckpointRow>
 
-/** The registry's register-time rules: a non-negative safe integer `stateVersion`, and a shared key must agree on the version.
- */
 export class RegistryViolationError extends Error {}
-
-/** The plain-JSON persistence gate: the projection cache's own write precondition (mirrored in the fold helpers). */
-import { snapshotJson } from '../helpers/projection'
 
 export class RegistryDriver {
   private readonly registrations = new Map<string, { def: ErasedDefinition; cells: Map<SessionLike, UnitCell> }>()
   private readonly listeners = new Set<ChangeListener>()
 
-  /** `ctx.sessionProjections.register` — accepts the plugin's real definitions. */
   register(definition: DefinitionLike): () => void {
     if (!Number.isSafeInteger(definition.stateVersion) || definition.stateVersion < 0) {
       throw new RegistryViolationError(`stateVersion must be a non-negative integer, got ${String(definition.stateVersion)}`)
@@ -75,7 +63,6 @@ export class RegistryDriver {
     const def: ErasedDefinition = {
       key: definition.key,
       stateSchema: definition.stateSchema,
-      // The registry calls init(header, inheritedEventCount); the plugin's zero-argument init observes neither argument.
       init: (header, inheritedEventCount) => definition.init(header, inheritedEventCount),
       apply: (state, event) => definition.apply(state, event),
       wire,
@@ -84,10 +71,8 @@ export class RegistryDriver {
     const existing = this.registrations.get(def.key)
     if (existing === undefined) {
       this.registrations.set(def.key, { def, cells: new Map() })
-    } else {
-      if (existing.def.stateVersion !== def.stateVersion) {
-        throw new RegistryViolationError(`key ${JSON.stringify(def.key)} is already registered at stateVersion ${String(existing.def.stateVersion)}`)
-      }
+    } else if (existing.def.stateVersion !== def.stateVersion) {
+      throw new RegistryViolationError(`key ${JSON.stringify(def.key)} is already registered at stateVersion ${String(existing.def.stateVersion)}`)
     }
     return () => {
       this.registrations.delete(def.key)
@@ -98,7 +83,6 @@ export class RegistryDriver {
     this.listeners.add(listener)
   }
 
-  /** The `session/created` eager seeding (seq-0 sessions only). */
   sessionCreated(session: SessionLike): void {
     if (session.seq !== 0) return
     for (const { def, cells } of this.registrations.values()) {
@@ -107,7 +91,6 @@ export class RegistryDriver {
     }
   }
 
-  /** The `session/event` eager drive. */
   driveEvent(session: SessionLike, event: { seq: number }): void {
     for (const { def, cells } of this.registrations.values()) {
       let cell = cells.get(session)
@@ -125,7 +108,6 @@ export class RegistryDriver {
     }
   }
 
-  /** One consistent cut: every wire unit's schema-validated view. */
   snapshot(session: SessionLike): ProjectionSnapshot {
     const values: Record<string, unknown> = {}
     for (const { def, cells } of this.registrations.values()) {
@@ -141,7 +123,6 @@ export class RegistryDriver {
     return { asOfSeq: session.seq - 1, values }
   }
 
-  /** The persisted-cache write face: `ver/seq/val` rows, structurally cloned. */
   checkpoint(session: SessionLike): Checkpoint {
     const rows: Checkpoint = {}
     for (const { def, cells } of this.registrations.values()) {
@@ -156,15 +137,10 @@ export class RegistryDriver {
     return rows
   }
 
-  /** The projection cache's WRITE precondition (session-projection-cache
-   * src/index.ts): every row must be losslessly JSON-serializable or the
-   * whole write fails with a TypeError — one undefined-valued property in
-   * one unit's state once broke every session on the host (issues #5-#7, #27-#30). Returns the detached JSON image. */
   checkpointJson(session: SessionLike): Record<string, unknown> | undefined {
     return snapshotJson(this.checkpoint(session)) as Record<string, unknown> | undefined
   }
 
-  /** Cold-read rung: schema-validated views of ver-matching rows; bad rows stay absent. */
   viewCheckpoint(checkpoint: Checkpoint): Record<string, unknown> {
     const values: Record<string, unknown> = {}
     for (const { def } of this.registrations.values()) {
@@ -182,7 +158,6 @@ export class RegistryDriver {
     return values
   }
 
-  /** The persisted-cache read anchor (one below the lowest usable watermark). */
   restoreFloor(checkpoint: Checkpoint): number | undefined {
     let floor: number | undefined
     for (const { def } of this.registrations.values()) {
@@ -193,7 +168,6 @@ export class RegistryDriver {
     return floor === undefined ? undefined : Math.max(floor - 1, 0)
   }
 
-  /** Cold read: seed usable rows through stateSchema.parse, refold the rest. */
   restore(checkpoint: Checkpoint, events: { seq: number }[], baseSeq: number, header: unknown, inheritedEventCount = 0): ProjectionSnapshot {
     const endSeq = events.at(-1)?.seq ?? baseSeq - 1
     const values: Record<string, unknown> = {}
@@ -216,7 +190,6 @@ export class RegistryDriver {
     return { asOfSeq: endSeq, values }
   }
 
-  /** Advance one cell through a contiguous log prefix (registry rule: no gaps). */
   private advanceCell(def: ErasedDefinition, cell: UnitCell, events: unknown[], throughSeq: number): void {
     if (cell.observedSeq >= throughSeq) return
     for (let seq = cell.observedSeq + 1; seq <= throughSeq; seq++) {

@@ -4,7 +4,6 @@ import type { TimelineEvent } from '../../src/host/fold'
 import { assistantMessage, at, compaction, userMessage } from './helpers/events'
 import { assertStatesPlainJson, driveTimeline, timelineDef } from './helpers/projection'
 
-// The agent loop logs these blocks when the effective tool registry changes.
 const changes = [
   { type: 'tool-addition', toolName: 'read_file' },
   { type: 'tool-removal', toolName: 'shell' },
@@ -95,26 +94,28 @@ describe('developer/message', () => {
     assert.equal(result.state.events[0].tokens, 0)
   })
 
-  test.each([undefined, null, {}, { kind: 'user' }])('a developer source %j never counts as a human input', source => {
-    const event = developerMessage(1)
-    const message = event.data!.message as Record<string, unknown>
-    if (source === undefined) delete message.source
-    else message.source = source
-    const result = driveTimeline([event])
-    assert.equal(result.state.surface[0].cat, 'inject')
-    assert.equal(result.state.sums.inject, 35)
-    assert.equal(result.state.humanInputs, undefined)
-    assert.equal(result.state.events[0].kind, 'inject')
-    assertStatesPlainJson(result)
+  test('no developer source, whatever its shape, ever counts as a human input', () => {
+    for (const source of [undefined, null, {}, { kind: 'user' }]) {
+      const event = developerMessage(1)
+      const message = event.data!.message as Record<string, unknown>
+      if (source === undefined) delete message.source
+      else message.source = source
+      const result = driveTimeline([event])
+      assert.equal(result.state.surface[0].cat, 'inject', JSON.stringify(source))
+      assert.equal(result.state.sums.inject, 35)
+      assert.equal(result.state.humanInputs, undefined)
+      assert.equal(result.state.events[0].kind, 'inject')
+      assertStatesPlainJson(result)
+    }
   })
 
-  test.each([undefined, {}, { message: null }, { message: { content: 'invalid' } }])(
-    'a malformed nested message leaves the state unchanged: %j', data => {
+  test('a malformed nested message leaves the state unchanged', () => {
+    for (const data of [undefined, {}, { message: null }, { message: { content: 'invalid' } }]) {
       const def = timelineDef()
       const initial = def.init()
       const event: TimelineEvent = { type: 'developer/message', seq: 1, time: at(), ...(data === undefined ? {} : { data }) }
-      assert.equal(def.apply(initial, event), initial)
+      assert.equal(def.apply(initial, event), initial, JSON.stringify(data))
       def.stateSchema.parse(initial)
-    },
-  )
+    }
+  })
 })

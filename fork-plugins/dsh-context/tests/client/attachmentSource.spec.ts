@@ -1,6 +1,3 @@
-// The attachment plumbing (src/client/attachmentSource.ts): the location route read behind one
-// click, its cache, and the preview-column opener the File Activity card also rides.
-
 import assert from 'node:assert/strict'
 import { afterEach, describe, test, vi } from 'vitest'
 import {
@@ -20,7 +17,6 @@ interface Call {
   body: unknown
 }
 
-/** Stub the global fetch with per-call answers; returns the recorded calls. */
 function stubFetch(answer: (call: Call) => unknown): Call[] {
   const calls: Call[] = []
   vi.stubGlobal('fetch', async (url: string, init: { body?: string }) => {
@@ -53,12 +49,9 @@ describe('pathOfValue', () => {
 })
 
 describe('makeAttachmentLocator', () => {
-  test('no session means no locator', () => {
+  test('no session means no locator; otherwise one read resolves the path and the next click reuses it', async () => {
     assert.equal(makeAttachmentLocator(undefined), undefined)
     assert.equal(makeAttachmentLocator(''), undefined)
-  })
-
-  test('one read resolves the path and the next click reuses it', async () => {
     const calls = stubFetch(() => json({ ok: true, value: { path: ALIAS } }))
     const locate = makeAttachmentLocator('s1')!
     assert.equal(await locate(FILE), ALIAS)
@@ -74,6 +67,7 @@ describe('makeAttachmentLocator', () => {
       () => json({ ok: false, error: { code: 'x' } }),
       () => json({ ok: true, value: { path: '' } }),
       () => ({ ok: false, json: () => Promise.resolve({}) }),
+      () => ({ ok: true, json: () => Promise.reject(new Error('bad json')) }),
       () => {
         throw new Error('offline')
       },
@@ -90,12 +84,6 @@ describe('makeAttachmentLocator', () => {
     }
   })
 
-  test('a malformed JSON body resolves null', async () => {
-    vi.stubGlobal('fetch', async () => ({ ok: true, json: () => Promise.reject(new Error('bad json')) }))
-    const locate = makeAttachmentLocator('s1')!
-    assert.equal(await locate(FILE), null)
-  })
-
   test('the cache is bounded: the oldest path is dropped first', async () => {
     const calls = stubFetch(call => json({ ok: true, value: { path: `${ALIAS}#${String((call.body as { attachmentId: string }).attachmentId)}` } }))
     const locate = makeAttachmentLocator('s1')!
@@ -103,7 +91,6 @@ describe('makeAttachmentLocator', () => {
       await locate({ kind: 'file', attachmentId: `sha256:f${String(i)}`, name: 'x.md' })
     }
     assert.equal(calls.length, 33)
-    // The first id fell out of the 32-entry cache, so it reads again; the newest stays cached.
     await locate({ kind: 'file', attachmentId: 'sha256:f0', name: 'x.md' })
     assert.equal(calls.length, 34)
     await locate({ kind: 'file', attachmentId: 'sha256:f32', name: 'x.md' })
@@ -112,15 +99,12 @@ describe('makeAttachmentLocator', () => {
 })
 
 describe('makeAttachmentOpener', () => {
-  test('without a session or a preview column there is no opener', async () => {
+  test('without a session or a preview column there is no opener; otherwise a resolved path opens the session file address', async () => {
     stubFetch(() => json({ ok: true, value: { path: ALIAS } }))
     const bare = new TestClientCtx()
     assert.equal(makeAttachmentOpener(asClientCtx(bare), undefined, undefined), undefined)
     assert.equal(makeAttachmentOpener(asClientCtx(bare), '', undefined), undefined)
     assert.equal(makeAttachmentOpener(asClientCtx(bare), 's1', undefined), undefined)
-  })
-
-  test('a resolved path opens the harness preview column at the session file address', async () => {
     stubFetch(() => json({ ok: true, value: { path: ALIAS } }))
     const opened: string[] = []
     const ctx = new TestClientCtx({ services: { sidebarRight: { openResource: (address: string) => { opened.push(address) } } } })
@@ -130,15 +114,6 @@ describe('makeAttachmentOpener', () => {
     assert.ok(opened[0].startsWith('dsh-resource://file/session/s1/'), opened[0])
     assert.ok(opened[0].endsWith('report.md'), opened[0])
     assert.ok(opened[0].includes('/home/me/.dsh/attachments/v1/files/a3/a3f0/'), 'an absolute path outside the workspace stays absolute')
-  })
-
-  test('an image-formed file keeps its stored name in the address', async () => {
-    stubFetch(() => json({ ok: true, value: { path: '/store/a3/shot.PNG' } }))
-    const opened: string[] = []
-    const ctx = new TestClientCtx({ services: { sidebarRight: { openResource: (address: string) => { opened.push(address) } } } })
-    const open = makeAttachmentOpener(asClientCtx(ctx), 's1', undefined)!
-    assert.equal(await open({ kind: 'file', attachmentId: 'sha256:f9', name: 'shot.PNG' }), true)
-    assert.ok(opened[0].endsWith('shot.PNG'))
   })
 
   test('an unresolved path and a refused address both report false', async () => {

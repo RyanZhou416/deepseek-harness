@@ -1,17 +1,16 @@
-/**
- * Session-cost estimate: prices the host-folded cumulative billed totals from
- * the client's models.dev price book. Rates are USD per 1M tokens, converted
- * for the CNY display at 1 CNY = 0.15 USD.
- *
- * DeepSeek's book figures are the official OFF-peak rates, so only its `peak`
- * buckets double here; a provider id the registry does not know prices through
- * the model-side index, whose vendor comes from registry data.
- */
-
 import type { SessionCostUsage } from '../shared/types'
 import { isDeepSeekProvider, modelsDevProviderOf } from '../shared/providers'
-import { COST_PERIODS, referenceModelPriceOf } from '../shared/modelPricing'
 import { asRecord, numOf, type LocaleService } from './services'
+import {
+  bareModelOf,
+  familyVendorOf,
+  isSubscriptionPlanProvider,
+  labOf,
+  lowerModelId,
+  normalizeModelId,
+  orgOf,
+  suffixKeys,
+} from './priceIdentity'
 
 export type CostCurrency = 'usd' | 'cny'
 
@@ -19,29 +18,75 @@ const USD_PER_CNY = 0.15
 
 const PEAK_FACTOR = 2
 
-/** Per-1M-token rates (USD); an absent registry cache field falls back to the input rate. */
 export interface PriceTriple { hit: number; miss: number; write: number; out: number }
 
 export type ModelPrices = Record<string, Record<string, PriceTriple>>
 
-/** One cross-provider candidate: the carrying provider (models.dev id) with its
- * rates, plus whether it is the model's own vendor (`primary`). `mid` is the
- * registry's model id spelling, the tooltip's listing face. */
-export interface PriceCandidate { pid: string; mid: string; rate: PriceTriple; primary: boolean }
+export type PriceVia =
+  | 'direct'
+  | 'branch-suffix'
+  | 'branch-normalized'
+  | 'provider-alias'
+  | 'org-branch'
+  | 'canonical-maker'
+  | 'family'
+  | 'index'
 
-/** Model-side index over the book: lowercased model id (exact ids plus their
- * `-`suffix tails, e.g. `k3` under `kimi-k3`) → the providers carrying it. */
-export interface PriceIndex { byModel: Map<string, PriceCandidate[]> }
+export type PriceConfidence = 'high' | 'medium' | 'low'
+
+export interface PriceCandidate {
+  pid: string
+  mid: string
+  rate: PriceTriple
+  canonical?: string
+  lab?: string
+}
+
+export type PriceMissReason = 'book-unavailable' | 'model-unknown' | 'ambiguous' | 'no-entry'
+
+export type PriceMiss =
+  | { reason: 'ambiguous'; candidates: number }
+  | { reason: 'book-unavailable' | 'model-unknown' | 'no-entry' }
+
+export interface PriceFace {
+  pid: string
+  mid: string
+  rate: PriceTriple
+  via: PriceVia
+  confidence: PriceConfidence
+  canonical?: string
+}
+
+export type PriceResolution =
+  | { kind: 'priced'; face: PriceFace }
+  | { kind: 'unpriced'; miss: PriceMiss }
+
+export interface PriceBranch {
+  pid: string
+  byExact: Map<string, PriceCandidate[]>
+  bySuffix: Map<string, PriceCandidate[]>
+  byNormalized: Map<string, PriceCandidate[]>
+  byNormalizedSuffix: Map<string, PriceCandidate[]>
+  labs: Set<string>
+  multiVendor: boolean
+}
+
+export interface PriceIndex {
+  byModel: Map<string, PriceCandidate[]>
+  byNormalized: Map<string, PriceCandidate[]>
+  branches: Map<string, PriceBranch>
+}
 
 export interface ModelBook { prices: ModelPrices; index: PriceIndex }
 
-export interface PriceFace { pid: string; mid: string; rate: PriceTriple }
+export type PriceLookup =
+  | { provider: string; model: string; face: PriceFace; miss?: undefined }
+  | { provider: string; model: string; face: null; miss: PriceMiss }
 
 export function toCurrency(usd: number, currency: CostCurrency): number {
   return currency === 'cny' ? usd / USD_PER_CNY : usd
 }
 
-/** Rate equality within the registry's float noise (sync drift prints 0.125000…003). */
 function sameRate(a: PriceTriple, b: PriceTriple): boolean {
   const close = (x: number, y: number): boolean => Math.abs(x - y) <= 1e-9 * Math.max(1, Math.abs(x))
   return close(a.hit, b.hit) && close(a.miss, b.miss) && close(a.write, b.write) && close(a.out, b.out)
@@ -57,188 +102,281 @@ function rateOfEntry(value: unknown): PriceTriple | null {
     : null
 }
 
-/** Build the resolution index over a proven book. `npmOf` carries each
- * provider's registry `npm` package (null when absent): `@ai-sdk/<its own id>`
- * marks a first-party provider, while mirrors and gateways ride a generic or foreign package. */
-export function priceIndexOf(prices: ModelPrices, npmOf: Record<string, string | null>): PriceIndex {
+function pushCandidate(map: Map<string, PriceCandidate[]>, key: string, candidate: PriceCandidate): void {
+  const list = map.get(key)
+  if (list === undefined) map.set(key, [candidate])
+  else if (!list.some(existing => existing.pid === candidate.pid && sameRate(existing.rate, candidate.rate))) list.push(candidate)
+}
+
+function pushForms(map: Map<string, PriceCandidate[]>, forms: readonly string[], candidate: PriceCandidate): void {
+  for (const key of forms) pushCandidate(map, key, candidate)
+}
+
+export function priceIndexOf(
+  prices: ModelPrices,
+  canonicalOf: Record<string, Record<string, string> | undefined> = {},
+): PriceIndex {
   const byModel = new Map<string, PriceCandidate[]>()
-  const push = (key: string, cand: PriceCandidate): void => {
-    const list = byModel.get(key)
-    if (list === undefined) byModel.set(key, [cand])
-    else if (!list.some(c => c.pid === cand.pid && sameRate(c.rate, cand.rate))) list.push(cand)
-  }
+  const byNormalized = new Map<string, PriceCandidate[]>()
+  const branches = new Map<string, PriceBranch>()
   for (const pid of Object.keys(prices)) {
-    const branch = branchOf(prices, pid)
-    if (branch === null) continue
-    const npm: unknown = npmOf[pid]
-    const primary = typeof npm === 'string' && npm.startsWith('@ai-sdk/') && npm.slice('@ai-sdk/'.length) === pid
-    for (const mid of Object.keys(branch)) {
-      const rate = rateOfEntry(branch[mid])
-      if (rate === null) continue
-      const lower = mid.toLowerCase()
-      const cand: PriceCandidate = { pid, mid, rate, primary }
-      push(lower, cand)
-      const parts = lower.split('-')
-      for (let i = 1; i < parts.length; i++) push(parts.slice(i).join('-'), cand)
+    if (isSubscriptionPlanProvider(pid)) continue
+    const branchPrices = branchOf(prices, pid)
+    if (branchPrices === null) continue
+    const exact = new Map<string, PriceCandidate[]>()
+    const suffix = new Map<string, PriceCandidate[]>()
+    const normalized = new Map<string, PriceCandidate[]>()
+    const normalizedSuffix = new Map<string, PriceCandidate[]>()
+    const labs = new Set<string>()
+    for (const mid of Object.keys(branchPrices)) {
+      const rate = branchPrices[mid]
+      if (rateOfEntry(rate) === null) continue
+      const canonical = canonicalOf[pid]?.[mid]
+      const lab = canonical === undefined || canonical.length === 0 ? undefined : labOf(canonical)
+      const candidate: PriceCandidate = {
+        pid,
+        mid,
+        rate,
+        ...canonical === undefined || canonical.length === 0 ? {} : { canonical },
+        ...lab === undefined ? {} : { lab },
+      }
+      const lower = lowerModelId(mid)
+      const normalizedKey = normalizeModelId(mid)
+      const lowerSuffixes = suffixKeys(lower)
+      const normalizedSuffixes = suffixKeys(normalizedKey)
+      pushCandidate(exact, lower, candidate)
+      pushForms(suffix, lowerSuffixes, candidate)
+      pushCandidate(normalized, normalizedKey, candidate)
+      pushForms(normalizedSuffix, normalizedSuffixes, candidate)
+      pushCandidate(byModel, lower, candidate)
+      pushCandidate(byNormalized, normalizedKey, candidate)
+      if (lab !== undefined) labs.add(lab)
+    }
+    branches.set(pid, {
+      pid,
+      byExact: exact,
+      bySuffix: suffix,
+      byNormalized: normalized,
+      byNormalizedSuffix: normalizedSuffix,
+      labs,
+      multiVendor: labs.size > 1,
+    })
+  }
+  return { byModel, byNormalized, branches }
+}
+
+type CandidatePick =
+  | { kind: 'hit'; candidate: PriceCandidate }
+  | { kind: 'ambiguous'; count: number }
+  | { kind: 'miss' }
+
+function pickCandidates(candidates: readonly PriceCandidate[]): CandidatePick {
+  if (candidates.length === 0) return { kind: 'miss' }
+  const first = candidates[0]
+  return candidates.every(candidate => sameRate(candidate.rate, first.rate))
+    ? { kind: 'hit', candidate: first }
+    : { kind: 'ambiguous', count: candidates.length }
+}
+
+function collect(map: Map<string, PriceCandidate[]>, keys: readonly string[]): PriceCandidate[] {
+  const out: PriceCandidate[] = []
+  for (const key of keys) out.push(...map.get(key) ?? [])
+  return out
+}
+
+type BranchLookup =
+  | { kind: 'hit'; face: PriceFace }
+  | { kind: 'ambiguous'; count: number }
+  | { kind: 'miss' }
+
+function faceOf(candidate: PriceCandidate, via: PriceVia, confidence: PriceConfidence): PriceFace {
+  return {
+    pid: candidate.pid,
+    mid: candidate.mid,
+    rate: candidate.rate,
+    via,
+    confidence,
+    ...candidate.canonical === undefined ? {} : { canonical: candidate.canonical },
+  }
+}
+
+function lookupBranch(branch: PriceBranch, model: string): BranchLookup {
+  const exact = lowerModelId(model)
+  const normalized = normalizeModelId(model)
+  const stages: ReadonlyArray<{
+    map: Map<string, PriceCandidate[]>
+    keys: readonly string[]
+    via: PriceVia
+    confidence: PriceConfidence
+  }> = [
+    { map: branch.byExact, keys: [exact], via: 'direct', confidence: 'high' },
+    { map: branch.bySuffix, keys: [exact], via: 'branch-suffix', confidence: 'high' },
+    { map: branch.byNormalized, keys: [normalized], via: 'branch-normalized', confidence: 'medium' },
+    { map: branch.byNormalizedSuffix, keys: [normalized], via: 'branch-normalized', confidence: 'medium' },
+  ]
+  for (const stage of stages) {
+    const picked = pickCandidates(collect(stage.map, stage.keys))
+    if (picked.kind === 'miss') continue
+    if (picked.kind === 'ambiguous') return picked
+    return { kind: 'hit', face: faceOf(picked.candidate, stage.via, stage.confidence) }
+  }
+  return { kind: 'miss' }
+}
+
+function lookupModel(branch: PriceBranch, model: string): BranchLookup {
+  const direct = lookupBranch(branch, model)
+  if (direct.kind !== 'miss') return direct
+  const bare = bareModelOf(model)
+  return bare === model ? direct : lookupBranch(branch, bare)
+}
+
+function indexCandidates(index: PriceIndex, model: string): PriceCandidate[] {
+  const lower = lowerModelId(model)
+  const exact = collect(index.byModel, [lower])
+  if (exact.length > 0) return exact
+  const bare = bareModelOf(lower)
+  if (bare !== lower) {
+    const bareExact = collect(index.byModel, [bare])
+    if (bareExact.length > 0) return bareExact
+  }
+  const normalized = collect(index.byNormalized, [normalizeModelId(model)])
+  if (normalized.length > 0) return normalized
+  return bare === lower ? [] : collect(index.byNormalized, [normalizeModelId(bare)])
+}
+
+function labsOf(candidates: readonly PriceCandidate[]): Set<string> {
+  const labs = new Set<string>()
+  for (const candidate of candidates) {
+    if (candidate.lab !== undefined) labs.add(candidate.lab)
+  }
+  return labs
+}
+
+function labHint(model: string, labs: ReadonlySet<string>): string | undefined {
+  const org = orgOf(model)
+  if (org !== undefined && labs.has(org)) return org
+  const vendor = familyVendorOf(model)
+  return vendor !== undefined && labs.has(vendor) ? vendor : undefined
+}
+
+function routedBranch(book: ModelBook, provider: string): { branch: PriceBranch; aliased: boolean } | null {
+  const exact = book.index.branches.get(provider)
+  if (exact !== undefined) return { branch: exact, aliased: false }
+  const alias = modelsDevProviderOf(provider)
+  if (alias === provider) return null
+  const target = book.index.branches.get(alias)
+  return target === undefined ? null : { branch: target, aliased: true }
+}
+
+function makerLookup(book: ModelBook, lab: string, model: string): BranchLookup {
+  const branch = book.index.branches.get(lab)
+  return branch === undefined ? { kind: 'miss' } : lookupModel(branch, model)
+}
+
+function priced(face: PriceFace): PriceResolution {
+  return { kind: 'priced', face }
+}
+
+function unpriced(reason: Exclude<PriceMissReason, 'ambiguous'>): PriceResolution {
+  return { kind: 'unpriced', miss: { reason } }
+}
+
+function ambiguous(count: number): PriceResolution {
+  return { kind: 'unpriced', miss: { reason: 'ambiguous', candidates: count } }
+}
+
+export function priceResolutionOf(book: ModelBook | null | undefined, provider: string, model: string): PriceResolution {
+  if (book === null || book === undefined) return unpriced('book-unavailable')
+  const routed = routedBranch(book, provider)
+  if (routed !== null) {
+    const match = lookupModel(routed.branch, model)
+    if (match.kind === 'hit') return priced(routed.aliased ? { ...match.face, via: 'provider-alias' } : match.face)
+    if (match.kind === 'ambiguous') return ambiguous(match.count)
+    if (!routed.branch.multiVendor) return unpriced('model-unknown')
+  }
+  const org = orgOf(model)
+  if (org !== undefined) {
+    const branch = book.index.branches.get(org)
+    if (branch !== undefined) {
+      const match = lookupBranch(branch, bareModelOf(model))
+      if (match.kind === 'hit') return priced({ ...match.face, via: 'org-branch', confidence: 'high' })
+      if (match.kind === 'ambiguous') return ambiguous(match.count)
     }
   }
-  return { byModel }
-}
-
-/** The candidate whose rate the most candidates share, or null on a tie. */
-function majorityCandidate(cands: PriceCandidate[]): PriceCandidate | null {
-  const groups: { cand: PriceCandidate; n: number }[] = []
-  for (const c of cands) {
-    const g = groups.find(g => sameRate(g.cand.rate, c.rate))
-    if (g === undefined) groups.push({ cand: c, n: 1 })
-    else g.n++
-  }
-  groups.sort((a, b) => b.n - a.n)
-  return groups.length > 1 && groups[0].n === groups[1].n ? null : groups[0].cand
-}
-
-function resolveCandidates(lower: string, cands: PriceCandidate[], org: string | null): PriceCandidate | null {
-  if (org !== null) {
-    // `vendor/model` catalogs: the org segment names the vendor, exactly or as
-    // the registry id behind a variant org (`deepseek-ai` → `deepseek`).
-    const named = cands.filter(c => c.pid === org || org.startsWith(c.pid + '-') || (org.length >= 4 && org.startsWith(c.pid)))
-    if (named.length > 0) {
-      const cand = majorityCandidate(named)
-      if (cand !== null) return cand
+  const candidates = indexCandidates(book.index, model)
+  const labs = labsOf(candidates)
+  if (labs.size === 1) {
+    const lab = [...labs][0]
+    const match = makerLookup(book, lab, model)
+    if (match.kind === 'hit') return priced({ ...match.face, via: 'canonical-maker', confidence: 'high' })
+    if (match.kind === 'ambiguous') return ambiguous(match.count)
+  } else if (labs.size > 1) {
+    const hint = labHint(model, labs)
+    if (hint === undefined) return ambiguous(candidates.length)
+    const match = makerLookup(book, hint, model)
+    if (match.kind === 'hit') return priced({ ...match.face, via: 'canonical-maker', confidence: 'high' })
+    return ambiguous(match.kind === 'ambiguous' ? match.count : candidates.length)
+  } else {
+    const vendor = familyVendorOf(model)
+    if (vendor !== undefined) {
+      const branch = book.index.branches.get(vendor)
+      if (branch !== undefined) {
+        const match = lookupModel(branch, model)
+        if (match.kind === 'hit') return priced({ ...match.face, via: 'family', confidence: 'medium' })
+        if (match.kind === 'ambiguous') return ambiguous(match.count)
+      }
     }
   }
-  const primaries = cands.filter(c => c.primary)
-  if (primaries.length > 0) {
-    const cand = majorityCandidate(primaries)
-    if (cand !== null) return cand
-  }
-  const prefixed = cands.filter(c => lower.startsWith(c.pid + '-') || lower.startsWith(c.pid + '/'))
-  if (prefixed.length > 0) {
-    const cand = majorityCandidate(prefixed)
-    if (cand !== null) return cand
-  }
-  return cands.length === 1 ? cands[0] : null
+  const picked = pickCandidates(candidates)
+  if (picked.kind === 'hit') return priced(faceOf(picked.candidate, 'index', 'low'))
+  if (picked.kind === 'ambiguous') return ambiguous(picked.count)
+  return unpriced('no-entry')
 }
 
-/** Resolve a model id book-wide: the full id, then its last `/`-segment. */
-function resolveRate(index: PriceIndex, model: string): PriceCandidate | null {
-  const lower = model.toLowerCase()
-  const slash = lower.lastIndexOf('/')
-  const org = slash > 0 ? lower.slice(0, slash) : null
-  for (const key of slash > 0 ? [lower, lower.slice(slash + 1)] : [lower]) {
-    const cands = index.byModel.get(key)
-    if (cands === undefined) continue
-    const cand = resolveCandidates(key, cands, org)
-    if (cand !== null) return cand
-  }
-  return null
+export function priceFaceOf(book: ModelBook | null | undefined, provider: string, model: string): PriceFace | null {
+  const resolution = priceResolutionOf(book, provider, model)
+  return resolution.kind === 'priced' ? resolution.face : null
 }
 
-function branchOf(book: ModelPrices, id: string): Record<string, PriceTriple> | null {
-  const v: unknown = book[id]
-  return v !== null && typeof v === 'object' ? (v as Record<string, PriceTriple>) : null
+export function priceOf(book: ModelBook | null | undefined, provider: string, model: string): PriceTriple | null {
+  return priceFaceOf(book, provider, model)?.rate ?? null
 }
 
-/** One branch's lookup hit: exact own key first (the book is untrusted wire
- * data), then case-insensitively, then by id suffix — dsh spells some models
- * short (`k3`) where the registry namespaces them (`kimi-k3`). Several suffix candidates are ambiguous and price nothing. */
-function lookupFace(models: Record<string, PriceTriple>, model: string): { mid: string; rate: PriceTriple } | null {
-  if (Object.hasOwn(models, model)) return { mid: model, rate: models[model] }
-  const m = model.toLowerCase()
-  let found: { mid: string; rate: PriceTriple } | null = null
-  let seen: string | null = null
-  for (const id in models) {
-    const lower = id.toLowerCase()
-    if (lower !== m && !lower.endsWith('-' + m)) continue
-    if (seen !== null && seen !== lower) return null
-    seen = lower
-    found = { mid: id, rate: models[id] }
-  }
-  return found
-}
-
-/**
- * One billed model's price and registry face. The dsh provider id prices by
- * model id (exact, case-insensitive, or suffix); a provider the book does not
- * carry falls back to the model-side index.
- *
- * The one vendor-level seam: a `deepseek-` model id prices from DeepSeek's own
- * branch first, since its listing is the first-party book with cache rates,
- * while the model-side tiers can hand the same id to a self-named host that
- * bills cache hits as plain input (azure's `deepseek-v4-pro`, issue #93).
- */
-export function priceFaceOf(
-  book: ModelBook | null | undefined,
-  provider: string,
-  model: string,
-  longContext = false,
-): PriceFace | null {
-  // Verified subscription routes price from the bundled reference list even when
-  // the registry is unavailable; a long-context request uses its own tier.
-  const reference = referenceModelPriceOf(provider, model)
-  if (reference !== undefined) {
-    // A long-context request prices only on a tier that actually advertises one.
-    if (longContext) {
-      return reference.longContext === undefined
-        ? null
-        : { pid: modelsDevProviderOf(provider), mid: model, rate: reference.longContext.price }
-    }
-    return { pid: modelsDevProviderOf(provider), mid: model, rate: reference.standard }
-  }
-  if (book === null || book === undefined) return null
-  const registryPid = modelsDevProviderOf(provider)
-  const direct = branchOf(book.prices, registryPid)
-  // A carried provider's own branch is final: an unknown model there prices null.
-  if (direct !== null) {
-    const found = lookupFace(direct, model)
-    return found === null ? null : { pid: registryPid, mid: found.mid, rate: found.rate }
-  }
-  if (model.toLowerCase().startsWith('deepseek-')) {
-    const firstParty = branchOf(book.prices, 'deepseek')
-    if (firstParty !== null) {
-      const official = lookupFace(firstParty, model)
-      if (official !== null) return { pid: 'deepseek', mid: official.mid, rate: official.rate }
+export function priceLookupsOf(usage: SessionCostUsage | null | undefined, book: ModelBook | null | undefined): PriceLookup[] {
+  if (usage === null || usage === undefined || book === null || book === undefined) return []
+  const lookups: PriceLookup[] = []
+  for (const provider of Object.keys(usage)) {
+    const models = asRecord(usage[provider])
+    if (models === null) continue
+    for (const model of Object.keys(models)) {
+      const resolution = priceResolutionOf(book, provider, model)
+      lookups.push(resolution.kind === 'priced'
+        ? { provider, model, face: resolution.face }
+        : { provider, model, face: null, miss: resolution.miss })
     }
   }
-  const cand = resolveRate(book.index, model)
-  return cand === null ? null : { pid: cand.pid, mid: cand.mid, rate: cand.rate }
+  return lookups
 }
 
-export function priceOf(
-  book: ModelBook | null | undefined,
-  provider: string,
-  model: string,
-  longContext = false,
-): PriceTriple | null {
-  return priceFaceOf(book, provider, model, longContext)?.rate ?? null
-}
-
-/** Price the session's cumulative billed totals; `peak` buckets double for
- * DeepSeek only. Null when nothing was priced, so the cell can show a dash. */
 export function estimateSessionCost(
   usage: SessionCostUsage | null | undefined,
   book: ModelBook | null | undefined,
   currency: CostCurrency,
 ): number | null {
-  // Verified reference prices need no live book, so only the usage gate applies.
-  if (usage === null || usage === undefined) return null
+  if (usage === null || usage === undefined || book === null || book === undefined) return null
   let total = 0
   let any = false
   for (const provider of Object.keys(usage)) {
     const models = asRecord(usage[provider])
     if (models === null) continue
-    // The doubled peak period is DeepSeek's alone.
     const deepseek = isDeepSeekProvider(provider)
     for (const model of Object.keys(models)) {
+      const rate = priceOf(book, provider, model)
       const periods = asRecord(models[model])
-      if (periods === null) continue
-      for (const period of COST_PERIODS) {
+      if (rate === null || periods === null) continue
+      for (const period of ['peak', 'off'] as const) {
         const bucket = asRecord(periods[period])
         if (bucket === null) continue
-        // A whole-request long-context bucket prices at its own tier; the
-        // verified references carry it, the registry does not.
-        const rate = priceOf(book, provider, model, period === 'long')
-        if (rate === null) continue
         const price = (numOf(bucket.cacheRead) * rate.hit + numOf(bucket.uncached) * rate.miss
           + numOf(bucket.cacheWrite) * rate.write + numOf(bucket.output) * rate.out) / 1e6
         total += deepseek && period === 'peak' ? price * PEAK_FACTOR : price
@@ -258,7 +396,7 @@ export function billedTokensOf(usage: SessionCostUsage | null | undefined): numb
     for (const model of Object.keys(models)) {
       const periods = asRecord(models[model])
       if (periods === null) continue
-      for (const period of COST_PERIODS) {
+      for (const period of ['peak', 'off'] as const) {
         const bucket = asRecord(periods[period])
         if (bucket === null) continue
         total += numOf(bucket.uncached) + numOf(bucket.cacheRead) + numOf(bucket.cacheWrite) + numOf(bucket.output)
@@ -268,8 +406,6 @@ export function billedTokensOf(usage: SessionCostUsage | null | undefined): numb
   return total
 }
 
-/** Accumulate one usage's buckets into `out`. True when any bucket record
- * merged, even an all-zero one, so the estimator prices it as $0 not a dash. */
 function mergeInto(out: SessionCostUsage, usage: SessionCostUsage | null | undefined): boolean {
   if (usage === null || usage === undefined) return false
   let any = false
@@ -281,7 +417,7 @@ function mergeInto(out: SessionCostUsage, usage: SessionCostUsage | null | undef
       const periods = asRecord(models[model])
       if (periods === null || Array.isArray(periods)) continue
       const target = branch[model] ?? (branch[model] = {})
-      for (const period of COST_PERIODS) {
+      for (const period of ['peak', 'off'] as const) {
         const bucket = asRecord(periods[period])
         if (bucket === null || Array.isArray(bucket)) continue
         const prev = target[period] ?? { uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
@@ -298,8 +434,6 @@ function mergeInto(out: SessionCostUsage, usage: SessionCostUsage | null | undef
   return any
 }
 
-/** Deep-merge session-cost usages into one — the stats board's total-cost scope
- * and the subagent fold. Null when no side carried a bucket record. */
 export function mergeCostUsage(...usages: (SessionCostUsage | null | undefined)[]): SessionCostUsage | null {
   const out: SessionCostUsage = {}
   let any = false
@@ -314,12 +448,15 @@ export function formatCost(amount: number, currency: CostCurrency): string {
   return symbol + (amount >= 1 ? amount.toFixed(2) : amount.toPrecision(2))
 }
 
-/** The display currency follows the active locale — read per render: slot outlets re-render on a locale switch. */
 export function displayCurrencyOf(locale: LocaleService): CostCurrency {
   return typeof locale.getLocale === 'function' && locale.getLocale().active === 'zh' ? 'cny' : 'usd'
 }
 
-/** Price-list figure: always two decimals (the tooltip's `¥ XX.XX` rate format). */
 export function formatPriceRate(amount: number, currency: CostCurrency): string {
   return (currency === 'cny' ? '¥' : '$') + amount.toFixed(2)
+}
+
+function branchOf(book: ModelPrices, id: string): Record<string, PriceTriple> | null {
+  const value: unknown = book[id]
+  return value !== null && typeof value === 'object' ? value as Record<string, PriceTriple> : null
 }

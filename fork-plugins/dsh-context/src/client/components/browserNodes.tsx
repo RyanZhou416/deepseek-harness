@@ -1,5 +1,3 @@
-/** The context browser's per-node rendering: one surface node's rows and its fold-stamped identity. */
-
 import type { ReactElement, ReactNode } from 'react'
 import type { Category, SurfaceNode } from '../../shared/types'
 import type { Assembled } from '../assemble'
@@ -74,7 +72,6 @@ export function nodeNameOf(n: SurfaceNode): string {
 export function msgKindsOf(n: SurfaceNode, conv: ConversationNodeLike | undefined): { think: boolean; tool: boolean; answer: boolean } {
   let think = false
   let tool = false
-  let answer = false
   for (const blocks of [conv?.blocks, conv?.content]) {
     if (!Array.isArray(blocks)) continue
     for (const b of blocks) {
@@ -84,17 +81,15 @@ export function msgKindsOf(n: SurfaceNode, conv: ConversationNodeLike | undefine
         : ''
       if (k === 'reasoning') think = true
       else if (k === 'tool-call') tool = true
-      else if (k === 'text') answer = true
     }
   }
   return {
     think,
     tool: tool || (Array.isArray(n.calls) && n.calls.length > 0),
-    answer: answer || (typeof n.text === 'string' && n.text !== ''),
+    answer: typeof n.text === 'string' && n.text !== '',
   }
 }
 
-/** The only scan face for thinking blocks — the fold stamps no reasoning on the node. */
 export function reasoningTextOf(conv: ConversationNodeLike | undefined): string {
   if (conv === undefined) return ''
   let out = ''

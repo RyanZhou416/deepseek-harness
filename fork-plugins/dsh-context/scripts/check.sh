@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
-# The pre-commit gate: lint, typecheck and the full coverage suite, run
-# concurrently, each tool's complete output kept in .tmp/check-logs.
-#
-# A green run fingerprints the worktree into .tmp/check.stamp, so the husky
-# hook skips the full suite for content that just passed. Any tracked or
-# untracked edit invalidates the stamp, and so does a stamp older than an hour:
-# gitignored inputs (lib/, node_modules, staged dsh baselines) can drift without
-# changing the fingerprint. `--full` always re-runs.
+# The pre-commit gate: lint, typecheck and coverage in parallel (logs in .tmp/check-logs). A green run fingerprints the
+# worktree into .tmp/check.stamp so husky skips unchanged content; the stamp expires after STAMP_TTL_MIN because gitignored
+# inputs (lib/, node_modules, baselines) can drift un-fingerprinted. `--full` always re-runs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,9 +12,7 @@ LOGS=".tmp/check-logs"
 INDEX=".tmp/check-index"
 STAMP_TTL_MIN=60
 
-# The fingerprint is the worktree's tree object, built through a THROWAWAY
-# index: staged and unstaged edits plus untracked files all count, while
-# gitignored outputs (.tmp, coverage, lib, node_modules, IDE/tool state) do not.
+# The fingerprint is the worktree's tree object, built through a THROWAWAY index: staged, unstaged and untracked files all count; gitignored outputs do not.
 fingerprint() {
   local tree
   mkdir -p .tmp
@@ -37,8 +30,7 @@ fingerprint() {
 FULL=0
 [[ "${1:-}" == "--full" ]] && FULL=1
 
-# Command substitutions do not inherit errexit on bash 3.2 (macOS), so both
-# fingerprint calls check their status explicitly.
+# Command substitutions do not inherit errexit on bash 3.2 (macOS), so both fingerprint calls check status explicitly.
 BEFORE="$(fingerprint)" || { echo "==> check: cannot fingerprint the worktree" >&2; exit 1; }
 if (( FULL == 0 )) && [[ -f "$STAMP" ]] && [[ "$(cat "$STAMP")" == "$BEFORE" ]] \
   && [[ -n "$(find "$STAMP" -mmin "-$STAMP_TTL_MIN" 2>/dev/null)" ]]; then
@@ -71,8 +63,7 @@ if [[ -n "$FAILED" ]]; then
   exit 1
 fi
 
-# A gate run over a moving worktree proves nothing, so an edit during the run
-# must not be stamped as verified.
+# A gate run over a moving worktree proves nothing: an edit during the run must not be stamped as verified.
 AFTER="$(fingerprint)" || { echo "==> check: cannot fingerprint the worktree" >&2; exit 1; }
 if [[ "$BEFORE" != "$AFTER" ]]; then
   echo "==> check: the worktree changed while the gate ran — re-run before committing." >&2

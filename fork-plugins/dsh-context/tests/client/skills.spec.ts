@@ -1,6 +1,3 @@
-// The client skill catalog (src/client/skills.ts): the payload narrowing and the route read's never-reject
-// contract (transport, status, envelope, and empty answers all read null), plus the clipboard seam behind the path footer.
-
 import assert from 'node:assert/strict'
 import { afterEach, describe, test, vi } from 'vitest'
 import { copySkillPath, readSkillCatalog, setSkillCopier, skillInfoListOf } from '../../src/client/skills'

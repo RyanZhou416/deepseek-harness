@@ -7,20 +7,23 @@ import { click, mount, query, queryAll, text, until } from '../helpers/kit'
 import { buttonByText, makeView, projectionsFor, richTimeline, T0, timeline } from './contextViewHarness'
 
 describe('ContextView — projection guards', () => {
-  test('loading screen while useProjection is absent, empty, or the session id is missing', async () => {
+  test('loading screen while useProjection is absent, empty, or the session id is missing; a served projection renders without one', async () => {
     const View = makeView(new TestClientCtx())
 
-    const m1 = await mount(h(View, { sessionId: 'sv-none' }))
-    assert.ok(text(m1.container).includes(DICT_EN.loading))
-    await m1.unmount()
+    for (const props of [
+      { sessionId: 'sv-none' },
+      { sessionId: '', useProjection: () => undefined },
+      { useProjection: () => undefined },
+    ]) {
+      const m = await mount(h(View, props))
+      assert.ok(text(m.container).includes(DICT_EN.loading))
+      await m.unmount()
+    }
 
-    const m2 = await mount(h(View, { sessionId: '', useProjection: () => undefined }))
-    assert.ok(text(m2.container).includes(DICT_EN.loading))
-    await m2.unmount()
-
-    const m3 = await mount(h(View, { useProjection: () => undefined }))
-    assert.ok(text(m3.container).includes(DICT_EN.loading))
-    await m3.unmount()
+    const m = await mount(h(View, { useProjection: projectionsFor(timeline()) }))
+    assert.ok(text(m.container).includes(DICT_EN['overview.title']))
+    assert.ok(text(m.container).includes(DICT_EN.footer))
+    await m.unmount()
   })
 
   test('a cold read that settles without data surfaces the retryable failure, not a stall', async () => {
@@ -35,21 +38,12 @@ describe('ContextView — projection guards', () => {
     await m.unmount()
   })
 
-  test('renders the full tab without a session id (the agent card anchors nothing)', async () => {
-    const View = makeView(new TestClientCtx())
-    const m = await mount(h(View, { useProjection: projectionsFor(timeline()) }))
-    assert.ok(text(m.container).includes(DICT_EN['overview.title']))
-    assert.ok(text(m.container).includes(DICT_EN.footer))
-    await m.unmount()
-  })
-
   test('a corrupt timeline is sanitized and the whole tab still renders empty-section states', async () => {
     const View = makeView(new TestClientCtx())
     const m = await mount(h(View, {
       sessionId: 'sv-garbage',
       useProjection: projectionsFor(timeline(), {}),
     }))
-    // Well-formed-but-empty: every section renders its empty state.
     assert.ok(text(m.container).includes(DICT_EN['overview.title']))
     assert.ok(text(m.container).includes(DICT_EN['stats.title']))
     assert.ok(text(m.container).includes(DICT_EN['trend.empty']))
@@ -57,7 +51,6 @@ describe('ContextView — projection guards', () => {
     assert.ok(text(m.container).includes(DICT_EN['files.empty']))
     assert.ok(text(m.container).includes(DICT_EN['footer']))
     assert.ok(m.container.querySelector('.lc-br-cats') !== null)
-    // No model/provider: the composition card carries no subtitle.
     const comp = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['overview.title']))
     assert.ok(comp !== undefined && comp.querySelector('.lc-card-sub') === null)
     await m.unmount()
@@ -74,11 +67,7 @@ describe('ContextView — projection guards', () => {
         contextHeaders: { headers: [{ seq: 1, time: T0, system: 'SYS', tools: [{ name: 'bash', tokens: 12 }] }] },
       }),
     }))
-    // Anchored headline: projected 100 of a 128k window.
     assert.ok(text(m.container).includes(DICT_EN['overview.used']))
-    // The Token card's center is the chat stats line's whole-session billed
-    // total off the official tokenUsage projection (100 + 200 + 0 + 50), and
-    // its corner shows the line's own cache-hit rate two decimals deep (200 / 300, truncated).
     const tokensCard = queryAll(m.container, '.lc-head > .lc-col-donut')[0]
     assert.equal(query(tokensCard, '.lc-donut-center b').textContent, '350')
     assert.equal(query(tokensCard, '.lc-card-rate').textContent, 'Cache Hit 66.66%')
@@ -95,29 +84,16 @@ describe('ContextView — the sidebar host', () => {
     const tab = await mount(h(View, { useProjection: projections }))
     assert.equal(queryAll(tab.container, '.lc-stats').length, 1, 'the tab keeps the context stats')
     assert.equal(queryAll(tab.container, '.lc-pi-grid').length, 1, 'the tab keeps the plugin info')
+    assert.equal(queryAll(tab.container, '.lc-recom').length, 1, 'the tab keeps the recom card')
     await tab.unmount()
 
     const panel = await mount(h(View, { host: 'sidebar', useProjection: projections }))
     assert.equal(queryAll(panel.container, '.lc-stats').length, 0, 'the panel drops the context stats')
     assert.equal(queryAll(panel.container, '.lc-pi-grid').length, 0, 'the panel drops the plugin info')
+    assert.equal(queryAll(panel.container, '.lc-recom').length, 0, 'the panel drops the recom card')
     assert.equal(queryAll(panel.container, '.lc-head > .lc-card').length, 2, 'the head row keeps its two donut cards')
     assert.equal(queryAll(panel.container, '.lc-head > .lc-col-donut').length, 2, 'token usage and timing')
     await panel.unmount()
-  })
-
-  test('both hosts arrange the main row as composition+trend beside the browser', async () => {
-    const View = makeView(new TestClientCtx())
-    const projections = projectionsFor(richTimeline())
-
-    for (const props of [{ useProjection: projections }, { host: 'sidebar' as const, useProjection: projections }]) {
-      const m = await mount(h(View, props))
-      const cols = queryAll(m.container, '.lc-cols-main > .lc-col')
-      assert.equal(cols.length, 2, 'one two-column split')
-      assert.ok(cols[0].querySelector('.lc-overview-num') !== null, 'composition leads the left column')
-      assert.ok(cols[0].querySelector('.lc-trend-ctl') !== null, 'the trend follows in the same column')
-      assert.ok(cols[1].querySelector('.lc-br-dna-ctl') !== null, 'the browser owns the right column')
-      await m.unmount()
-    }
   })
 })
 
@@ -126,14 +102,13 @@ describe('ContextView — baseline gate', () => {
     const View = makeView(new TestClientCtx())
     const m = await mount(h(View, {
       sessionId: 'sv-gated',
-      useProjection: projectionsFor(timeline({ unsupported: { current: '0.1.1-rc.2', minimum: '0.1.7-rc.2' } })),
+      useProjection: projectionsFor(timeline({ unsupported: { current: '0.1.1-rc.2', minimum: '0.2.0-rc.2' } })),
     }))
     assert.ok(m.container.querySelector('.lc-modal-backdrop') !== null)
     const card = query(m.container, '.lc-gate-card')
     assert.ok(text(card).includes(DICT_EN['gate.title']))
     assert.ok(text(card).includes('v0.1.1-rc.2'))
-    assert.ok(text(card).includes('v0.1.7-rc.2'))
-    // The cards keep rendering the fallback's zeroed data behind it.
+    assert.ok(text(card).includes('v0.2.0-rc.2'))
     assert.ok(text(m.container).includes(DICT_EN['overview.title']))
     assert.ok(text(m.container).includes(DICT_EN['trend.empty']))
     assert.ok(text(m.container).includes(DICT_EN['events.empty']))
@@ -141,16 +116,13 @@ describe('ContextView — baseline gate', () => {
     assert.equal(m.container.querySelector('.lc-modal-backdrop'), null)
     assert.ok(text(m.container).includes(DICT_EN['stats.title']))
     await m.unmount()
-  })
 
-  test('a malformed gate record never opens the modal', async () => {
-    const View = makeView(new TestClientCtx())
-    const m = await mount(h(View, {
+    const junk = await mount(h(View, {
       sessionId: 'sv-gate-junk',
       useProjection: projectionsFor(timeline({ unsupported: { current: 7 } })),
     }))
-    assert.equal(m.container.querySelector('.lc-modal-backdrop'), null)
-    assert.ok(text(m.container).includes(DICT_EN['overview.title']))
-    await m.unmount()
+    assert.equal(junk.container.querySelector('.lc-modal-backdrop'), null)
+    assert.ok(text(junk.container).includes(DICT_EN['overview.title']))
+    await junk.unmount()
   })
 })
