@@ -39,11 +39,11 @@ afterEach(() => {
 const originalResolve = internals.resolveDistIndex
 const originalOpenBrowser = internals.openBrowser
 
-type BrowserLauncher = ChildProcess & { stderr: PassThrough }
+type BrowserLauncher = ChildProcess & { stderr: PassThrough; unref: ReturnType<typeof vi.fn> }
 
 /** Minimal browser-launcher process for the native handoff adapter. */
 function launcher(): BrowserLauncher {
-  return Object.assign(new EventEmitter(), { stderr: new PassThrough() }) as BrowserLauncher
+  return Object.assign(new EventEmitter(), { stderr: new PassThrough(), unref: vi.fn() }) as BrowserLauncher
 }
 
 /** Stage a dist fixture and point the bundle's resolver at it. */
@@ -476,7 +476,8 @@ describe('web-app runtime glue', () => {
     await ctx.fiber.dispose()
   })
 
-  it('scrubs the helper environment and reports helper spawn or exit failures', async () => {
+  it('scrubs the non-Windows helper environment and reports helper spawn or exit failures', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
     vi.stubEnv('DEEPSEEK_API_KEY', 'must-not-reach-browser')
     vi.stubEnv('DSH_HOME', '/must-not-reach-browser')
     const completed = launcher()
@@ -489,12 +490,13 @@ describe('web-app runtime glue', () => {
       '--eval', expect.stringContaining('await import('),
       '--', 'http://127.0.0.1:4567',
     ])
-    expect(args?.[2]).toContain("if (process.platform === 'win32')")
-    expect(args?.[2]).toContain('launcher.ref()')
+    expect(args?.[2]).toContain('await open(process.argv[1])')
+    expect(args?.[2]).not.toContain('win32')
     expect(options?.env).not.toHaveProperty('DEEPSEEK_API_KEY')
     expect(options?.env).not.toHaveProperty('DSH_HOME')
     expect(options?.env?.PATH).toBe(process.env.PATH)
     expect(options?.stdio).toEqual(['ignore', 'inherit', 'pipe'])
+    expect(completed.unref).not.toHaveBeenCalled()
     completed.emit('close', 0)
     await expect(completion).resolves.toBeUndefined()
     expect(completed.listenerCount('error')).toBe(0)
@@ -532,5 +534,52 @@ describe('web-app runtime glue', () => {
     errored.emit('error', new Error('spawn failed'))
     await errorAssertion
     expect(errored.listenerCount('close')).toBe(0)
+  })
+
+  it('hands a token URL to the Windows shell handler as one argv element without a shell', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    vi.stubEnv('SystemRoot', 'D:\\Windows')
+    const url = 'http://127.0.0.1:4567/?token=ab%2Fcd&scope=a+b&x=1,2==&y=%25pct'
+    const handoff = launcher()
+    vi.mocked(spawn).mockReturnValueOnce(handoff)
+    const completion = originalOpenBrowser(url)
+    const [command, args, options] = vi.mocked(spawn).mock.calls[0]!
+
+    // The shell handler resolves the default browser a double-click uses; the
+    // URL stays one argv element so `&`, `%`, `=`, and `,` cannot be rewritten.
+    expect(command).toBe(join('D:\\Windows', 'System32', 'rundll32.exe'))
+    expect(args).toEqual(['url.dll,FileProtocolHandler', url])
+    // No command shell sits between this process and the shell handoff.
+    expect(options?.shell).toBeUndefined()
+    expect(options).toMatchObject({
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', 'inherit', 'pipe'],
+    })
+    expect(handoff.unref).toHaveBeenCalledOnce()
+
+    handoff.emit('close', 0)
+    await expect(completion).resolves.toBeUndefined()
+    expect(handoff.listenerCount('error')).toBe(0)
+  })
+
+  it('keeps Harness credentials out of the Windows shell handoff and reports its failure reason', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    // A host without SystemRoot still resolves the helper under the system drive.
+    vi.stubEnv('SystemRoot', '')
+    vi.stubEnv('DEEPSEEK_API_KEY', 'must-not-reach-browser')
+    vi.stubEnv('DSH_HOME', '/must-not-reach-browser')
+    const failed = launcher()
+    vi.mocked(spawn).mockReturnValueOnce(failed)
+    const failure = originalOpenBrowser('http://127.0.0.1:4567')
+    const assertion = expect(failure).rejects.toThrow('url.dll could not be loaded')
+    const options = vi.mocked(spawn).mock.calls[0]![2]
+    expect(options?.env).not.toHaveProperty('DEEPSEEK_API_KEY')
+    expect(options?.env).not.toHaveProperty('DSH_HOME')
+    expect(options?.env?.PATH).toBe(process.env.PATH)
+    failed.stderr?.write('Error: url.dll could not be loaded\n    at fixture')
+    failed.emit('close', 1)
+    await assertion
+    expect(failed.listenerCount('close')).toBe(0)
   })
 })

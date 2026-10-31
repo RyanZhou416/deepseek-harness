@@ -39,8 +39,9 @@ export default async function open(url) {
     apiKeyPresent: process.env.DEEPSEEK_API_KEY !== undefined,
     dshHomePresent: process.env.DSH_HOME !== undefined,
   })}`)
-  // The Windows launcher writes the server-exit marker only while its helper
-  // remains alive, so the assembled test detects an early helper exit.
+  // The non-Windows handoff resolves at spawn, so this probe records the
+  // server-exit marker from a process that outlives the helper. The Windows
+  // stand-in in child-process.mjs records it when the shell handoff closes.
   const launcher = spawn(process.execPath, [
     '--eval', handoffProbe,
     '--', join(process.cwd(), `.dsh-browser-open-${process.ppid}`), String(process.pid),

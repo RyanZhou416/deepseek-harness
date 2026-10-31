@@ -84,27 +84,11 @@ const DSH_WEB_URL = 'DSH_WEB_URL' as const
 
 const BROWSER_OPENER_MODULE = import.meta.resolve('open')
 
+/** Non-Windows helper program; the URL is its only argument. */
 const BROWSER_OPENER_PROGRAM = `
 try {
   const { default: open } = await import(${JSON.stringify(BROWSER_OPENER_MODULE)})
-  const launcher = await open(process.argv[1])
-  if (process.platform === 'win32') {
-    // open resolves at PowerShell spawn; keep it referenced until that launcher hands the URL to Windows.
-    const code = launcher.exitCode ?? await new Promise((resolve, reject) => {
-      function onError(error) {
-        launcher.off('close', onClose)
-        reject(error)
-      }
-      function onClose(code) {
-        launcher.off('error', onError)
-        resolve(code)
-      }
-      launcher.ref()
-      launcher.once('error', onError)
-      launcher.once('close', onClose)
-    })
-    if (code !== 0) throw new Error('browser operating-system launcher exited with code ' + String(code))
-  }
+  await open(process.argv[1])
   process.exitCode = 0
 } catch (error) {
   // The parent turns this exit into the manual-URL warning.
@@ -130,16 +114,48 @@ function resolveDistIndex(): string {
   }
 }
 
-/** Start the maintained platform opener without forwarding Harness credentials. */
+/**
+ * Windows system opener that resolves a URL through `ShellExecute`, the
+ * default-browser handoff a double-click performs. The absolute path keeps a
+ * `rundll32.exe` planted in the working directory or beside Node out of the
+ * launch path, which a bare name would search first.
+ * @returns the absolute path of the system shell-open helper.
+ */
+function windowsShellOpener(): string {
+  return join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'rundll32.exe')
+}
+
+/** Start the platform browser launcher without forwarding Harness credentials. */
 function spawnBrowserLauncher(url: string): ChildProcess {
-  return spawn(process.execPath, [
-    '--input-type=module',
-    '--eval', BROWSER_OPENER_PROGRAM,
-    '--', url,
-  ], {
+  if (process.platform !== 'win32') {
+    // The maintained package owns the macOS, Linux, container, WSL, and
+    // `BROWSER` distinctions; the helper keeps its module graph out of this process.
+    return spawn(process.execPath, [
+      '--input-type=module',
+      '--eval', BROWSER_OPENER_PROGRAM,
+      '--', url,
+    ], {
+      env: scrubbedParentEnv(),
+      stdio: ['ignore', 'inherit', 'pipe'],
+    })
+  }
+  // Windows needs no argument parser between this process and the shell, so the
+  // URL crosses as one argv element of `rundll32`, whose `FileProtocolHandler`
+  // calls `ShellExecute("open")`: the default-browser resolution a double-click
+  // performs. `cmd /c start` splits a token URL at `&` and expands `%NAME%`;
+  // `explorer.exe` parses its own command line and splits fields at commas and
+  // equals signs. The maintained package stays off this path because it starts
+  // Node and PowerShell before the shell launch, delaying the browser window.
+  const launcher = spawn(windowsShellOpener(), ['url.dll,FileProtocolHandler', url], {
     env: scrubbedParentEnv(),
     stdio: ['ignore', 'inherit', 'pipe'],
+    detached: true,
+    windowsHide: true,
   })
+  // The shell launch survives this Host once spawned: detaching keeps a Host
+  // exit from cutting it short, and unref keeps it off this process's lifetime.
+  launcher.unref()
+  return launcher
 }
 
 /** Hand one URL to the operating system's default browser. */

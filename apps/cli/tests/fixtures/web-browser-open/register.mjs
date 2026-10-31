@@ -3,6 +3,7 @@ import { registerHooks } from 'node:module'
 import { join } from 'node:path'
 
 const openerUrl = new URL('./open.mjs', import.meta.url).href
+const childProcessUrl = new URL('./child-process.mjs', import.meta.url).href
 const exitMarker = join(process.cwd(), `.dsh-browser-open-${process.pid}`)
 
 const markerPoll = setInterval(() => {
@@ -15,6 +16,11 @@ markerPoll.unref()
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === 'open') return { shortCircuit: true, url: openerUrl }
+    // The Windows stand-in forwards every other spawn to the real module, so
+    // its own import of that builtin passes through.
+    if (specifier === 'node:child_process' && context.parentURL !== childProcessUrl) {
+      return { shortCircuit: true, url: childProcessUrl }
+    }
     return nextResolve(specifier, context)
   },
 })
