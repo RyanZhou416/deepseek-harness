@@ -588,6 +588,22 @@ function withClaudeCodeFieldOrder(payload: Record<string, unknown>): Record<stri
 }
 
 /**
+ * The caller's system blocks of one `cc3` request, without a caller identity line.
+ *
+ * The client emits the identity line at most once, so a caller block equal to
+ * it is dropped before the policy's own block opens the array.
+ * @param systemValue - the request's system value: a block array, or text for a transport that sends one.
+ * @returns the caller blocks in order, with any identity line removed.
+ */
+function cc3CallerSystem(systemValue: unknown): unknown[] {
+  /* v8 ignore next 3 -- pi-ai serializes `system` as a block array; the string form is handled for a transport that sends one */
+  const systemBlocks = typeof systemValue === 'string'
+    ? systemValue.length === 0 ? [] : [{ type: 'text', text: systemValue }]
+    : arrayOf(systemValue)
+  return (systemBlocks ?? []).filter(block => !isIdentityBlock(block))
+}
+
+/**
  * Place the Claude Code 2.1.288 system blocks and its three markers on one
  * Anthropic Messages request.
  *
@@ -597,33 +613,34 @@ function withClaudeCodeFieldOrder(payload: Record<string, unknown>): Record<stri
  * request's lifetime. The identity block opens the system array this route
  * builds and the caller's prompt blocks follow, so a request that already
  * carries the mac pool's billing block forwards it as billing, identity,
- * harness. The three slots are the identity block, the harness block, and the
- * last user content block: the two system blocks are the cached static prefix, a
- * single-message request carries the same three, and a request with no caller
- * system prompt marks the identity and last-user slots. No other message is
- * marked — the previous-message breakpoint belongs to a different prompt branch
- * — and no tool declaration is ever marked.
+ * harness. When the request states an assembly whose filtered sections carry
+ * the caller's prompt, that text replaces the caller blocks: the harness
+ * sections and a duplicate identity line are never forwarded. The three slots
+ * are the identity block, the harness block, and the last user content block:
+ * the two system blocks are the cached static prefix, a single-message request
+ * carries the same three, and a request with no caller system prompt marks the
+ * identity and last-user slots. No other message is marked — the previous-message
+ * breakpoint belongs to a different prompt branch — and no tool declaration is
+ * ever marked.
  *
  * The edits finish by restoring the pinned client's top-level field order; see
  * {@link withClaudeCodeFieldOrder}.
  * @param payload - the Anthropic Messages request fields pi-ai built.
  * @param lifetime - the marker lifetime this request's class declares.
+ * @param systemText - the caller's filtered prompt sections, when the request
+ *   states an assembly; absent keeps the caller system the transport built.
  * @returns the fields with the policy's identity block and markers in place.
  */
 function withCc3Markers(
   payload: Record<string, unknown>,
   lifetime: Cc3MarkerLifetime,
+  systemText?: string,
 ): Record<string, unknown> {
-  const systemValue = payload['system']
-  /* v8 ignore next 3 -- pi-ai serializes `system` as a block array; the string form is handled for a transport that sends one */
-  const systemBlocks = typeof systemValue === 'string'
-    ? systemValue.length === 0 ? [] : [{ type: 'text', text: systemValue }]
-    : arrayOf(systemValue)
   const toolBlocks = arrayOf(payload['tools'])
   const messageBlocks = arrayOf(payload['messages'])
-  // The client emits the identity line at most once, so a caller block equal to
-  // it is dropped before the policy's own block opens the array.
-  const callerSystem = (systemBlocks ?? []).filter(block => !isIdentityBlock(block))
+  const callerSystem = systemText === undefined
+    ? cc3CallerSystem(payload['system'])
+    : systemText.length === 0 ? [] : [{ type: 'text', text: systemText }]
   const system: unknown[] = [
     withCc3Marker({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }, lifetime),
     ...callerSystem,
@@ -682,17 +699,65 @@ function withExtendedCacheBeta(payload: Record<string, unknown>): Record<string,
 type CcWireParityRequestClass = NonNullable<GenerateOptions['requestClass']>
 
 /**
- * Prompt sections wire parity never forwards: they describe this harness process,
- * not the pinned client's prompt, so the shared cache prefix cannot hold them.
+ * Prompt sections no CC wire forwards: they describe this harness process, not
+ * the pinned client's prompt, so the shared cache prefix cannot hold them.
  */
-const CC_WIRE_PARITY_DROPPED_SECTIONS: ReadonlySet<string> = new Set(['harness:source', 'app:web-surface'])
+const CC_WIRE_DROPPED_PROMPT_SECTIONS: ReadonlySet<string> = new Set(['harness:source', 'app:web-surface'])
 
 /**
- * The prompt section the pinned identity line replaces. Wire parity emits one
- * identity line, first and unmarked, so the section's own text is dropped
- * rather than following it as a second line.
+ * The prompt section the pinned identity line replaces. A CC wire emits one
+ * identity line, so the section's own text is dropped rather than following it
+ * as a second line.
  */
-const CC_WIRE_PARITY_IDENTITY_SECTION = 'harness:identity'
+const CC_WIRE_IDENTITY_PROMPT_SECTION = 'harness:identity'
+
+/** One request's prompt sections after the CC-wire filter, in the forms each body needs. */
+interface CcPromptSections {
+  /** Kept section text in assembly order, joined as the render joined it. */
+  readonly text: string
+  /** Kept `stable` section text in assembly order. */
+  readonly staticText: string
+  /** Kept non-stable section text in assembly order. */
+  readonly dynamicText: string
+}
+
+/**
+ * Filter one request's assembled prompt sections for a CC wire.
+ *
+ * `harness:source` and `app:web-surface` describe this harness process, and
+ * `harness:identity` carries the DeepSeek identity line; a CC wire forwards
+ * none of them, because its prompt is the pinned client's. The filter drops
+ * those sections, drops a section already equal to the pinned identity line,
+ * and keeps every other section in assembly order, so the caller's own prompt
+ * content is preserved. The leading system text must equal the joined sections:
+ * a prompt committed in history no longer describes the current assembly, and
+ * rewriting it from unrelated sections would drop caller text, so such a
+ * request keeps its system unchanged.
+ * @param options - the assembled request.
+ * @returns the filtered sections, or undefined when the request states no
+ *   assembly that matches its leading system text.
+ */
+function ccPromptSections(options: GenerateOptions): CcPromptSections | undefined {
+  const sections = options.systemSections
+  if (sections === undefined || sections.length === 0) return undefined
+  if (sections.map(section => section.text).join('\n\n') !== leadingSystemText(options).text) return undefined
+  const kept: string[] = []
+  const stable: string[] = []
+  const session: string[] = []
+  for (const section of sections) {
+    if (CC_WIRE_DROPPED_PROMPT_SECTIONS.has(section.name)) continue
+    if (section.name === CC_WIRE_IDENTITY_PROMPT_SECTION) continue
+    if (section.text === CLAUDE_CODE_IDENTITY_TEXT) continue
+    kept.push(section.text)
+    const region = section.stable ? stable : session
+    region.push(section.text)
+  }
+  return {
+    text: kept.join('\n\n'),
+    staticText: stable.join('\n\n'),
+    dynamicText: session.join('\n\n'),
+  }
+}
 
 /**
  * One wire-parity request's member-side decisions.
@@ -715,6 +780,13 @@ interface CcWireParityRequest {
    * for a helper, which forwards the caller's system without a split.
    */
   readonly boundary?: { readonly staticText: string; readonly dynamicText: string }
+  /**
+   * The caller's filtered system text of a helper. Absent when the request
+   * states no section assembly, in which case the helper forwards the system it
+   * carries; present even when empty, which states that every section was
+   * harness-owned and the helper sends no system at all.
+   */
+  readonly systemText?: string
 }
 
 /**
@@ -772,10 +844,12 @@ function isHelperRequest(options: GenerateOptions): boolean {
  * prompt committed in history — whose leading system text no longer describes
  * the current assembly — is wire-parity off rather than rewritten from
  * unrelated text. A helper (`compaction`, `auxiliary`) has no boundary: it
- * forwards the system its caller built, with layout `none` and no markers. Only
- * a main or subagent request reads the route's cache intent; a helper always
- * declares `helper`, whose body carries no marker either way. Everything the
- * contract cannot state exactly is wire-parity off instead of a partial rewrite.
+ * forwards the caller's non-harness system, with layout `none` and no markers.
+ * When the helper states no matching section assembly there is nothing to
+ * filter by name, so it forwards the system it carries unchanged. Only a main
+ * or subagent request reads the route's cache intent; a helper always declares
+ * `helper`, whose body carries no marker either way. Everything the contract
+ * cannot state exactly is wire-parity off instead of a partial rewrite.
  * @param options - the assembled request.
  * @param mainCacheIntent - the cache intent this route's profile declares for a
  *   `main` or `subagent` request: `main` asks the worker for its cache plan, and
@@ -790,24 +864,17 @@ function resolveCcWireParityRequest(
   const requestClass = ccWireParityRequestClass(options)
   if (requestClass === undefined) return undefined
   if (requestClass === 'compaction' || requestClass === 'auxiliary') {
-    return { requestClass, cacheIntent: 'helper', systemLayout: 'none' }
+    const sections = ccPromptSections(options)
+    return {
+      requestClass,
+      cacheIntent: 'helper',
+      systemLayout: 'none',
+      ...sections === undefined ? {} : { systemText: sections.text },
+    }
   }
-  const sections = options.systemSections
-  if (sections === undefined || sections.length === 0) return undefined
-  if (sections.map(section => section.text).join('\n\n') !== leadingSystemText(options).text) return undefined
-  const stable: string[] = []
-  const session: string[] = []
-  for (const section of sections) {
-    if (CC_WIRE_PARITY_DROPPED_SECTIONS.has(section.name)) continue
-    if (section.name === CC_WIRE_PARITY_IDENTITY_SECTION) continue
-    // The pinned client emits the identity line at most once, so text equal to
-    // it is dropped before the identity block claims the leading slot.
-    if (section.text === CLAUDE_CODE_IDENTITY_TEXT) continue
-    const region = section.stable ? stable : session
-    region.push(section.text)
-  }
-  const staticText = stable.join('\n\n')
-  const dynamicText = session.join('\n\n')
+  const sections = ccPromptSections(options)
+  if (sections === undefined) return undefined
+  const { staticText, dynamicText } = sections
   if (staticText.length === 0 || dynamicText.length === 0) return undefined
   return {
     requestClass,
@@ -862,6 +929,34 @@ const CACHE_BETA_PREFIXES = [
   'cache-keepalive-',
   'message-threads-',
 ] as const
+
+/**
+ * The beta pi-ai derives when a model withholds the per-tool
+ * `eager_input_streaming` field. The pinned client sends neither the field nor
+ * this beta, so a `cc3` or wire-parity request drops the automatic member:
+ * announcing fine-grained streaming a request does not use is not that wire.
+ */
+const FINE_GRAINED_TOOL_STREAMING_BETA = 'fine-grained-tool-streaming-2025-05-14'
+
+/**
+ * Remove pi-ai's automatic fine-grained tool-streaming beta from one request.
+ *
+ * pi-ai adds the beta when a model sets `supportsEagerToolInputStreaming: false`
+ * and the request carries tools, which is the route's statement that the
+ * per-tool field is unavailable rather than the pinned client's beta plan.
+ * @param payload - the request fields after the route's payload policy.
+ * @returns the fields without that beta, or the same object when it is absent.
+ */
+function withoutToolStreamingBeta(payload: Record<string, unknown>): Record<string, unknown> {
+  const betas = arrayOf(payload['betas'])
+  if (betas === undefined) return payload
+  const kept = betas.filter(beta => beta !== FINE_GRAINED_TOOL_STREAMING_BETA)
+  if (kept.length === betas.length) return payload
+  const next = { ...payload }
+  if (kept.length === 0) delete next['betas']
+  else next['betas'] = kept
+  return next
+}
 
 /**
  * Whether one beta identifier names a cache behavior the pool's worker plans.
@@ -967,8 +1062,10 @@ function ccWireParityMessage(value: unknown, expandText: boolean): unknown {
  * A main or subagent request replaces the system array with exactly the pinned
  * identity line and the two boundary regions, so the pool's worker can insert
  * its billing block ahead of them and own every marker. A helper keeps the
- * system its caller built. Both strip every marker the transport or a caller
- * placed — on system blocks, tool declarations, and message content — and
+ * caller's system minus the harness-describing sections, which the wire never
+ * forwards, and otherwise has no boundary and adds no identity or billing
+ * block. Both strip every marker the transport or a caller placed — on system
+ * blocks, tool declarations, and message content — and
  * remove only the cache betas the worker plans, leaving context-window and
  * tool-streaming betas intact. The final text-only user message travels as a
  * content block array rather than a bare string, because the worker's marker
@@ -984,9 +1081,13 @@ function ccWireParityMessage(value: unknown, expandText: boolean): unknown {
  */
 function withCcWireParityBody(payload: Record<string, unknown>, request: CcWireParityRequest): Record<string, unknown> {
   const boundary = request.boundary
-  const system = boundary === undefined
-    ? withoutSystemMarkers(payload['system'])
-    : ccWireParitySystem(boundary)
+  const system = boundary !== undefined
+    ? ccWireParitySystem(boundary)
+    : request.systemText === undefined
+      ? withoutSystemMarkers(payload['system'])
+      // Every kept section was harness-owned when the filtered text is empty, so
+      // the helper sends no system rather than an empty block array.
+      : request.systemText.length === 0 ? undefined : [{ type: 'text', text: request.systemText }]
   const toolBlocks = arrayOf(payload['tools'])
   const messageBlocks = arrayOf(payload['messages'])
   /* v8 ignore next -- an Anthropic Messages payload always carries its message array */
@@ -996,11 +1097,14 @@ function withCcWireParityBody(payload: Record<string, unknown>, request: CcWireP
   )
   const stripped: Record<string, unknown> = {
     ...payload,
-    ...system === undefined ? {} : { system },
     ...toolBlocks === undefined ? {} : { tools: toolBlocks.map(withoutToolExtras) },
     /* v8 ignore next -- every Anthropic Messages request carries its messages */
     ...wireMessages === undefined ? {} : { messages: wireMessages },
   }
+  // A helper whose kept sections are empty sends no `system` member at all, so
+  // the field pi-ai built must be removed rather than left by the spread.
+  if (system === undefined) delete stripped['system']
+  else stripped['system'] = system
   const betas = withoutCacheBetas(stripped['betas'])
   if (betas === undefined) delete stripped['betas']
   else stripped['betas'] = betas
@@ -1020,15 +1124,22 @@ function withCcWireParityBody(payload: Record<string, unknown>, request: CcWireP
  * non-wire-parity policy the same profile declares — a wire-parity-off request
  * is the current non-wire-parity request, never half of each. Every other route
  * keeps the previous behavior: the beta alone preserves pi-ai's own markers,
- * while the `cc3` policy replaces them and adds the identity system block. On a
- * `cc3` route a helper request keeps the API's default five-minute lifetime, so
- * its markers carry no `ttl` and the route's extended beta is not declared; a
- * main, subagent, or unclassified request keeps the route's one-hour policy.
+ * while the `cc3` policy replaces them and adds the identity system block. A
+ * request whose assembly filters to a caller prompt sends that text instead of
+ * the harness-describing sections on either wire. On a `cc3` route a helper
+ * request keeps the API's default five-minute lifetime, so its markers carry no
+ * `ttl` and the route's extended beta is not declared; a main, subagent, or
+ * unclassified request keeps the route's one-hour policy.
  * @param payload - the Anthropic Messages request fields pi-ai built.
  * @param profile - the resolved route whose payload policy applies.
  * @param ccWireParity - the request's wire-parity decisions, absent when the
  *   request is wire-parity off.
  * @param helper - whether the request is a helper call; see {@link isHelperRequest}.
+ * @param cc3SystemText - the filtered caller prompt sections a `cc3` request
+ *   sends, absent when it states no matching assembly.
+ * @param withholdsEagerToolStreaming - whether this model sets
+ *   `supportsEagerToolInputStreaming: false`, which makes pi-ai derive a beta
+ *   the pinned wire does not declare; see {@link withoutToolStreamingBeta}.
  * @returns replacement fields, or undefined to leave them as built.
  */
 function withAnthropicPayloadPolicy(
@@ -1036,15 +1147,22 @@ function withAnthropicPayloadPolicy(
   profile: ResolvedPiAiProviderProfile,
   ccWireParity: CcWireParityRequest | undefined,
   helper: boolean,
+  cc3SystemText: string | undefined,
+  withholdsEagerToolStreaming: boolean,
 ): Record<string, unknown> | undefined {
   /* v8 ignore next -- pi-ai hands the hook the request fields it built, always an object */
   if (!isRequestPayload(payload)) return undefined
-  if (profile.ccWireParity === true && ccWireParity !== undefined) return withCcWireParityBody(payload, ccWireParity)
+  if (profile.ccWireParity === true && ccWireParity !== undefined) {
+    let next = withCcWireParityBody(payload, ccWireParity)
+    if (withholdsEagerToolStreaming) next = withoutToolStreamingBeta(next)
+    return next
+  }
   const cc3 = profile.cacheMarkerPolicy === 'cc3'
-  let next = cc3 ? withCc3Markers(payload, helper ? '5m' : '1h') : payload
+  let next = cc3 ? withCc3Markers(payload, helper ? '5m' : '1h', cc3SystemText) : payload
   // The extended beta permits the one-hour lifetime the `cc3` policy writes; a
   // helper keeps the API's default and declares no beta for it.
   if (profile.extendedCacheBeta === true && !(cc3 && helper)) next = withExtendedCacheBeta(next)
+  if (withholdsEagerToolStreaming) next = withoutToolStreamingBeta(next)
   return next === payload ? undefined : next
 }
 
@@ -1485,6 +1603,20 @@ export class PiAiAdapter extends LlmAdapter {
       const ccWireParity = profile.ccWireParity === true && model.api === 'anthropic-messages'
         ? resolveCcWireParityRequest(request, profile.ccWireParityCache)
         : undefined
+      // A cc3 request that falls back from wire parity still filters its
+      // harness-describing sections, because no CC wire forwards them. The
+      // parity branch reads the same filter through its own decisions.
+      const cc3SystemText = ccWireParity === undefined
+        && profile.cacheMarkerPolicy === 'cc3'
+        && model.api === 'anthropic-messages'
+        ? ccPromptSections(request)?.text
+        : undefined
+      // pi-ai derives a fine-grained tool-streaming beta from a model that
+      // withholds the per-tool eager field; the pinned wire declares neither.
+      const withholdsEagerToolStreaming = model.api === 'anthropic-messages'
+        && model.compat !== undefined
+        && 'supportsEagerToolInputStreaming' in model.compat
+        && !model.compat.supportsEagerToolInputStreaming
       // The helper class is the one other request-level decision the payload
       // policy reads: it selects the `cc3` marker lifetime.
       const helper = isHelperRequest(request)
@@ -1546,11 +1678,16 @@ export class PiAiAdapter extends LlmAdapter {
         || profile.extendedCacheBeta === true
         || profile.cacheMarkerPolicy === 'cc3'
       const payloadPolicy = model.api === 'anthropic-messages' && declaresPayloadPolicy
+      const payloadOptions = payloadPolicy
+        ? {
+          onPayload: (payload: unknown) => withAnthropicPayloadPolicy(
+            payload, profile, ccWireParity, helper, cc3SystemText, withholdsEagerToolStreaming,
+          ),
+        }
+        : {}
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
-        ...payloadPolicy
-          ? { onPayload: (payload: unknown) => withAnthropicPayloadPolicy(payload, profile, ccWireParity, helper) }
-          : {},
+        ...payloadOptions,
         ...supportsFetchCapture(model.api) ? { fetch: providerError.fetch } : {},
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },

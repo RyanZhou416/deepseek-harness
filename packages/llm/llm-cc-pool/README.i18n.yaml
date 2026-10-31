@@ -21,11 +21,11 @@
   en: 8bef5dfa8713b1c1
   zh: 8e1f5b6107663855
 /deepseek-ai-dsh-llm-cc-pool/use-this-package/prompt-cache-policy:
-  en: bf401854df85f55d
-  zh: e7cad96a9dd845a2
+  en: 1375ba5cfc78b2fa
+  zh: a76f1fa5aead7be4
 /deepseek-ai-dsh-llm-cc-pool/use-this-package/cc-wire-parity:
-  en: fe4d2f95a5aa589d
-  zh: c6105201de6d08de
+  en: 7aa6780a25362384
+  zh: bef388099423e4d9
 /deepseek-ai-dsh-llm-cc-pool/use-this-package/model-catalogue:
   en: 2ee818fb19948b02
   zh: 8ce427ea0411251d
@@ -48,17 +48,17 @@
   en: c113819d24809037
   zh: c54251a0ae03d43b
 /deepseek-ai-dsh-llm-cc-pool/model-experience/provider-request-through-the-mac-pool/what-the-model-sees:
-  en: 077e667d2270a8f7
-  zh: 88588a1a1b39a708
+  en: 51d4b222cf1c40c9
+  zh: cefce88c4b6ff424
 /deepseek-ai-dsh-llm-cc-pool/model-experience/provider-request-through-the-mac-pool/token-effect:
   en: 82ac0d562e2e1a77
   zh: ff0efad0e929efc7
 /deepseek-ai-dsh-llm-cc-pool/model-experience/provider-request-through-the-mac-pool/kv-cache-effect:
-  en: 69f4d3aa789b7265
-  zh: a385f3223084580e
+  en: 2f49751c8f89fe85
+  zh: cf9445c7765cf589
 /deepseek-ai-dsh-llm-cc-pool/known-limitations-and-deferred-work:
-  en: 957e6ff781182376
-  zh: 662269b83aa380e3
+  en: 240f01cc7b4a1939
+  zh: dbe6ad6f793a763c
 /deepseek-ai-dsh-llm-cc-pool/known-limitations-and-deferred-work/dev-note:
   en: 020894f38748f582
   zh: 8dbb8a08c8d661bf

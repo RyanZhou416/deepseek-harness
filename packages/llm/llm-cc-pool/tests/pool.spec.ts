@@ -3,6 +3,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import LlmRuntime, { createSystemMessage } from '@deepseek-ai/dsh-llm'
+import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import {
   POOL_CAPACITY_CODE,
   POOL_RATE_LIMITED_CODE,
@@ -115,6 +116,9 @@ describe('fixed mac-pool route', () => {
         reasoning: true,
         compat: { forceAdaptiveThinking: true },
       })
+      // Fine-grained tool streaming is a first-party flag the pinned carve
+      // leaves off by default; pi-ai's per-model default would turn it on.
+      expect(model.compat).toMatchObject({ supportsEagerToolInputStreaming: false })
       expect(model.thinkingLevelMap).toEqual({
         off: null,
         minimal: null,
@@ -378,6 +382,13 @@ const WIRE_PARITY_PROBE = {
   requestClass: 'main' as const,
 }
 
+/** One tool declaration, so a request carries a declaration whose wire features are inspectable. */
+const ECHO: ToolSchema = {
+  name: 'echo',
+  description: 'Echo text back.',
+  parameters: { type: 'object', properties: { text: { type: 'string' } } },
+}
+
 /**
  * A capability reply in the pool's exact `{protocol, ccWireParity, buildId}`
  * form.
@@ -514,6 +525,37 @@ describe('CC wire parity capability proof', () => {
     expect(wire).not.toContain('The runtime context names the DeepSeek Harness implementation checkout.')
     expect(wire).not.toContain('You are interacting with the user through the DeepSeek Harness Web GUI.')
     expect(wire.match(/You are Claude Code, Anthropic's official CLI for Claude\./gu)).toHaveLength(1)
+  })
+
+  it('omits eager_input_streaming on the proved parity wire and the default wire', async () => {
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? capabilityReply('pool-build-1')
+      : anthropicSuccessResponse())
+    await awaitWireParity(ctx, capture)
+
+    await assemble(ctx, { ...WIRE_PARITY_PROBE, tools: [ECHO] })
+    const parity = modelCalls(capture).at(-1) as CapturedRequest
+    const parityTools = parity.body['tools'] as Record<string, unknown>[]
+    // The pinned carve leaves fine-grained tool streaming off by default and the
+    // subscription route omits it, so the parity body announces no such feature.
+    expect(parityTools[0]).not.toHaveProperty('eager_input_streaming')
+    // pi-ai derives a fine-grained tool-streaming beta from that compat, and the
+    // parity body removes it because the pinned wire declares neither member.
+    expect(parity.body).not.toHaveProperty('betas')
+    expect(parity.headers.get('anthropic-beta')).toBeNull()
+
+    // A classless request falls back to the route's cc3 wire, which must omit the
+    // same flag: the model-level compat fixes it for every request class.
+    const { requestClass: _requestClass, ...classless } = WIRE_PARITY_PROBE
+    await assemble(ctx, { ...classless, tools: [ECHO] })
+    const fallback = modelCalls(capture).at(-1) as CapturedRequest
+    expect(declaresWireParity(fallback)).toBe(false)
+    const fallbackTools = fallback.body['tools'] as Record<string, unknown>[]
+    expect(fallbackTools[0]).not.toHaveProperty('eager_input_streaming')
+    // The default wire still carries the pinned identity block and the three
+    // markers this route's policy owns.
+    expect(JSON.stringify(fallback.body)).toContain('You are Claude Code, Anthropic\'s official CLI for Claude.')
+    expect(JSON.stringify(fallback.body).match(/"cache_control"/gu)).toHaveLength(3)
   })
 
   it('declares cache intent off and sends the parity body for the caching-disabled lifetime', async () => {

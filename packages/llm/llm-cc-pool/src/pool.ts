@@ -411,7 +411,11 @@ export function poolProviderProfile(
       reasoning: model.defaultReasoning,
       // Adaptive thinking makes a level an effort rather than a token budget;
       // without it pi-ai sends budget-based thinking instead of output_config.
-      compat: { forceAdaptiveThinking: true },
+      // `eager_input_streaming` is a first-party fine-grained-streaming flag the
+      // pinned carve leaves off by default and the subscription route omits, so
+      // pi-ai's per-model default of `true` would announce a feature this route
+      // never sends.
+      compat: { forceAdaptiveThinking: true, supportsEagerToolInputStreaming: false },
     })),
   }
 }

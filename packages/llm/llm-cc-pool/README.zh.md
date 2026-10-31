@@ -63,11 +63,11 @@ kind: "package-bundle"
 
 ### 提示缓存策略
 
-本路由的默认策略是 CC 2.1.288 的三标记布局，带显式一小时存活期：`cacheMarkerPolicy: cc3`、`cacheTtl: 1h`、`extendedCacheBeta: true`。三者都不配置的 profile 就使用这套策略。这些字段是插件装载时读取的 loader 配置，只作用于本路由，并且只经本路由的 profile 到达请求。`cacheTtl` 命名 main 或 subagent 请求声明的标记存活期，`extendedCacheBeta` 声明该一小时存活期所需的 `extended-cache-ttl-2025-04-11`，`cacheMarkerPolicy: cc3` 掌管放置。helper 请求（`compaction`、`auxiliary`）不属于该存活期：它保持 API 默认的五分钟存活期，不带 `ttl`，也不声明 extended beta。
+本路由的默认策略是 CC 2.1.288 的三标记布局，带显式一小时存活期：`cacheMarkerPolicy: cc3`、`cacheTtl: 1h`、`extendedCacheBeta: true`。三者都不配置的 profile 就使用这套策略。这些字段是插件装载时读取的 loader 配置，只作用于本路由，并且只经本路由的 profile 到达请求。`cacheTtl` 命名 main 或 subagent 请求声明的标记存活期，`extendedCacheBeta` 声明该一小时存活期所需的 `extended-cache-ttl-2025-04-11`，`cacheMarkerPolicy: cc3` 掌管放置。helper 请求（`compaction`、`auxiliary`）不属于该存活期：它保持 API 默认的五分钟存活期，不带 `ttl`，也不声明 extended beta。池的 forward 路径会在 identity 块之前插入规范 billing 块，因此 `cc3` helper 与订阅 helper 一样携带 billing、identity 与三个五分钟标记。
 
 不可能成立的组合会在插件装载时被拒绝，设置写入也走同一校验，绝不会拖到请求时才失败：`cacheTtl: 1h` 缺少 `extendedCacheBeta: true` 是错误，`cacheMarkerPolicy: cc3` 还要求 `cacheTtl: 1h`。`cacheTtl: none` 是受支持的关闭缓存状态：解析时会移除 `cacheMarkerPolicy`、强制 `extendedCacheBeta: false`，路由不写任何标记，并去掉 cc3 布局——identity 块、pinned 字段顺序与 `metadata` 占位符——请求体保持 pi-ai 自己的形态。`cacheTtl: 5m` 仅供编程调用：loader schema 只提供默认 `cc3` 策略能服务的两种存活期（`1h` 与 `none`），而省略 `cacheMarkerPolicy` 的编程 profile 仍可选择 `5m`。helper 存活期同样不是 loader 取值：它跟随请求类别，任何配置字段都不会把 helper 变成一小时。schema 接受其策略能服务的存活期取值，但由解析后的策略决定它们如何服务，因此路由不会留下来不带其标记所需 beta 的状态。
 
-使用 `cc3` 时，放置由本路由的适配器接管：先移除 `system`、`tools` 和 `messages` 上共享传输或调用方放置的全部 `cache_control`，然后只给三个位置加标记——pinned identity 块、harness system 块，以及最后一个可缓存的用户内容块。main 或 subagent 请求在每个位置写入 `{"type": "ephemeral", "ttl": "1h"}`；helper 请求（`compaction`、`auxiliary`）保持 API 默认的五分钟存活期，写入 `{"type": "ephemeral"}`、不带 `ttl`，也不声明 extended beta。identity 块——`You are Claude Code, Anthropic's official CLI for Claude.`——排在整个 system 数组最前，因此本路由转发的顺序是 identity、harness；mac 池在其前面发送的 billing 块属于池本身，最终顺序为 billing、identity、harness。策略会给 identity 块加标记；池插入的 billing 块不带标记，最后一条 user 消息之前的消息与任何工具声明也都不带。identity 行最多出现一次，因为与它逐字节相等的调用方块会在策略加入自己的块之前被丢弃。
+使用 `cc3` 时，放置由本路由的适配器接管：先移除 `system`、`tools` 和 `messages` 上共享传输或调用方放置的全部 `cache_control`，然后只给三个位置加标记——pinned identity 块、调用方过滤后的提示块，以及最后一个可缓存的用户内容块。描述本 harness 进程的 section（`harness:source`、`app:web-surface`）与 `harness:identity` 文本绝不转发：pinned 行替换 identity section，调用方的其他 section 按装配顺序保留。main 或 subagent 请求在每个位置写入 `{"type": "ephemeral", "ttl": "1h"}`；helper 请求（`compaction`、`auxiliary`）保持 API 默认的五分钟存活期，写入 `{"type": "ephemeral"}`、不带 `ttl`，也不声明 extended beta。identity 块——`You are Claude Code, Anthropic's official CLI for Claude.`——排在整个 system 数组最前，因此本路由转发的顺序是 identity、调用方提示；mac 池在其前面发送的 billing 块属于池本身，最终顺序为 billing、identity、调用方提示。策略会给 identity 块加标记；池插入的 billing 块不带标记，最后一条 user 消息之前的消息与任何工具声明也都不带。identity 行最多出现一次，因为与它逐字节相等的调用方块会在策略加入自己的块之前被丢弃。
 
 唯一的消息位置是最后一条 user 消息的末尾块；没有调用方 system prompt 的请求标记 identity 与最后 user 两个位置，只有一条消息的请求仍带三个标记。请求体还遵循 pinned 客户端的顶层字段顺序——`model`、`messages`、`system`、`tools`、`tool_choice`、`metadata`、`max_tokens`、`thinking`，随后是其余字段，`stream` 最后——若 `metadata` 缺失，则在规范位置补一个空对象，好让池的 forward-body 编辑器就地把 `metadata.user_id` 写入其中，而不是在 `stream` 之后追加成员；转发后的请求体保持一个 `metadata` 成员，且仍在原位置。beta 走请求的 `anthropic-beta` header，且只随 main 或 subagent 请求发送，helper 不声明；转发的请求体不增加 `scope` 字段，也不声明 scope beta。
 
@@ -79,7 +79,7 @@ kind: "package-bundle"
 
 正面证明只属于作出回答的端点与池构建。插件在 profile 装载时以及 `CC_POOL_API_KEY` 被替换时再次询问，绝不轮询。它也没有重连接缝：新构建上的池重启在其中一个触发器运行之前不会被重新探测，因此路由可能继续为上一个构建证明过的线路服务。池标记为 `x-cc-wire-parity-unavailable: 1` 的 `503` 是对能力的反证，而不是再问一次的理由：插件丢弃证明，下一个请求改用其配置的非 parity 线路，且不重新探测。该标记本身也禁止自动重发——即使响应体没有 pool code、`origin` 或重试事实——因此被拒绝的 wire parity 请求绝不会以默认线路重试。
 
-在已证明的路由上，适配器写入 parity 请求体与三个成员 header（`x-cc-request-class`、`x-cc-system-layout`、`x-cc-cache-intent`）；本插件只公布标志与缓存意图，绝不改写请求体或 header。线路自行声明缓存意图：`cacheTtl: none`——本路由的关闭缓存状态——变成意图 `off`，worker 因此不写标记、不写 TTL、不声明 cache beta，而其它存活期都变成 `main`，即 worker 自己的缓存计划；helper 始终声明 `helper`。parity 请求体本身不携带 `cache_control`，因此该线路不要求 `cc3`、`cacheTtl: 1h` 或 `extendedCacheBeta`，关闭缓存的路由仍启用该线路。适配器无法分类的请求，或没有真实静态/动态分界的主/子智能体请求，会回退到该路由的普通 wire（配置 `cc3` 时即三标记请求体），而不是部分 parity 请求体；`cacheTtl: none` 时该普通 wire 就是 pi-ai 自己的请求体，没有 identity 块、没有 pinned 字段顺序，也没有 `metadata` 占位符。
+在已证明的路由上，适配器写入 parity 请求体与三个成员 header（`x-cc-request-class`、`x-cc-system-layout`、`x-cc-cache-intent`）；本插件只公布标志与缓存意图，绝不改写请求体或 header。线路自行声明缓存意图：`cacheTtl: none`——本路由的关闭缓存状态——变成意图 `off`，worker 因此不写标记、不写 TTL、不声明 cache beta，而其它存活期都变成 `main`，即 worker 自己的缓存计划；helper 始终声明 `helper`。受 worker 约束，helper 采用保守形态：只有调用方过滤掉 harness section 后的 system，没有 billing 或 identity 块，也没有标记；这比订阅 helper 发送的 billing、identity 与三个五分钟标记少发，因为 worker 的 helper frame 不承载这些内容。parity 请求体本身不携带 `cache_control`，因此该线路不要求 `cc3`、`cacheTtl: 1h` 或 `extendedCacheBeta`，关闭缓存的路由仍启用该线路。适配器无法分类的请求，或没有真实静态/动态分界的主/子智能体请求，会回退到该路由的普通 wire（配置 `cc3` 时即三标记请求体），而不是部分 parity 请求体；`cacheTtl: none` 时该普通 wire 就是 pi-ai 自己的请求体，没有 identity 块、没有 pinned 字段顺序，也没有 `metadata` 占位符。
 
 ### 模型目录
 
@@ -138,7 +138,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 #### What the model sees
 
-所选池模型收到 Claude Code identity 块、共享 pi-ai 传输组装出的 system prompt、会话历史与工具声明，并附带池的 `x-cc-backend` 与 Claude Code 会话 header；模型默认档位以 `thinking: {type: "adaptive"}` 下的 `output_config.effort` 发送。
+所选池模型收到 Claude Code identity 块、调用方过滤后的 system prompt、会话历史与工具声明，并附带池的 `x-cc-backend` 与 Claude Code 会话 header；模型默认档位以 `thinking: {type: "adaptive"}` 下的 `output_config.effort` 发送。工具声明不携带 `eager_input_streaming`：本路由不启用 pinned carve 默认关闭、订阅路由也不发送的第一方细粒度流式字段，cc3 与 parity 线路同时移除 pi-ai 由该字段派生的 beta。
 
 #### Token effect
 
@@ -146,7 +146,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 #### KV Cache effect
 
-固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。默认的 `cc3` 策略加入 identity 块，对 main 或 subagent 请求用显式一小时存活期、对 helper 请求用 API 默认的五分钟存活期标记 identity 块、harness system 块与最后一个用户内容块，写入 pinned 客户端的字段顺序，并只在采用一小时存活期时声明 extended beta。`cacheTtl` 与 `extendedCacheBeta` 仍是本路由的字段，但策略要求一小时且声明 beta 的组合，并由策略掌管标记集合与字段顺序，因此布局不会在请求之间变化，任何工具声明也都不带标记。一旦证明 `ccWireParity`，parity 请求体反而完全不携带 `cache_control`：它把 prompt 拆成 identity 行、重排后的静态 section 与会话专属余下部分，由 worker 按声明的意图写入缓存计划——`main`，或关闭缓存路由的 `off`——因此该线路的前缀布局与标记放置属于池的 worker，而不属于本路由。
+固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。默认的 `cc3` 策略加入 identity 块，对 main 或 subagent 请求用显式一小时存活期、对 helper 请求用 API 默认的五分钟存活期标记 identity 块、调用方过滤后的提示块与最后一个用户内容块，写入 pinned 客户端的字段顺序，并只在采用一小时存活期时声明 extended beta。`cacheTtl` 与 `extendedCacheBeta` 仍是本路由的字段，但策略要求一小时且声明 beta 的组合，并由策略掌管标记集合与字段顺序，因此布局不会在请求之间变化，任何工具声明也都不带标记，任何 cc3 或 parity 请求都不声明不启用的 eager 流式字段及其派生 beta。一旦证明 `ccWireParity`，parity 请求体反而完全不携带 `cache_control`：它把 prompt 拆成 identity 行、重排后的静态 section 与会话专属余下部分，由 worker 按声明的意图写入缓存计划——`main`，或关闭缓存路由的 `off`——因此该线路的前缀布局与标记放置属于池的 worker，而不属于本路由。
 
 ## 已知限制与后续工作
 
@@ -154,11 +154,11 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 - **池失败分类仍位于 `dsh-llm-pi-ai`**——本插件复用通用适配器的 pool-error 分类器与 `dsh-llm-retry` 的执行器，因此没有 `dsh-llm-pi-ai` 的组合无法挂载该路由。把 mac 池专属分类移入本包属于后续工作；迁移不得向通用包加入 mac 池分支。
 - **持久化日志需显式启用并使用自己的文件名**——未配置的插件不写任何文件，因为会话 header 本身不隐含 sink。配置 `requestLog` 但未给 `path` 时写入 `$DSH_HOME/logs/llm-cc-pool-requests.jsonl`，从而避开通用 pi-ai 文件，也不会在同一默认路径上出现两个写入者。
-- **parity 的 system 改写没有持久记录**——该线路的 `[identity, static, dynamic]` system 文本，以及被丢弃或重排的 section，会到达模型却没有对应的 `llm/request-record` 条目。订阅插件的 Claude 路由会发布该记录；在此照做需要修改 required-on-read 的 `llm/request-record` 持久类型（producer 为字面量、payload 没有 section plan 字段），因此这是对 model-visible⟺logged 规则的有意例外，而不是静默的格式改动。理由与后续工作记录在 `FORK_MAINTENANCE.md`；请求日志只记录尝试、不含请求体，不能替代它。这只是可观测性缺口——请求字节、缓存布局与线路行为均不改变。
+- **CC 的 system 改写没有持久记录**——该线路的 `[identity, static, dynamic]` system 文本、丢弃 harness 描述 section 的 cc3 过滤，以及两者丢弃或重排的 section，会到达模型却没有对应的 `llm/request-record` 条目。订阅插件的 Claude 路由会发布该记录；在此照做需要修改 required-on-read 的 `llm/request-record` 持久类型（producer 为字面量、payload 没有 section plan 字段），因此这是对 model-visible⟺logged 规则的有意例外，而不是静默的格式改动。理由与后续工作记录在 `FORK_MAINTENANCE.md`；请求日志只记录尝试、不含请求体，不能替代它。这只是可观测性缺口——请求字节、缓存布局与线路行为均不改变。
 - **目录经本插件自己的字段编辑**——部署通过 `models` 改动自己的模型集，而池同步只报告候选：采纳需要一次显式的设置写入并经过目录校验，绝不会静默覆盖，该读取也无法采纳进通用 Models 页面。新增档位、移除 adaptive thinking 或修改路由事实都随插件版本发布。
 - **只公布生效目录中的 id**——服务层仍接受未列出的模型 id，但选择器表面展示该列表，配置后的目录是唯一事实来源。
 - **图片模态是声明而非探测**——每个目录条目都会得到 `text` 与 `image`；拒绝图片的池端点会在轮次中途以 provider 拒绝的形式浮现。
-- **缓存布局是三个真实的 CC 标记，而不是 CC 的完整 planner**——未启用 `ccWireParity` 时，路由转发客户端 identity 块，并按 pinned 客户端的顶层字段顺序标记 identity 块、harness system 块与最后一个用户内容块。它不复制客户端的 `markerIndices`、fork point、compact 断点规划、其静态/动态 prompt 切分，也不复制其前一条消息断点，并且不放置任何工具标记。可选线路只在成员端点证明能力后的请求上加入该切分与 parity header；在 parity 请求上，改写会用 pinned identity 行替换 `harness:identity` 区段，并丢弃 `harness:source` 与 `app:web-surface` 区段。适配器无法分类的请求，或没有真实静态/动态分界的主/子智能体请求，会回退到该路由的普通 wire（配置 `cc3` 时即三标记请求体）；`cacheTtl: none` 时该普通 wire 就是 pi-ai 自己的请求体，没有 identity 块、没有 pinned 字段顺序，也没有 `metadata` 占位符。缺少必需的一小时/beta 组合的策略会在装载时被拒绝，而不是静默回退；`cacheTtl: none` 则解析为合法的关闭缓存策略，不写标记，也不声明 extended beta。
+- **缓存布局是三个真实的 CC 标记，而不是 CC 的完整 planner**——未启用 `ccWireParity` 时，路由转发客户端 identity 块，并按 pinned 客户端的顶层字段顺序标记 identity 块、调用方过滤后的提示块与最后一个用户内容块。它不复制客户端的 `markerIndices`、fork point、compact 断点规划、其静态/动态 prompt 切分，也不复制其前一条消息断点，不放置任何工具标记，也不声明不启用的 eager 工具流式字段及其派生 beta。可选线路只在成员端点证明能力后的请求上加入该切分与 parity header；无论哪条线路，改写都会用 pinned identity 行替换 `harness:identity` 区段，并丢弃 `harness:source` 与 `app:web-surface` 区段。适配器无法分类的请求，或没有真实静态/动态分界的主/子智能体请求，会回退到该路由的普通 wire（配置 `cc3` 时即三标记请求体）；`cacheTtl: none` 时该普通 wire 就是 pi-ai 自己的请求体，没有 identity 块、没有 pinned 字段顺序，也没有 `metadata` 占位符。缺少必需的一小时/beta 组合的策略会在装载时被拒绝，而不是静默回退；`cacheTtl: none` 则解析为合法的关闭缓存策略，不写标记，也不声明 extended beta。
 - **线路按池构建证明，且没有重连触发器**——一次证明只覆盖一个成员端点与一个池 `buildId`；插件只在 profile 装载与 `CC_POOL_API_KEY` 被替换时再次询问。因此新构建上的池重启不会被重新探测，路由会继续为上一个构建证明过的线路服务，直到其中一个触发器运行或带标记的 `503` 丢弃证明。
 - **base bundle 不包含本包**——只有链接了该 bundle 的 profile 才存在该路由。fork 的 `build.cmd` 会为 web profile 完成链接，但未经过该构建的 profile 没有 `cc-pool` 路由。仍声明 `llm-pi-ai` `cc-pool` provider 的 profile 必须移除它，否则两个适配器都会占用 `cc-pool`，插件装载失败。
 - **同会话排序仅限单个 Host 进程**——队列属于一个插件实例，因此另一个 DSH 进程或其它 CC 客户端使用同一池会话时并不受协调。有界重试只能吸收稍晚释放的租约；若该会话仍在别处活跃，调用方会看到 `POOL_SESSION_BUSY`。

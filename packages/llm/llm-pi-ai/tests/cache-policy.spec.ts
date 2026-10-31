@@ -897,3 +897,236 @@ describe('CC wire parity body', () => {
     expect(markersOf(body)).toEqual([])
   })
 })
+
+/**
+ * The real harness-owned prompt sections: the DeepSeek identity line the wire
+ * replaces, the two process-describing sections it never forwards, a caller
+ * block holding the pinned identity text, a caller's stable rules, and the
+ * session-specific remainder.
+ */
+const HARNESS_SECTIONS = [
+  { name: 'harness:identity', text: 'You are an AI agent powered by DeepSeek Harness.', stable: true },
+  { name: 'harness:source', text: 'The runtime context names the DeepSeek Harness implementation checkout.', stable: true },
+  { name: 'app:web-surface', text: 'You are interacting with the user through the DeepSeek Harness Web GUI.', stable: true },
+  { name: 'app:instructions', text: 'Stable route instructions.', stable: true },
+  { name: 'caller:identity', text: IDENTITY, stable: true },
+  { name: 'session:state', text: 'Current session state.', stable: false },
+]
+
+/** The caller's kept prompt text: every section except the three harness ones and the identity duplicate. */
+const CALLER_PROMPT = 'Stable route instructions.\n\nCurrent session state.'
+
+/** A request whose real harness sections join to its leading system text. */
+function harnessRequest(overrides: Record<string, unknown> = {}) {
+  return {
+    ...PROBE,
+    system: HARNESS_SECTIONS.map(section => section.text).join('\n\n'),
+    systemSections: HARNESS_SECTIONS,
+    ...overrides,
+  }
+}
+
+/** The harness text a CC wire must never forward. */
+function expectNoHarnessPrompt(body: Record<string, unknown>): void {
+  const wire = JSON.stringify(body)
+  expect(wire).not.toContain('You are an AI agent powered by DeepSeek Harness.')
+  expect(wire).not.toContain('The runtime context names the DeepSeek Harness implementation checkout.')
+  expect(wire).not.toContain('You are interacting with the user through the DeepSeek Harness Web GUI.')
+  // The caller's own sections survive on every wire.
+  expect(wire).toContain('Stable route instructions.')
+  expect(wire).toContain('Current session state.')
+}
+
+describe('prompt-section filtering on the cc3 wire and parity helpers', () => {
+  it('drops the harness sections on a cc3 main request and keeps the caller prompt', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, { ...harnessRequest({ provider: 'cache-cc3', requestClass: 'main' }) })
+
+    const body = server.requests[0] as Record<string, unknown>
+    // The pinned identity line replaces harness:identity, the two
+    // process-describing sections and a caller duplicate identity line are
+    // dropped, and the caller's other sections remain in assembly order.
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: CALLER_PROMPT, cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expectNoHarnessPrompt(body)
+    expect(JSON.stringify(body).match(/You are Claude Code, Anthropic's official CLI for Claude\./gu)).toHaveLength(1)
+    expect(betasOf(server.headers[0] ?? {})).toEqual([EXTENDED_CACHE_TTL_BETA])
+  })
+
+  it('drops the harness sections on a cc3 helper request at the five-minute lifetime', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, { ...harnessRequest({ provider: 'cache-cc3', purpose: 'compaction' }) })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: CALLER_PROMPT, cache_control: { type: 'ephemeral' } },
+    ])
+    expect(JSON.stringify(body)).not.toContain('"ttl"')
+    expectNoHarnessPrompt(body)
+    // The helper's slot count is unchanged: identity, caller prompt, last user block.
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
+      ['.system[0].cache_control', { type: 'ephemeral' }],
+      ['.system[1].cache_control', { type: 'ephemeral' }],
+    ])
+    expect(betasOf(server.headers[0] ?? {})).toEqual([])
+  })
+
+  it('keeps the caller system unchanged when the sections no longer describe it', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    // A prompt committed in history no longer equals the current assembly, so
+    // there is no section text to substitute: rewriting it from the current
+    // sections would drop caller content, so the cc3 policy forwards it whole.
+    await assemble(ctx, {
+      ...PROBE,
+      provider: 'cache-cc3',
+      system: 'Committed prompt.\n\nState one.',
+      systemSections: HARNESS_SECTIONS,
+      requestClass: 'main',
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: 'Committed prompt.\n\nState one.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+  })
+
+  it('drops the harness sections on a parity helper and under-emits the subscription helper form', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        apiKeyEnv: 'CACHE_POLICY_KEY',
+        ccWireParity: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    await assemble(ctx, { ...harnessRequest({ provider: 'parity-main', purpose: 'compaction' }) })
+
+    const headers = server.headers[0] ?? {}
+    const body = server.requests[0] as Record<string, unknown>
+    expect(headers['x-cc-request-class']).toBe('compaction')
+    expect(headers['x-cc-system-layout']).toBe('none')
+    expect(headers['x-cc-cache-intent']).toBe('helper')
+    // The conservative helper form the worker's frame admits: the caller's
+    // non-harness system only, no billing or identity block, and no cache
+    // marker. It deliberately under-emits the subscription helper's billing +
+    // identity + three five-minute markers, which the frame cannot carry.
+    expect(body['system']).toEqual([{ type: 'text', text: CALLER_PROMPT }])
+    expect(markersOf(body)).toEqual([])
+    expect(JSON.stringify(body)).not.toContain('"ttl"')
+    expectNoHarnessPrompt(body)
+    expect(JSON.stringify(body).match(/You are Claude Code, Anthropic's official CLI for Claude\./gu)).toBeNull()
+    // The pool splices `metadata.user_id` into every forwarded request,
+    // helpers included, so the canonical slot is still part of the body.
+    expect(body['metadata']).toEqual({})
+  })
+
+  it('omits a helper system that held only harness sections', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        apiKeyEnv: 'CACHE_POLICY_KEY',
+        ccWireParity: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    const harnessOnly = HARNESS_SECTIONS.slice(0, 3)
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'parity-main',
+      system: harnessOnly.map(section => section.text).join('\n\n'),
+      systemSections: harnessOnly,
+      purpose: 'session-title',
+      messages: [userText('title this')],
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    // Dropping every section leaves nothing to forward: the helper omits the
+    // field instead of sending an empty system array.
+    expect(body['system']).toBeUndefined()
+    expect(markersOf(body)).toEqual([])
+  })
+})
