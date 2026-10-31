@@ -695,9 +695,10 @@ describe('CC wire parity capability proof', () => {
     await assemble(ctx, WIRE_PARITY_PROBE)
     expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
 
-    // The next request is back on the three-marker wire without asking the
-    // endpoint again: the marked refusal is evidence against the proof, not a
-    // trigger for another probe.
+    // The next request is back on the three-marker wire immediately. The marked
+    // refusal clears the proof and schedules another probe after the cooldown,
+    // so the route is not permanently off; the separate case below advances that
+    // cooldown and observes the probe.
     refuse = false
     await assemble(ctx, WIRE_PARITY_PROBE)
     const after = modelCalls(capture).at(-1) as CapturedRequest
@@ -706,6 +707,42 @@ describe('CC wire parity capability proof', () => {
     expect(body.match(/"cache_control"/gu)).toHaveLength(3)
     expect(body).toContain('"ttl":"1h"')
     expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('re-probes after the marked 503 cooldown and serves the wire again', async () => {
+    vi.useFakeTimers()
+    try {
+      let refuse = false
+      let probes = 0
+      const { ctx, capture } = await mountProbed((request) => {
+        if (request.url !== CAPABILITIES_URL) {
+          return refuse ? wireParityRefusal() : anthropicSuccessResponse()
+        }
+        probes += 1
+        return capabilityReply(`pool-build-${probes}`)
+      })
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+
+      refuse = true
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      refuse = false
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      const fallback = modelCalls(capture).at(-1) as CapturedRequest
+      expect(declaresWireParity(fallback)).toBe(false)
+      expectCc3Wire(fallback)
+      // The refusal scheduled the next probe, but not before the cooldown.
+      expect(capabilityCalls(capture)).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(capabilityCalls(capture)).toHaveLength(2)
+
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+      expect(capabilityCalls(capture)).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('keeps the proof on a 503 that carries no wire parity marker', async () => {
@@ -725,6 +762,78 @@ describe('CC wire parity capability proof', () => {
     await assemble(ctx, WIRE_PARITY_PROBE)
     expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
     expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('retries a failed load probe and turns the wire on after a later proof', async () => {
+    let probes = 0
+    const firstProbe = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed((request) => {
+      if (request.url !== CAPABILITIES_URL) return anthropicSuccessResponse()
+      probes += 1
+      return probes === 1 ? firstProbe.promise : capabilityReply('pool-build-retry')
+    })
+    const logs: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
+
+    // The first request waits for the failed load probe and serves the cc3 wire.
+    const pending = assemble(ctx, WIRE_PARITY_PROBE)
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
+    firstProbe.resolve(bareServerError())
+    await pending
+    const first = modelCalls(capture).at(-1) as CapturedRequest
+    expect(declaresWireParity(first)).toBe(false)
+    expectCc3Wire(first)
+    // A failed probe is visible, not debug-only.
+    expect(logs.some(args => args.some(arg => String(arg).includes('CC wire parity probe failed')))).toBe(true)
+
+    // The bounded backoff retries; the second probe proves the wire, and the
+    // retry does not leave the route permanently off.
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(2) }, { timeout: 10_000 })
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+  })
+
+  it('waits for the load probe before the first routed request decides the wire', async () => {
+    const answer = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? answer.promise
+      : anthropicSuccessResponse())
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
+
+    // The first request cannot prepare a snapshot before the probe answers.
+    const pending = assemble(ctx, WIRE_PARITY_PROBE)
+    await new Promise((resolve) => { setTimeout(resolve, 20) })
+    expect(modelCalls(capture)).toHaveLength(0)
+
+    answer.resolve(capabilityReply('pool-build-1'))
+    await pending
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+  })
+
+  it('serves the current wire when the initial probe misses the readiness deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const answer = Promise.withResolvers<Response>()
+      const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+        ? answer.promise
+        : anthropicSuccessResponse())
+
+      // The probe stays pending past the bounded wait; the first request then
+      // proceeds on the non-parity wire, and the probe keeps running.
+      const pending = assemble(ctx, WIRE_PARITY_PROBE)
+      await vi.advanceTimersByTimeAsync(6_000)
+      await pending
+      const first = modelCalls(capture).at(-1) as CapturedRequest
+      expect(declaresWireParity(first)).toBe(false)
+      expectCc3Wire(first)
+
+      answer.resolve(capabilityReply('pool-build-late'))
+      await vi.advanceTimersByTimeAsync(0)
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('replaces the proof and keeps the wire when a later probe answers a different build', async () => {

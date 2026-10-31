@@ -1426,7 +1426,10 @@ covers the default three-marker body with a marked identity block and caller
 prompt block, the helper request's five-minute markers with no `ttl` and no beta
 beside a main and subagent request's one-hour markers with the extended beta,
 the dropped `harness:source`/`app:web-surface` sections and replaced
-`harness:identity` on the cc3 wire and on parity helpers, the compaction
+`harness:identity` on the cc3 wire and on parity helpers, the sectionless cc3
+main/subagent fallback that drops the current and named harness paragraphs and
+prepends the pinned identity once while leaving arbitrary caller text intact,
+the compaction
 request's attached `systemSections`,
 the unmarked assistant turn before the last user block, the
 single-message and no-system-prompt requests, the pinned top-level field order,
@@ -1498,13 +1501,15 @@ worker advertises `ccWireParity` in the separate `wire_profile_capabilities`
 frame, not `hello_ok`; otherwise the pool returns
 `503 cc_wire_parity_unavailable` with `x-cc-wire-parity-unavailable: 1` before
 forwarding bytes, and DSH treats only that marked 503 on a request that carries
-the wire as evidence against the proof: it drops the proof and immediately
-serves the default wire. Old pool + new DSH keeps the default wire; new pool +
+the wire as evidence against the proof: it drops the proof, immediately serves
+the default wire, and schedules another probe after a 30 s cooldown so the
+refusal is not a permanent fallback. Old pool + new DSH keeps the default wire; new pool +
 old worker is the marked 503; rollback disables DSH `ccWireParity` and
 invalidates the positive probe before rolling back the pool. A positive probe is
-cached only for the same endpoint and pool build: DSH re-probes at profile load
-and on a replaced `CC_POOL_API_KEY` and never polls, so no reconnect seam exists
-in `llm-cc-pool`/`dsh-llm` to re-probe a pool restart at a new build.
+cached only for the same endpoint and pool build: DSH re-probes at profile load,
+on a replaced `CC_POOL_API_KEY`, after a failed probe's bounded backoff, and
+after a marked refusal's cooldown, so a pool restart at a new build is not
+probed until one of those triggers runs. A successful proof is not polled.
 
 **Member contract.** Three headers, all present or all absent:
 `x-cc-request-class` (`main|compaction|auxiliary|subagent`; `workflow`
@@ -1633,13 +1638,15 @@ filter: drop `harness:source`/`app:web-surface`, replace `harness:identity`,
 keep other caller sections; a helper that states matching sections forwards the
 filtered caller text, layout `none`, no markers. `compaction-basic` supplies
 those sections from the current assembly because it replays the committed system
-message; a helper without sections drops the exact DSH identity, source and
-Web-surface paragraphs by their owned texts (named section texts cover a
-versioned assembly that still states them), and only a whole paragraph compares
-equal. An older value-bearing paragraph with no section identity is not guessed
-at. The owned fallback texts mirror `packages/core/system-prompt` and
-`packages/context/harness-dev-context`; a change there must update the adapter
-constants and their tests. The three `x-cc-*` headers are added in the adapter's existing
+message; a helper or a main/subagent request without a matching assembly drops
+the exact DSH identity, source and Web-surface paragraphs by their owned texts
+(named section texts cover a versioned assembly that still states them), removes
+a caller paragraph equal to the pinned identity line before the policy prepends
+its own copy, and leaves every other caller paragraph untouched. Only a whole
+paragraph compares equal; an older value-bearing paragraph with no section
+identity is not guessed at. The owned fallback texts mirror
+`packages/core/system-prompt` and `packages/context/harness-dev-context`; a
+change there must update the adapter constants and their tests. The three `x-cc-*` headers are added in the adapter's existing
 per-request header construction; they are adapter-owned on every route, a
 profile that spells one is refused at resolution, and the request construction
 also strips it. That construction also removes the worker-planned cache betas
@@ -1650,11 +1657,20 @@ wire. Non-cache betas keep their order, and a header with no remaining beta is
 removed rather than sent empty; `packages/llm/llm-pi-ai/tests/wire-parity-body.spec.ts`
 covers both the parity request and the unchanged non-parity request.
 `llm-cc-pool` only adds the profile field and the capability
-probe. The probe is a member HTTP request at profile load and on a replaced
-member credential, not a model/account request; it requires the pool's build
-identity and never polls. A marked `503` on a request that carries the wire
-drops the proof and the next request serves the default wire without
-re-probing. Routes without the wire and other providers keep their current
+probe. The probe is a member HTTP request at profile load, on a replaced member
+credential, and after a failed attempt's backoff; it is not a model/account
+request and it requires the pool's build identity. A successful proof is not
+polled on a schedule. A failed load probe retries with bounded
+backoff (2 s doubling to 60 s) and logs the attempt and next delay at warning
+level, so one failure does not leave the process permanently on the default
+wire. The first routed request awaits the initial probe under a 6 s deadline
+and then proceeds on the configured default wire if it has not answered,
+while the retry schedule keeps running. A marked `503` on a request that carries
+the wire drops the proof immediately and schedules another probe after a 30 s
+cooldown, so the refusal is not a permanent fallback; a probe already in flight
+is the fresher question and the cooldown bounds probe traffic. Proven and
+failed probe transitions are logged at info/warning with the build id but no
+credential. Routes without the wire and other providers keep their current
 bytes. The request log records the attempt's route, model, endpoint, status and
 pool request id; it never carries the body, the headers, or the section plan.
 

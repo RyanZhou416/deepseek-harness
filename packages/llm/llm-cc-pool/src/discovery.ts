@@ -44,8 +44,8 @@ export const CAPABILITIES_URL = `${BASE_URL}/v1/capabilities`
  * Security bound on one capability probe, in milliseconds. The probe decides
  * whether a request may carry wire parity, so an endpoint that stops answering
  * must prove nothing instead of holding that decision open. It bounds
- * a single probe; it is not a polling interval, because the plugin asks only at
- * profile load and on a member credential change.
+ * a single attempt; the caller owns the retry schedule, so this is not a polling
+ * interval.
  */
 const CAPABILITY_PROBE_TIMEOUT_MS = 5_000
 
@@ -230,8 +230,8 @@ function readCapabilityProof(body: unknown, endpoint: string): PoolCapabilityPro
  * body, a missing or unusable build identity, an unreachable endpoint, the
  * deadline, or caller cancellation — answers `undefined`, so the caller keeps
  * the route's current wire instead of enabling wire parity on an endpoint that never
- * proved it for a build. The probe is neither retried nor polled: the caller
- * owns its triggers, and each trigger asks exactly once.
+ * proved it for a build. The probe is not retried here: it answers once per
+ * call, and the caller owns the bounded retry schedule and its triggers.
  * @param apiKey - the resolved `CC_POOL_API_KEY` member credential.
  * @param signal - caller cancellation, for fiber disposal or a superseding probe.
  * @returns the proof for this endpoint and pool build, or `undefined` when the

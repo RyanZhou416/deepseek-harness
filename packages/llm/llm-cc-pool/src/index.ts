@@ -26,16 +26,18 @@
  * `/v1/capabilities` at profile load and when the member credential changes,
  * accepts a positive proof only for the endpoint and pool build that answered,
  * puts wire parity on the route profile only after that proof, and never
- * rewrites a request body or header for it. Wire parity declares its own cache
+ * rewrites a request body or header for it. A failed probe retries with bounded
+ * backoff, the first routed request waits for the initial probe's outcome under
+ * a bounded deadline, and a `503` the endpoint marks with
+ * `x-cc-wire-parity-unavailable: 1` on a wire-parity-on request drops the proof
+ * and schedules another probe after a cooldown instead of leaving the route
+ * permanently on the non-parity wire. Wire parity declares its own cache
  * intent, which the profile carries: `cacheTtl: none` — this route's
  * caching-disabled state — makes a main or subagent wire-parity request declare
  * `off`, so the worker writes no marker, no TTL, and no cache beta, and every
- * other lifetime declares `main` for the worker's own cache plan. Only a `503`
- * the endpoint marks with `x-cc-wire-parity-unavailable: 1` on a wire-parity-on
- * request is evidence against that proof, so only that refusal immediately
- * falls back to the three-marker wire instead of re-probing; every other `503`
- * is an ordinary failure and leaves the proof in place. Only a profile load or
- * a replaced `CC_POOL_API_KEY` asks the endpoint again. All of them reach the wire only through this route's profile;
+ * other lifetime declares `main` for the worker's own cache plan, including the
+ * HIPAA-driven five-minute fallback on that wire. All
+ * of them reach the wire only through this route's profile;
  * no other provider's request is touched. The durable request log is opt-in: a
  * request carrying the session identity does not write a file by itself,
  * `requestLog` turns it on, and its default path is the pool's own so the pi-ai
@@ -125,6 +127,33 @@ function retriedAttempt(options: GenerateOptions, retryNonce: string): GenerateO
 }
 
 /**
+ * Retry delays for a failed capability probe: the first retry starts after
+ * {@link WIRE_PARITY_RETRY_INITIAL_MS} and every later failure doubles the delay
+ * up to {@link WIRE_PARITY_RETRY_MAX_MS}. The ceiling bounds background traffic
+ * when the endpoint stays unreachable while the route keeps serving the safe
+ * non-parity wire.
+ */
+const WIRE_PARITY_RETRY_INITIAL_MS = 2_000
+
+/** Ceiling of the probe retry backoff; see {@link WIRE_PARITY_RETRY_INITIAL_MS}. */
+const WIRE_PARITY_RETRY_MAX_MS = 60_000
+
+/**
+ * Minimum spacing between a marked `503` refusal and the next probe. The refusal
+ * clears the proof immediately, but asking again inside this window would let a
+ * still-unsupported pool turn every refused request into a probe.
+ */
+const WIRE_PARITY_REFUSAL_COOLDOWN_MS = 30_000
+
+/**
+ * Upper bound on one request's wait for the load probe. The probe itself is
+ * bounded by the capability timeout; this deadline also covers a credential
+ * lookup that stops answering, so the first request proceeds on the safe
+ * non-parity wire instead of hanging.
+ */
+const WIRE_PARITY_READY_TIMEOUT_MS = 6_000
+
+/**
  * The pi-ai adapter with two mac-pool differences: the model catalogue is the
  * plugin's configured catalogue, not a credential-gated discovery result, and
  * streams for one session are ordered before they reach the pool.
@@ -142,8 +171,14 @@ class CcPoolAdapter extends PiAiAdapter {
   /**
    * @param options - generic adapter hooks.
    * @param catalogue - the effective catalogue of the current configuration.
+   * @param readiness - settles when the load capability probe first answers, so
+   *   a request cannot decide the wire before that probe does.
    */
-  constructor(options: PiAiAdapterOptions, private readonly catalogue: () => readonly CcPoolModel[]) {
+  constructor(
+    options: PiAiAdapterOptions,
+    private readonly catalogue: () => readonly CcPoolModel[],
+    private readonly readiness: () => Promise<void>,
+  ) {
     super(options)
   }
 
@@ -183,14 +218,33 @@ class CcPoolAdapter extends PiAiAdapter {
     })
   }
 
+  /**
+   * Await the load probe before opening one dispatch.
+   *
+   * The probe decides whether the route profile carries the wire-parity flag,
+   * and the adapter's snapshot is captured at dispatch preparation. Waiting on
+   * the probe's first outcome — bounded by the caller's deadline — keeps the
+   * first request from deciding the wire before the endpoint answered.
+   * @param open - opens the dispatch after the probe's first outcome.
+   * @returns the deferred stream.
+   */
+  private async * afterReadiness(open: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
+    await this.readiness()
+    yield* open()
+  }
+
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    return this.ordered(options, attempt => super.stream(attempt))
+    return this.afterReadiness(() => this.ordered(options, attempt => super.stream(attempt)))
   }
 
   /**
    * Bind the model generation and its dispatch, then order that dispatch by
    * session. The pi-ai base binds its snapshot directly rather than routing
    * through {@link stream}, so a dispatch enters exactly one queue here.
+   *
+   * The load probe is awaited before the base captures its snapshot: that
+   * snapshot reads the profile whose wire-parity flag the probe decides, so a
+   * request issued at the same moment as the load probe must not prepare first.
    * @param provider - registered provider route.
    * @param model - exact model id.
    * @param signal - cancellation for model resolution.
@@ -201,6 +255,7 @@ class CcPoolAdapter extends PiAiAdapter {
     model: string,
     signal?: AbortSignal,
   ): Promise<PreparedAdapterCall> {
+    await this.readiness()
     const call = await super.prepareCall(provider, model, signal)
     return {
       model: call.model,
@@ -282,14 +337,22 @@ export function apply(ctx: Context, config: Config): void {
   // proof exists at load. The stored proof carries that `buildId`, and the route
   // profiles are resolved for the build it names, so a new probe replaces both
   // and a profile built for another build is never reused. A load or credential
-  // probe drops the previous proof before it asks, and the pool's marked 503
-  // refusal on a request that carried the wire drops it too, because a refusal
-  // is evidence against the capability rather than a question to ask again. A
-  // failed, stale, or superseded probe leaves no proof, and a reply without a
-  // build identity cannot produce one.
+  // probe drops the previous proof before it asks. A failed probe is retried with
+  // bounded backoff instead of leaving the route permanently off; a probe that
+  // answers without a build identity cannot produce one, and a superseded probe
+  // never writes its answer.
   let capabilityProof: PoolCapabilityProof | undefined
   let capabilityProbe: AbortController | undefined
+  let probeRetryTimer: ReturnType<typeof setTimeout> | undefined
+  let probeFailures = 0
   let disposed = false
+  // The first routed request waits for the load probe's first outcome, so it
+  // cannot prepare its snapshot before the probe decides the wire. The promise
+  // never rejects; `awaitInitialProbe` bounds the wait.
+  let initialProbeSettled = false
+  let initialProbeWaitExpired = false
+  let settleInitialProbe: () => void = () => {}
+  const initialProbe = new Promise<void>((resolve) => { settleInitialProbe = resolve })
   // Read once, with the rest of the loader configuration: the cache policy a
   // deployment asks for is not a per-request setting, and it is captured here so
   // every resolution of this route's profiles carries the same policy.
@@ -340,26 +403,50 @@ export function apply(ctx: Context, config: Config): void {
   // Fail loud at load, before the route is registered.
   current()
 
+  /** Settle the first-request wait; repeated calls are no-ops. */
+  const markInitialProbeSettled = (): void => {
+    if (initialProbeSettled) return
+    initialProbeSettled = true
+    settleInitialProbe()
+  }
+
+  /** Read the settled flag without narrowing it across the wait's await boundary. */
+  const isInitialProbeSettled = (): boolean => initialProbeSettled
+
+  /** Cancel a pending retry; a new probe generation and disposal both do. */
+  const clearProbeRetry = (): void => {
+    if (probeRetryTimer === undefined) return
+    clearTimeout(probeRetryTimer)
+    probeRetryTimer = undefined
+  }
+
+  /** The bounded backoff before the next probe attempt after the failures seen. */
+  const nextProbeDelay = (): number => Math.min(
+    WIRE_PARITY_RETRY_INITIAL_MS * 2 ** Math.max(probeFailures - 1, 0),
+    WIRE_PARITY_RETRY_MAX_MS,
+  )
+
   /**
    * Ask the member endpoint whether this route may use the CC wire parity wire format.
    *
-   * This runs at profile load and when the member credential changes, and never
-   * polls: a request failure does not trigger it, so no refusal can turn into a
-   * probe per request. A route that does not request wire parity sends no probe
-   * request at all, and a missing credential is wire-parity off rather than a
-   * route failure: the route keeps its three-marker wire until the endpoint
-   * proves wire parity.
+   * This runs at profile load, when the member credential changes, and after a
+   * failed attempt's backoff. A route that does not request wire parity sends no
+   * probe request at all, and a missing credential is wire-parity off rather
+   * than a route failure: the route keeps its non-parity wire until the
+   * endpoint proves wire parity, and a stored credential reopens the question
+   * through the credentials event. A failed, timed-out, malformed, or
+   * build-less answer leaves no proof and schedules another attempt with bounded
+   * backoff, so one failed probe cannot leave the process permanently off. The
+   * failure is logged at warning level with the attempt number and the next
+   * delay; a proof logs the answering build identity at info level. Both carry no
+   * credential.
    *
    * Each probe supersedes the previous one and drops its proof before asking, so
    * a stale positive proof never outlives the endpoint or pool build it described.
-   * A probe that fails, times out, answers without a build identity, or is
-   * cancelled leaves wire parity off, and only these two triggers can ask again;
-   * the pool's marked `cc_wire_parity_unavailable` refusal clears the proof
-   * without re-probing, so the same probe cannot re-enable the wire it just
-   * refuted.
    */
-  const refreshWireParity = (): void => {
+  const startProbe = (): void => {
     if (disposed || !config.ccWireParity) return
+    clearProbeRetry()
     capabilityProbe?.abort()
     const controller = new AbortController()
     capabilityProbe = controller
@@ -372,17 +459,92 @@ export function apply(ctx: Context, config: Config): void {
         // A missing member credential cannot prove wire parity; the route keeps its
         // current wire instead of failing to load. The proof is already cleared,
         // and a probe that outlived its own generation never writes an answer.
+        if (controller.signal.aborted || capabilityProbe !== controller) return
+        capabilityProbe = undefined
+        markInitialProbeSettled()
+        ctx.logger.info(
+          'llm-cc-pool: no member credential for the CC wire parity probe;'
+          + ' serving the non-parity wire until a credential is stored',
+        )
         return
       }
       const proof = await probePoolCapabilities(apiKey, controller.signal)
       // A superseded probe and a disposed plugin both abort this controller, so
       // an answer that arrives after either never writes a proof.
-      if (controller.signal.aborted) return
-      capabilityProof = proof
-      if (proof === undefined) {
-        ctx.logger.debug('llm-cc-pool: member endpoint did not prove CC wire parity for a pool build; keeping the three-marker wire')
+      if (controller.signal.aborted || capabilityProbe !== controller) return
+      capabilityProbe = undefined
+      if (proof !== undefined) {
+        capabilityProof = proof
+        probeFailures = 0
+        markInitialProbeSettled()
+        ctx.logger.info(
+          `llm-cc-pool: CC wire parity proved for endpoint build "${proof.buildId}"; serving the parity wire`,
+        )
+        return
       }
+      probeFailures += 1
+      const delay = nextProbeDelay()
+      markInitialProbeSettled()
+      ctx.logger.warn(
+        `llm-cc-pool: CC wire parity probe failed (attempt ${probeFailures});`
+        + ` serving the non-parity wire; retrying in ${delay}ms`,
+      )
+      scheduleProbe(delay)
     })()
+  }
+
+  /**
+   * Schedule one probe generation after `delayMs`.
+   * @param delayMs - bounded wait before the next attempt.
+   */
+  const scheduleProbe = (delayMs: number): void => {
+    if (disposed || !config.ccWireParity) return
+    clearProbeRetry()
+    probeRetryTimer = setTimeout(() => {
+      probeRetryTimer = undefined
+      startProbe()
+    }, delayMs)
+  }
+
+  /**
+   * Reopen the capability question now, dropping the current proof and any
+   * pending retry. A replaced member credential resets the failure count because
+   * the new credential may be the fact the previous attempts lacked.
+   */
+  const refreshWireParity = (): void => {
+    probeFailures = 0
+    startProbe()
+  }
+
+  /**
+   * Wait for the load probe's first outcome under a bounded deadline.
+   *
+   * The first routed request calls this before preparing its snapshot. A probe
+   * that answers proves the wire or leaves it off; a probe that stalls past the
+   * deadline leaves the request on the safe non-parity wire while the retry
+   * schedule keeps asking.
+   */
+  const awaitInitialProbe = async (): Promise<void> => {
+    if (isInitialProbeSettled() || initialProbeWaitExpired) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        initialProbe,
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, WIRE_PARITY_READY_TIMEOUT_MS) }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+    if (!isInitialProbeSettled()) {
+      // One bounded wait per process: a probe that outlived it keeps retrying in
+      // the background, and later requests serve the current non-parity wire
+      // without paying the same wait again.
+      initialProbeWaitExpired = true
+      ctx.logger.warn(
+        'llm-cc-pool: the initial CC wire parity probe did not answer within'
+        + ` ${WIRE_PARITY_READY_TIMEOUT_MS}ms; serving the non-parity wire while it keeps retrying`,
+      )
+    }
   }
 
   // A positive proof belongs to the member credential that asked for it, so a
@@ -392,7 +554,11 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.effect(() => () => {
     disposed = true
+    clearProbeRetry()
     capabilityProbe?.abort()
+    // A request already waiting on the load probe must not hang behind a fiber
+    // that can no longer prove anything.
+    markInitialProbeSettled()
   }, 'llm-cc-pool.capability-probe')
 
   // The settings service validates the complete candidate through the schema
@@ -439,18 +605,26 @@ export function apply(ctx: Context, config: Config): void {
    * restart, a proxy error — leaves wire parity exactly as it was. Only the
    * response carrying `x-cc-wire-parity-unavailable: 1` is evidence against the
    * capability, so only that response drops the proof and the next request uses
-   * the three-marker wire. Nothing re-probes here: the only triggers that can
-   * prove wire parity again are a profile load and a replaced `CC_POOL_API_KEY`,
-   * so a burst of refusals cannot become a probe storm, and the probe that would
-   * have answered cannot re-enable the wire its own request just refuted. The
-   * standard request-log and logging callback runs first and is not replaced.
+   * the three-marker wire. The refusal schedules another probe after a cooldown
+   * instead of leaving the route permanently off; a probe already in flight is
+   * the fresher question, and the cooldown means a burst of refusals cannot
+   * become a probe storm. The standard request-log and logging callback runs
+   * first and is not replaced.
    * @param event - one request or settled-response diagnostic.
    */
   const observeWireParityFailure = (event: PiAiRequestDiagnostic): void => {
     diagnostics.onRequestDiagnostic?.(event)
     if (event.kind === 'response' && event.status === 503 && event.wireParityUnavailable === true && wireParity()) {
       capabilityProof = undefined
-      ctx.logger.debug('llm-cc-pool: pool refused CC wire parity with 503 on a wire-parity-on request; dropping CC wire parity until the endpoint is proven again')
+      ctx.logger.warn(
+        'llm-cc-pool: pool refused CC wire parity with 503 on a wire-parity-on request;'
+        + ' dropping the proof and serving the non-parity wire until the endpoint proves it again',
+      )
+      // A probe already in flight is the newer question; a pending retry keeps its
+      // shorter delay. Otherwise ask again after the cooldown.
+      if (capabilityProbe === undefined && probeRetryTimer === undefined) {
+        scheduleProbe(WIRE_PARITY_REFUSAL_COOLDOWN_MS)
+      }
     }
   }
 
@@ -468,7 +642,7 @@ export function apply(ctx: Context, config: Config): void {
     ...diagnostics,
     onRequestDiagnostic: observeWireParityFailure,
   }
-  const adapter = new CcPoolAdapter(options, () => current().models)
+  const adapter = new CcPoolAdapter(options, () => current().models, awaitInitialProbe)
   ctx.llm.registerAdapter([PROVIDER], adapter)
   // Requests the session queue still holds cannot be served once the route is
   // gone; settling them as aborted keeps a disposed fiber from leaving them
@@ -487,8 +661,9 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   // The route loads on its current wire and switches only after the member
-  // endpoint proves wire parity, so an enabled deployment keeps its cc3 bytes
-  // whenever the probe cannot answer, and falls back to them again if a
-  // wire-parity-on request is refused.
-  refreshWireParity()
+  // endpoint proves wire parity. A disabled route records no pending
+  // first-request wait; an enabled one starts its probe now, and the first
+  // request awaits that probe's first outcome under a bounded deadline.
+  if (config.ccWireParity) refreshWireParity()
+  else markInitialProbeSettled()
 }

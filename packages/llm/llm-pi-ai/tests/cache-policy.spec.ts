@@ -1278,7 +1278,7 @@ const DSH_WEB_SURFACE_TEXT = 'You are interacting with the user through the Deep
 
 const DSH_HARNESS_PROMPT = `${DSH_IDENTITY_TEXT}\n\n${DSH_SOURCE_TEXT}\n\n${DSH_WEB_SURFACE_TEXT}`
 
-describe('helper harness-text fallback', () => {
+describe('sectionless harness-text fallback', () => {
   it('drops the DSH paragraphs from a cc3 helper that states no sections', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const server = await mockServer([{ events: anthropicTextEvents }])
@@ -1318,6 +1318,147 @@ describe('helper harness-text fallback', () => {
       ['.system[0].cache_control', { type: 'ephemeral' }],
       ['.system[1].cache_control', { type: 'ephemeral' }],
     ])
+  })
+
+  it('drops the DSH paragraphs from a cc3 main request that states no sections', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    // A replayed main prompt with no section identity: the DSH paragraphs are
+    // dropped by exact text and the pinned identity line is prepended. The note
+    // merely CONTAINS the DSH identity sentence, so it survives byte-for-byte.
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      requestClass: 'main',
+      messages: [createSystemMessage(
+        `${DSH_HARNESS_PROMPT}\n\nCaller state.\n\nNote: You are an AI agent powered by DeepSeek Harness. Keep this.`,
+      ), userText('hello')],
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      {
+        type: 'text',
+        text: 'Caller state.\n\nNote: You are an AI agent powered by DeepSeek Harness. Keep this.',
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      },
+    ])
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    const wire = JSON.stringify(body)
+    expect(wire).not.toContain(DSH_SOURCE_TEXT)
+    expect(wire).not.toContain(DSH_WEB_SURFACE_TEXT)
+    expect(wire).toContain('Keep this.')
+    // One DSH identity occurrence remains, and only inside the caller's note:
+    // the paragraph itself is gone.
+    expect(wire.split(DSH_IDENTITY_TEXT)).toHaveLength(2)
+    expect(betasOf(server.headers[0] ?? {})).toEqual([EXTENDED_CACHE_TTL_BETA])
+  })
+
+  it('drops the DSH paragraphs and a duplicate identity line from a sectionless cc3 subagent request', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      requestClass: 'subagent',
+      messages: [createSystemMessage(
+        `${DSH_HARNESS_PROMPT}\n\n${IDENTITY}\n\nCaller subagent rules.`,
+      ), userText('hello')],
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    // The pinned identity block opens the array once, the DSH paragraphs and the
+    // caller's duplicate identity block are dropped, and the caller rule survives.
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: 'Caller subagent rules.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(JSON.stringify(body).match(/You are Claude Code, Anthropic's official CLI for Claude\./gu)).toHaveLength(1)
+    expect(JSON.stringify(body)).not.toContain(DSH_IDENTITY_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_SOURCE_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_WEB_SURFACE_TEXT)
+  })
+
+  it('uses named section texts for a sectionless cc3 main request whose assembly no longer joins', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    const legacySource = 'Legacy harness source paragraph for this checkout.'
+    const legacyWeb = 'Legacy Web-surface paragraph for this GUI.'
+    const versionedSections = [
+      { name: 'harness:identity', text: DSH_IDENTITY_TEXT, stable: true },
+      { name: 'harness:source', text: legacySource, stable: true },
+      { name: 'app:web-surface', text: legacyWeb, stable: true },
+      { name: 'session:state', text: 'Current session state.', stable: false },
+    ]
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      requestClass: 'main',
+      messages: [createSystemMessage(
+        `${DSH_IDENTITY_TEXT}\n\n${legacySource}\n\n${legacyWeb}\n\nOld session state.`,
+      ), userText('hello')],
+      systemSections: versionedSections,
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: 'Old session state.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(JSON.stringify(body)).not.toContain(DSH_IDENTITY_TEXT)
+    expect(JSON.stringify(body)).not.toContain(legacySource)
+    expect(JSON.stringify(body)).not.toContain(legacyWeb)
   })
 
   it('drops the DSH paragraphs from a parity helper that states no sections', async () => {
