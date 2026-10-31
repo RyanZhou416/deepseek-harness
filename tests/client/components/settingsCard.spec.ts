@@ -1,10 +1,10 @@
-import { createElement as h } from 'react'
+import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { makePluginConfigCard } from '../../../src/client/components/settingsCard'
 import type { SettingsState } from '../../../src/client/settings'
 import { DICT_EN } from '../../../src/client/i18n'
-import { blur, click, focus, keydown, makeKit, mount, query, queryAll, text, typeText } from '../helpers/kit'
+import { blur, click, focus, keydown, makeKit, mount, press, query, queryAll, text, typeText } from '../helpers/kit'
 
 const kit = makeKit()
 const PluginConfigCard = makePluginConfigCard(kit)
@@ -14,13 +14,17 @@ function hookFor(state: SettingsState) {
 }
 
 function stateOf(partial: Partial<SettingsState> = {}): SettingsState {
-  return { status: 'ready', placement: 'all', granularity: 'step', mode: 'total', deltaBase: 'step', toolSort: 'count', fileSort: 'count', insightsEntry: 'show', durationCurve: 'show', fleetTab: 'show', promptPrefix: '', promptSuffix: '', writable: true, ...partial }
+  return { status: 'ready', placement: 'all', granularity: 'step', mode: 'total', deltaBase: 'step', toolSort: 'count', fileSort: 'count', insightsEntry: 'show', durationCurve: 'show', overviewAutoSteps: '100', overviewRange: '30d', fleetTab: 'show', promptPrefix: '', promptSuffix: '', writable: true, ...partial }
 }
 
-/** Menu items portaled into document.body while a select is open. */
 function menuItems(): HTMLElement[] {
   return queryAll(document.body, '[role="menu"] [role="menuitem"]')
 }
+
+const stepsLabel = (n: number): string => DICT_EN['settings.overviewAutoSteps'].replace('{n}', String(n))
+
+const clearOf = (area: HTMLTextAreaElement): HTMLElement | null =>
+  area.closest('.lc-settings-textrow')?.querySelector('.lc-settings-textx') ?? null
 
 describe('PluginConfigCard (the Plugins-page seat)', () => {
   test('renders nothing without a settings hook or when the namespace is unavailable', async () => {
@@ -33,7 +37,7 @@ describe('PluginConfigCard (the Plugins-page seat)', () => {
     await m2.unmount()
   })
 
-  test('renders the nine selects and the two prompt text rows across three titled groups — no card chrome', async () => {
+  test('renders the eleven selects and the two prompt text rows across three titled groups — no card chrome', async () => {
     const m = await mount(h(PluginConfigCard, { useContextSettings: hookFor(stateOf({ status: 'loading', writable: false })) }))
     assert.equal(m.container.querySelector('.lc-settings-card'), null, 'no settings-section chrome')
     assert.ok(query(m.container, '.lc-settings-prefs'))
@@ -45,7 +49,7 @@ describe('PluginConfigCard (the Plugins-page seat)', () => {
       DICT_EN['settings.group.prompt'],
     ])
     const selects = queryAll<HTMLButtonElement>(m.container, '.lc-settings-select')
-    assert.equal(selects.length, 9)
+    assert.equal(selects.length, 11)
     assert.ok(selects.every(s => s.disabled), 'loading is not ready: the rows are disabled')
     const textareas = queryAll<HTMLTextAreaElement>(m.container, '.lc-settings-textarea')
     assert.equal(textareas.length, 2)
@@ -57,6 +61,11 @@ describe('PluginConfigCard (the Plugins-page seat)', () => {
 
   test('ready+writable: enabled selects pick through the real portaled Menu', async () => {
     const calls: [string, string][] = []
+    const expected: [string, string][] = []
+    const commit = (field: string, value: string): void => {
+      expected.push([field, value])
+      assert.deepEqual(calls, expected)
+    }
     const m = await mount(h(PluginConfigCard, {
       useContextSettings: hookFor(stateOf()),
       set: (field, value) => { calls.push([field, value]) },
@@ -69,14 +78,15 @@ describe('PluginConfigCard (the Plugins-page seat)', () => {
     await click(selects[0])
     assert.equal(selects[0].getAttribute('aria-expanded'), 'true')
     const placementItems = menuItems()
-    assert.equal(placementItems.length, 3)
+    assert.equal(placementItems.length, 4)
     assert.deepEqual(placementItems.map(i => text(i)), [
       DICT_EN['placement.all'],
       DICT_EN['placement.tab'],
       DICT_EN['placement.sidebar'],
+      DICT_EN['placement.hide'],
     ])
-    await click(placementItems[2]) // 'Sidebar'
-    assert.deepEqual(calls, [['defaultPlacement', 'sidebar']])
+    await click(placementItems[2])
+    commit('defaultPlacement', 'sidebar')
     assert.equal(selects[0].getAttribute('aria-expanded'), 'false')
     assert.equal(document.body.querySelector('[role="menu"]'), null)
 
@@ -85,119 +95,94 @@ describe('PluginConfigCard (the Plugins-page seat)', () => {
     await click(selects[1])
     const entryItems = menuItems()
     assert.deepEqual(entryItems.map(i => text(i)), [DICT_EN['showHide.show'], DICT_EN['showHide.hide']])
-    await click(entryItems[1]) // 'Hide'
-    assert.deepEqual(calls, [['defaultPlacement', 'sidebar'], ['insightsEntry', 'hide']])
+    await click(entryItems[1])
+    commit('insightsEntry', 'hide')
 
-    // The Fleet-tab row follows the insights entry: the two view-visibility gates sit together.
     assert.ok(text(m.container).includes(DICT_EN['settings.fleetTab']))
     assert.ok(text(selects[2]).includes(DICT_EN['showHide.show']))
     await click(selects[2])
     const fleetItems = menuItems()
     assert.deepEqual(fleetItems.map(i => text(i)), [DICT_EN['showHide.show'], DICT_EN['showHide.hide']])
-    await click(fleetItems[1]) // 'Hide'
-    assert.deepEqual(calls, [['defaultPlacement', 'sidebar'], ['insightsEntry', 'hide'], ['fleetTab', 'hide']])
+    await click(fleetItems[1])
+    commit('fleetTab', 'hide')
 
-    assert.ok(text(selects[3]).includes(DICT_EN['gran.step']))
-    assert.ok(text(selects[4]).includes(DICT_EN['gran.total']))
-    // The duration-curve row follows the trend-mode one, reusing the entry's show/hide labels.
+    assert.ok(text(m.container).includes(DICT_EN['settings.overviewRange']))
+    assert.ok(text(selects[3]).includes(DICT_EN['ov.range.30d']))
+    assert.ok(text(selects[4]).includes(DICT_EN['gran.step']))
+    assert.ok(text(selects[5]).includes(DICT_EN['gran.total']))
     assert.ok(text(m.container).includes(DICT_EN['settings.durationCurve']))
-    assert.ok(text(selects[5]).includes(DICT_EN['showHide.show']))
-    // The delta-baseline row leads the tool-sort one, reusing the toolbar's option labels.
+    assert.ok(text(selects[6]).includes(DICT_EN['showHide.show']))
+    assert.ok(text(m.container).includes(DICT_EN['settings.overviewAuto']))
+    assert.ok(text(selects[7]).includes(stepsLabel(100)))
     assert.ok(text(m.container).includes(DICT_EN['settings.deltaBase']))
-    assert.ok(text(selects[6]).includes(DICT_EN['browser.base.step']))
+    assert.ok(text(selects[8]).includes(DICT_EN['browser.base.step']))
     assert.ok(text(m.container).includes(DICT_EN['settings.toolSort']))
-    assert.ok(text(selects[7]).includes(DICT_EN['tool.sort.count']))
+    assert.ok(text(selects[9]).includes(DICT_EN['tool.sort.count']))
     assert.ok(text(m.container).includes(DICT_EN['settings.fileSort']))
-    assert.ok(text(selects[8]).includes(DICT_EN['files.sort.count']))
-
-    await click(selects[3])
-    const items = menuItems()
-    assert.deepEqual(items.map(i => text(i)), [DICT_EN['gran.step'], DICT_EN['gran.turn']])
-    await click(items[1]) // 'Turn'
-    assert.deepEqual(calls, [
-      ['defaultPlacement', 'sidebar'],
-      ['insightsEntry', 'hide'],
-      ['fleetTab', 'hide'],
-      ['defaultGranularity', 'turn'],
-    ])
+    assert.ok(text(selects[10]).includes(DICT_EN['files.sort.count']))
 
     await click(selects[4])
-    const modeItems = menuItems()
-    assert.deepEqual(modeItems.map(i => text(i)), [DICT_EN['gran.total'], DICT_EN['gran.delta']])
-    await click(modeItems[1]) // 'Delta'
-    assert.deepEqual(calls, [
-      ['defaultPlacement', 'sidebar'],
-      ['insightsEntry', 'hide'],
-      ['fleetTab', 'hide'],
-      ['defaultGranularity', 'turn'],
-      ['defaultTrendMode', 'delta'],
-    ])
+    const items = menuItems()
+    assert.deepEqual(items.map(i => text(i)), [DICT_EN['gran.step'], DICT_EN['gran.turn']])
+    await click(items[1])
+    commit('defaultGranularity', 'turn')
 
     await click(selects[5])
-    const curveItems = menuItems()
-    assert.deepEqual(curveItems.map(i => text(i)), [DICT_EN['showHide.show'], DICT_EN['showHide.hide']])
-    await click(curveItems[1]) // 'Hide'
-    assert.deepEqual(calls, [
-      ['defaultPlacement', 'sidebar'],
-      ['insightsEntry', 'hide'],
-      ['fleetTab', 'hide'],
-      ['defaultGranularity', 'turn'],
-      ['defaultTrendMode', 'delta'],
-      ['defaultDurationCurve', 'hide'],
-    ])
+    const modeItems = menuItems()
+    assert.deepEqual(modeItems.map(i => text(i)), [DICT_EN['gran.total'], DICT_EN['gran.delta']])
+    await click(modeItems[1])
+    commit('defaultTrendMode', 'delta')
 
     await click(selects[6])
-    const baseItems = menuItems()
-    assert.deepEqual(baseItems.map(i => text(i)), [DICT_EN['browser.base.step'], DICT_EN['browser.base.turn']])
-    await click(baseItems[1]) // 'prev turn'
-    assert.deepEqual(calls, [
-      ['defaultPlacement', 'sidebar'],
-      ['insightsEntry', 'hide'],
-      ['fleetTab', 'hide'],
-      ['defaultGranularity', 'turn'],
-      ['defaultTrendMode', 'delta'],
-      ['defaultDurationCurve', 'hide'],
-      ['defaultDeltaBase', 'turn'],
-    ])
+    const curveItems = menuItems()
+    assert.deepEqual(curveItems.map(i => text(i)), [DICT_EN['showHide.show'], DICT_EN['showHide.hide']])
+    await click(curveItems[1])
+    commit('defaultDurationCurve', 'hide')
 
     await click(selects[7])
+    const overviewItems = menuItems()
+    assert.deepEqual(overviewItems.map(i => text(i)), [stepsLabel(100), stepsLabel(200), stepsLabel(300), DICT_EN['settings.overviewAutoOff']])
+    await click(overviewItems[3])
+    commit('overviewAutoSteps', 'off')
+
+    await click(selects[8])
+    const baseItems = menuItems()
+    assert.deepEqual(baseItems.map(i => text(i)), [DICT_EN['browser.base.step'], DICT_EN['browser.base.turn']])
+    await click(baseItems[1])
+    commit('defaultDeltaBase', 'turn')
+
+    await click(selects[9])
     const toolItems = menuItems()
     assert.deepEqual(toolItems.map(i => text(i)), [
       DICT_EN['tool.sort.size'],
       DICT_EN['tool.sort.count'],
       DICT_EN['tool.sort.name'],
     ])
-    await click(toolItems[2]) // 'By name'
-    assert.deepEqual(calls, [
-      ['defaultPlacement', 'sidebar'],
-      ['insightsEntry', 'hide'],
-      ['fleetTab', 'hide'],
-      ['defaultGranularity', 'turn'],
-      ['defaultTrendMode', 'delta'],
-      ['defaultDurationCurve', 'hide'],
-      ['defaultDeltaBase', 'turn'],
-      ['defaultToolSort', 'name'],
-    ])
+    await click(toolItems[2])
+    commit('defaultToolSort', 'name')
 
-    await click(selects[8])
+    await click(selects[10])
     const sortItems = menuItems()
     assert.deepEqual(sortItems.map(i => text(i)), [
       DICT_EN['files.sort.count'],
+      DICT_EN['files.sort.lines'],
       DICT_EN['files.sort.latest'],
       DICT_EN['files.sort.path'],
+      DICT_EN['files.sort.name'],
     ])
-    await click(sortItems[2]) // 'By path'
-    assert.deepEqual(calls, [
-      ['defaultPlacement', 'sidebar'],
-      ['insightsEntry', 'hide'],
-      ['fleetTab', 'hide'],
-      ['defaultGranularity', 'turn'],
-      ['defaultTrendMode', 'delta'],
-      ['defaultDurationCurve', 'hide'],
-      ['defaultDeltaBase', 'turn'],
-      ['defaultToolSort', 'name'],
-      ['defaultFileSort', 'path'],
+    await click(sortItems[4])
+    commit('defaultFileSort', 'name')
+
+    await click(selects[3])
+    const rangeItems = menuItems()
+    assert.deepEqual(rangeItems.map(i => text(i)), [
+      DICT_EN['ov.range.today'],
+      DICT_EN['ov.range.7d'],
+      DICT_EN['ov.range.30d'],
+      DICT_EN['ov.range.all'],
     ])
+    await click(rangeItems[1])
+    commit('defaultOverviewRange', '7d')
     assert.equal(document.body.querySelector('[role="menu"]'), null)
 
     await click(selects[0])
@@ -205,34 +190,72 @@ describe('PluginConfigCard (the Plugins-page seat)', () => {
     await click(selects[0])
     assert.equal(selects[0].getAttribute('aria-expanded'), 'false')
     assert.equal(document.body.querySelector('[role="menu"]'), null)
-    await m.unmount()
-  })
-
-  test('Menu onClose (Escape) closes an open select without picking', async () => {
-    const calls: [string, string][] = []
-    const m = await mount(h(PluginConfigCard, {
-      useContextSettings: hookFor(stateOf()),
-      set: (field, value) => { calls.push([field, value]) },
-    }))
-    const select = query(m.container, '.lc-settings-select')
-    await click(select)
-    assert.equal(select.getAttribute('aria-expanded'), 'true')
-    assert.equal(menuItems().length, 3, 'the placement row leads with three options')
+    const picked = calls.length
+    await click(selects[0])
     await keydown('Escape', document.body)
-    assert.equal(select.getAttribute('aria-expanded'), 'false')
+    assert.equal(selects[0].getAttribute('aria-expanded'), 'false')
     assert.equal(document.body.querySelector('[role="menu"]'), null)
-    assert.deepEqual(calls, [])
+    assert.equal(calls.length, picked)
     await m.unmount()
   })
 
   test('ready+readonly: disabled selects and the read-only note', async () => {
-    const m = await mount(h(PluginConfigCard, { useContextSettings: hookFor(stateOf({ writable: false })) }))
+    const m = await mount(h(PluginConfigCard, { useContextSettings: hookFor(stateOf({ writable: false, promptPrefix: 'served' })) }))
     const note = query(m.container, '.lc-settings-note')
     assert.equal(note.getAttribute('role'), 'status')
     assert.equal(text(note), DICT_EN['settings.readOnly'])
     assert.ok(queryAll<HTMLButtonElement>(m.container, '.lc-settings-select').every(s => s.disabled))
     assert.ok(queryAll<HTMLTextAreaElement>(m.container, '.lc-settings-textarea').every(t => t.disabled))
+    assert.equal(m.container.querySelector('.lc-settings-textx'), null, 'disabled rows hide the clear control')
     await m.unmount()
+  })
+
+  test('prompt text rows: the × clears the draft, keeps focus, and commits empty on blur', async () => {
+    const calls: [string, string][] = []
+    const m = await mount(h(PluginConfigCard, {
+      useContextSettings: hookFor(stateOf({ promptPrefix: 'served' })),
+      set: (field, value) => { calls.push([field, value]) },
+    }))
+    const textareas = queryAll<HTMLTextAreaElement>(m.container, '.lc-settings-textarea')
+    const clear = clearOf(textareas[0]) as HTMLButtonElement
+    assert.equal(textareas[0].getAttribute('data-lc-clearable'), '')
+    assert.equal(clear.getAttribute('aria-label'), DICT_EN['field.clear'])
+    assert.equal(clear.title, DICT_EN['field.clear'])
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    await act(async () => { clear.dispatchEvent(down) })
+    assert.equal(down.defaultPrevented, true, 'the press never steals focus from the textarea')
+    await click(clear)
+    assert.equal(textareas[0].value, '')
+    assert.equal(document.activeElement, textareas[0])
+    assert.equal(clearOf(textareas[0]), null)
+    await blur(textareas[0])
+    assert.deepEqual(calls, [['promptPrefix', '']], 'the cleared draft commits on blur')
+    await m.unmount()
+
+    const escCalls: [string, string][] = []
+    const escMount = await mount(h(PluginConfigCard, {
+      useContextSettings: hookFor(stateOf({ promptSuffix: 'served' })),
+      set: (field, value) => { escCalls.push([field, value]) },
+    }))
+    const area = queryAll<HTMLTextAreaElement>(escMount.container, '.lc-settings-textarea')[1]
+    await focus(area)
+    await typeText(area, 'Sign as Atlas.')
+    assert.ok(clearOf(area), 'typing keeps the control present')
+    const composing = await press(area, { key: 'Escape', isComposing: true })
+    assert.equal(area.value, 'Sign as Atlas.', 'Escape during IME composition stays with the IME')
+    assert.equal(composing.ev.defaultPrevented, false)
+    assert.equal(composing.reachedDocument, true)
+    const esc = await press(area, { key: 'Escape' })
+    assert.equal(area.value, '')
+    assert.equal(esc.ev.defaultPrevented, true)
+    assert.equal(esc.reachedDocument, false, 'the settings dialog must not also close')
+    assert.equal(clearOf(area), null)
+    const emptyEsc = await press(area, { key: 'Escape' })
+    assert.equal(emptyEsc.ev.defaultPrevented, false, 'an empty field lets Escape close the dialog')
+    assert.equal(emptyEsc.reachedDocument, true)
+    await blur(area)
+    assert.deepEqual(escCalls, [['promptSuffix', '']], 'the cleared suffix commits on blur')
+    await escMount.unmount()
   })
 
   test('prompt text rows: typing stays local, the blur commits, an unmount without a blur commits too', async () => {
@@ -273,7 +296,6 @@ describe('PluginConfigCard (the Plugins-page seat)', () => {
 
     await focus(prefix)
     await typeText(prefix, 'served!')
-    // A host push lands while the row is being edited.
     await m.update(h(PluginConfigCard, {
       useContextSettings: hookFor(stateOf({ promptPrefix: 'pushed' })),
       set: (field, value) => { calls.push([field, value]) },
@@ -282,7 +304,6 @@ describe('PluginConfigCard (the Plugins-page seat)', () => {
     await blur(query(m.container, '.lc-settings-textarea'))
     assert.deepEqual(calls, [['promptPrefix', 'served!']])
 
-    // Idle again: the next push is followed.
     await m.update(h(PluginConfigCard, {
       useContextSettings: hookFor(stateOf({ promptPrefix: 'pushed' })),
       set: (field, value) => { calls.push([field, value]) },
@@ -296,7 +317,6 @@ describe('PluginConfigCard (the Plugins-page seat)', () => {
     const m = await mount(h(PluginConfigCard, { useContextSettings: hookFor(stateOf({ placement: 'weird' as never })) }))
     const selects = queryAll(m.container, '.lc-settings-select')
     assert.ok(text(selects[0]).includes('weird'))
-    // props.set undefined: picking still closes the menu, no throw.
     await click(selects[0])
     await click(menuItems()[1])
     assert.equal(document.body.querySelector('[role="menu"]'), null)

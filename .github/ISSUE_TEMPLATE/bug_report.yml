@@ -8,7 +8,7 @@ body:
     attributes:
       label: DeepSeek Harness version / DeepSeek Harness 版本
       description: The `@deepseek-ai/dsh` version in use, from `dsh --version`. / 正在使用的 `@deepseek-ai/dsh` 版本（`dsh --version`）。
-      placeholder: e.g. 0.1.7-rc.2
+      placeholder: e.g. 0.2.1-rc.2
     validations:
       required: true
   - type: input

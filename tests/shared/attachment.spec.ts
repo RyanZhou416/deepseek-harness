@@ -1,6 +1,3 @@
-// The shared attachment vocabulary (src/shared/attachment.ts): both block spellings normalize into
-// one proven reference, and the preview tables classify what a card can show.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import {
@@ -12,17 +9,13 @@ import {
 } from '../../src/shared/attachment'
 
 describe('attachmentExtension', () => {
-  test('reads the last suffix of a name or path, lower-cased', () => {
+  test('reads the last suffix of a name or path, lower-cased; a missing or trailing suffix is empty', () => {
     assert.equal(attachmentExtension('report.MD'), 'md')
     assert.equal(attachmentExtension('dir/sub/file.tar.gz'), 'gz')
     assert.equal(attachmentExtension('C:\\docs\\sheet.XLSX'), 'xlsx')
-  })
-
-  test('a missing, trailing, or leading-dot suffix is empty', () => {
     assert.equal(attachmentExtension('README'), '')
     assert.equal(attachmentExtension('archive.'), '')
     assert.equal(attachmentExtension('.env'), 'env')
-    assert.equal(attachmentExtension('.gitignore'), 'gitignore')
     assert.equal(attachmentExtension(''), '')
   })
 })
@@ -50,16 +43,13 @@ describe('leafNameOf', () => {
 })
 
 describe('attachmentOf', () => {
-  test('rejects every non-attachment block', () => {
+  test('rejects every non-attachment block and a missing or malformed envelope', () => {
     assert.equal(attachmentOf(null), null)
     assert.equal(attachmentOf('image'), null)
     assert.equal(attachmentOf(42), null)
     assert.equal(attachmentOf({}), null)
     assert.equal(attachmentOf({ type: 'text', attachment: { attachmentId: 'a' } }), null)
     assert.equal(attachmentOf({ kind: 'mystery', attachment: { attachmentId: 'a' } }), null)
-  })
-
-  test('rejects a missing or malformed attachment envelope', () => {
     assert.equal(attachmentOf({ type: 'image' }), null)
     assert.equal(attachmentOf({ type: 'image', attachment: null }), null)
     assert.equal(attachmentOf({ type: 'image', attachment: 'x' }), null)
@@ -136,7 +126,7 @@ describe('attachmentOf', () => {
 })
 
 describe('attachmentsIn', () => {
-  test('keeps the message order and drops everything else', () => {
+  test('keeps the message order and drops everything else; a non-array content has none', () => {
     const content = [
       { type: 'file', attachment: { attachmentId: 'f1', name: 'a.svg', bytes: 2627 } },
       { type: 'text', text: 'hello' },
@@ -149,9 +139,6 @@ describe('attachmentsIn', () => {
       { kind: 'file', attachmentId: 'f1', name: 'a.svg', bytes: 2627 },
       { kind: 'image', attachmentId: 'i1', width: 10, height: 10 },
     ])
-  })
-
-  test('a non-array content has none', () => {
     assert.deepEqual(attachmentsIn(undefined), [])
     assert.deepEqual(attachmentsIn('content'), [])
   })

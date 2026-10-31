@@ -1,6 +1,3 @@
-// watchFleetTab (src/client/fleetTab.ts): the Fleet tab's own show/hide preference, layered on the placement
-// gate — 'hide' unwinds the registration live, 'show' brings it back, and a sidebar-only placement keeps it off.
-
 import { createElement as h, type ReactElement } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -39,6 +36,15 @@ describe('watchFleetTab — the Fleet tab\'s own gate', () => {
     dispose()
     assert.deepEqual(ctx.slots.of('conversation.view'), [], 'the watcher dispose unwinds the tab')
     ctx.dispose()
+
+    const bare = new TestClientCtx()
+    ;(bare.slots as unknown as { register: () => unknown }).register = () => undefined
+    const guarded = wire(bare)
+    guarded.settings.set('fleetTab', 'hide')
+    guarded.settings.set('fleetTab', 'show')
+    guarded.dispose()
+    assert.deepEqual(bare.slots.of('conversation.view'), [], 'a no-disposer registry never throws')
+    bare.dispose()
   })
 
   test('hide unwinds it live and show brings it back, with no churn in between', () => {
@@ -54,7 +60,6 @@ describe('watchFleetTab — the Fleet tab\'s own gate', () => {
     const { dispose } = wire(ctx, settings)
     assert.deepEqual(ctx.slots.of('conversation.view'), [], 'a hidden tab never registers')
 
-    // An unrelated preference never remounts the tab.
     settings.set('defaultGranularity', 'turn')
     assert.deepEqual(ctx.slots.of('conversation.view'), [])
 
@@ -63,33 +68,24 @@ describe('watchFleetTab — the Fleet tab\'s own gate', () => {
     assert.equal(ctx.slots.of('conversation.view')[0].registration.id, 'fleet')
     settings.set('fleetTab', 'hide')
     assert.deepEqual(ctx.slots.of('conversation.view'), [])
-    // The subscription stops with the watcher: a later flip registers nothing.
     dispose()
     settings.set('fleetTab', 'show')
     assert.deepEqual(ctx.slots.of('conversation.view'), [])
     ctx.dispose()
   })
 
-  test('a sidebar-only placement keeps the tab off whatever the preference says', () => {
+  test('the Context panel\'s placement never gates the tab', () => {
     const ctx = new TestClientCtx()
     const settings = createContextSettings()
     settings.set('defaultPlacement', 'sidebar')
     const { dispose } = wire(ctx, settings)
-    assert.deepEqual(ctx.slots.of('conversation.view'), [], 'placement-sidebar serves no conversation tabs')
+    assert.equal(ctx.slots.of('conversation.view').length, 1, 'a sidebar-only Context panel leaves the tab served')
     settings.set('defaultPlacement', 'all')
     assert.equal(ctx.slots.of('conversation.view').length, 1)
-    settings.set('defaultPlacement', 'sidebar')
-    assert.deepEqual(ctx.slots.of('conversation.view'), [])
-    dispose()
-    assert.deepEqual(ctx.slots.of('conversation.view'), [])
-    ctx.dispose()
-  })
-
-  test('a registry that hands back no disposer never throws on show, hide or disposal', () => {
-    const ctx = new TestClientCtx()
-    ;(ctx.slots as unknown as { register: () => unknown }).register = () => undefined
-    const { dispose, settings } = wire(ctx)
-    settings.set('fleetTab', 'hide')
+    settings.set('defaultPlacement', 'tab')
+    assert.equal(ctx.slots.of('conversation.view').length, 1, 'no placement churn')
+    settings.set('defaultPlacement', 'hide')
+    assert.equal(ctx.slots.of('conversation.view').length, 1, 'a hidden panel entry leaves the tab served')
     dispose()
     assert.deepEqual(ctx.slots.of('conversation.view'), [])
     ctx.dispose()

@@ -55,8 +55,6 @@ describe('ContextBrowser live surface', () => {
     assert.ok(meta.includes('Live · Next Request'))
     assert.ok(meta.includes('Estimated ≈ 350'))
     assert.ok(meta.includes('Actual 800'), 'live pairs the estimate with the freshest actual')
-    // Live in 'prev turn' mode: the freshest request is turn-less (degrades to turn 0), so no previous
-    // turn exists — the zero baseline shows the whole live makeup as change.
     await clickDeltaBase(m, 'prev turn')
     const liveUserCat = queryAll(m.container, '.lc-br-cat')[ROW.user]
     assert.equal(text(query(liveUserCat, '.lc-br-delta')), '+1')
@@ -70,8 +68,6 @@ describe('ContextBrowser live surface', () => {
     assert.ok(meta2.includes('Turn 0 · Step 0'))
     assert.ok(!meta2.includes('Actual'), 'this freshest request reported no usage')
     assert.equal(queryAll(m.container, '.lc-br-delta').length, 0, 'the seq-7 view and its seq-20 baseline hold the same single node')
-    // Turn mode on a turn-less record: 'turn − 1' degrades to −1, no baseline turn exists —
-    // the zero baseline shows the step's single node as pure change.
     await clickDeltaBase(m, 'prev turn')
     assert.equal(text(query(m.container, '.lc-br-delta')), '+1')
     await pickStep(m, 'live')
@@ -79,20 +75,18 @@ describe('ContextBrowser live surface', () => {
     assert.equal(queryAll(m.container, '.lc-br-body').length, 0)
     assert.ok(queryAll(m.container, '.lc-br-pct').some(el => text(el).endsWith('%')))
     await m.unmount()
-  })
 
-  test('zero-total surface renders no percentages; no requests means no delta pills', async () => {
-    const m = await mount(h(Browser, props({ data: tl({}) })))
-    assert.ok(queryAll(m.container, '.lc-br-pct').every(el => text(el) === ''))
-    assert.equal(queryAll(m.container, '.lc-br-delta').length, 0)
-    assert.equal(queryAll(m.container, '.lc-br-tdelta').length, 0)
-    await clickDeltaBase(m, 'prev turn')
-    assert.equal(queryAll(m.container, '.lc-br-delta').length, 0)
-    assert.equal(queryAll(m.container, '.lc-br-tdelta').length, 0)
-    const meta = text(query(m.container, '.lc-br-meta'))
-    assert.ok(meta.includes('Estimated ≈ 0'))
-    assert.ok(!meta.includes('Actual'), 'no requests, no actual figure')
-    await m.unmount()
+    const zero = await mount(h(Browser, props({ data: tl({}) })))
+    assert.ok(queryAll(zero.container, '.lc-br-pct').every(el => text(el) === ''))
+    assert.equal(queryAll(zero.container, '.lc-br-delta').length, 0)
+    assert.equal(queryAll(zero.container, '.lc-br-tdelta').length, 0)
+    await clickDeltaBase(zero, 'prev turn')
+    assert.equal(queryAll(zero.container, '.lc-br-delta').length, 0)
+    assert.equal(queryAll(zero.container, '.lc-br-tdelta').length, 0)
+    const zeroMeta = text(query(zero.container, '.lc-br-meta'))
+    assert.ok(zeroMeta.includes('Estimated ≈ 0'))
+    assert.ok(!zeroMeta.includes('Actual'), 'no requests, no actual figure')
+    await zero.unmount()
   })
 
   test('dropped live nodes raise the missing-window note, live and on later steps only', async () => {
@@ -106,11 +100,9 @@ describe('ContextBrowser live surface', () => {
     })
     const m = await mount(h(Browser, props({ data })))
     assert.ok(text(m.container).includes('2 earlier messages are also part of the context'), 'live flags the dropped tail')
-    // Step before the floor: the dropped slice is not attributable → no note.
     await pickStep(m, '3')
     assert.ok(!text(m.container).includes('earlier messages are also part'))
     assert.ok(text(m.container).includes('approximate'), 'seq below the archive floor is approximate')
-    // Step after the floor: the dropped slice is inside the context.
     await pickStep(m, '10')
     assert.ok(text(m.container).includes('2 earlier messages are also part of the context'))
     assert.ok(!text(m.container).includes('approximate'), 'seq at/after the archive floor is exact')
@@ -129,7 +121,6 @@ describe('ContextBrowser live surface', () => {
     const meta = text(query(m.container, '.lc-br-meta'))
     assert.ok(meta.includes('Turn 1 · Step 0'))
     assert.ok(!meta.includes('Actual'), 'this step reported no usage')
-    // The step's surface: archived node (gone 15 > 10) + seq 1; seq 11 is the response.
     await click(catRow(m, 'user'))
     assert.equal(elemRows(m).length, 2, 'archived + live nodes reconstructed')
     assert.ok(text(m.container).includes('archived hello'))
@@ -159,7 +150,6 @@ describe('ContextBrowser live surface', () => {
     })
     const m = await mount(h(Browser, props({ data })))
     const userRow = (): HTMLElement => queryAll(m.container, '.lc-br-cat')[ROW.user]
-    // Default 'prev step': step 4 reads against step 3, its immediate predecessor.
     await pickStep(m, '4')
     const countPills = queryAll(userRow(), '.lc-br-delta')
     assert.equal(countPills.length, 1, 'only the user count changed')
@@ -168,23 +158,18 @@ describe('ContextBrowser live surface', () => {
     const tokenPills = queryAll(userRow(), '.lc-br-tdelta')
     assert.equal(tokenPills.length, 1)
     assert.equal(text(tokenPills[0]), '+10')
-    // The log's first step has no predecessor: the zero baseline shows the full makeup as change,
-    // EVERY category included (system +1, tools +2, user +10).
     await pickStep(m, '1')
     assert.equal(queryAll(m.container, '.lc-br-tdelta').length, 3)
     assert.equal(text(query(userRow(), '.lc-br-delta')), '+1')
     assert.equal(text(query(userRow(), '.lc-br-tdelta')), '+10')
-    // 'prev turn': step 4 reads against turn 1's last step (seq 2).
     await pickStep(m, '4')
     await clickDeltaBase(m, 'prev turn')
     assert.equal(text(query(userRow(), '.lc-br-delta')), '+2')
     assert.equal(text(query(userRow(), '.lc-br-tdelta')), '+20')
-    // A first-turn step in 'prev turn' mode has no baseline either: zero again.
     await pickStep(m, '1')
     assert.equal(queryAll(m.container, '.lc-br-tdelta').length, 3)
     assert.equal(text(query(userRow(), '.lc-br-delta')), '+1')
     assert.equal(text(query(userRow(), '.lc-br-tdelta')), '+10')
-    // Live: 'prev step' reads the last request; 'prev turn' reads the previous turn's last step (seq 4).
     await pickStep(m, 'live')
     await clickDeltaBase(m, 'prev step')
     assert.equal(text(query(userRow(), '.lc-br-delta')), '+1')
@@ -231,12 +216,10 @@ describe('ContextBrowser live surface', () => {
     await hover(catRow(m, 'user'))
     await unhover(catRow(m, 'user'))
     assert.deepEqual(hovers, ['user', null])
-    // Mirrored hover lights the row; the 'free' key has no category row.
     await m.update(h(Browser, props({ data, hoverKey: 'user', onHoverKey: (k) => { hovers.push(k) } })))
     assert.ok(catRow(m, 'user').className.includes('lc-br-cat-on'))
     await m.update(h(Browser, props({ data, hoverKey: 'free', onHoverKey: (k) => { hovers.push(k) } })))
     assert.ok(!catRow(m, 'user').className.includes('lc-br-cat-on'))
-    // A picked step has a different composition: the linkage drops.
     await pickStep(m, '10')
     const before = hovers.length
     await hover(catRow(m, 'user'))
@@ -259,12 +242,10 @@ describe('ContextBrowser live surface', () => {
     const meta = text(query(m.container, '.lc-br-meta'))
     assert.ok(meta.includes('Turn 1 · Step 0'))
     assert.ok(meta.includes('Actual 700'))
-    // Unknown preview seq: no request matches → live surface, estimate paired with the freshest actual.
     await m.update(h(Browser, props({ data, previewSeq: 999 })))
     const liveMeta = text(query(m.container, '.lc-br-meta'))
     assert.ok(liveMeta.includes('Live · Next Request'))
     assert.ok(liveMeta.includes('Actual 700'))
-    // A pinned step trimmed out of retention falls back to live too.
     await m.update(h(Browser, props({ data, previewSeq: null, pinSeq: 999 })))
     assert.ok(text(query(m.container, '.lc-br-meta')).includes('Live · Next Request'))
     assert.equal(query<HTMLSelectElement>(m.container, 'select.lc-br-pick').value, 'live')
@@ -288,7 +269,6 @@ describe('ContextBrowser live surface', () => {
         surfaceNode({ seq: 45, cat: 'tool', tokens: 1, tool: 'bash' }),
       ],
     })
-    // The header epoch at seq 22 enters the context with the seq-30 request, like the inject node.
     const headers: ContextHeaders = { headers: [{ seq: 22, time: 100, systemTokens: 10, tools: [{ name: 't1', tokens: 5 }] }] }
     const epoch = withEpochContent(headers, { 22: { system: 'SYS', tools: [{ name: 't1', schema: {} }] } })
     const m = await mount(h(Browser, props({ data, headers: epoch.headers, fetchHeader: epoch.fetchHeader })))
@@ -303,8 +283,6 @@ describe('ContextBrowser live surface', () => {
     assert.match(injectStamp, /^T1 S2 · \d{2}:\d{2}:\d{2}$/, 'the stamp merges with the clock into one run')
     assert.deepEqual(await stampOfCat('assistant'), ['T2 S1'])
     assert.deepEqual(await stampOfCat('skill'), ['T2 S1'])
-    // The tool result landed after the last logged request: no request carries it yet, so it wears the
-    // PENDING estimate — the newest tail item is a tool result, the turn continues, next step predicted.
     await click(catRow(m, 'tool'))
     await flush()
     const toolBody = query(queryAll(m.container, '.lc-br-cat')[ROW.tool], '.lc-br-body')
@@ -313,7 +291,6 @@ describe('ContextBrowser live surface', () => {
     assert.ok(pendingMeta.className.includes('lc-br-time-pending'), 'the pending estimate wears the dotted underline')
     assert.equal(pendingMeta.title, 'Expected in the Turn 2 · Step 2 request (not yet sent)')
     assert.equal(queryAll(toolBody, '.lc-br-elem-row').length, 1, 'the row still renders with the pending stamp')
-    // System prompt and tool schemas share the epoch's introducing step.
     assert.deepEqual(await stampOfCat('system'), ['T1 S2'])
     assert.deepEqual(await stampOfCat('tools'), ['T1 S2'])
     const tip = query(queryAll(m.container, '.lc-br-cat')[ROW.tools], '.lc-br-time').title
@@ -321,8 +298,8 @@ describe('ContextBrowser live surface', () => {
     await m.unmount()
   })
 
-  test('pending tail stamp: a newest user message predicts the next turn\'s first step', async () => {
-    const data = tl({
+  test('pending tail stamps: a waiting user message opens the next turn, a final reply ends it, pending calls continue it', async () => {
+    const waiting = tl({
       current: { system: 0, tools: 0, user: 10, inject: 0, skill: 0, assistant: 0, tool: 10, total: 20 },
       requests: [req({ seq: 20, turn: 1, step: 1 })],
       nodes: [
@@ -331,15 +308,13 @@ describe('ContextBrowser live surface', () => {
         surfaceNode({ seq: 30, cat: 'user', tokens: 1 }),
       ],
     })
-    const m = await mount(h(Browser, props({ data })))
+    const m = await mount(h(Browser, props({ data: waiting })))
     await click(catRow(m, 'tool'))
     await flush()
     const toolBody = query(queryAll(m.container, '.lc-br-cat')[ROW.tool], '.lc-br-body')
     assert.equal(text(query(toolBody, '.lc-br-time')), 'T2 S1', 'a waiting user message opens the next turn')
     await m.unmount()
-  })
 
-  test('pending tail stamp: a text-only final reply ended the turn; a reply with pending calls continues it', async () => {
     const ended = tl({
       current: { system: 0, tools: 0, user: 10, inject: 0, skill: 0, assistant: 10, tool: 0, total: 20 },
       requests: [req({ seq: 20, turn: 1, step: 1 })],
@@ -372,20 +347,18 @@ describe('ContextBrowser live surface', () => {
 describe('stepStampOf', () => {
   const r = (seq: number, turn?: number, step?: number): RequestRecord => req({ seq, turn, step })
 
-  test('an item stamps to the FIRST request logged after it, whatever the wire order', () => {
+  test('an item stamps to the FIRST request logged after it, whatever the wire order; the live tail and turn-less introducers stamp null', () => {
     const input = [r(30, 2, 1), r(10, 1, 1), r(20, 1, 2)]
     const stamp = stepStampOf(input)
     assert.deepEqual(stamp(5), { turn: 1, step: 1 })
     assert.deepEqual(stamp(10), { turn: 1, step: 2 }, 'an item AT a request seq is carried by the NEXT request')
     assert.deepEqual(stamp(25), { turn: 2, step: 1 })
     assert.equal(input[0].seq, 30, 'the caller array is not reordered')
-  })
 
-  test('the live tail and turn-less introducers stamp null', () => {
-    const stamp = stepStampOf([r(10, undefined, undefined), r(20, 1, 1)])
-    assert.equal(stamp(5), null, 'the introducing request carries no turn/step numbers')
-    assert.deepEqual(stamp(15), { turn: 1, step: 1 })
-    assert.equal(stamp(25), null, 'no request follows the item yet')
+    const tail = stepStampOf([r(10, undefined, undefined), r(20, 1, 1)])
+    assert.equal(tail(5), null, 'the introducing request carries no turn/step numbers')
+    assert.deepEqual(tail(15), { turn: 1, step: 1 })
+    assert.equal(tail(25), null, 'no request follows the item yet')
   })
 })
 

@@ -1,18 +1,11 @@
-/** Category presentation config. Every part carries two figures: `raw`, the
- * heuristic count, and `value`, the provider-anchored bar width proportioned by
- * the heuristic ratios (equal when no anchor applies). */
-
 import type { Category, ContextBreakdown, RequestRecord, Snapshot, TokenUsage } from '../shared/types'
 
 export interface PartsPart {
   key: string
   color: string
   value: number
-  /** Heuristic count shown by the legend and tooltips (defaults to value). */
   raw?: number
-  /** Tooltip display name, defaulting to the category label of `key`. */
   label?: string
-  /** Shared-hover group: a hover key equal to a part's group lights it. */
   group?: string
 }
 
@@ -28,8 +21,6 @@ export const CATS: { key: Category | 'system' | 'tools'; color: string }[] = [
 
 export const CAT_COLOR = Object.fromEntries(CATS.map(c => [c.key, c.color])) as Record<Category | 'system' | 'tools', string>
 
-/** The message-fold categories in canonical order — the tail of CATS without the
- * singular `system`/`tools` bands. The pie panel and the block map lay parts out in this order. */
 export const MESSAGE_CATS: readonly (Category | 'system' | 'tools')[] = ['user', 'inject', 'skill', 'assistant', 'tool']
 
 export function partsOf(breakdown: Snapshot['current'] | RequestRecord): PartsPart[] {
@@ -38,8 +29,6 @@ export function partsOf(breakdown: Snapshot['current'] | RequestRecord): PartsPa
   })
 }
 
-/** Build the pie-consistent raw parts from the OFFICIAL `contextBreakdown`
- * figures when delivered, subdividing messages by the fold's ratios; absent the projection the fold's own sums serve. */
 export function officialParts(
   current: Snapshot['current'],
   breakdown: ContextBreakdown | null,
@@ -58,8 +47,6 @@ export function officialParts(
       assigned += count
       if (current[cat as Category] > current[largest]) largest = cat as Category
     }
-    // Rounding residue lands on the largest category; the clamp keeps a tiny
-    // message bucket with several rounded-up shares from going negative.
     shares[largest] = Math.max(0, shares[largest] + messages - assigned)
   } else {
     for (const cat of MESSAGE_CATS) shares[cat] = 0
@@ -67,14 +54,11 @@ export function officialParts(
   return CATS.map(c => ({
     key: c.key,
     color: c.color,
-    /** v8 ignore next 1 -- `shares` is initialized with system/tools and both
-     * foldSurface arms assign every MESSAGE_CATS key, so each key is always defined; the fallback is defensive. */
+    /* v8 ignore next 1 */
     value: shares[c.key] ?? 0,
   }))
 }
 
-/** Reproportion heuristic parts to a provider-anchored target: the heuristic
- * supplies the ratios, the provider sample the total; `value` takes the anchored figure and `raw` keeps the heuristic count. */
 export function anchoredParts(parts: PartsPart[], target: number | null): PartsPart[] {
   const sourced = parts.map(p => ({ ...p, raw: p.raw ?? p.value }))
   if (target === null || target <= 0) return sourced
@@ -86,18 +70,76 @@ export function anchoredParts(parts: PartsPart[], target: number | null): PartsP
   return sourced.map(p => ({ ...p, value: Math.round(p.raw * scale) }))
 }
 
-/** The Token card's billed split by WHAT the tokens are: the six composition
- * categories share the provider-reported prompt total by the composition card's
- * ratios, and the exact output count closes the ring, so the parts total the chat line's token count by construction. */
+const THINKING_COLOR = 'var(--color-violet-500)'
+
+const ANSWERS_COLOR = 'var(--color-pink-500)'
+
+const countOf = (value: number | undefined): number =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0
+
+export const RING_ORDER: readonly string[] = ['system', 'tools', 'user', 'inject', 'skill', 'toolCalls', 'thinking', 'answers']
+
+export interface GeneratedTokens {
+  reasoning?: number
+  answers?: number
+  calls?: number
+}
+
 export function billedParts(
   current: Snapshot['current'],
   breakdown: ContextBreakdown | null,
   usage: TokenUsage,
+  generated: GeneratedTokens = {},
 ): PartsPart[] {
   const input = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+  const output = countOf(usage.outputTokens)
   const estimated = officialParts(current, breakdown)
   const prompt = input > 0
     ? anchoredParts(estimated, input)
     : estimated.map(p => ({ ...p, value: 0 }))
-  return [...prompt, { key: 'output', color: 'var(--color-pink-500)', value: Math.max(0, usage.outputTokens) }]
+  const liveAssistant = countOf(current.assistant)
+  const liveReasoning = Math.min(countOf(current.assistantReasoning), liveAssistant)
+  const liveAnswers = Math.min(countOf(current.assistantAnswerTokens), liveAssistant - liveReasoning)
+  const liveCalls = Math.min(countOf(current.assistantCallTokens), liveAssistant - liveReasoning - liveAnswers)
+  const liveContent = liveReasoning + liveAnswers + liveCalls
+  const genReasoning = countOf(generated.reasoning)
+  const genAnswers = countOf(generated.answers)
+  const genCalls = countOf(generated.calls)
+  let promptThinking = 0
+  let promptAnswers = 0
+  let promptCalls = 0
+  let promptToolResults = 0
+  const parts: PartsPart[] = []
+  for (const p of prompt) {
+    if (p.key === 'assistant') {
+      const nonCall = liveContent > 0
+        ? Math.round(p.value * (liveReasoning + liveAnswers) / liveContent)
+        : 0
+      promptThinking = liveContent > 0 ? Math.round(p.value * liveReasoning / liveContent) : 0
+      promptAnswers = nonCall - promptThinking
+      promptCalls = Math.max(0, liveContent > 0 ? p.value - nonCall : p.value)
+      continue
+    }
+    if (p.key === 'tool') promptToolResults = p.value
+    parts.push(p)
+  }
+  const genThinking = Math.min(genReasoning, output)
+  const nonThinking = output - genThinking
+  const genNonThinking = genAnswers + genCalls
+  let outThinking = genThinking
+  let outAnswers = 0
+  let outCalls = 0
+  if (genNonThinking > 0) {
+    outAnswers = Math.round(nonThinking * genAnswers / genNonThinking)
+    outCalls = nonThinking - outAnswers
+  } else if (genThinking > 0) {
+    outThinking = output
+  } else {
+    outCalls = nonThinking
+  }
+  return [
+    ...parts.map(p => p.key === 'tool' ? { ...p, key: 'toolCalls', value: promptToolResults + promptCalls + outCalls } : p),
+    { key: 'thinking', color: THINKING_COLOR, value: promptThinking + outThinking },
+    { key: 'answers', color: ANSWERS_COLOR, value: promptAnswers + outAnswers },
+  ]
 }

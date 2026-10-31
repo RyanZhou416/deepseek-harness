@@ -1,6 +1,3 @@
-// FleetSummary — the Fleet tab's overview strip: family-wide stat chips and the progress bar whose
-// semantics follow the session shape (shared tasks, else subagent completion, else nothing).
-
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -29,7 +26,6 @@ const FOREST: AgentForest = {
     nodeOf('w3', { completed: true }),
   ],
   edges: [],
-  overflow: 0,
   solo: false,
 }
 
@@ -69,6 +65,17 @@ describe('FleetSummary', () => {
     assert.ok(text(progress).includes('2/3'))
     assert.equal(query(progress, '.lc-tasks-progress-track i')?.style.width, '67%')
     await m.unmount()
+
+    const solo: AgentForest = { nodes: [nodeOf('root', { isCurrent: true, running: true })], edges: [], solo: true }
+    const soloMount = await mount(h(FleetSummary, propsOf({ forest: solo })))
+    assert.equal(queryAll(soloMount.container, '.lc-summary-progress').length, 0)
+    assert.ok(!text(soloMount.container).includes(DICT_EN['fleet.summary.done'].replace('{n}', '')))
+    assert.equal(queryAll(soloMount.container, '.lc-agents-chip').length, 2, 'count + running only — no tokens without heads')
+    await soloMount.unmount()
+
+    const zh = await mount(h(FleetSummary, propsOf({ t: makeKit('zh').t })))
+    assert.ok(text(zh.container).includes('4 个 Agent'))
+    await zh.unmount()
   })
 
   test('shared tasks win the progress bar when the team serves any', async () => {
@@ -77,20 +84,6 @@ describe('FleetSummary', () => {
     const progress = query(m.container, '.lc-summary-progress')
     assert.ok(text(progress).includes(DICT_EN['fleet.summary.tasks']))
     assert.ok(text(progress).includes('1/3'))
-    await m.unmount()
-  })
-
-  test('a solo session lists no progress bar and no done chip', async () => {
-    const solo: AgentForest = {
-      nodes: [nodeOf('root', { isCurrent: true, running: true })],
-      edges: [],
-      overflow: 0,
-      solo: true,
-    }
-    const m = await mount(h(FleetSummary, propsOf({ forest: solo })))
-    assert.equal(queryAll(m.container, '.lc-summary-progress').length, 0)
-    assert.ok(!text(m.container).includes(DICT_EN['fleet.summary.done'].replace('{n}', '')))
-    assert.equal(queryAll(m.container, '.lc-agents-chip').length, 2, 'count + running only — no tokens without heads')
     await m.unmount()
   })
 
@@ -109,17 +102,9 @@ describe('FleetSummary', () => {
     assert.ok(text(m.container).includes('$0.45'))
     await m.unmount()
 
-    // A book without the model prices nothing — the chip stays out.
     const bare = pricesBookOf({ other: { models: { 'x': { cost: { input: 1, output: 1, cache_read: 1 } } } } })
     const m2 = await mount(h(FleetSummary, propsOf({ forest: priced, book: bare })))
     assert.ok(!text(m2.container).includes('est.'))
     await m2.unmount()
-  })
-
-  test('zh chrome and the overflow count ride along', async () => {
-    const zh = makeKit('zh')
-    const m = await mount(h(FleetSummary, propsOf({ forest: { ...FOREST, overflow: 2 }, t: zh.t, fmt: zh.fmt })))
-    assert.ok(text(m.container).includes('6 个 Agent'))
-    await m.unmount()
   })
 })

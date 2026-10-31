@@ -20,7 +20,6 @@ function stubRoute(body: unknown): void {
   vi.stubGlobal('fetch', async () => ({ ok: true, json: async () => body }))
 }
 
-/** Leave the previous open's figure in storage, as that open would have. */
 function remember(balance: unknown): void {
   globalThis.localStorage.setItem(PLATFORM_BALANCE_STORAGE_KEY, JSON.stringify(balance))
 }
@@ -61,7 +60,7 @@ describe('BalanceCapsule', () => {
     await flush()
   })
 
-  test('the en locale shows USD with the total and the breakdown tooltip', async () => {
+  test('the en locale shows USD with the total and breakdown; the zh locale shows CNY with localized labels', async () => {
     stubRoute({ ok: true, value: WIRE_BALANCE })
     const Capsule = makeBalanceCapsule(asClientCtx(new TestClientCtx({ locale: 'en' })), kit)
     const m = await mount(h(Capsule, {}))
@@ -73,13 +72,18 @@ describe('BalanceCapsule', () => {
     assert.equal(pill?.getAttribute('rel'), 'noreferrer')
     assert.equal(query(m.container, '.lc-ov-balance-label')?.textContent, 'DeepSeek balance')
     assert.equal(query(m.container, '.lc-ov-balance-value')?.textContent, '$12.50')
-    // The breakdown lives in the pill's data attributes for the page's hover
-    // tip (no native `title`): the pill already carries the total, so only
-    // the non-zero parts ride the bubble — the topped-up line leads the granted one, and the tip drops below the pill.
     assert.equal(pill?.getAttribute('title'), null)
     assert.equal(pill?.getAttribute('data-lc-tip'), 'Topped-up balance: $10.00\nGranted balance: $2.50')
     assert.equal(pill?.getAttribute('data-lc-tip-side'), 'bottom')
     await m.unmount()
+
+    const ZhCapsule = makeBalanceCapsule(asClientCtx(new TestClientCtx({ locale: 'zh' })), makeKit('zh'))
+    const zh = await mount(h(ZhCapsule, {}))
+    await flush()
+    assert.equal(query(zh.container, '.lc-ov-balance-label')?.textContent, 'DeepSeek 余额')
+    assert.equal(query(zh.container, '.lc-ov-balance-value')?.textContent, '¥110.00')
+    assert.equal(query(zh.container, '.lc-ov-balance').getAttribute('data-lc-tip'), '充值余额: ¥100.00\n赠送余额: ¥10.00')
+    await zh.unmount()
   })
 
   test('zero sub-items drop from the tooltip; an all-zero account rides bare', async () => {
@@ -106,19 +110,7 @@ describe('BalanceCapsule', () => {
     await m2.unmount()
   })
 
-  test('the zh locale shows CNY with localized breakdown labels', async () => {
-    stubRoute({ ok: true, value: WIRE_BALANCE })
-    // The kit's `t` is the harness's locale-bound translate (zh), while the ctx's locale service drives the currency pick.
-    const Capsule = makeBalanceCapsule(asClientCtx(new TestClientCtx({ locale: 'zh' })), makeKit('zh'))
-    const m = await mount(h(Capsule, {}))
-    await flush()
-    assert.equal(query(m.container, '.lc-ov-balance-label')?.textContent, 'DeepSeek 余额')
-    assert.equal(query(m.container, '.lc-ov-balance-value')?.textContent, '¥110.00')
-    assert.equal(query(m.container, '.lc-ov-balance').getAttribute('data-lc-tip'), '充值余额: ¥100.00\n赠送余额: ¥10.00')
-    await m.unmount()
-  })
-
-  test('the remembered figure paints first, then the revalidated one replaces it', async () => {
+  test('the remembered figure paints first, a live read replaces it, and a failed revalidation keeps it', async () => {
     remember(WIRE_BALANCE)
     const fresh = { isAvailable: true, balances: [{ currency: 'USD', total: 9.99, granted: 0.99, toppedUp: 9 }] }
     let release!: () => void
@@ -134,17 +126,17 @@ describe('BalanceCapsule', () => {
     await flush()
     assert.equal(query(m.container, '.lc-ov-balance-value')?.textContent, '$9.99', 'the live figure takes over')
     await m.unmount()
-  })
 
-  test('a failed revalidation keeps the remembered figure instead of blanking the pill', async () => {
+    resetPlatformBalance()
+    globalThis.localStorage.clear()
     remember(WIRE_BALANCE)
     stubRoute({ ok: false })
-    const Capsule = makeBalanceCapsule(asClientCtx(new TestClientCtx({ locale: 'en' })), kit)
-    const m = await mount(h(Capsule, {}))
-    assert.equal(query(m.container, '.lc-ov-balance-value')?.textContent, '$12.50')
+    const Failed = makeBalanceCapsule(asClientCtx(new TestClientCtx({ locale: 'en' })), kit)
+    const failed = await mount(h(Failed, {}))
+    assert.equal(query(failed.container, '.lc-ov-balance-value')?.textContent, '$12.50')
     await flush()
-    assert.equal(query(m.container, '.lc-ov-balance-value')?.textContent, '$12.50', 'the miss changes nothing')
-    await m.unmount()
+    assert.equal(query(failed.container, '.lc-ov-balance-value')?.textContent, '$12.50', 'the miss changes nothing')
+    await failed.unmount()
   })
 
   test('an account without the display currency falls back to its first entry, code-prefixed', async () => {
@@ -172,8 +164,6 @@ describe('BalanceCapsule — the fast close-reopen window (issue #82)', () => {
     const first = await mount(h(Capsule, {}))
     assert.equal(text(first.container), '', 'nothing remembered yet')
     await first.unmount()
-    // The reopen lands inside the first read's window: it joins the read —
-    // and settles on the landing figure exactly like the first open would.
     const Reopened = makeBalanceCapsule(asClientCtx(new TestClientCtx({ locale: 'en' })), kit)
     const second = await mount(h(Reopened, {}))
     assert.equal(text(second.container), '', 'the joined read has not landed yet')

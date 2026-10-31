@@ -1,7 +1,3 @@
-// The skill-catalog route (src/host/skills.ts): deferred-inject gating on the connection face, the session-addressed resolution mirroring
-// the harness's own skill catalog (observeSession → cwd + preset; a live agent's scoped registry wins; a cold session rides a scope lease;
-// every gap falls back to the global layers), and the typed `null` for every unusable face — never a throw into the transport.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
@@ -17,8 +13,6 @@ interface CtxSpec {
   agentPresets?: unknown
 }
 
-/** A minimal host ctx double with cordis inject semantics (mirrors
- * balance.spec.ts's): the callback runs once its dependency list completes, and `ctx.get` serves the request-time reads. */
 function ctxOf(spec: CtxSpec): { ctx: Context; captured: { path?: string; fetch?: RouteFetch } } {
   const captured: { path?: string; fetch?: RouteFetch } = {}
   const services = new Map<string, unknown>()
@@ -49,7 +43,7 @@ function ctxOf(spec: CtxSpec): { ctx: Context; captured: { path?: string; fetch?
   return { ctx: ctx as unknown as Context, captured }
 }
 
-const CONNECTION = { fetch: { register: () => () => {} } }
+const connectionOf = (): { fetch: { register: () => () => void } } => ({ fetch: { register: () => () => {} } })
 
 function registryOf(rows: unknown, log?: unknown[]): { list: (options: unknown) => Promise<unknown> } {
   return {
@@ -89,37 +83,25 @@ async function serve(captured: { fetch?: RouteFetch }, body: unknown = {}): Prom
 }
 
 function armed(spec: Omit<CtxSpec, 'connection'>): { path?: string; fetch?: RouteFetch } {
-  const { ctx, captured } = ctxOf({ connection: CONNECTION, ...spec })
+  const { ctx, captured } = ctxOf({ connection: connectionOf(), ...spec })
   watchSkillCatalog(ctx)
   return captured
 }
 
 describe('skills route registration', () => {
-  test('no connection service never registers the route', () => {
-    const { ctx, captured } = ctxOf({ skills: registryOf(ROWS) })
-    watchSkillCatalog(ctx)
-    assert.equal(captured.fetch, undefined)
-  })
-
-  test('a connection without a fetch registry never registers the route', () => {
-    const { ctx, captured } = ctxOf({ connection: {}, skills: registryOf(ROWS) })
-    watchSkillCatalog(ctx)
-    assert.equal(captured.fetch, undefined)
-  })
-
-  test('a rejecting registry is swallowed — the plugin stays up, no route', () => {
-    const { ctx, captured } = ctxOf({
+  test('a missing or unusable connection registry never mounts the route; a rejecting one stays up, a good one mounts', () => {
+    for (const spec of [{ skills: registryOf(ROWS) }, { connection: {}, skills: registryOf(ROWS) }]) {
+      const { ctx, captured } = ctxOf(spec)
+      watchSkillCatalog(ctx)
+      assert.equal(captured.fetch, undefined)
+    }
+    const rejecting = ctxOf({
       connection: { fetch: { register: () => { throw new Error('hostile registry') } } },
       skills: registryOf(ROWS),
     })
-    assert.doesNotThrow(() => watchSkillCatalog(ctx))
-    assert.equal(captured.fetch, undefined)
-  })
-
-  test('the route mounts under its path', () => {
-    const captured = armed({ skills: registryOf(ROWS) })
-    assert.equal(captured.path, SKILLS_ROUTE)
-    assert.equal(typeof captured.fetch, 'function')
+    assert.doesNotThrow(() => watchSkillCatalog(rejecting.ctx))
+    assert.equal(rejecting.captured.fetch, undefined)
+    assert.equal(armed({ skills: registryOf(ROWS) }).path, SKILLS_ROUTE)
   })
 })
 
@@ -167,47 +149,32 @@ describe('skills route: the session-addressed resolution', () => {
     assert.deepEqual(globalLog, [], 'the global registry never reads')
   })
 
-  test('a scoped face without list falls back to the global registry', async () => {
-    const globalLog: unknown[] = []
-    const captured = armed({
-      skills: registryOf(ROWS, globalLog),
+  test('a live agent without a usable preset face falls back to the unscoped global registry', async () => {
+    const scopedLog: unknown[] = []
+    const scoped = armed({
+      skills: registryOf(ROWS, scopedLog),
       agents: { get: () => ({}) },
       agentPresets: { serviceFor: () => ({ noList: true }) },
     })
-    const reply = await serve(captured, { sessionId: 's1' })
-    assert.deepEqual(globalLog, [{}], 'unscoped — no live scope, no lease face')
-    assert.equal((reply.value as { skills: unknown[] }).skills.length, 2)
+    const liveLog: unknown[] = []
+    const live = armed({ skills: registryOf(ROWS, liveLog), agents: { get: () => null }, agentPresets: {} })
+    for (const captured of [scoped, live]) {
+      const reply = await serve(captured, { sessionId: 's1' })
+      assert.equal((reply.value as { skills: unknown[] }).skills.length, 2)
+    }
+    assert.deepEqual(scopedLog, [{}], 'a serviceFor face without list reads unscoped')
+    assert.deepEqual(liveLog, [{}], 'an agent with no preset faces reads unscoped')
   })
 
-  test('a live agent with no preset faces at all still reads the global registry', async () => {
-    const log: unknown[] = []
-    const captured = armed({ skills: registryOf(ROWS, log), agents: { get: () => null }, agentPresets: {} })
-    await serve(captured, { sessionId: 's1' })
-    assert.deepEqual(log, [{}])
-  })
-
-  test('a lease without a key scopes nothing', async () => {
-    const log: unknown[] = []
-    const captured = armed({
-      skills: registryOf(ROWS, log),
+  test('a lease without a key, a throwing agents face, and a throwing lease all degrade to the unscoped global read', async () => {
+    const unkeyed: unknown[] = []
+    const unkeyedRoute = armed({
+      skills: registryOf(ROWS, unkeyed),
       agents: { get: () => undefined },
       agentPresets: { acquireScope: async () => ({}) },
     })
-    await serve(captured, { sessionId: 's1' })
-    assert.deepEqual(log, [{}])
-  })
-
-  test('every observation gap leaves the body’s cwd as the only selector', async () => {
-    const bodies: unknown[] = [{ sessionId: 's1', cwd: '/repo/body' }, { sessionId: '', cwd: '/repo/body' }, { sessionId: 7, cwd: '/repo/body' }]
-    for (const query of [undefined, {}, { observeSession: 42 }, queryOf(null, { throws: true }), queryOf(null)]) {
-      const log: unknown[] = []
-      const captured = armed({ skills: registryOf([], log), ...(query === undefined ? {} : { sessionQuery: query }) })
-      for (const body of bodies) await serve(captured, body)
-      assert.deepEqual(log, bodies.map(() => ({ cwd: '/repo/body' })))
-    }
-  })
-
-  test('a throwing agents face and a throwing lease both degrade to the unscoped global read', async () => {
+    await serve(unkeyedRoute, { sessionId: 's1' })
+    assert.deepEqual(unkeyed, [{}])
     const log: unknown[] = []
     const captured = armed({
       skills: registryOf(ROWS, log),
@@ -219,13 +186,24 @@ describe('skills route: the session-addressed resolution', () => {
     assert.equal((reply.value as { skills: unknown[] }).skills.length, 2)
   })
 
-  test('an absent or unusable registry answers a typed null', async () => {
+  test('every observation gap leaves the body’s cwd as the only selector', async () => {
+    const bodies: unknown[] = [{ sessionId: 's1', cwd: '/repo/body' }, { sessionId: '', cwd: '/repo/body' }, { sessionId: 7, cwd: '/repo/body' }]
+    for (const query of [undefined, {}, { observeSession: 42 }, queryOf(null, { throws: true }), queryOf(null)]) {
+      const log: unknown[] = []
+      const captured = armed({ skills: registryOf([], log), ...(query === undefined ? {} : { sessionQuery: query }) })
+      for (const body of bodies) await serve(captured, body)
+      assert.deepEqual(log, bodies.map(() => ({ cwd: '/repo/body' })))
+    }
+    const log: unknown[] = []
+    const captured = armed({ skills: registryOf([], log) })
+    for (const body of [{ cwd: '/repo/alpha' }, {}, { cwd: 42 }, { cwd: '' }, 'not a record']) await serve(captured, body)
+    assert.deepEqual(log, [{ cwd: '/repo/alpha' }, {}, {}, {}, {}])
+  })
+
+  test('an absent, unusable, or throwing registry and a broken body answer typed values, never a transport throw', async () => {
     for (const skills of [undefined, {}, { list: 42 }]) {
       assert.deepEqual(await serve(armed(skills === undefined ? {} : { skills })), { ok: true, value: null })
     }
-  })
-
-  test('a throwing registry, a non-array listing, or a broken body never throw into the transport', async () => {
     assert.deepEqual(await serve(armed({ skills: registryOf(new Error('disk down')) })), { ok: true, value: null })
     assert.deepEqual(await serve(armed({ skills: registryOf('not an array') })), { ok: true, value: { skills: [] } })
     const captured = armed({ skills: registryOf(ROWS) })
@@ -257,17 +235,6 @@ describe('skills route outcomes', () => {
         ],
       },
     })
-  })
-
-  test('the body’s cwd alone selects the project layer when no session services compose', async () => {
-    const log: unknown[] = []
-    const captured = armed({ skills: registryOf([], log) })
-    await serve(captured, { cwd: '/repo/alpha' })
-    await serve(captured, {})
-    await serve(captured, { cwd: 42 })
-    await serve(captured, { cwd: '' })
-    await serve(captured, 'not a record')
-    assert.deepEqual(log, [{ cwd: '/repo/alpha' }, {}, {}, {}, {}])
   })
 
   test('entries failing the name proof drop whole; description defaults empty; path/source ride only when proved', async () => {

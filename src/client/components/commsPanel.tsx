@@ -1,163 +1,313 @@
-/**
- * The Fleet comms panel — the family's inter-agent traffic in one timeline. The harness attests
- * it in three durable shapes, each lifted from the log it landed in by the fleet-detail route: a
- * team relay sits in the RECIPIENT's log (`agent-message`, sender id attested), a historical
- * mailbox delivery likewise (`team-message`, sender name attested), and a child's settling account
- * sits in the PARENT's log (`subagent-settled`). Reading N session logs is the expensive part, so
- * the scan runs on demand, reports its progress, and flags itself stale once a scanned session
- * moves on.
- */
-
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
 import { IconSendOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { AgentNode } from '../agentTree'
-import { commsStaleOf, type FleetDetailState } from '../fleetModel'
-import { type CommsRow } from '../fleetDetail'
-import { CommsParties, commsTextOf } from './commsRow'
-import { fmtTime } from '../format'
+import {
+  channelsOf,
+  fromPartyOf,
+  includesAgent,
+  kindGroupOf,
+  type CommsAgent,
+  type CommsKindFilter,
+} from '../commsModel'
+import { agentResolverOf } from '../fleetAgents'
+import type { CommsRow } from '../fleetDetail'
+import type { FleetDetailState } from '../fleetModel'
 import type { ViewKit } from '../viewkit'
+import type { FleetMessage } from '../../shared/types'
+import { ClearableInput } from './clearableInput'
+import { CommsChannelCard } from './commsChannel'
+import { CommsEvent, CommsEventDetail } from './commsEvent'
+import type { RichKit } from './richText'
 
 export interface CommsPanelProps {
-  nodes: readonly AgentNode[]
   details: FleetDetailState
-  /** Merged comms rows over the landed details (newest first). */
   comms: CommsRow[]
-  labelOf: (id: string) => string
-  onPin: (id: string | null) => void
-  /** The picked agent's session id (the graph's and members board's own pick): the timeline
-   * narrows to their traffic, and the pick chip in the toolbar clears it. */
+  agents: ReadonlyMap<string, CommsAgent>
+  titles: ReadonlyMap<string, string>
+  attested: ReadonlyMap<string, string>
+  anchorId?: string
   pickId: string | null
   onPickClear: () => void
+  pinnedId: string | null
+  onSelect: (id: string) => void
+  onOpen: (id: string) => void
+  onEnter: (id: string) => void
+  rich: RichKit
   t: ViewKit['t']
-  fmt: ViewKit['fmt']
 }
 
-/** HH:MM:SS for the row's instant (the shared locale-free formatter). */
-function clockOf(time: number): string {
-  return time <= 0 ? '—' : fmtTime(time)
+const MAX_VISIBLE_CHANNELS = 8
+
+function countsOf(rows: readonly CommsRow[]): Record<CommsKindFilter, number> {
+  const counts: Record<CommsKindFilter, number> = { all: 0, message: 0, report: 0 }
+  for (const row of rows) {
+    counts.all += 1
+    counts[kindGroupOf(row)] += 1
+  }
+  return counts
+}
+
+function fullMessageOf(details: FleetDetailState, row: CommsRow | undefined): FleetMessage | null {
+  if (row === undefined) return null
+  const detail = details.fullLanded.get(row.to)
+  if (detail === null || detail === undefined) return null
+  return detail.messages.find(message => message.seq === row.seq && message.kind === row.kind) ?? null
+}
+
+function hiddenMessagesOf(landed: FleetDetailState['landed'], rows: readonly CommsRow[]): number {
+  const owners = new Set(rows.map(row => row.to))
+  let hidden = 0
+  for (const id of owners) {
+    const detail = landed.get(id)?.detail
+    if (detail?.messagesTotal !== undefined) {
+      hidden += Math.max(0, detail.messagesTotal - detail.messages.length)
+    }
+  }
+  return hidden
 }
 
 export function CommsPanel(props: CommsPanelProps): ReactElement {
-  const { nodes, details, comms, pickId, t } = props
-  const [agentFilter, setAgentFilter] = useState<string | null>(null)
+  const { comms, details, pickId, t } = props
+  const [channelKey, setChannelKey] = useState<string | null>(null)
+  const [kindFilter, setKindFilter] = useState<CommsKindFilter>('all')
+  const [query, setQuery] = useState('')
+  const [order, setOrder] = useState<'newest' | 'oldest'>('newest')
+  const [openKey, setOpenKey] = useState<string | null>(null)
+  const [showAll, setShowAll] = useState(false)
 
-  // A pick governs while it stands: the dropdown's own choice yields on landing and never
-  // resurrects stale once the pick clears.
   useEffect(() => {
-    if (pickId !== null) setAgentFilter(null)
+    setChannelKey(null)
+    setOpenKey(null)
+    setShowAll(false)
   }, [pickId])
 
-  // Only scan-claimed sessions drive the panel's state: the inspector's own focus reads never
-  // flip it past the collapsed state.
-  const scannedNodes = useMemo(() => nodes.filter(n => details.scanned.has(n.id)), [nodes, details.scanned])
-  const done = scannedNodes.filter(n => details.landed.has(n.id)).length
-  const scanning = scannedNodes.some(n => details.pending.has(n.id))
-  const stale = useMemo(() => commsStaleOf(scannedNodes, details.landed), [scannedNodes, details.landed])
+  const agentOf = useMemo(
+    () => agentResolverOf(props.agents, props.titles, props.attested, t),
+    [props.agents, props.attested, props.titles, t],
+  )
 
-  const involved = useMemo(() => {
-    const ids = new Set<string>()
-    for (const row of comms) {
-      if (row.from !== undefined) ids.add(row.from)
-      ids.add(row.to)
+  const scoped = useMemo(
+    () => (pickId === null ? comms : comms.filter(row => includesAgent(row, pickId))),
+    [comms, pickId],
+  )
+  const channels = useMemo(() => channelsOf(scoped, props.anchorId), [scoped, props.anchorId])
+  const activeChannel = channelKey !== null ? channels.find(channel => channel.key === channelKey) : undefined
+  const channelRows = activeChannel !== undefined ? activeChannel.rows : scoped
+  const counts = useMemo(() => countsOf(channelRows), [channelRows])
+
+  const shownRows = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    const filtered = channelRows.filter((row) => {
+      if (kindFilter !== 'all' && kindGroupOf(row) !== kindFilter) return false
+      if (needle === '') return true
+      const from = agentOf(fromPartyOf(row))
+      const to = agentOf(row.to)
+      return [row.text, row.summary, row.report, from.name, to.name]
+        .some(value => value !== undefined && value.toLowerCase().includes(needle))
+    })
+    return order === 'newest' ? filtered : [...filtered].reverse()
+  }, [agentOf, channelRows, kindFilter, order, query])
+
+  const openRow = openKey !== null ? shownRows.find(row => row.key === openKey) : undefined
+  const fullMessage = fullMessageOf(details, openRow)
+  const fullPending = openRow !== undefined && details.fullPending.has(openRow.to)
+
+  const visibleChannels = useMemo(() => {
+    const base = showAll ? channels : channels.slice(0, MAX_VISIBLE_CHANNELS)
+    if (activeChannel !== undefined && !base.some(channel => channel.key === activeChannel.key)) {
+      return [...base, activeChannel]
     }
-    return [...ids]
-  }, [comms])
+    return base
+  }, [activeChannel, channels, showAll])
+  const hiddenChannels = channels.length - visibleChannels.length
 
-  // The pick narrows first; the dropdown's own choice only ever governs without one.
-  const rows = pickId !== null
-    ? comms.filter(row => row.from === pickId || row.to === pickId)
-    : agentFilter !== null
-      ? comms.filter(row => row.from === agentFilter || row.to === agentFilter)
-      : comms
-
-  const truncated = useMemo(() => {
-    for (const entry of details.landed.values()) {
-      if (entry.detail?.truncated === true) return true
+  const toggle = (row: CommsRow): void => {
+    if (openKey === row.key) {
+      setOpenKey(null)
+      return
     }
-    return false
-  }, [details.landed])
+    setOpenKey(row.key)
+    if (row.clipped === true) details.requestFull(row.to)
+  }
+
+  const pending = details.pending.size > 0
+  const clippedCount = channelRows.filter(row => row.clipped === true).length
+  const hiddenMessages = useMemo(() => hiddenMessagesOf(details.landed, channelRows), [channelRows, details.landed])
+  const pickName = pickId !== null ? agentOf(pickId).name : ''
+  const showTools = scoped.length > 4 || pickId !== null
+  const subtitle = t('fleet.comms.sub', {
+    n: channelRows.length,
+    c: activeChannel === undefined ? channels.length : 1,
+  }) + (pending ? ` · ${t('fleet.comms.loading')}` : '')
 
   return (
-    <div className="lc-card lc-comms">
+    <div className="lc-card lc-comms" aria-busy={pending}>
       <div className="lc-card-title">
         <span className="lc-card-title-text">
           <IconSendOutlineRegular size={14} />
           {t('fleet.comms.title')}
         </span>
-        <span className="lc-card-sub">{t('fleet.comms.sub')}</span>
+        <span className="lc-card-sub" title={subtitle}>{subtitle}</span>
       </div>
 
-      <div className="lc-fleet-toolbar">
-        {details.scanned.size === 0 ? (
+      {showTools ? (
+        <div className="lc-fleet-toolbar">
+          {pickId !== null ? (
+            <button
+              type="button"
+              className="lc-agents-badge lc-tasks-filter"
+              title={pickName}
+              onClick={props.onPickClear}
+            >
+              {pickName} ×
+            </button>
+          ) : null}
+          <div className="lc-fleet-filters" role="group" aria-label={t('fleet.comms.kindGroup')}>
+            {(['all', 'message', 'report'] as const).map(key => (
+              <button
+                key={key}
+                type="button"
+                className={'lc-gran-btn' + (kindFilter === key ? ' lc-gran-on' : '')}
+                aria-pressed={kindFilter === key}
+                onClick={() => {
+                  setKindFilter(key)
+                  setOpenKey(null)
+                }}
+              >
+                {t(`fleet.comms.kind.${key}`)}
+                <span className="lc-kind-n">{counts[key]}</span>
+              </button>
+            ))}
+          </div>
+          <ClearableInput
+            type="search"
+            className="lc-fleet-search"
+            placeholder={t('fleet.comms.search')}
+            clearLabel={t('field.clear')}
+            value={query}
+            onChange={setQuery}
+          />
           <button
             type="button"
-            className="lc-inspector-btn lc-comms-scan"
-            onClick={() => { details.scan(nodes) }}
+            className="lc-gran-btn lc-comms-order"
+            title={t(order === 'newest' ? 'fleet.comms.orderOldestTip' : 'fleet.comms.orderNewestTip')}
+            onClick={() => { setOrder(current => current === 'newest' ? 'oldest' : 'newest') }}
           >
-            {t('fleet.comms.scan', { n: nodes.length })}
+            {t(order === 'newest' ? 'fleet.comms.orderNewest' : 'fleet.comms.orderOldest')}
           </button>
-        ) : (
-          <>
-            <span className="lc-agents-chip">
-              {scanning
-                ? t('fleet.comms.scanning', { done, total: details.scanned.size })
-                : t('fleet.comms.rows', { n: comms.length })}
+        </div>
+      ) : null}
+
+      {scoped.length > 0 ? (
+        <div className="lc-comms-channels" role="group" aria-label={t('fleet.comms.channels')}>
+          <button
+            type="button"
+            className={'lc-comms-channel lc-comms-channel-all' + (activeChannel === undefined ? ' lc-comms-channel-on' : '')}
+            aria-pressed={activeChannel === undefined}
+            onClick={() => {
+              setChannelKey(null)
+              setOpenKey(null)
+            }}
+          >
+            <span className="lc-comms-allicon"><IconSendOutlineRegular size={16} /></span>
+            <span className="lc-comms-channel-main">
+              <span className="lc-comms-channel-names"><b>{t('fleet.comms.allChannels')}</b></span>
+              <span className="lc-comms-channel-meta">
+                {t('fleet.comms.allMeta', { n: scoped.length, c: channels.length })}
+              </span>
             </span>
-            {stale && !scanning ? <span className="lc-agents-chip lc-agents-chip-on">{t('fleet.comms.stale')}</span> : null}
-            <button type="button" className="lc-inspector-btn" onClick={() => { details.refresh(nodes) }}>
-              {t('fleet.comms.rescan')}
+          </button>
+          {visibleChannels.map(channel => (
+            <CommsChannelCard
+              key={channel.key}
+              channel={channel}
+              agentOf={agentOf}
+              selected={activeChannel?.key === channel.key}
+              onSelect={() => {
+                setChannelKey(current => current === channel.key ? null : channel.key)
+                setOpenKey(null)
+              }}
+              t={t}
+            />
+          ))}
+          {hiddenChannels > 0 ? (
+            <button
+              type="button"
+              className="lc-comms-channel lc-comms-channel-more"
+              onClick={() => { setShowAll(true) }}
+            >
+              <span className="lc-comms-morecount">+{hiddenChannels}</span>
+              <span className="lc-comms-channel-main">
+                <span className="lc-comms-channel-names"><b>{t('fleet.comms.moreChannels', { n: hiddenChannels })}</b></span>
+              </span>
             </button>
-            {pickId !== null ? (
-              <button
-                type="button"
-                className="lc-agents-badge lc-tasks-filter"
-                title={props.labelOf(pickId)}
-                onClick={props.onPickClear}
-              >
-                {props.labelOf(pickId)} ×
-              </button>
-            ) : involved.length > 0 ? (
-              <select
-                className="lc-fleet-sort"
-                value={agentFilter ?? ''}
-                aria-label={t('fleet.comms.filter')}
-                onChange={(ev) => { setAgentFilter(ev.target.value === '' ? null : ev.target.value) }}
-              >
-                <option value="">{t('fleet.comms.all')}</option>
-                {involved.map(id => <option key={id} value={id}>{props.labelOf(id)}</option>)}
-              </select>
-            ) : null}
-          </>
-        )}
-      </div>
+          ) : showAll && channels.length > MAX_VISIBLE_CHANNELS ? (
+            <button
+              type="button"
+              className="lc-comms-channel lc-comms-channel-more"
+              onClick={() => { setShowAll(false) }}
+            >
+              <span className="lc-comms-morecount">−</span>
+              <span className="lc-comms-channel-main">
+                <span className="lc-comms-channel-names"><b>{t('fleet.comms.lessChannels')}</b></span>
+              </span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
-      {details.scanned.size > 0 && !scanning && comms.length === 0 ? (
+      {comms.length === 0 && (pending || details.landed.size === 0) ? (
+        <div className="lc-comms-skeleton" aria-label={t('fleet.comms.loading')} role="status">
+          <i /><i /><i />
+        </div>
+      ) : comms.length === 0 ? (
         <div className="lc-empty">{t('fleet.comms.empty')}</div>
-      ) : pickId !== null && !scanning && comms.length > 0 && rows.length === 0 ? (
+      ) : scoped.length === 0 || shownRows.length === 0 ? (
         <div className="lc-empty">{t('fleet.comms.noMatch')}</div>
-      ) : null}
-
-      {rows.length > 0 ? (
-        <ul className="lc-comms-rows">
-          {rows.map((row) => {
-            const text = commsTextOf(row, t)
-            return (
-              <li key={row.key} className={`lc-comms-row lc-comms-${row.kind}`}>
-                <span className="lc-comms-time">{clockOf(row.time)}</span>
-                <span className="lc-agents-badge">{t(`fleet.kind.${row.kind}`)}</span>
-                <span className="lc-comms-parties">
-                  <CommsParties row={row} labelOf={props.labelOf} onPin={props.onPin} peerClass="lc-comms-peer" />
-                </span>
-                <span className="lc-comms-text" title={text !== row.text ? row.text : undefined}>
-                  {text}
-                </span>
-              </li>
-            )
-          })}
+      ) : (
+        <ul className="lc-comms-list">
+          {shownRows.map(row => (
+            <CommsEvent
+              key={row.key}
+              row={row}
+              agentOf={agentOf}
+              open={openKey === row.key}
+              onToggle={() => { toggle(row) }}
+              full={openKey === row.key ? fullMessage : null}
+              t={t}
+            >
+              {openKey === row.key ? (
+                <CommsEventDetail
+                  row={row}
+                  agentOf={agentOf}
+                  full={fullMessage}
+                  fullPending={fullPending}
+                  pinnedId={props.pinnedId}
+                  onSelect={props.onSelect}
+                  onOpen={props.onOpen}
+                  onEnter={props.onEnter}
+                  onClose={() => { setOpenKey(null) }}
+                  rich={props.rich}
+                  t={t}
+                />
+              ) : null}
+            </CommsEvent>
+          ))}
         </ul>
-      ) : null}
+      )}
 
-      {truncated ? <div className="lc-comms-note">{t('fleet.comms.truncated')}</div> : null}
+      {shownRows.length < channelRows.length || clippedCount > 0 || hiddenMessages > 0 ? (
+        <div className="lc-comms-notes">
+          {shownRows.length < channelRows.length
+            ? <span>{t('fleet.comms.filtered', { n: shownRows.length, total: channelRows.length })}</span>
+            : null}
+          {clippedCount > 0
+            ? <span>{t('fleet.comms.clipped', { n: clippedCount })}</span>
+            : null}
+          {hiddenMessages > 0
+            ? <span>{t('fleet.comms.hidden', { n: hiddenMessages })}</span>
+            : null}
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -1,7 +1,4 @@
-/** Chat → Context jump relay: the assistant-message action records the clicked reply's request seq and opens
- * the Context view — the right Sidebar's tab when served, else the conversation tab — which consumes the
- * one-shot focus once its projection data is in. */
-
+import { useEffect, useState } from 'react'
 import { asRecord, type ClientCtx } from './services'
 import { SIDEBAR_CONTEXT_KIND } from './sidebar'
 
@@ -14,8 +11,6 @@ export function requestContextFocus(sessionId: string, seq: number): void {
   for (const listener of focusListeners) listener()
 }
 
-/** Wake every subscribed view on each record; a listener takes its OWN session's entry, so other sessions'
- * records stay pending for their views. */
 export function subscribeContextFocus(listener: () => void): () => void {
   focusListeners.add(listener)
   return () => { focusListeners.delete(listener) }
@@ -28,9 +23,35 @@ export function takeContextFocus(sessionId: string): number | null {
   return seq
 }
 
-/** Open the Context tab over `ctx.sidebarRight.openTab` (the column expands in the same step). OPTIONAL seam,
- * re-proved at call time: a stripped service, no registered tab type, or a hostile face all report false so
- * the caller keeps its conversation-tab fallback. */
+const memberFocus = new Map<string, string>()
+
+const memberListeners = new Set<() => void>()
+
+export function requestFleetMemberFocus(sessionId: string, memberId: string): void {
+  memberFocus.set(sessionId, memberId)
+  for (const listener of memberListeners) listener()
+}
+
+export function currentFleetMemberFocus(sessionId: string): string | null {
+  return memberFocus.get(sessionId) ?? null
+}
+
+export function subscribeFleetMemberFocus(listener: () => void): () => void {
+  memberListeners.add(listener)
+  return () => { memberListeners.delete(listener) }
+}
+
+export function useFleetMemberFocus(sessionId: string | undefined): string | null {
+  const [id, setId] = useState<string | null>(null)
+  useEffect(() => {
+    if (sessionId === undefined || sessionId === '') return undefined
+    const sync = (): void => { setId(currentFleetMemberFocus(sessionId)) }
+    sync()
+    return subscribeFleetMemberFocus(sync)
+  }, [sessionId])
+  return id
+}
+
 export function openContextSidebar(ctx: ClientCtx): boolean {
   try {
     const face = asRecord(ctx.get('sidebarRight'))
@@ -42,9 +63,6 @@ export function openContextSidebar(ctx: ClientCtx): boolean {
   }
 }
 
-/** Activate a conversation view tab by clicking its own `button[role="tab"]` chrome: the harness hands `openView`
- * only to the ACTIVE view entry, so a nested action cannot call it; a missing tab reports failure. The label is the
- * tab's rendered text, so it addresses the Context tab and the Fleet tab alike. */
 export function activateViewTab(label: string): boolean {
   const tabs = document.querySelectorAll<HTMLButtonElement>('button[role="tab"]')
   for (const tab of tabs) {

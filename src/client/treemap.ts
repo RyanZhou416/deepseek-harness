@@ -1,22 +1,8 @@
-/**
- * The context browser's block map: a two-level squarified treemap of the assembled
- * context. Category regions take the outer level; inside each, same-kind items fold
- * into ONE weighted block (every `bash` result together, every load of a skill
- * together, injections by form), so a long session reads as a handful of chunks
- * instead of hundreds of slivers. Singular categories (system prompt, each tool
- * schema, every user/assistant message) keep one block per item.
- *
- * Click targets ride the block: `elem` opens that exact browser row when the block
- * is one item, `query` filters the category's rows to the group's tag when many;
- * the "others" fold carries neither and only opens the category.
- */
-
 import type { Category, SurfaceNode } from '../shared/types'
 import type { Assembled } from './assemble'
 import { MESSAGE_CATS } from './categories'
 import type { Translate } from './i18n'
 
-/** Per-category fold cap: the top blocks by tokens plus one "others" block for the tail. */
 const MAX_BLOCKS = 12
 const TOP_BLOCKS = MAX_BLOCKS - 1
 
@@ -25,9 +11,7 @@ export interface MapBlock {
   label: string
   tokens: number
   count: number
-  /** One-item block: the browser row to open ('sys', 'tool:<name>', 'n<seq>'). */
   elem?: string
-  /** Multi-item block: the row-filter text matching the rows' tags. */
   query?: string
 }
 
@@ -40,9 +24,6 @@ export interface MapCat {
 export interface MapBox { x: number; y: number; w: number; h: number }
 export interface Laid<T> { item: T; rect: MapBox }
 
-/** The group's display label doubles as the row filter: the browser rows' tags are built from the same words.
- * Keys carry the category (and a `~` fold marker) so every block key is unique across the whole map.
- * Only called for the grouped categories — user/assistant stay one block per node. */
 function groupOf(n: SurfaceNode, t: Translate): { gkey: string; label: string } {
   switch (n.cat) {
     case 'tool': return { gkey: 'tool:' + (n.tool ?? '?'), label: n.tool ?? '?' }
@@ -118,12 +99,6 @@ export function mapOf(view: Assembled, t: Translate, catLabel: (key: string) => 
   return cats
 }
 
-/**
- * Squarified layout (Bruls–Huizing–van Wijk): items are laid biggest-first into
- * strips along the remaining rectangle's shortest side, a new strip starting when
- * the next item would WORSEN the strip's worst aspect ratio. Zero-token items drop
- * out; the survivors tile the box exactly.
- */
 export function squarify<T extends { tokens: number }>(items: readonly T[], box: MapBox): Laid<T>[] {
   const sized = items.filter(it => it.tokens > 0)
   sized.sort((a, b) => b.tokens - a.tokens)

@@ -1,17 +1,6 @@
-/**
- * File activity — what the agent DID to files. The op-log generation's host fold
- * derives one record per executed file op over the whole log
- * (shared/fileOps.ts), so this module only filters and aggregates; older hosts
- * serve no `fileOps`, and the legacy path re-derives the ops from the served
- * nodes joined with the conversation window (window-bound).
- *
- * `before` is the exclusive upper seq bound (the next request's seq).
- */
-
 import type { FileOpRecord, RequestRecord, SurfaceNode } from '../shared/types'
 import { opsOfCall, parseCallArgs } from '../shared/fileOps'
-// The harness's browser-safe file-address layer, inlined by the client bundle:
-// the produced address is the `dsh-resource://file/…` spelling the preview claims.
+import { leafNameOf } from '../shared/attachment'
 import { fileAddressFor } from '@deepseek-ai/dsh-util-workspace-path'
 import type { ConversationNodeLike } from './services'
 
@@ -27,10 +16,12 @@ export interface FileEntry {
   searches: number
   added: number
   removed: number
-  errs: number
   ops: FileOp[]
-  /** Set when `path` is a pathless search's PATTERN, not a file path — display must not relativize it. */
   pattern?: true
+}
+
+export function surfaceSeqOf(op: FileOp): number {
+  return op.parent ?? op.seq
 }
 
 export interface FileKindTotal { files: number; ops: number }
@@ -48,16 +39,13 @@ export function formOf(tool: string, path: string): FileForm {
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i
 
-/** One row icon: the emoji, or a letter badge when `color` is set, plus the i18n key naming its bucket. */
 export interface FileGlyph {
   glyph: string
   tip: string
-  /** Language-badge fill; present only on the code-file buckets. */
   color?: string
   text?: string
 }
 
-/** Directory buckets by last path segment; then hidden dirs, then the plain folder. */
 const DIR_BUCKETS: (readonly [readonly string[], string, string])[] = [
   [['test', 'tests', '__tests__', 'spec', 'specs', 'e2e'], '🧪', 'files.glyph.tests'],
   [['doc', 'docs', 'documentation'], '📚', 'files.glyph.docs'],
@@ -72,7 +60,6 @@ const LOCK_NAMES = ['package-lock.json', 'pnpm-lock.yaml', 'npm-shrinkwrap.json'
 const MAKE_NAMES = ['makefile', 'justfile', 'cmakelists.txt']
 const TEST_NAME = /(^|[^a-z0-9])test([^a-z0-9]|$)|\.test\./
 
-/** Language files render as letter badges over their language's color, before the emoji buckets. */
 const CODE_LANGS: (readonly [readonly string[], string, string, string])[] = [
   [['tsx'], 'TSX', '#3178c6', 'files.glyph.lang.ts'],
   [['ts'], 'TS', '#3178c6', 'files.glyph.lang.ts'],
@@ -100,7 +87,6 @@ const CODE_LANGS: (readonly [readonly string[], string, string, string])[] = [
   [['sql'], 'SQL', '#e38c00', 'files.glyph.database'],
 ]
 
-/** Badge text by fill luminance: white on dark shades, near-black (never pure black) on light ones. */
 function badgeTextColor(hex: string): string {
   const n = parseInt(hex.slice(1), 16)
   const luminance = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255
@@ -132,7 +118,6 @@ function dirGlyph(base: string): FileGlyph {
 function fileGlyph(base: string): FileGlyph {
   const name = base.toLowerCase()
   const dot = name.lastIndexOf('.')
-  // A dot at position 0 is a dotfile, not an extension — `.env` below reads by name.
   const ext = dot > 0 ? name.slice(dot + 1) : ''
   if (name.endsWith('.lock') || LOCK_NAMES.includes(name)) return { glyph: '🔒', tip: 'files.glyph.lock' }
   if (TEST_NAME.test(name)) return { glyph: '🧪', tip: 'files.glyph.tests' }
@@ -152,26 +137,24 @@ function fileGlyph(base: string): FileGlyph {
   return { glyph: '📄', tip: 'files.form.text' }
 }
 
+export function baseNameOf(path: string): string {
+  return leafNameOf(path.endsWith('/') ? path.slice(0, -1) : path)
+}
+
 export function glyphOf(path: string, form: FileForm): FileGlyph {
   if (form === 'image') return { glyph: '🖼', tip: 'files.form.image' }
-  const trimmed = path.endsWith('/') ? path.slice(0, -1) : path
-  const base = trimmed.slice(trimmed.lastIndexOf('/') + 1)
+  const base = baseNameOf(path)
   return form === 'dir' ? dirGlyph(base) : fileGlyph(base)
 }
 
 const DRIVE_PATH = /^[a-zA-Z]:[\\/]/
 
-/** The absolute form of a real file path: verbatim when already absolute,
- * resolved against the workspace root when relative, undefined when a relative path has no root to resolve against. */
 export function absPathOf(path: string, workspace: string | undefined): string | undefined {
   if (path.startsWith('/') || DRIVE_PATH.test(path)) return path
   if (workspace === undefined || workspace === '' || path.startsWith('.')) return undefined
   return workspace.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '')
 }
 
-/** The session-scoped `dsh-resource://file/…` preview address, built by the
- * harness's own `fileAddressFor`, so every route to one file settles on one
- * tab. Undefined for a search pattern, a directory, a missing session, or a path the encoder rejects. */
 export function previewAddressOf(
   path: string,
   form: FileForm,
@@ -183,20 +166,15 @@ export function previewAddressOf(
   try {
     return fileAddressFor(sessionId, workspace, path)
   } catch {
-    // A lone surrogate in an untrusted log path fails URI encoding: not previewable, never a thrown render.
     return undefined
   }
 }
 
-/** The display form of a relative remainder: its repeating leading `./` drops;
- * a raw all-`./` degenerate leaves nothing to show, so it displays as itself. */
 function bareOf(remainder: string): string {
   const bare = remainder.replace(/^(?:\.\/)+/, '')
   return bare !== '' ? bare : remainder
 }
 
-/** The row's display path: inside the workspace it shortens to the bare workspace-relative
- * form, and other forms stay verbatim. */
 export function displayPathOf(path: string, workspace: string | undefined): string {
   const root = workspace !== undefined && workspace.length > 1 ? workspace.replace(/\/+$/, '') : undefined
   if (root !== undefined) {
@@ -207,8 +185,7 @@ export function displayPathOf(path: string, workspace: string | undefined): stri
   return bareOf(path)
 }
 
-/** Fold op records into per-file activity: scope-filtered, aggregated per path, ops newest first. */
-function aggregateOps(ops: readonly FileOp[], before: number | null): FileActivity {
+export function totalsOf(entries: readonly FileEntry[]): FileActivity['totals'] {
   const totals: FileActivity['totals'] = {
     read: { files: 0, ops: 0 },
     write: { files: 0, ops: 0 },
@@ -217,12 +194,28 @@ function aggregateOps(ops: readonly FileOp[], before: number | null): FileActivi
     added: 0,
     removed: 0,
   }
+  for (const e of entries) {
+    if (e.reads > 0) totals.read.files++
+    if (e.writes > 0) totals.write.files++
+    if (e.searches > 0) totals.search.files++
+    totals.read.ops += e.reads
+    totals.write.ops += e.writes
+    totals.search.ops += e.searches
+    if (e.form === 'image') {
+      totals.image.files++
+      totals.image.ops += e.ops.length
+    }
+    totals.added += e.added
+    totals.removed += e.removed
+  }
+  return totals
+}
+
+function aggregateOps(ops: readonly FileOp[], before: number | null): FileActivity {
   const byPath = new Map<string, FileEntry>()
   for (const op of ops) {
-    // A nested op's scope key is its parent result's seq.
-    const key = op.parent ?? op.seq
+    const key = surfaceSeqOf(op)
     if (before !== null && key >= before) continue
-    totals[op.kind].ops++
     let entry = byPath.get(op.path)
     if (entry === undefined) {
       entry = {
@@ -233,7 +226,6 @@ function aggregateOps(ops: readonly FileOp[], before: number | null): FileActivi
         searches: 0,
         added: 0,
         removed: 0,
-        errs: 0,
         ops: [],
         ...(op.pattern === true ? { pattern: true as const } : {}),
       }
@@ -244,33 +236,19 @@ function aggregateOps(ops: readonly FileOp[], before: number | null): FileActivi
     else entry.searches++
     entry.added += op.added
     entry.removed += op.removed
-    if (op.err) entry.errs++
     entry.ops.push(op)
   }
   const entries = [...byPath.values()]
-  for (const e of entries) {
-    e.ops.sort((a, b) => b.seq - a.seq)
-    if (e.reads > 0) totals.read.files++
-    if (e.writes > 0) totals.write.files++
-    if (e.searches > 0) totals.search.files++
-    if (e.form === 'image') {
-      totals.image.files++
-      totals.image.ops += e.ops.length
-    }
-    totals.added += e.added
-    totals.removed += e.removed
-  }
+  for (const e of entries) e.ops.sort((a, b) => b.seq - a.seq)
   entries.sort((a, b) => b.ops[0].seq - a.ops[0].seq)
-  return { entries, totals }
+  return { entries, totals: totalsOf(entries) }
 }
 
-/** The op-log generation's read of the card: fold-derived records, with `gone` joined from the detail's archive at render time.
- */
 export function activityOfOps(ops: readonly FileOpRecord[], archive: readonly SurfaceNode[], before: number | null): FileActivity {
   const goneBySeq = new Map<number, number>()
   for (const n of archive) if (n.gone !== undefined) goneBySeq.set(n.seq, n.gone)
   const joined = ops.map((op) => {
-    const gone = goneBySeq.get(op.parent ?? op.seq)
+    const gone = goneBySeq.get(surfaceSeqOf(op))
     return gone !== undefined && op.gone === undefined ? { ...op, gone } : op
   })
   return aggregateOps(joined, before)
@@ -285,7 +263,6 @@ interface SubCall {
   subCalls?: readonly unknown[]
 }
 
-/** Narrow one block of a node's `subCalls` tree to a settled nested call; a running or malformed block is dropped. */
 function subCallOf(block: unknown): SubCall | null {
   const b = block as Record<string, unknown>
   if (b.kind !== 'tool-result') return null
@@ -303,18 +280,13 @@ function subCallOf(block: unknown): SubCall | null {
   }
 }
 
-/** The run_code call's model-authored description — the nested ops' "why". */
 function programOf(conv: ConversationNodeLike | undefined): string | undefined {
   const description = parseCallArgs(conv?.call?.argsRaw)?.description
   return typeof description === 'string' && description !== '' ? description : undefined
 }
 
-/** Depth guard for nested Code-Mode trees: the SDK bindings exclude `run_code` itself, so a real tree is one level deep. */
 const SUBCALL_MAX_DEPTH = 8
 
-/** The legacy nested walk: every settled sub-dispatch whose arguments resolve to
- * a file target books one op, located on the parent run_code result. `seen`
- * holds visited blocks, so a malformed cyclic join cannot loop. */
 function foldSubCalls(
   blocks: readonly unknown[],
   parent: SurfaceNode,
@@ -344,8 +316,6 @@ function foldSubCalls(
   }
 }
 
-/** The INLINE generation's derivation from the served nodes joined with the
- * conversation window (window-bound). Anything that throws while folding a node drops that node and the walk carries on. */
 export function activityOf(
   nodes: SurfaceNode[],
   convOf: (seq: number) => ConversationNodeLike | undefined,
@@ -368,21 +338,16 @@ export function activityOf(
         ...(n.time !== undefined ? { time: n.time } : {}),
         ...(n.gone !== undefined ? { gone: n.gone } : {}),
       }))
-      // Nested Code-Mode calls (PTC): one settled sub-dispatch is one op.
       const subCalls = conv?.subCalls
       if (subCalls !== undefined && subCalls.length > 0) {
         foldSubCalls(subCalls, n, programOf(conv), ops, new Set<object>(), 1)
       }
     } catch {
-      // The guard exists so malformed join data can never matter.
     }
   }
   return aggregateOps(ops, null)
 }
 
-/** The browser step whose surface SHOWS an op's result node: the first request dispatched after it while it was still
- * alive. Sorted here because the wire's append order is not guaranteed (restored rows can re-order) — the same rule
- * the browser's own entry stamps read. */
 export function locateStepOf(requests: RequestRecord[], seq: number, gone: number | undefined): number | 'live' | null {
   const sorted = requests.slice().sort((a, b) => a.seq - b.seq)
   for (const r of sorted) {

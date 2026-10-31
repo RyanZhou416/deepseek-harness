@@ -1,5 +1,3 @@
-/** The context browser's tool-schema readers: the producer-dependent parameter vocabulary. */
-
 export interface ParamSchema {
   type?: unknown
   description?: unknown
@@ -49,8 +47,6 @@ export function typeOf(p: ParamSchema): string {
   return 'unknown'
 }
 
-/** Tool schemas nest parameters under `parameters`, `input_schema`, or `inputSchema` (producer-dependent), or bare
- * when `type === 'object'`. */
 export function paramsOf(schema: unknown): ParamSchema | null {
   if (schema === null || typeof schema !== 'object') return null
   const s = schema as Record<string, unknown>

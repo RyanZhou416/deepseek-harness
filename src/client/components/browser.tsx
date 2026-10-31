@@ -1,47 +1,49 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { assembleCached } from './derivedCache'
 import { UNKNOWN_TOOL_SOURCE, type Category, type ContextHeaders, type ContextTimeline, type HeaderRecord, type HeaderTool, type RequestRecord, type SurfaceNode, type SystemPromptNode } from '../../shared/types'
-import { assemble } from '../assemble'
-import type { Assembled } from '../assemble'
 import { CATS, CAT_COLOR, partsOf } from '../categories'
 import { dnaBaseLabel, dnaOf } from '../dna'
+import { useRowWindow } from './useRowWindow'
 import type { DnaItem } from '../dna'
 import type { ContentFetcher, ConversationNodeLike, HeaderFetcher } from '../services'
 import type { ContextSettings, DefaultDeltaBase, DefaultToolSort } from '../settings'
 import type { ViewKit } from '../viewkit'
-import { blockSummaryOf, callNamesOf, callSummaryOf } from '../callSummary'
+import { IconBrowse } from '../primitives'
 import type { DetailState } from '../timelineSource'
 import { makeDetailNote } from './detailNote'
 import { makeNodeText } from './nodes'
 import { turnStepsOf } from './trendChart'
 import { fetchMissNote, useFetchOnMiss } from './fetchOnMiss'
-import { attachmentsIn } from '../../shared/attachment'
+import { makeNodeRowOf, rowMatches } from './browserRows'
+import type { NodeRow } from './browserRows'
 import { makeAttachmentSection } from './attachments'
 import { makeRichText } from './richText'
 import type { StackedBarProps } from './stackedBar'
 import type { AttachmentOpener, ImageLoader } from '../services'
-import { TextSection, schemaTextOf, RowToolbar, ToolSchema, toolErrOf } from './browserToolCard'
-import { NodeContent, byCatOf, nodeNameOf, msgKindsOf, reasoningTextOf, ROW_KINDS } from './browserNodes'
+import { TextSection, schemaTextOf, RowToolbar, ToolSchema } from './browserToolCard'
+import { revealRowInCard } from '../revealScroll'
+import { NodeContent, byCatOf, msgKindsOf, ROW_KINDS } from './browserNodes'
 import type { RowKind } from './browserNodes'
+import { DNA_MIN_BAND, countOf, lastOfTurn, stepStampOf } from './browserHelpers'
+import type { CatFocus } from './browserHelpers'
+export type { CatFocus } from './browserHelpers'
+export { stepStampOf } from './browserHelpers'
 import { MapIcon, makeBrowserTreemap } from './browserTreemap'
 import type { MapBlock } from '../treemap'
 
+const FLAT_ROW_PITCH = 30
+
 export interface ContextBrowserProps {
+  locale?: string
   data: ContextTimeline
   headers: ContextHeaders | null
-  /** Resolved by the caller so the `useChat` seat's hook order lives in exactly one place. */
   convNodes?: readonly ConversationNodeLike[]
   fetchContent?: ContentFetcher
   fetchHeader?: HeaderFetcher
-  /** Preview-seq: hover transiently previews that step; the picker's own selection resumes when the pointer leaves the chart. */
   previewSeq?: number | null
-  /** Pin-seq: a pin selects that step; pinSeq null returns the browser to the live surface. */
   pinSeq?: number | null
-  /** Controlled only when BOTH props arrive; absent (the /context modal) — the browser keeps its own mount-local toggle. */
   dna?: boolean
   onDnaChange?: (on: boolean) => void
-  /** One-shot reveal request: `key` is the band key both DNA surfaces share — 'sys' (system prompt),
-   * 'tool:<name>' (a tool schema), 'n<seq>' (a message) — so the same bridge serves header bands and message
-   * nodes; handed back via `onNodeFocusHandled` so the same row can fire again. */
   nodeFocus?: { step: number | 'live'; key: string; cat: Category | 'system' | 'tools' } | null
   onNodeFocusHandled?: () => void
   catFocus?: CatFocus | null
@@ -50,47 +52,11 @@ export interface ContextBrowserProps {
   onHoverKey?: (key: string | null) => void
   onOpenCat?: (cat: string | null) => void
   loadImage?: ImageLoader
-  /** On-click opener of one attachment's preview (attachmentSource.ts); absent = metadata only. */
   openAttachment?: AttachmentOpener
   detailState?: DetailState
   onDetailRetry?: () => void
 }
 
-
-export interface CatFocus {
-  cat: string
-  kind?: RowKind
-}
-
-function countOf(asm: Assembled, byCat: Partial<Record<Category, SurfaceNode[]>>, c: string): number {
-  if (c === 'system') return asm.system !== null ? 1 : 0
-  if (c === 'tools') return asm.header !== null ? asm.header.tools.length : 0
-  return byCat[c as Category]?.length ?? 0
-}
-
-function lastOfTurn(requests: RequestRecord[], turn: number): RequestRecord | null {
-  for (let i = requests.length - 1; i >= 0; i--) if ((requests[i].turn ?? 0) === turn) return requests[i]
-  return null
-}
-
-/** The turn/step marking where a surface item entered the context: the FIRST request logged after the item's seq is
- * the first that carried it (assemble's inclusion rule is `n.seq < R.seq`); no following request stamps null. */
-export function stepStampOf(requests: RequestRecord[]): (itemSeq: number) => { turn: number; step: number } | null {
-  // Sort a copy: the wire arrives in append order, but the derivation must not depend on it (restored rows can re-order).
-  const sorted = requests.slice().sort((a, b) => a.seq - b.seq)
-  return (itemSeq) => {
-    for (const r of sorted) {
-      if (r.seq > itemSeq) {
-        return typeof r.turn === 'number' && typeof r.step === 'number' ? { turn: r.turn, step: r.step } : null
-      }
-    }
-    return null
-  }
-}
-
-/** Bands keep at least this share of the occupied region, so a tiny item stays a hoverable/clickable filament
- * instead of a sub-pixel sliver; tooltips still report true shares. */
-const DNA_MIN_BAND = 0.35
 
 export function makeContextBrowser(
   kit: ViewKit,
@@ -107,31 +73,25 @@ export function makeContextBrowser(
 
   return function ContextBrowser(props: ContextBrowserProps): ReactElement {
     const { data, headers } = props
-    // 'live' = the current surface (the NEXT request's context); number = a retained step's seq.
     const [sel, setSel] = useState<'live' | number>('live')
     const [openCat, setOpenCat] = useState<string | null>(null)
     const [openElem, setOpenElem] = useState<string | null>(null)
-    // The filter is a lens on the OPEN category: a category switch resets it, a step pick keeps it so the same lens compares epochs.
     const [rowQuery, setRowQuery] = useState('')
     const [rowKind, setRowKind] = useState<RowKind | null>(null)
-    // Mount-time default; in-toolbar toggling stays mount-local and never writes back.
     const [toolSort, setToolSort] = useState<DefaultToolSort>(() => settings.defaultToolSort())
     const [dnaLocal, setDnaLocal] = useState(false)
     const dnaLinked = props.dna !== undefined && props.onDnaChange !== undefined
     const dna = dnaLinked ? props.dna === true : dnaLocal
     const setDna = (on: boolean): void => {
       if (dnaLinked) {
-        /* v8 ignore next 1 -- `dnaLinked` requires both props, so the handler is always present. */
+        /* v8 ignore next 1 */
         props.onDnaChange?.(on)
       } else {
         setDnaLocal(on)
       }
     }
     const [dnaKey, setDnaKey] = useState<string | null>(null)
-    // The flat feed's row-hover mirror: hovering a row lights ITS band (exact node key) or band group
-    // ('tools'/'system') on the bar. A pointer hover overrides it; it never reports upward.
     const [rowDnaKey, setRowDnaKey] = useState<string | null>(null)
-    // The block map is mount-local like the unlinked DNA toggle: a visualization lens, not shared page state.
     const [mapOn, setMapOn] = useState(false)
     const [deltaBase, setDeltaBase] = useState<DefaultDeltaBase>(() => settings.defaultDeltaBase())
     const onOpenCat = props.onOpenCat
@@ -162,7 +122,6 @@ export function makeContextBrowser(
       for (const [seq, n] of miss.values) if (!m.has(seq)) m.set(seq, n)
       return m
     }, [convBySeq, miss.values])
-    // Pin linkage: a pinned bar selects its step; unpin returns to live, and only a NEW pin overrides a manual pick.
     const pinSeq = props.pinSeq
     useEffect(() => {
       setSel(pinSeq === null || pinSeq === undefined ? 'live' : pinSeq)
@@ -170,7 +129,31 @@ export function makeContextBrowser(
       setOpenElem(null)
     }, [pinSeq, onOpenCat])
     const rootRef = useRef<HTMLDivElement | null>(null)
+    const scrollRef = useRef<HTMLDivElement | null>(null)
+    const flatIndexRef = useRef<Map<string, number>>(new Map())
+    const [flatWide, setFlatWide] = useState(true)
     const focusScrollRef = useRef(false)
+    const revealFlatKey = useCallback((key: string): boolean => {
+      /* v8 ignore next 1 */
+      if (!dna || scrollRef.current === null) return false
+      const index = flatIndexRef.current.get(key)
+      /* v8 ignore next 1 */
+      if (index === undefined) return false
+      const el = scrollRef.current
+      el.scrollTop = Math.max(0, index * FLAT_ROW_PITCH - 40)
+      el.dispatchEvent(new Event('scroll'))
+      const settle = (left: number): void => {
+        /* v8 ignore next 1 */
+        if (left <= 0) return
+        requestAnimationFrame(() => {
+          const row = [...el.querySelectorAll<HTMLElement>('[data-lc-key]')].find(node => node.dataset.lcKey === key) ?? null
+          if (row !== null) revealRowInCard(rootRef.current, row)
+          else settle(left - 1)
+        })
+      }
+      settle(4)
+      return true
+    }, [dna])
     const nodeFocus = props.nodeFocus
     useEffect(() => {
       if (nodeFocus === null || nodeFocus === undefined) return
@@ -185,29 +168,33 @@ export function makeContextBrowser(
     const catFocus = props.catFocus
     useEffect(() => {
       if (catFocus === null || catFocus === undefined) return
-      // A category jump has no landing spot in the DNA flat feed (no category rows): it drops back to the accordion.
       if (dna) setDna(false)
-      setSel('live')
+      setSel(catFocus.step ?? 'live')
       setCat(catFocus.cat)
       setOpenElem(null)
-      setRowQuery('')
+      setRowQuery(catFocus.query ?? '')
       setRowKind(catFocus.kind ?? null)
       if (props.onCatFocusHandled !== undefined) props.onCatFocusHandled()
     }, [catFocus, props.onCatFocusHandled, onOpenCat, dna])
     useLayoutEffect(() => {
       if (!focusScrollRef.current) return
       focusScrollRef.current = false
-      rootRef.current?.querySelector('.lc-br-elem-on')?.scrollIntoView({ block: 'nearest' })
+      const row = rootRef.current?.querySelector('.lc-br-elem-on') ?? null
+      if (row !== null) revealRowInCard(rootRef.current, row)
     })
-    // The note an un-joined open row shows, per fetch state (fetchOnMiss.tsx).
     const missNote = fetchMissNote(t, fetchContent, miss.state, miss.retry, 'browser.noContent')
 
     const requests = data.requests
     const stepsOf = useMemo(() => turnStepsOf(requests), [requests])
+    const pickOptions = useMemo(
+      () => requests.slice().reverse().map(r => (
+        <option key={r.seq} value={String(r.seq)}>
+          {t('detail.step', { t: r.turn ?? 0, s: r.step ?? 0, n: stepsOf(r.turn) })}
+        </option>
+      )),
+      [requests, stepsOf, t, props.locale],
+    )
     const stampOf = useMemo(() => stepStampOf(requests), [requests])
-    // The live tail — items no logged request carries yet — rides the NEXT request, following the harness's step loop
-    // (`core/agent-loop`'s agent.ts): a newest user message opens a new turn, a text-only final reply ends the turn,
-    // anything else continues it. An ESTIMATE (dotted underline) until the request logs and the confirmed stamp replaces it.
     const pendingStamp = useMemo(() => {
       let hasReq = false
       let lastSeq = -1
@@ -235,23 +222,16 @@ export function makeContextBrowser(
       ? requests.find(r => r.seq === props.previewSeq) ?? null
       : null
     const req = hoverReq ?? (sel === 'live' ? null : requests.find(r => r.seq === sel) ?? null)
-    // The live surface pairs its next-request estimate with the freshest actual the log holds (highest seq — wire order is not trusted).
     const actual = req ?? requests.reduce<RequestRecord | null>((a, r) => (a === null || r.seq > a.seq ? r : a), null)
     const seq = req !== null ? req.seq : null
-    // The browser joins the shared composition hover ONLY while it shows the LIVE step — a pinned/previewed step has a
-    // different composition, so its hover must not light the overview (and vice versa).
     const linked = req === null && props.onHoverKey !== undefined
     const linkKey = linked && props.hoverKey !== null && props.hoverKey !== 'free'
       ? props.hoverKey
       : null
-    const view = assemble(data, headers, seq)
+    const view = useMemo(() => assembleCached(data, headers, seq), [data, headers, seq])
 
-    /** The tools group's element keys: the group key itself or any exact tool schema key. */
     const toolsElemOpen = (): boolean => openElem === 'tools' || (openElem !== null && openElem.startsWith('tool:'))
 
-    // The projections carry metadata only, so the selected step's content is fetched on demand (one history read per
-    // open section); the system prompt rides the timeline's own `system/message` nodes, the tools the header epoch.
-    // Open-content keys: the accordion's open category, or — in the DNA flat feed — the open group/element row.
     const fetchHeader = props.fetchHeader
     const headerSeq = view.header !== null ? view.header.seq : null
     const systemSeq = view.system !== null ? view.system.seq : null
@@ -269,8 +249,6 @@ export function makeContextBrowser(
     const breakdown = req !== null ? req : data.current
     const parts = partsOf(breakdown)
     const total = breakdown.total
-    // The open category stays lit without hover (a pointer hover overrides the pin); dropped when the shown step's
-    // composition holds nothing for it, so the bar never reads all-dimmed.
     const pinKey = openCat !== null && (breakdown[openCat as Category | 'system' | 'tools'] || 0) > 0 ? openCat : null
     const pick = (v: string) => {
       setSel(v === 'live' ? 'live' : Number(v))
@@ -278,8 +256,6 @@ export function makeContextBrowser(
       setOpenElem(null)
     }
 
-    // δ baseline: 'step' diffs the immediately preceding record, 'turn' the previous turn's last step — live: the last
-    // served request, or this turn's growth so far. A surface with no predecessor falls back to a ZERO baseline.
     const prevRecordOf = (r: RequestRecord): RequestRecord | null => {
       const i = requests.findIndex(x => x.seq === r.seq)
       return i > 0 ? requests[i - 1] : null
@@ -290,13 +266,14 @@ export function makeContextBrowser(
       ? deltaBase === 'step' ? lastReq : lastReq === null ? null : turnBaseOf(lastReq)
       : deltaBase === 'turn' ? turnBaseOf(req) : prevRecordOf(req)
     const zeroBase = refReq === null && lastReq !== null
-    const prevView = refReq !== null ? assemble(data, headers, refReq.seq) : null
+    const prevView = useMemo(
+      () => (refReq !== null ? assembleCached(data, headers, refReq.seq) : null),
+      [data, headers, refReq],
+    )
     const prevByCat = prevView !== null ? byCatOf(prevView) : null
 
     const byCat = byCatOf(view)
 
-    // One tool-result node is one completed call — the same accounting as the stats' toolCalls; a reclassified
-    // `skill` load keeps its tool stamp and still counts here.
     const toolHits = new Map<string, number>()
     for (const n of view.nodes) {
       if ((n.cat === 'tool' || n.cat === 'skill') && n.tool !== undefined) toolHits.set(n.tool, (toolHits.get(n.tool) ?? 0) + 1)
@@ -316,49 +293,25 @@ export function makeContextBrowser(
       label: dnaLabel(it),
       group: it.cat,
     })) ?? null
-    // A band hover is honored only while its key names a RENDERED band: a push can drop the band under a resting pointer
-    // without a mouseleave, and a dead key would leave the bar all-dimmed (the same invariant the pin's gate keeps).
     const liveDnaKey = dnaKey !== null && dnaByKey.has(dnaKey) ? dnaKey : null
-    // A row hover stays live only while DNA mode is on and its item still renders (a push can drop the
-    // hovered row and fire no mouseleave — a dead key must not dim the bar, the same invariant as liveDnaKey).
     const rowDnaLive = dna && rowDnaKey !== null
       && (rowDnaKey === 'tools' ? view.header !== null
         : rowDnaKey === 'system' ? view.system !== null
           : dnaByKey.has(rowDnaKey)) ? rowDnaKey : null
-    // A band hover brings its echoed row into view — within the nearest scrollable ancestor's own scrollport
-    // (the card's rows region) and nothing above it: the pointer rests on the bar, and a page scroll would
-    // drag it off the band mid-scrub.
     useLayoutEffect(() => {
       if (liveDnaKey === null) return
-      /* v8 ignore next 1 -- liveDnaKey non-null implies a mounted card: the ref always resolves. */
+      /* v8 ignore next 1 */
       const row = rootRef.current?.querySelector('.lc-br-elem-echo') ?? null
-      /* v8 ignore next 1 -- a live band names a rendered item, so its echoed row always exists. */
-      if (row === null) return
-      let scroller: HTMLElement | null = row.parentElement
-      while (scroller !== null && scroller.scrollHeight <= scroller.clientHeight) {
-        scroller = scroller.parentElement
-      }
-      /* v8 ignore next 1 -- jsdom lays out nothing: no ancestor ever overflows. */
-      if (scroller === null) return
-      /* v8 ignore start -- real layout only: jsdom measures no boxes. */
-      const rb = row.getBoundingClientRect()
-      const sb = scroller.getBoundingClientRect()
-      // The row only has to reach the scrollport's VISIBLE slice: a capped column usually extends below the
-      // page fold, so its own box bottom is no visibility boundary.
-      const visTop = Math.max(sb.top, 0)
-      const visBottom = Math.min(sb.bottom, window.innerHeight)
-      if (rb.top < visTop) scroller.scrollTop -= visTop - rb.top
-      else if (rb.bottom > visBottom) scroller.scrollTop += rb.bottom - visBottom
-      /* v8 ignore stop */
-    }, [liveDnaKey])
+      if (row !== null) revealRowInCard(rootRef.current, row)
+      else revealFlatKey(liveDnaKey)
+    }, [liveDnaKey, revealFlatKey])
     const pickDna = (key: string): void => {
       const it = dnaByKey.get(key)
-      /* v8 ignore next 1 -- the bar only reports keys of the parts it was handed; defensive. */
+      /* v8 ignore next 1 */
       if (it === undefined) return
       openRow(it.cat, key)
     }
 
-    /** One shared land-on-a-row sequence for every bar/map click that opens an exact row. */
     const openRow = (c: string, key: string): void => {
       setCat(c)
       setRowQuery('')
@@ -369,28 +322,23 @@ export function makeContextBrowser(
 
     const toolCount = (c: string): number => countOf(view, byCat, c)
 
-    // A category holding exactly one item opens that row with the category, so one click lands on the content directly.
     const singleKeyOf = (c: string): string | null => {
       if (c === 'system') return view.system !== null ? 'sys' : null
       if (c === 'tools') {
         const tools = view.header?.tools
         return tools !== undefined && tools.length === 1 ? 'tool:' + tools[0].name : null
       }
-      /* v8 ignore next 1 -- reached only through toggleCat's openable guard
-         (count > 0 ⟺ byCat[c] exists); the fallback is defensive. */
+      /* v8 ignore next 1 */
       const nodes = byCat[c as Category] ?? []
       return nodes.length === 1 ? 'n' + String(nodes[0].seq) : null
     }
 
     const toggleCat = (c: string) => {
       if (dna) {
-        // The flat feed has no category rows: system/tools land on their group rows; message categories are
-        // interleaved in the feed, so a bare category pick has no row to open (grouped map blocks filter instead).
         if (c === 'system' && view.system !== null) { setOpenCat(c); setRowQuery(''); setOpenElem('sys') }
         else if (c === 'tools') { setOpenCat(c); setRowQuery(''); setOpenElem('tools') }
         return
       }
-      // Empty cats stay shut — except system/tools with no header epoch, which open to explain the degradation note.
       const openable = toolCount(c) > 0
         || ((c === 'system' || c === 'tools') && view.header === null)
       if (!openable) return
@@ -404,9 +352,6 @@ export function makeContextBrowser(
       setRowKind(null)
       setOpenElem(singleKeyOf(c))
     }
-    // The flat feed's header group rows double as their category's row: opening one pins the category (bar and
-    // trend link) exactly like the accordion's category click; the tools group stays open while any of its
-    // element keys is. Message rows stay elem-scoped.
     const toggleElem = (key: string) => {
       if (dna && (key === 'tools' || key === 'sys')) {
         const open = key === 'tools' ? toolsElemOpen() : openElem === key
@@ -418,8 +363,6 @@ export function makeContextBrowser(
       setOpenElem(openElem === key ? null : key)
     }
 
-    /** Block-map picks: a one-item block lands on its exact row (the DNA band pick's path), a multi-item
-     * block filters the category's rows to the group's tag, and the "others" fold just opens the category. */
     const pickMapBlock = (c: string, b: MapBlock): void => {
       if (b.elem !== undefined) {
         openRow(c, b.elem)
@@ -431,11 +374,6 @@ export function makeContextBrowser(
       }
     }
 
-    /** Expandable element row; `err` carries the red run-state dot right after the chevron so a failed result scans while collapsed.
-     * `opts.open` overrides the `openElem === key` derivation for rows whose key set is wider (the flat feed's tools group);
-     * `opts.onHover` lets a DNA feed row light its own band on the composition bar. The reverse echo — a DNA band
-     * hover lighting its row — derives straight from the band key: a node or the system prompt matches its own row,
-     * a tool-schema band matches the tools group row. */
     const elemRow = (
       key: string, tag: ReactNode | null, preview: string,
       tokens: number, time: number | undefined, body: ReactNode,
@@ -448,7 +386,7 @@ export function makeContextBrowser(
       const echo = dna && liveDnaKey !== null
         && (liveDnaKey === key || (key === 'tools' && liveDnaKey.startsWith('tool:')))
       return (
-        <div key={key} className={'lc-br-elem' + (open ? ' lc-br-elem-on' : '') + (echo ? ' lc-br-elem-echo' : '')}>
+        <div key={key} data-lc-key={key} className={'lc-br-elem' + (open ? ' lc-br-elem-on' : '') + (echo ? ' lc-br-elem-echo' : '')}>
           <button
             type="button"
             className="lc-br-elem-row hover:bg-(--dsw-alias-interactive-bg-hover)"
@@ -480,7 +418,6 @@ export function makeContextBrowser(
       )
     }
 
-    // A row's stamp: its confirmed introducing step, else — LIVE only — the pending estimate (past-step views never speculate).
     const stampFor = (itemSeq: number): { turn: number; step: number; pending: boolean } | null => {
       const confirmed = stampOf(itemSeq)
       if (confirmed !== null) return { ...confirmed, pending: false }
@@ -498,73 +435,8 @@ export function makeContextBrowser(
       ))
     }
 
-    /** One message row's display facts, shared by the category bodies and the DNA flat feed, so the text
-     * filter scans exactly what the rows show — at derivation time, not per keystroke. */
-    const nodeRowOf = (n: SurfaceNode) => {
-      const conv = bySeq.get(n.seq)
-      // A `skill`-tool load reclassifies into the `skill` bucket but stays a tool result — same failure rule.
-      const rowErr = (n.cat === 'tool' || n.cat === 'skill') && toolErrOf(n, conv).err
-      let tag: string | null = null
-      let tagNames: string[] | null = null
-      let preview = nodeText(n)
-      const id = nodeNameOf(n)
-      if (n.cat === 'tool') {
-        tag = n.tool ?? '?'
-        tagNames = n.tool !== undefined ? [n.tool] : null
-        preview = callSummaryOf(conv) ?? t('node.toolResult')
-      } else if (n.cat === 'skill') {
-        tag = n.skill !== undefined ? t('node.skillTag', { name: n.skill }) : t('form.' + (n.form || 'context'))
-        preview = (n.skill === undefined && id !== '' ? id : null)
-          ?? (n.text !== undefined && n.text !== '' ? n.text : null)
-          ?? callSummaryOf(conv) ?? preview
-      } else if (n.cat === 'assistant') {
-        // The fold stamps `calls` only on TEXT-LESS replies; a reply carrying both text and calls recovers its
-        // breadcrumb through the join.
-        const names = Array.isArray(n.calls) && n.calls.length > 0 ? n.calls : callNamesOf(conv)
-        if (names.length > 0) {
-          tag = names.join(' › ')
-          tagNames = names
-          preview = (n.text !== undefined && n.text !== '' ? n.text : null)
-            ?? blockSummaryOf(conv)
-            ?? t('node.empty')
-        } else if (n.text === undefined || n.text === '') {
-          preview = blockSummaryOf(conv) ?? preview
-        }
-      } else if (n.cat === 'user') {
-        const attCount = attachmentsIn(conv?.content).length
-        if (attCount > 0 && openElem !== `n${n.seq}`) {
-          tag = t('attach.title') + (attCount > 1 ? ' ×' + String(attCount) : '')
-        }
-      } else {
-        tag = t('form.' + (n.form || 'context'))
-        if (id !== '') {
-          preview = id
-        } else if (n.text !== undefined && n.text !== '') {
-          preview = n.form === 'snapshot' ? t('node.snapshot') + n.text : n.text
-        }
-      }
-      return {
-        n,
-        conv,
-        rowErr,
-        tag,
-        tagNames,
-        preview,
-        reasoning: n.cat === 'assistant' ? reasoningTextOf(conv) : '',
-        kinds: msgKindsOf(n, conv),
-      }
-    }
-    type NodeRow = ReturnType<typeof nodeRowOf>
+    const nodeRowOf = makeNodeRowOf(kit, nodeText, bySeq, openElem)
 
-    /** The text lens both row lists share: tag, preview, raw text, and thinking. */
-    const rowMatches = (r: NodeRow, q: string): boolean =>
-      (r.tag ?? '').toLowerCase().includes(q) || r.preview.toLowerCase().includes(q)
-      || (typeof r.n.text === 'string' && r.n.text.toLowerCase().includes(q))
-      || r.reasoning.toLowerCase().includes(q)
-
-    /** One expandable message row — the category bodies' and the flat feed's shared renderer; `tag` composes
-     * the row's chips (the flat feed adds the category label and the prompt position) and `onHover` lights
-     * the row's own band on the bar. */
     const messageRow = (r: NodeRow, tag: ReactNode, onHover?: (over: boolean) => void): ReactElement =>
       elemRow(`n${r.n.seq}`, tag, r.preview, r.n.tokens, r.n.time,
         <NodeContent
@@ -589,12 +461,10 @@ export function makeContextBrowser(
               </span>
             ),
           }}
-          // Only the open row's body renders, so the miss note is exactly THIS join's fetch state.
           hint={r.conv === undefined ? missNote : t('browser.noContent')}
         />,
         r.rowErr, null, stampFor(r.n.seq), onHover !== undefined ? { onHover } : undefined)
 
-    /** The system row's preview and content body, shared by the category body and the DNA flat feed. */
     const systemPreviewOf = (sys: SystemPromptNode): string =>
       headerContent.get(sys.seq)?.system?.replace(/\s+/g, ' ').trim().slice(0, 80) ?? ''
     const systemBodyOf = (sys: SystemPromptNode): ReactNode => {
@@ -606,7 +476,6 @@ export function makeContextBrowser(
 
     const catBody = (c: string): ReactNode => {
       if (c === 'system') {
-        // No prompt in force: the note must name the missing PROJECTION — no headers service versus no epoch yet.
         const sys = view.system
         if (sys === null) {
           return <div className="lc-br-note">{t(headers === null ? 'browser.noHeader' : 'browser.noEpoch')}</div>
@@ -640,14 +509,25 @@ export function makeContextBrowser(
             return (row.description ?? '').toLowerCase().includes(q)
               || schemaTextOf(row.schema).toLowerCase().includes(q)
           })
-          // Size order mirrors the overview's Top chips; the producer's header order is not meaningful.
           .sort((a, b) => toolSort === 'count'
             ? (toolHitsOf(b) - toolHitsOf(a) || (a.name < b.name ? -1 : 1))
             : toolSort === 'size'
               ? b.tokens - a.tokens
               : (a.name < b.name ? -1 : 1))
+        const allPrices = view.header.tools.reduce((sum, tool) => sum + tool.tokens, 0)
+        const shownPrices = shown.reduce((sum, tool) => sum + tool.tokens, 0)
+        /* v8 ignore next 1 */
+        const shownTokens = allPrices > 0 ? Math.round(breakdown.tools * shownPrices / allPrices) : 0
         const toolctl = (
-          <RowToolbar value={rowQuery} placeholder={t('tool.search')} tip={t('tool.sortTip')} onChange={setRowQuery}>
+          <RowToolbar
+            value={rowQuery}
+            placeholder={t('tool.search')}
+            clearLabel={t('field.clear')}
+            count={shown.length}
+            tokens={shownTokens}
+            tip={t('tool.sortTip')}
+            onChange={setRowQuery}
+          >
             {(['size', 'count', 'name'] as const).map(k => (
               <button
                 key={k}
@@ -679,8 +559,6 @@ export function makeContextBrowser(
           <div>
             {toolctl}
             {shown.map((tool: HeaderTool) => {
-              // Best-effort host attribution (toolSources.ts); a provider predating the attribution hook arrives as the
-              // UNKNOWN_TOOL_SOURCE sentinel and renders the localized "unknown plugin" tag.
               const trailing = (
                 <>
                   {tool.plugin !== undefined
@@ -698,23 +576,38 @@ export function makeContextBrowser(
           </div>
         )
       }
-      /* v8 ignore next 1 -- the body renders only when the category is open,
-         which requires count > 0 ⟺ byCat[c] exists; defensive. */
+      /* v8 ignore next 1 */
       const rows = (byCat[c as Category] ?? []).slice().reverse().map(nodeRowOf)
       const q = rowQuery.trim().toLowerCase()
-      // Kind chips count over ALL of the shown step's rows — the step's composition, not the text-lens survivors.
+      const matchedRows = q === '' ? rows : rows.filter(r => rowMatches(r, q))
       const kindCounts = c === 'assistant'
-        ? ROW_KINDS.map(k => ({ k, n: rows.reduce((acc, r) => acc + (r.kinds[k] ? 1 : 0), 0) }))
+        ? ROW_KINDS.map(k => ({ k, n: matchedRows.reduce((acc, r) => acc + (r.kinds[k] ? 1 : 0), 0) }))
         : null
-      const shown = q === '' && rowKind === null
-        ? rows
-        : rows.filter(r =>
-          (rowKind === null || r.kinds[rowKind])
-          && (q === '' || rowMatches(r, q)))
+      const shown = rowKind === null ? matchedRows : matchedRows.filter(r => r.kinds[rowKind])
+      const shownTokens = shown.length === rows.length
+        ? breakdown[c as Category] || 0
+        : shown.reduce((sum, r) => sum + r.n.tokens, 0)
       const rowctl = kindCounts === null
-        ? <RowToolbar value={rowQuery} placeholder={t('browser.search.' + c)} onChange={setRowQuery} />
+        ? (
+          <RowToolbar
+            value={rowQuery}
+            placeholder={t('browser.search.' + c)}
+            clearLabel={t('field.clear')}
+            count={shown.length}
+            tokens={shownTokens}
+            onChange={setRowQuery}
+          />
+        )
         : (
-          <RowToolbar value={rowQuery} placeholder={t('browser.search.' + c)} tip={t('browser.kindTip')} onChange={setRowQuery}>
+          <RowToolbar
+            value={rowQuery}
+            placeholder={t('browser.search.' + c)}
+            clearLabel={t('field.clear')}
+            count={shown.length}
+            tokens={shownTokens}
+            tip={t('browser.kindTip')}
+            onChange={setRowQuery}
+          >
             {kindCounts.map(({ k, n }) => (
               <button
                 key={k}
@@ -739,8 +632,6 @@ export function makeContextBrowser(
       )
     }
 
-    /** The DNA feed row's category chip: the category's own color as a tinted capsule — the same
-     * color-mix idiom the delta badges and the block map's tiles use — so a row maps to its bar band at a glance. */
     const catChip = (cat: Category | 'system' | 'tools'): ReactElement => (
       <span
         className="lc-br-tag"
@@ -751,8 +642,6 @@ export function makeContextBrowser(
       >{catLabel(cat)}</span>
     )
 
-    /** The DNA feed's header group row: one row for every tool schema, opening into the category body's
-     * toolbar and rows. It sits at the feed's bottom — the model reads the header before the messages. */
     const toolsGroupRow = (header: HeaderRecord): ReactElement => {
       const open = toolsElemOpen()
       return elemRow(
@@ -773,51 +662,75 @@ export function makeContextBrowser(
         breakdown.system, undefined, systemBodyOf(sys), false, null, stampFor(sys.seq),
         { onHover: (over) => { setRowDnaKey(over ? 'system' : null) } })
 
-    /** The DNA feed: every assembled item as one flat row list in the prompt's reading order, presented
-     * bottom-up — the model reads oldest-first, so the NEWEST message is the top row and the header groups
-     * (tool schemas, system prompt) close the list. One text lens (`rowQuery`) — pinned in the card head —
-     * filters the feed's rows and the open tools group's schemas alike. */
-    const flatToolbar = (): ReactElement => (
-      <RowToolbar value={rowQuery} placeholder={t('browser.search.flat')} onChange={setRowQuery} />
-    )
+    /* v8 ignore start */
+    useLayoutEffect(() => {
+      if (!dna) return
+      const el = scrollRef.current
+      if (el === null) return
+      const sync = (): void => { setFlatWide(el.clientWidth >= 380) }
+      sync()
+      if (typeof ResizeObserver !== 'function') return
+      const observer = new ResizeObserver(sync)
+      observer.observe(el)
+      return () => { observer.disconnect() }
+    }, [dna])
+    /* v8 ignore stop */
 
-    const flatRows = (): ReactElement => {
+    interface FlatEntry {
+      r: NodeRow
+      pos: number
+    }
+    const flatRows = (): { entries: FlatEntry[]; tail: ReactElement[]; count: number; tokens: number } => {
       const q = rowQuery.trim().toLowerCase()
-      const rows: ReactElement[] = []
-      // Positions count ascending in reading order; reversing the array must not renumber them.
-      const flow = view.nodes.map((n, i) => ({ r: nodeRowOf(n), pos: i + 1 })).reverse()
-      for (const { r, pos } of flow) {
+      const entries: FlatEntry[] = []
+      let tokens = 0
+      for (let i = view.nodes.length - 1; i >= 0; i--) {
+        const r = nodeRowOf(view.nodes[i])
         if (q !== '' && !rowMatches(r, q)) continue
-        rows.push(messageRow(r, (
-          <>
-            {catChip(r.n.cat)}
-            <span className="lc-br-pos">#{fmt(pos)}</span>
-            {rowTagNode(r.tag, r.tagNames)}
-          </>
-        ), (over) => { setRowDnaKey(over ? 'n' + String(r.n.seq) : null) }))
+        entries.push({ r, pos: i + 1 })
+        tokens += r.n.tokens
       }
-      // An empty q matches everything (String.includes('') is true), so the lens needs no short-circuit arms.
-      // A header-less surface (no epoch served) renders message bands only, so its feed carries no header rows.
       const toolsHit = (view.header?.tools ?? []).some(tool =>
         tool.name.toLowerCase().includes(q) || (tool.plugin ?? '').toLowerCase().includes(q))
       const sys = view.system
       const sysText = sys !== null ? headerContent.get(sys.seq)?.system ?? '' : ''
       const sysHit = sys !== null && (systemPreviewOf(sys).toLowerCase().includes(q) || sysText.toLowerCase().includes(q))
-      if (view.header !== null && toolsHit) rows.push(toolsGroupRow(view.header))
-      if (sys !== null && sysHit) rows.push(systemRow(sys))
-      return (
-        <div className="lc-br-flat">
-          {rows}
-          {rows.length === 0 ? <div className="lc-br-note">{t('browser.rowNoMatch')}</div> : null}
-        </div>
-      )
+      const tail: ReactElement[] = []
+      if (view.header !== null && toolsHit) {
+        tail.push(toolsGroupRow(view.header))
+        tokens += breakdown.tools
+      }
+      if (sys !== null && sysHit) {
+        tail.push(systemRow(sys))
+        tokens += breakdown.system
+      }
+      const keys = new Map<string, number>()
+      for (let i = 0; i < entries.length; i++) keys.set('n' + String(entries[i].r.n.seq), i)
+      flatIndexRef.current = keys
+      return { entries, tail, count: entries.length + tail.length, tokens }
     }
+    const flatRowsModel = dna ? flatRows() : null
+    const flatRange = useRowWindow(scrollRef, flatRowsModel?.entries.length ?? 0, 30, dna && flatWide && openElem === null)
+    const flat = flatRowsModel ?? { entries: [] as FlatEntry[], tail: [] as ReactElement[], count: 0, tokens: 0 }
+    const flatToolbar = (): ReactElement => (
+      <RowToolbar
+        value={rowQuery}
+        placeholder={t('browser.search.flat')}
+        clearLabel={t('field.clear')}
+        count={flat.count}
+        tokens={flat.tokens}
+        onChange={setRowQuery}
+      />
+    )
 
     return (
       <div className="lc-card lc-br" ref={rootRef}>
         <div className="lc-br-head">
           <div className="lc-card-title">
-            <span className="lc-card-title-text">{t('browser.title')}</span>
+            <span className="lc-card-title-text">
+              <IconBrowse size={14} />
+              {t('browser.title')}
+            </span>
             <span className="lc-gran lc-br-dna-ctl" role="group" title={t('browser.dnaTip')}>
               <button
                 type="button"
@@ -849,11 +762,7 @@ export function makeContextBrowser(
               onChange={(e) => { pick(e.target.value) }}
             >
               <option value="live">{t('browser.live')}</option>
-              {requests.slice().reverse().map(r => (
-                <option key={r.seq} value={String(r.seq)}>
-                  {t('detail.step', { t: r.turn ?? 0, s: r.step ?? 0, n: stepsOf(r.turn) })}
-                </option>
-              ))}
+              {pickOptions}
             </select>
           </div>
 
@@ -872,9 +781,6 @@ export function makeContextBrowser(
               <StackedBar
                 parts={dnaParts ?? parts}
                 height={10}
-                // Highlight precedence: pointer hover (local in DNA mode, the shared link otherwise) over the open-category pin. In
-                // DNA mode the mirrored link is ONE-WAY: an incoming category key lights that category's bands, while band hovers stay
-                // on the bar and never report upward.
                 hoverKey={dna ? liveDnaKey ?? rowDnaLive ?? linkKey ?? pinKey : linkKey ?? pinKey}
                 onHoverKey={dna ? setDnaKey : linked ? props.onHoverKey : undefined}
                 tip={dna}
@@ -910,25 +816,38 @@ export function makeContextBrowser(
           {dna ? flatToolbar() : null}
         </div>
 
-        <div className="lc-br-scroll">
-          {mapOn
-            ? (
-              <BrowserTreemap
-                view={view}
-                openCat={openCat}
-                hoverKey={linkKey}
-                // The map reports its category upward only outside DNA mode: there the bar's link is one-way (an
-                // incoming category key lights that category's bands; bar hovers stay local), and the map — the
-                // bar's companion surface — keeps the same convention so every hover link mirrors the bar's.
-                onHoverKey={dna ? undefined : linked ? props.onHoverKey : undefined}
-                onPickCat={toggleCat}
-                onPickBlock={pickMapBlock}
-              />
-            )
-            : null}
+        {mapOn
+          ? (
+            <BrowserTreemap
+              view={view}
+              openCat={openCat}
+              hoverKey={linkKey}
+              onHoverKey={dna ? undefined : linked ? props.onHoverKey : undefined}
+              onPickCat={toggleCat}
+              onPickBlock={pickMapBlock}
+            />
+          )
+          : null}
 
+        <div className="lc-br-scroll" ref={scrollRef}>
           {dna
-            ? flatRows()
+            ? (
+              <div className="lc-br-flat">
+                {flatRange.from > 0 ? <div className="lc-row-pad" style={{ height: Math.max(0, flatRange.from * FLAT_ROW_PITCH - 2) }} aria-hidden="true" /> : null}
+                {flat.entries.slice(flatRange.from, flatRange.to + 1).map(({ r, pos }) => messageRow(r, (
+                  <>
+                    {catChip(r.n.cat)}
+                    <span className="lc-br-pos">#{fmt(pos)}</span>
+                    {rowTagNode(r.tag, r.tagNames)}
+                  </>
+                ), (over) => { setRowDnaKey(over ? 'n' + String(r.n.seq) : null) }))}
+                {flatRange.to < flat.entries.length - 1
+                  ? <div className="lc-row-pad" style={{ height: Math.max(0, (flat.entries.length - 1 - flatRange.to) * FLAT_ROW_PITCH - 2) }} aria-hidden="true" />
+                  : null}
+                {flat.tail}
+                {flat.count === 0 ? <div className="lc-br-note">{t('browser.rowNoMatch')}</div> : null}
+              </div>
+            )
             : (
               <div className="lc-br-cats">
                 {CATS.map((c) => {
@@ -948,8 +867,7 @@ export function makeContextBrowser(
                         className={'lc-br-cat-row hover:bg-(--dsw-alias-interactive-bg-hover)'
                           + (open ? ' lc-br-cat-open' : '')
                           + (linked && props.hoverKey === c.key ? ' lc-br-cat-on' : '')}
-                        /* v8 ignore start -- the handlers exist only when linked,
-                           and linked already requires onHoverKey defined (above). */
+                        /* v8 ignore start */
                         onMouseEnter={linked ? () => { if (props.onHoverKey !== undefined) props.onHoverKey(c.key) } : undefined}
                         onMouseLeave={linked ? () => { if (props.onHoverKey !== undefined) props.onHoverKey(null) } : undefined}
                         /* v8 ignore stop */

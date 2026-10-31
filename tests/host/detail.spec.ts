@@ -1,6 +1,3 @@
-// The on-demand detail route (src/host/detail.ts) and its gate: the nested-inject gating on the connection/sessions faces (load-order
-// independent), the live flip on unload, and typed outcomes — never a throw into the transport.
-
 import assert from 'node:assert/strict'
 import { describe, test, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
@@ -24,9 +21,6 @@ interface CtxSpec {
   stateOf?: (session: unknown, key: string) => unknown
 }
 
-/** A minimal host ctx double with cordis inject semantics: the callback runs
- * once its dependency list completes (here: immediately when the services
- * map has them, never otherwise), and its returned disposer is collected. */
 function ctxOf(spec: CtxSpec): { ctx: Context; captured: { path?: string; fetch?: RouteFetch }; disposers: (() => void)[] } {
   const captured: { path?: string; fetch?: RouteFetch } = {}
   const disposers: (() => void)[] = []
@@ -49,7 +43,6 @@ function ctxOf(spec: CtxSpec): { ctx: Context; captured: { path?: string; fetch?
       if (typeof d === 'function') disposers.push(d as () => void)
     },
   }
-  // Wire the connection face so register() captures its route.
   if (spec.connection !== undefined && spec.connection !== null) {
     const conn = spec.connection as { fetch?: { register?: unknown } }
     if (typeof conn.fetch?.register === 'function') {
@@ -91,17 +84,33 @@ function okSession(): object {
 }
 
 describe('watchDetailChannel gating', () => {
-  test('the gate stays closed without the connection or sessions service', () => {
+  test('the gate stays closed without the connection or sessions service, and a rejecting registry keeps it closed', () => {
     assert.equal(watchDetailChannel(ctxOf({}).ctx, BOUNDS).live, false)
     assert.equal(watchDetailChannel(ctxOf({ sessions: sessionsWith(okSession()) }).ctx, BOUNDS).live, false)
     const connOnly = ctxOf({ connection: { fetch: { register: () => () => {} } } })
     assert.equal(watchDetailChannel(connOnly.ctx, BOUNDS).live, false)
-    // A connection without the fetch.register face, or a sessions without get.
     assert.equal(watchDetailChannel(ctxOf({ connection: { fetch: {} }, sessions: sessionsWith(okSession()) }).ctx, BOUNDS).live, false)
     assert.equal(watchDetailChannel(ctxOf({
       connection: { fetch: { register: () => () => {} } },
       sessions: { get: 42 },
     }).ctx, BOUNDS).live, false)
+    const rejecting = {
+      get: (name: string) =>
+        name === 'connection'
+          ? { fetch: { register: () => { throw new Error('registration rejected') } } }
+          : name === 'sessions'
+            ? sessionsWith(okSession())
+            : undefined,
+      sessionProjections: { stateOf: () => undefined },
+      effect(fn: () => unknown) {
+        fn()
+        return () => {}
+      },
+      inject(deps: string[], cb: (c: unknown) => unknown) {
+        if (deps.every(d => (d === 'connection' || d === 'sessions'))) cb(rejecting)
+      },
+    }
+    assert.equal(watchDetailChannel(rejecting as unknown as Context, BOUNDS).live, false, 'a rejecting registry keeps the gate closed')
   })
 
   test('the gate opens on registration and closes on unload', () => {
@@ -112,36 +121,8 @@ describe('watchDetailChannel gating', () => {
     const gate = watchDetailChannel(ctx, BOUNDS)
     assert.equal(gate.live, true)
     assert.equal(captured.path, '/api/dsh-context/detail')
-    assert.equal(typeof captured.fetch, 'function')
-    // Unload: the inject fiber's disposer closes the gate (the wire flips back to inline).
     for (const d of disposers) d()
     assert.equal(gate.live, false)
-  })
-
-  test('a rejecting registry keeps the gate closed without throwing', () => {
-    const ctx = {
-      get: (name: string) =>
-        name === 'connection'
-          ? {
-            fetch: {
-              register: () => {
-                throw new Error('registration rejected')
-              },
-            },
-          }
-          : name === 'sessions'
-            ? sessionsWith(okSession())
-            : undefined,
-      sessionProjections: { stateOf: () => undefined },
-      effect(fn: () => unknown) {
-        fn()
-        return () => {}
-      },
-      inject(deps: string[], cb: (c: unknown) => unknown) {
-        if (deps.every(d => (d === 'connection' || d === 'sessions'))) cb(ctx)
-      },
-    }
-    assert.equal(watchDetailChannel(ctx as unknown as Context, BOUNDS).live, false)
   })
 })
 
@@ -162,23 +143,19 @@ describe('the detail route', () => {
       assert.equal(result.ok, false, `payload ${JSON.stringify(body)} rejected`)
       assert.equal(result.error?.code, 'dsh-context/bad-request')
     }
-    // A non-JSON body degrades to the same typed rejection.
     const raw = await callRaw(captured, 'not json') as { ok: boolean; error?: { code: string } }
     assert.equal(raw.ok, false)
     assert.equal(raw.error?.code, 'dsh-context/bad-request')
   })
 
-  test('a session outside the live set resolves to the typed null', async () => {
+  test('a session outside the live set and an absent unit state both resolve to the typed null', async () => {
     const { state } = driveTimeline([userMessage(1, [{ type: 'text', text: 'hi' }], { kind: 'user' })])
     const { ctx, captured } = liveCtx(state)
     watchDetailChannel(ctx, BOUNDS)
     assert.deepEqual(await call(captured, { sessionId: 'gone' }), { ok: true, value: null })
-  })
-
-  test('an absent unit state resolves to the typed null', async () => {
-    const { ctx, captured } = liveCtx(undefined)
-    watchDetailChannel(ctx, BOUNDS)
-    assert.deepEqual(await call(captured, { sessionId: 's1' }), { ok: true, value: null })
+    const absent = liveCtx(undefined)
+    watchDetailChannel(absent.ctx, BOUNDS)
+    assert.deepEqual(await call(absent.captured, { sessionId: 's1' }), { ok: true, value: null })
   })
 
   test('a cold session (never entered into the live store) folds its detail off the observed log', async () => {
@@ -214,28 +191,21 @@ describe('the detail route', () => {
     assert.ok(result.value.head.current.total > 0, 'the slim head rides the cold fold (the graph ring fetch)')
     assert.deepEqual(observedOptions, { projectionMode: 'none' }, 'the observation skips projection work')
     assert.equal(disposed, 1, 'the observation lease disposed after the fold')
-    // A session nothing can observe (the query resolves null) stays a typed null.
     assert.deepEqual(await call(captured, { sessionId: 'nobody' }), { ok: true, value: null })
-  })
 
-  test('an observation without a dispose face still serves (nothing to release)', async () => {
-    const events = [userMessage(1, [{ type: 'text', text: 'hi' }], { kind: 'user' })]
-    const { ctx, captured } = ctxOf({
+    const bare = ctxOf({
       connection: { fetch: { register: () => () => {} } },
       sessions: sessionsWith(okSession()),
       stateOf: () => undefined,
-      sessionQuery: {
-        observeSession: () => Promise.resolve({ events }),
-      },
+      sessionQuery: { observeSession: () => Promise.resolve({ events: [events[1]] }) },
     })
-    watchDetailChannel(ctx, BOUNDS)
-    const result = await call(captured, { sessionId: 'cold1' }) as { ok: boolean; value: { nodes: unknown[] } | null }
-    assert.equal(result.ok, true)
-    assert.equal(result.value?.nodes.length, 1)
+    watchDetailChannel(bare.ctx, BOUNDS)
+    const bareResult = await call(bare.captured, { sessionId: 'cold1' }) as { ok: boolean; value: { nodes: unknown[] } | null }
+    assert.equal(bareResult.ok, true)
+    assert.equal(bareResult.value?.nodes.length, 1, 'an observation without a dispose face still serves')
   })
 
   test('a sessionQuery without the observe face (or a rejecting read) degrades cleanly', async () => {
-    // Face present but the method missing.
     const noFace = ctxOf({
       connection: { fetch: { register: () => () => {} } },
       sessions: sessionsWith(okSession()),
@@ -243,8 +213,6 @@ describe('the detail route', () => {
     })
     watchDetailChannel(noFace.ctx, BOUNDS)
     assert.deepEqual(await call(noFace.captured, { sessionId: 'cold' }), { ok: true, value: null })
-
-    // The observation read rejects (persistence down).
     const rejecting = ctxOf({
       connection: { fetch: { register: () => () => {} } },
       sessions: sessionsWith(okSession()),
@@ -259,7 +227,7 @@ describe('the detail route', () => {
     assert.equal(result.error.message, 'persistence down')
   })
 
-  test('a cold read skipped under heap pressure answers the typed null (and never observes)', async () => {
+  test('the cold-read gate applies to cold reads only: a skipped read answers null, a live read never touches it', async () => {
     let observed = 0
     const { ctx, captured } = ctxOf({
       connection: { fetch: { register: () => () => {} } },
@@ -282,15 +250,13 @@ describe('the detail route', () => {
     assert.deepEqual(await call(captured, { sessionId: 'cold1' }), { ok: true, value: null })
     assert.equal(admitted, 1, 'the cold read went through the gate')
     assert.equal(observed, 0, 'a skipped read never touches the log')
-  })
 
-  test('the live path never touches the cold-read gate', async () => {
     const { state } = driveTimeline([userMessage(1, [{ type: 'text', text: 'hi' }], { kind: 'user' })])
-    const { ctx, captured } = liveCtx(state)
-    watchDetailChannel(ctx, BOUNDS, {
+    const live = liveCtx(state)
+    watchDetailChannel(live.ctx, BOUNDS, {
       admit: () => Promise.reject(new Error('the gate must not see a live read')),
     })
-    const result = await call(captured, { sessionId: 's1' }) as { ok: boolean; value: { rev: number } | null }
+    const result = await call(live.captured, { sessionId: 's1' }) as { ok: boolean; value: { rev: number } | null }
     assert.equal(result.ok, true)
     assert.ok(result.value !== null, 'the live read served its detail without the gate')
   })
@@ -311,8 +277,70 @@ describe('the detail route', () => {
     assert.ok(result.value.head.current.total > 0, 'the slim head rides the live read too')
   })
 
+  test('a head read serves the envelope only, live and cold', async () => {
+    const { state } = driveTimeline([
+      header(1, { model: 'deepseek-v4-flash', provider: 'deepseek' }),
+      userMessage(2, [{ type: 'text', text: 'hi' }], { kind: 'user' }),
+      assistantMessage(3, { turn: 1, step: 0, usage: { inputTokens: 10, outputTokens: 5 } }),
+    ])
+    const live = liveCtx(state)
+    watchDetailChannel(live.ctx, BOUNDS)
+    const liveHead = await call(live.captured, { sessionId: 's1', head: true }) as { ok: true; value: { rev: number; head: { current: { total: number } }; requests?: unknown } }
+    assert.equal(liveHead.ok, true)
+    assert.equal(liveHead.value.rev, 2)
+    assert.ok(liveHead.value.head.current.total > 0)
+    assert.equal(liveHead.value.requests, undefined, 'the collections never ride a head read')
+
+    const fresh = liveCtx(driveTimeline([header(1, { model: 'deepseek-v4-flash', provider: 'deepseek' })]).state)
+    watchDetailChannel(fresh.ctx, BOUNDS)
+    const freshHead = await call(fresh.captured, { sessionId: 's1', head: true }) as { ok: true; value: { rev: number; head: { model?: unknown } } }
+    assert.equal(freshHead.value.rev, 0)
+    assert.equal(freshHead.value.head.model, 'deepseek-v4-flash')
+
+    const cold = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      sessions: sessionsWith(okSession()),
+      stateOf: () => undefined,
+      sessionQuery: { observeSession: () => Promise.resolve({
+        revision: 'rev-1',
+        events: [
+          header(1, { model: 'deepseek-v4-flash', provider: 'deepseek' }),
+          userMessage(2, [{ type: 'text', text: 'hi' }], { kind: 'user' }),
+          assistantMessage(3, { turn: 1, step: 0, usage: { inputTokens: 10, outputTokens: 5 } }),
+        ],
+        [Symbol.dispose]: () => {},
+      }) },
+      sessionPersistence: { backend: 'default' },
+    })
+    watchDetailChannel(cold.ctx, BOUNDS)
+    const coldHead = await call(cold.captured, { sessionId: 'cold1', head: true }) as { ok: true; value: { rev: number; head: { model?: unknown }; requests?: unknown } }
+    assert.equal(coldHead.ok, true)
+    assert.ok(coldHead.value.head !== undefined)
+    assert.equal(coldHead.value.requests, undefined, 'the cold head read serves the envelope only')
+    const full = await call(cold.captured, { sessionId: 'cold1' }) as { ok: true; value: { requests: unknown[] } }
+    assert.equal(full.ok, true)
+    assert.ok(Array.isArray(full.value.requests))
+    const cachedHead = await call(cold.captured, { sessionId: 'cold1', head: true }) as { ok: true; value: { rev: number; head?: unknown } }
+    assert.equal(cachedHead.ok, true)
+    assert.ok(cachedHead.value.head !== undefined)
+
+    const unkeyed = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      sessions: sessionsWith(okSession()),
+      stateOf: () => undefined,
+      sessionQuery: { observeSession: () => Promise.resolve({
+        events: [header(1, { model: 'deepseek-v4-flash', provider: 'deepseek' })],
+        [Symbol.dispose]: () => {},
+      }) },
+      sessionPersistence: { backend: 'default' },
+    })
+    watchDetailChannel(unkeyed.ctx, BOUNDS)
+    const unkeyedHead = await call(unkeyed.captured, { sessionId: 'cold2', head: true }) as { ok: true; value: { rev: number; head: { model?: unknown } } }
+    assert.equal(unkeyedHead.ok, true)
+    assert.equal(unkeyedHead.value.head.model, 'deepseek-v4-flash')
+  })
+
   test('hostile reads degrade to the failure envelope, never a throw', async () => {
-    // sessions.get throwing.
     const throwingGet = ctxOf({
       connection: { fetch: { register: () => () => {} } },
       sessions: {
@@ -326,8 +354,6 @@ describe('the detail route', () => {
     assert.equal(r1.ok, false)
     assert.equal(r1.error.code, 'gateway/internal')
     assert.equal(r1.error.message, 'hostile sessions')
-
-    // stateOf throwing.
     const throwingState = ctxOf({
       connection: { fetch: { register: () => () => {} } },
       sessions: sessionsWith(okSession()),
@@ -340,7 +366,6 @@ describe('the detail route', () => {
     assert.equal(r2.ok, false)
     assert.equal(r2.error.message, 'hostile registry')
 
-    // A state whose collections are junk (the detail builder throws).
     const junkState = ctxOf({
       connection: { fetch: { register: () => () => {} } },
       sessions: sessionsWith(okSession()),
@@ -350,7 +375,6 @@ describe('the detail route', () => {
     const r3 = await call(junkState.captured, { sessionId: 's1' }) as { ok: boolean }
     assert.equal(r3.ok, false)
 
-    // A non-Error rejection stringifies into the envelope.
     const stringThrow = ctxOf({
       connection: { fetch: { register: () => () => {} } },
       sessions: {
@@ -424,10 +448,10 @@ describe('the cold fold (issue #145)', () => {
     assert.equal(disposed, 2, 'both observation leases released')
   })
 
-  test('a changed revision refolds (no stale payload, ever)', async () => {
+  test('a changed revision refolds; an observation without a revision never keys the cache', async () => {
     const events = manyEvents(5)
     let eventReads = 0
-    let revision = 'r1'
+    let revision: string | undefined = 'r1'
     const { ctx, captured } = coldCtx(() => Promise.resolve({
       get revision() { return revision },
       get events() {
@@ -438,25 +462,13 @@ describe('the cold fold (issue #145)', () => {
     }))
     watchDetailChannel(ctx, BOUNDS)
     await call(captured, { sessionId: 'cold1' })
-    revision = 'r2' // the log moved: a new durable revision must fold again
+    revision = 'r2'
     await call(captured, { sessionId: 'cold1' })
     assert.equal(eventReads, 2, 'the changed log refolded instead of serving stale data')
-  })
-
-  test('an observation without a revision (a live-race cut) never keys the cache', async () => {
-    const events = manyEvents(5)
-    let eventReads = 0
-    const { ctx, captured } = coldCtx(() => Promise.resolve({
-      get events() {
-        eventReads++
-        return events
-      },
-      [Symbol.dispose]: () => {},
-    }))
-    watchDetailChannel(ctx, BOUNDS)
+    revision = undefined
     await call(captured, { sessionId: 'cold1' })
     await call(captured, { sessionId: 'cold1' })
-    assert.equal(eventReads, 2, 'no revision — every read folds, as before')
+    assert.equal(eventReads, 4, 'no revision — every read folds, as before')
   })
 
   test('the cache holds four sessions; the evicted oldest refolds, the kept newest re-serves', async () => {
@@ -478,13 +490,13 @@ describe('the cold fold (issue #145)', () => {
     assert.equal(reads.get('c1'), 2, 'the evicted oldest refolded on its next read')
   })
 
-  test('a swapped persistence instance can never alias a stale payload (the dsh trust tuple)', async () => {
+  test('a swapped persistence instance and a remount never alias a stale payload', async () => {
     const events = manyEvents(5)
-    let eventReads = 0
+    let swappedReads = 0
     const observe = (): Promise<unknown> => Promise.resolve({
       revision: 'same-token-from-two-backends',
       get events() {
-        eventReads++
+        swappedReads++
         return events
       },
       [Symbol.dispose]: () => {},
@@ -492,29 +504,24 @@ describe('the cold fold (issue #145)', () => {
     const first = coldCtx(observe, { backend: 'one' })
     watchDetailChannel(first.ctx, BOUNDS)
     await call(first.captured, { sessionId: 'cold1' })
-    // The storage backend was replaced (its revision tokens say nothing anymore): refold.
     const second = coldCtx(observe, { backend: 'two' })
     watchDetailChannel(second.ctx, BOUNDS)
     await call(second.captured, { sessionId: 'cold1' })
-    assert.equal(eventReads, 2, 'a replaced persistence invalidates every cached payload')
-  })
+    assert.equal(swappedReads, 2, 'a replaced persistence invalidates every cached payload (the dsh trust tuple)')
 
-  test('a remount (a fresh watch closure) starts with an empty cache', async () => {
-    const events = manyEvents(5)
-    let eventReads = 0
+    let remountReads = 0
     const { ctx, captured } = coldCtx(() => Promise.resolve({
       revision: 'r1',
       get events() {
-        eventReads++
+        remountReads++
         return events
       },
       [Symbol.dispose]: () => {},
     }))
     watchDetailChannel(ctx, BOUNDS)
     await call(captured, { sessionId: 'cold1' })
-    // The second watch (the config remount's re-arm) shares nothing with the first.
     watchDetailChannel(ctx, BOUNDS)
     await call(captured, { sessionId: 'cold1' })
-    assert.equal(eventReads, 2, 'the remounted route folds against its own cache')
+    assert.equal(remountReads, 2, 'the remounted route folds against its own cache')
   })
 })

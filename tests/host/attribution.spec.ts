@@ -1,6 +1,3 @@
-// The runtime register() attribution hook (src/host/attribution.ts) against a REAL cordis Context:
-// plugin fibers read `ctx.tools` (firing the internal/get waterfall) and call `register()` on a fake tools service.
-
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,16 +8,10 @@ import { callerPackageFrom, createToolAttribution, packageNameFrom, type ToolAtt
 
 const fileUrl = (file: string) => 'file:///' + file.replace(/\\/g, '/')
 
-/** Absolute path of this spec file (a file inside the dsh-context package). */
 const specFile = path.normalize(fileURLToPath(import.meta.url))
 
-/** Symbol cordis registers on its traced proxies (`Symbol.for`, shared
- * registry); reading it yields the wrapped underlying service instance. */
 const CORDIS_ORIGINAL = Symbol.for('cordis.original')
 
-/** A tracked tools service shaped like dsh's ToolRuntime: a real Service
- * subclass whose `register` is a PROTOTYPE method — the shape that makes
- * cordis hand out a fresh traced proxy (closing over the reader's context) on every `ctx.tools` property read. */
 class TrackedTools extends Service {
   layers = { global: { tools: new Map() } }
   constructor(ctx: Context) { super(ctx, 'tools') }
@@ -30,12 +21,22 @@ class TrackedTools extends Service {
 }
 
 describe('createToolAttribution', () => {
-  test('falls back to the static chain when nothing was registered at runtime', () => {
+  test('falls back to the static chain when nothing was registered at runtime, ignoring non-tools reads', async () => {
     const app = new Context()
     const attribution = createToolAttribution(app)
     assert.equal(attribution.ownerOf('read'), '@deepseek-ai/dsh-tool-fs')
+    assert.equal(attribution.ownerOf('bash'), '@deepseek-ai/dsh-tool-bash', 'the pinned map serves boot-time first-party tools')
     assert.equal(attribution.ownerOf('mcp__github__get_issue'), 'mcp:github')
     assert.equal(attribution.ownerOf('unknown_tool'), undefined)
+    app.provide('bench', { value: 1 })
+    await app.plugin({
+      name: 'probe',
+      apply(sub) {
+        void (sub as any).bench.value
+        void (sub as any).bench.value
+      },
+    })
+    assert.equal(attribution.ownerOf('grep'), '@deepseek-ai/dsh-tool-fs-search')
   })
 
   test('attributes tools to the plugin that read ctx.tools and registered them', async () => {
@@ -95,22 +96,8 @@ describe('createToolAttribution', () => {
     assert.equal(attribution.ownerOf('blind_tool'), 'anon-plugin', 'self/root slots are never taken as-is')
   })
 
-  test('ignores non-tools reads and keeps the static chain intact', async () => {
-    const app = new Context()
-    const attribution = createToolAttribution(app)
-    app.provide('bench', { value: 1 })
-    await app.plugin({
-      name: 'probe',
-      apply(sub) {
-        void (sub as any).bench.value
-        void (sub as any).bench.value
-      },
-    })
-    assert.equal(attribution.ownerOf('grep'), '@deepseek-ai/dsh-tool-fs-search')
-  })
-
-  test('tolerates falsy and non-object tools values', async () => {
-    for (const value of [undefined, 42]) {
+  test('tolerates falsy, non-object, and register-less tools values', async () => {
+    for (const value of [undefined, 42, { register: 42 }, {}]) {
       const app = new Context()
       const attribution = createToolAttribution(app)
       app.provide('tools', value)
@@ -124,26 +111,9 @@ describe('createToolAttribution', () => {
     }
   })
 
-  test('leaves instances without a callable register untouched', async () => {
-    for (const tools of [{ register: 42 }, {}]) {
-      const app = new Context()
-      const attribution = createToolAttribution(app)
-      app.provide('tools', tools)
-      await app.plugin({
-        name: 'probe',
-        apply(sub) {
-          void (sub as any).tools
-        },
-      })
-      assert.equal(attribution.ownerOf('whatever'), undefined)
-    }
-  })
-
   test('a foreign wrapper carrying a garbage attribution marker is left untouched', async () => {
     const app = new Context()
     const attribution = createToolAttribution(app)
-    // A wrapper that copied the peel-marker name with a non-function value:
-    // there is no original to recover, so the instance is not re-wrapped.
     const foreign = Object.assign(() => 'not-a-disposer', { attributedOriginal: 42 })
     const fake = { register: foreign }
     app.provide('tools', fake)
@@ -193,20 +163,11 @@ describe('createToolAttribution', () => {
     assert.equal(attribution.ownerOf('brand_new_tool'), 'third-party', 'live record fills the gap')
   })
 
-  test('a pinned first-party name still resolves when it was never registered at runtime', () => {
-    const app = new Context()
-    const attribution = createToolAttribution(app)
-    assert.equal(attribution.ownerOf('bash'), '@deepseek-ai/dsh-tool-bash', 'the pinned map serves boot-time first-party tools')
-  })
-
-  test('re-installing the hook re-wraps the instance without stacking wrappers', async () => {
+  test('re-installing or re-applying the hook re-wraps without stacking wrappers', async () => {
     const app = new Context()
     let calls = 0
     app.provide('tools', { register() { calls++; return () => {} } })
-    const first = createToolAttribution(app)
-    void first
-    // The second hook incarnation (a reload) peels the first wrapper back to
-    // the original: a registration records into the NEW hook only, and the original register still runs exactly once.
+    createToolAttribution(app)
     const second = createToolAttribution(app)
     await app.plugin({
       name: 'provider-b',
@@ -216,9 +177,32 @@ describe('createToolAttribution', () => {
     })
     assert.equal(calls, 1, 'the original register ran once, through one wrapper only')
     assert.equal(second.ownerOf('reload_tool'), 'provider-b', 'the fresh hook records the registration')
+
+    const reapplied = new Context()
+    let reCalls = 0
+    reapplied.provide('tools', { register() { reCalls++; return () => {} } })
+    let attribution!: ToolAttribution
+    const plugged = reapplied.plugin({ name: 'dsh-context', apply(sub) { createToolAttribution(sub) } })
+    await plugged
+    await plugged.dispose()
+    const replugged = reapplied.plugin({
+      name: 'dsh-context',
+      apply(sub) {
+        attribution = createToolAttribution(sub)
+      },
+    })
+    await replugged
+    await reapplied.plugin({
+      name: 'provider-d',
+      apply(sub) {
+        ;((sub as any).tools as { register(def?: unknown): () => void }).register({ name: 'reloaded_tool' })
+      },
+    })
+    assert.equal(reCalls, 1, 'the original register ran once, through one wrapper only')
+    assert.equal(attribution.ownerOf('reloaded_tool'), 'provider-d', 'the re-applied hook records the registration')
   })
 
-  test('unloading the hook plugin restores the original register', async () => {
+  test('unload restores the original register; an older incarnation unload leaves a newer wrapper installed', async () => {
     const app = new Context()
     const fake = { register(_definition?: unknown) { return () => {} } }
     app.provide('tools', fake)
@@ -236,23 +220,21 @@ describe('createToolAttribution', () => {
     assert.equal(fake.register, original, 'unload put the original register back on the instance')
     fake.register({ name: 'orphan_tool' })
     assert.equal(attribution.ownerOf('orphan_tool'), undefined, 'no dead-hook recording after unload')
-  })
 
-  test('an unloaded older incarnation leaves a newer wrapper installed', async () => {
-    const app = new Context()
-    const fake = { register() { return () => {} } }
-    app.provide('tools', fake)
-    const original = fake.register
+    const stacked = new Context()
+    const stackedFake = { register() { return () => {} } }
+    stacked.provide('tools', stackedFake)
+    const stackedOriginal = stackedFake.register
     let second!: ToolAttribution
-    const older = app.plugin({ name: 'older-hook', apply(sub) { createToolAttribution(sub) } })
+    const older = stacked.plugin({ name: 'older-hook', apply(sub) { createToolAttribution(sub) } })
     await older
-    assert.notEqual(fake.register, original, 'the first hook wrapped the instance')
-    const newer = app.plugin({ name: 'newer-hook', apply(sub) { second = createToolAttribution(sub) } })
+    assert.notEqual(stackedFake.register, stackedOriginal, 'the first hook wrapped the instance')
+    const newer = stacked.plugin({ name: 'newer-hook', apply(sub) { second = createToolAttribution(sub) } })
     await newer
-    assert.notEqual(fake.register, original, 'the newer incarnation re-wrapped the instance')
+    assert.notEqual(stackedFake.register, stackedOriginal, 'the newer incarnation re-wrapped the instance')
     await older.dispose()
-    assert.notEqual(fake.register, original, 'the older disposer did not strip the newer wrapper')
-    await app.plugin({
+    assert.notEqual(stackedFake.register, stackedOriginal, 'the older disposer did not strip the newer wrapper')
+    await stacked.plugin({
       name: 'provider-c',
       apply(sub) {
         ;((sub as any).tools as { register(def?: unknown): () => void }).register({ name: 'late_tool' })
@@ -260,32 +242,7 @@ describe('createToolAttribution', () => {
     })
     assert.equal(second.ownerOf('late_tool'), 'provider-c', 'the surviving hook still records')
     await newer.dispose()
-    assert.equal(fake.register, original, 'the newer disposer restores the true original')
-  })
-
-  test('unload then re-apply re-wraps the restored original without stacking', async () => {
-    const app = new Context()
-    let calls = 0
-    app.provide('tools', { register() { calls++; return () => {} } })
-    let attribution!: ToolAttribution
-    const first = app.plugin({ name: 'dsh-context', apply(sub) { createToolAttribution(sub) } })
-    await first
-    await first.dispose()
-    const second = app.plugin({
-      name: 'dsh-context',
-      apply(sub) {
-        attribution = createToolAttribution(sub)
-      },
-    })
-    await second
-    await app.plugin({
-      name: 'provider-d',
-      apply(sub) {
-        ;((sub as any).tools as { register(def?: unknown): () => void }).register({ name: 'reloaded_tool' })
-      },
-    })
-    assert.equal(calls, 1, 'the original register ran once, through one wrapper only')
-    assert.equal(attribution.ownerOf('reloaded_tool'), 'provider-d', 'the re-applied hook records the registration')
+    assert.equal(stackedFake.register, stackedOriginal, 'the newer disposer restores the true original')
   })
 
   test('a tracked service is wrapped once on its stable identity and restored on unload', async () => {
@@ -305,8 +262,6 @@ describe('createToolAttribution', () => {
     await app.plugin({
       name: 'agent-scope',
       apply(sub) {
-        // Tracked services yield a FRESH traced proxy per property read, both
-        // peeling to the same underlying instance (issue #108's premise).
         const first = (sub as unknown as { tools: TrackedTools & Record<symbol, unknown> }).tools
         const second = (sub as unknown as { tools: TrackedTools & Record<symbol, unknown> }).tools
         assert.notEqual(first, second, 'cordis hands out a fresh traced proxy per read')
@@ -366,8 +321,6 @@ describe('createToolAttribution', () => {
       { register() { return () => {} }, layers: {} },
       { register() { return () => {} }, layers: { global: {} } },
       { register() { return () => {} }, layers: { global: { tools: {} } } },
-      // A host tool service whose enumeration throws must not take the
-      // caller's startup down — the boot snapshot just stays empty.
       {
         register() { return () => {} },
         layers: { global: { tools: { entries() { throw new Error('boom') } } } },
@@ -399,24 +352,15 @@ describe('createToolAttribution', () => {
     const local = path.normalize(fileURLToPath(new URL('./fixtures/local-plugin/index.js', import.meta.url)))
     assert.equal(callerPackageFrom(undefined), undefined)
     assert.equal(callerPackageFrom('no frames here'), undefined)
-    // non-frame lines are skipped
     assert.equal(callerPackageFrom(`Error\n  note\n  at ${local}:1:2`), 'local-plugin')
-    // frames without a :line:col position are skipped, unresolvable targets yield undefined
     assert.equal(callerPackageFrom('Error\n    at x (file:///D:/no-position.js)\n    at y (file:///D:/has-position.js:1:2)'), undefined)
-    // bare absolute path frames (transpiled modules) resolve
     assert.equal(callerPackageFrom(`Error\n    at ${local}:1:2\n    at ${specFile}:3:4`), 'local-plugin')
-    // file:// URL frames with fn (...) wrappers resolve
     assert.equal(callerPackageFrom(`Error\n    at registerBlind (${fileUrl(anon)}:1:2)\n    at run (${fileUrl(specFile)}:3:4)`), 'anon-plugin')
-    // frames resolving to this package are skipped, the next package wins
     assert.equal(callerPackageFrom(`Error\n    at ${specFile}:1:2\n    at ${local}:3:4`), 'local-plugin')
-    // this module's own frames are skipped too
     const attributionFile = path.normalize(fileURLToPath(new URL('../../src/host/attribution.ts', import.meta.url)))
     assert.equal(callerPackageFrom(`Error\n    at ${attributionFile}:1:2\n    at ${local}:3:4`), 'local-plugin')
-    // unparseable file URLs are skipped
     assert.equal(callerPackageFrom(`Error\n    at x (file:///D:/bad%zz.js:1:2)\n    at y (${fileUrl(local)}:3:4)`), 'local-plugin')
-    // non-absolute targets (e.g. node: internal frames) are skipped
     assert.equal(callerPackageFrom(`Error\n    at ModuleJob.run (node:internal/modules/esm/module_job.js:346:20)\n    at y (${fileUrl(local)}:3:4)`), 'local-plugin')
-    // async wrappers are tolerated
     assert.equal(callerPackageFrom(`Error\n    at async fn (${fileUrl(anon)}:1:2)`), 'anon-plugin')
   })
 

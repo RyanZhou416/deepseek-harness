@@ -1,21 +1,25 @@
-import { memo, useState, type ChangeEvent, type ComponentType, type MouseEvent, type ReactElement } from 'react'
-import { absPathOf, displayPathOf, glyphOf } from '../fileActivity'
+import { memo, useEffect, useRef, useState, type ComponentType, type MouseEvent, type ReactElement } from 'react'
+import { absPathOf, baseNameOf, displayPathOf, glyphOf, surfaceSeqOf, totalsOf } from '../fileActivity'
 import type { FileActivity, FileEntry, FileOp, FileOpKind } from '../fileActivity'
 import type { ContextSettings, DefaultFileSort } from '../settings'
 import type { DetailState } from '../timelineSource'
 import type { ViewKit } from '../viewkit'
+import { IconFolderOpen } from '../primitives'
+import { ClearableInput } from './clearableInput'
 import { makeDetailNote } from './detailNote'
+import { useRowWindow } from './useRowWindow'
 
 export type FileFilter = 'all' | FileOpKind | 'image'
 
 export interface FileCardProps {
   activity: FileActivity
-  scope: string
   workspace?: string
-  /** Returns whether the preview column took the file, so a refusal falls through to the system opener; absent = no preview column. */
+  filterFocus?: FileFilter | null
+  onFilterFocusHandled?: () => void
   onPreview?: (entry: FileEntry) => boolean
   onOpen?: (absPath: string) => void
   onLocate?: (op: FileOp) => void
+  stampOf?: (seq: number) => { turn: number; step: number } | null
   state?: DetailState
   onRetry?: () => void
 }
@@ -32,7 +36,6 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
     return e.searches > 0
   }
 
-  /** Signed line pair, harness diff semantics: growth on the success token, shrinkage on the error token. */
   function DeltaPair(props: { added: number; removed: number }): ReactElement {
     return (
       <span className="lc-fa-delta">
@@ -42,115 +45,186 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
     )
   }
 
-  // Memoized at the factory level: the parent's activity/scope/onLocate props are reference-stable across hover/select
-  // renders (see contextView), so the card skips reconciliation whenever its own inputs did not move.
   return memo(function FileCard(props: FileCardProps): ReactElement {
+    kit.useLocaleTick()
     const { activity } = props
     const [filter, setFilter] = useState<FileFilter>('all')
-    // Mount-time default; in-card toggling stays mount-local and never writes back.
     const [sort, setSort] = useState<DefaultFileSort>(() => settings.defaultFileSort())
     const [query, setQuery] = useState('')
     const [openPath, setOpenPath] = useState<string | null>(null)
+    const listRef = useRef<HTMLDivElement | null>(null)
+    const [listWide, setListWide] = useState(false)
+    const [rowPitch, setRowPitch] = useState(0)
+    const [rowGap, setRowGap] = useState(0)
+
+    const filterFocus = props.filterFocus
+    useEffect(() => {
+      if (filterFocus === null || filterFocus === undefined) return
+      setFilter(filterFocus)
+      setQuery('')
+      setOpenPath(null)
+      if (props.onFilterFocusHandled !== undefined) props.onFilterFocusHandled()
+    }, [filterFocus, props.onFilterFocusHandled])
 
     const q = query.trim().toLowerCase()
-    // Display form of an entry's path: bare workspace-relative inside the workspace, verbatim outside — except search rows,
-    // whose "path" is a pattern.
     const displayOf = (e: FileEntry): string => (e.pattern === true ? e.path : displayPathOf(e.path, props.workspace))
-    // Count sort magnitude: the selected kind's own ops under a kind chip, else the file's overall op count.
     const countOf = (e: FileEntry): number =>
       filter === 'read' ? e.reads : filter === 'write' ? e.writes : filter === 'search' ? e.searches : e.ops.length
-    const shown = activity.entries
-      .filter(e => matches(e, filter) && (q === '' || displayOf(e).toLowerCase().includes(q)))
-      .sort((a, b) => sort === 'count'
-        ? (countOf(b) - countOf(a)) || (b.ops[0].seq - a.ops[0].seq)
-        : sort === 'latest'
-          ? b.ops[0].seq - a.ops[0].seq
-          : (a.path < b.path ? -1 : 1))
+    const linesOf = (e: FileEntry): number => e.added + e.removed
+    const byLatest = (a: FileEntry, b: FileEntry): number => b.ops[0].seq - a.ops[0].seq
+    const byPath = (a: FileEntry, b: FileEntry): number => (a.path < b.path ? -1 : 1)
+    const byVolume = (keyOf: (e: FileEntry) => number, tie: (a: FileEntry, b: FileEntry) => number) =>
+      (a: FileEntry, b: FileEntry): number => keyOf(b) - keyOf(a) || tie(a, b)
+    const byName = (a: FileEntry, b: FileEntry): number => {
+      const an = baseNameOf(displayOf(a))
+      const bn = baseNameOf(displayOf(b))
+      return an !== bn ? (an < bn ? -1 : 1) : byPath(a, b)
+    }
+    const comparators: Record<DefaultFileSort, (a: FileEntry, b: FileEntry) => number> = {
+      count: byVolume(countOf, byLatest),
+      lines: byVolume(linesOf, byPath),
+      latest: byLatest,
+      name: byName,
+      path: byPath,
+    }
+    const matched = q === '' ? activity.entries : activity.entries.filter(e => displayOf(e).toLowerCase().includes(q))
+    const shown = matched.filter(e => matches(e, filter)).sort(comparators[sort])
+    const matchedTotals = totalsOf(matched)
+    const shownTotals = totalsOf(shown)
 
+    useEffect(() => {
+      const el = listRef.current
+      if (el === null) {
+        setListWide(false)
+        return
+      }
+      const sync = (): void => { setListWide(el.clientWidth >= 380) }
+      sync()
+      if (typeof ResizeObserver !== 'function') return
+      /* v8 ignore start */
+      const observer = new ResizeObserver(sync)
+      observer.observe(el)
+      return () => { observer.disconnect() }
+      /* v8 ignore stop */
+    }, [shown.length > 0])
+    useEffect(() => {
+      setRowPitch(0)
+      setRowGap(0)
+    }, [shown.length, listWide, filter, query, sort, openPath])
+    useEffect(() => {
+      if (!listWide || openPath !== null || rowPitch > 0) return
+      const el = listRef.current
+      /* v8 ignore start */
+      if (el === null) return
+      const items = [...el.querySelectorAll<HTMLElement>('.lc-fa-item')]
+      if (items.length < 2 || items.length !== shown.length) return
+      /* v8 ignore stop */
+      const rects = items.map(item => item.getBoundingClientRect())
+      const first = rects[0]
+      const height = Math.round(first.height)
+      const uniform = height > 4 && rects.every(r => Math.abs(Math.round(r.height) - height) <= 1)
+      if (!uniform) return
+      const pitch = rects[1].top - first.top
+      /* v8 ignore next 1 */
+      if (Number.isFinite(pitch) && pitch > 4) {
+        setRowPitch(Math.round(pitch))
+        setRowGap(Math.max(0, Math.round(pitch - first.height)))
+      }
+    }, [listWide, openPath, rowPitch, rowGap, shown.length])
+    const rowRange = useRowWindow(listRef, shown.length, rowPitch, listWide && openPath === null && rowPitch > 0)
     const chips: { key: FileFilter; files: number; ops: number }[] = [
       {
         key: 'all',
-        files: activity.entries.length,
-        ops: activity.totals.read.ops + activity.totals.write.ops + activity.totals.search.ops,
+        files: matched.length,
+        ops: matchedTotals.read.ops + matchedTotals.write.ops + matchedTotals.search.ops,
       },
-      { key: 'read', files: activity.totals.read.files, ops: activity.totals.read.ops },
-      { key: 'write', files: activity.totals.write.files, ops: activity.totals.write.ops },
-      { key: 'search', files: activity.totals.search.files, ops: activity.totals.search.ops },
-      { key: 'image', files: activity.totals.image.files, ops: activity.totals.image.ops },
+      { key: 'read', files: matchedTotals.read.files, ops: matchedTotals.read.ops },
+      { key: 'write', files: matchedTotals.write.files, ops: matchedTotals.write.ops },
+      { key: 'search', files: matchedTotals.search.files, ops: matchedTotals.search.ops },
+      { key: 'image', files: matchedTotals.image.files, ops: matchedTotals.image.ops },
     ]
 
-    const opLine = (op: FileOp): ReactElement => (
-      <>
-        <span className="lc-fa-op-tool" title={op.tool}>{op.tool}</span>
-        {op.read !== undefined
-          ? (
+    const opLine = (op: FileOp): ReactElement => {
+      const stamp = props.stampOf?.(surfaceSeqOf(op)) ?? null
+      const stampText = stamp !== null ? t('browser.stepAt', { t: stamp.turn, s: stamp.step }) : null
+      const timeText = op.time !== undefined ? fmtTime(op.time) : null
+      return (
+        <>
+          <span className="lc-fa-op-tool" title={op.tool}>{op.tool}</span>
+          {op.detail !== undefined ? <span className="lc-fa-op-detail">{op.detail}</span> : null}
+          {op.hits !== undefined ? <span className="lc-fa-op-detail">{t('files.hits', { n: fmt(op.hits) })}</span> : null}
+          {op.detail === undefined && op.hits === undefined && op.program !== undefined
+            ? <span className="lc-fa-op-detail">{op.program}</span>
+            : null}
+          <span className="lc-fa-op-meta">
+            {op.read !== undefined
+              ? (
+                <span
+                  className="lc-fa-read"
+                  title={'est' in op.read
+                    ? t('files.readEst')
+                    : t('files.readTip', { a: fmt(op.read.start), b: fmt(op.read.start + op.read.count - 1) })}
+                >
+                  {('est' in op.read ? '≈' : '>>') + fmt(op.read.count)}
+                </span>
+              )
+              : null}
+            {op.added + op.removed > 0 ? <DeltaPair added={op.added} removed={op.removed} /> : null}
+            {op.err ? <span className="lc-br-err-dot" title={t('node.failed')} /> : null}
             <span
-              className="lc-fa-read"
-              title={'est' in op.read
-                ? t('files.readEst')
-                : t('files.readTip', { a: fmt(op.read.start), b: fmt(op.read.start + op.read.count - 1) })}
+              className="lc-fa-op-time"
+              title={stamp !== null ? t('browser.stepAtTip', { t: stamp.turn, s: stamp.step }) : undefined}
             >
-              {('est' in op.read ? '≈' : '>>') + fmt(op.read.count)}
+              {[stampText, timeText].filter(part => part !== null).join(' · ') || '—'}
             </span>
-          )
-          : null}
-        {op.detail !== undefined ? <span className="lc-fa-op-detail">{op.detail}</span> : null}
-        {op.hits !== undefined ? <span className="lc-fa-op-detail">{t('files.hits', { n: fmt(op.hits) })}</span> : null}
-        {/* A nested PTC op with no other detail still names its program. */}
-        {op.detail === undefined && op.hits === undefined && op.program !== undefined
-          ? <span className="lc-fa-op-detail">{op.program}</span>
-          : null}
-        {op.added + op.removed > 0 ? <DeltaPair added={op.added} removed={op.removed} /> : null}
-        {op.err ? <span className="lc-br-err-dot" title={t('node.failed')} /> : null}
-        <span className="lc-fa-op-time">{op.time !== undefined ? fmtTime(op.time) : '—'}</span>
-      </>
-    )
+          </span>
+        </>
+      )
+    }
 
     return (
-      <div className="lc-card lc-col flex-1 min-w-[min(360px,100%)]">
+      <div className="lc-card lc-fa-card lc-col flex-1 min-w-[min(360px,100%)]">
         <div className="lc-card-title">
-          <span className="lc-card-title-text">{t('files.title')}</span>
-          <span className="lc-card-sub">{props.scope}</span>
-        </div>
-        {/* The filter band and the list lane render in EVERY state, so an empty or pending card measures exactly what a
-            populated one does: the band alone was worth 55px of the row, which reflowed the page below it on the first
-            read of a session. */}
-        <div>
-          <div className="lc-fa-ctl">
-            {/* The five chips overflow a ~300px card in English — fold the group to two lines. */}
-            <div className="lc-gran @max-[380px]/lc-card:flex-wrap">
-              {chips.map(c => (
-                <button
-                  key={c.key}
-                  type="button"
-                  className={'lc-gran-btn' + (filter === c.key ? ' lc-gran-on' : '')
-                    + (c.key === 'read' || c.key === 'write' || c.key === 'search' ? ' lc-fa-chip-' + c.key : '')}
-                  title={t('files.chipTip', { files: c.files, ops: c.ops })}
-                  onClick={() => { setFilter(cur => (cur === c.key ? 'all' : c.key)) }}
-                >
-                  {t('files.kind.' + c.key)}
-                  <b className="lc-fa-n">{fmt(c.ops)}</b>
-                </button>
-              ))}
-            </div>
-            <input
-              className="lc-fa-search focus:border-(--dsw-alias-label-dimmed)"
-              value={query}
-              placeholder={t('files.search')}
-              onChange={(ev: ChangeEvent<HTMLInputElement>) => { setQuery(ev.target.value) }}
-            />
-          </div>
-          <div className="lc-fa-meta">
-            <span>{t('files.files', { n: activity.entries.length })}</span>
-            {activity.totals.added + activity.totals.removed > 0 ? (
-              /* The one styled tip of the card lives OUTSIDE the scrolling list, so the bubble never clips. */
+          <span className="lc-card-title-text">
+            <IconFolderOpen size={14} />
+            {t('files.title')}
+          </span>
+          <span className="lc-fa-meta">
+            <span>{t(shown.length === 1 ? 'files.file' : 'files.files', { n: shown.length })}</span>
+            {shownTotals.added + shownTotals.removed > 0 ? (
               <span className="lc-fa-meta-delta group/tip">
-                <DeltaPair added={activity.totals.added} removed={activity.totals.removed} />
+                <DeltaPair added={shownTotals.added} removed={shownTotals.removed} />
                 <span className="lc-tip lc-fa-meta-tip group-hover/tip:opacity-100" role="tooltip">{t('files.deltaTip')}</span>
               </span>
             ) : null}
+          </span>
+          <div className="lc-gran lc-fa-chips @max-[380px]/lc-card:flex-wrap">
+            {chips.map(c => (
+              <button
+                key={c.key}
+                type="button"
+                className={'lc-gran-btn' + (filter === c.key ? ' lc-gran-on' : '')
+                  + (c.key === 'image' ? '' : ' lc-fa-chip-' + c.key)}
+                title={t('files.chipTip', { files: c.files, ops: c.ops })}
+                onClick={() => { setFilter(cur => (cur === c.key ? 'all' : c.key)) }}
+              >
+                {t('files.kind.' + c.key)}
+                <b className="lc-fa-n">{fmt(c.ops)}</b>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="lc-fa-ctl">
+            <ClearableInput
+              className="lc-fa-search"
+              value={query}
+              placeholder={t('files.search')}
+              clearLabel={t('field.clear')}
+              onChange={setQuery}
+            />
             <span className="lc-gran lc-fa-sort" role="group" title={t('files.sortTip')}>
-              {(['count', 'latest', 'path'] as const).map(k => (
+              {(['count', 'lines', 'latest', 'path', 'name'] as const).map(k => (
                 <button
                   key={k}
                   type="button"
@@ -169,9 +243,11 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
           ) : shown.length === 0 ? (
             <div className="lc-empty lc-lane">{t(activity.entries.length === 0 ? 'files.empty' : 'files.noMatch')}</div>
           ) : (
-            <div className="lc-fa-list">
-              {shown.map((e) => {
+            <div className="lc-fa-list" ref={listRef}>
+              {rowRange.from > 0 ? <div className="lc-row-pad" style={{ height: Math.max(0, rowRange.from * rowPitch - rowGap) }} aria-hidden="true" /> : null}
+              {shown.slice(rowRange.from, rowRange.to + 1).map((e, i) => {
                 const open = openPath === e.path
+                const alt = (rowRange.from + i) % 2 === 1
                 const display = displayOf(e)
                 const trimmed = display.endsWith('/') ? display.slice(0, -1) : display
                 const slash = trimmed.lastIndexOf('/')
@@ -182,7 +258,7 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
                 const previewable = props.onPreview !== undefined && e.pattern !== true && e.form !== 'dir'
                 const openable = previewable || (abs !== undefined && props.onOpen !== undefined)
                 return (
-                  <div key={e.path} className={'lc-fa-item' + (open ? ' lc-fa-item-on' : '')}>
+                  <div key={e.path} className={'lc-fa-item' + (open ? ' lc-fa-item-on' : '') + (alt ? ' lc-fa-item-alt' : '')}>
                     <button
                       type="button"
                       className="lc-fa-row hover:bg-(--dsw-alias-interactive-bg-hover) @max-[380px]/lc-card:flex-wrap"
@@ -199,9 +275,6 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
                           )
                           : glyph.glyph}
                       </span>
-                      {/* Narrow cards wrap instead of crushing: the path's near-full-width basis keeps line 1 to
-                            chevron + icon + path, badges/delta/time fold onto line 2. The 46px reservation is
-                            chevron (12) + gaps (2×7) + form icon (20). */}
                       <span className="lc-fa-path flex-1 @max-[380px]/lc-card:basis-[calc(100%-46px)]">
                         {dir !== '' ? <em>{dir}</em> : null}
                         {openable
@@ -230,7 +303,6 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
                         <span className="lc-fa-badge lc-fa-b-search" title={t('files.kind.search')}><i />{fmt(e.searches)}</span>
                       ) : null}
                       {e.added + e.removed > 0 ? <DeltaPair added={e.added} removed={e.removed} /> : null}
-                      {e.errs > 0 ? <span className="lc-br-err-dot" title={t('files.errs', { n: e.errs })} /> : null}
                       {e.ops[0].time !== undefined
                         ? <span className="lc-fa-time">{fmtTime(e.ops[0].time)}</span>
                         : null}
@@ -239,8 +311,6 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
                       <div className="lc-fa-ops">
                         {e.ops.map((op, i) => {
                           const onLocate = props.onLocate
-                          // A meta-attributed search rows one op per matched file off ONE result — the ops share
-                          // that result's seq, so the key joins the index.
                           const key = `${op.seq}:${i}`
                           return onLocate !== undefined
                             ? (
@@ -261,6 +331,7 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
                   </div>
                 )
               })}
+              {rowRange.to < shown.length - 1 ? <div className="lc-row-pad" style={{ height: Math.max(0, (shown.length - 1 - rowRange.to) * rowPitch - rowGap) }} aria-hidden="true" /> : null}
             </div>
           )}
         </div>

@@ -1,23 +1,15 @@
-/**
- * The Fleet tab — the agent family's standalone home. One shared derivation (fleetModel.ts) feeds
- * an overview strip (family stats + the progress bar: shared tasks when a team exists, subagent
- * completion otherwise), then a two-up cockpit row — the network card left, the members board
- * over the task board right — then the comms timeline. Both boards stay up with guidance notes
- * when the session never formed a team, so the page's shape never jumps between session kinds.
- * Hover, pin, owner filter, and task focus are all lifted here, so a graph node, a member card, an
- * agent row, a task owner chip, a blocker chip, and a comms party all steer each other.
- */
-
-import { createElement as h, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { createElement as h, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import type { AgentHeads } from '../agentHeads'
 import { agentSelfOf } from '../agentTree'
 import { displayCurrencyOf } from '../cost'
 import { mergeComms } from '../fleetDetail'
+import { attestedNamesOf, commsAgentsOf } from '../fleetAgents'
 import { useFleetDetails, useFleetModel } from '../fleetModel'
 import { teamMemberOf, teamOf } from '../fleetTeam'
 import { useModelPrices } from '../modelPrices'
 import type { ClientCtx, SessionStandardProps } from '../services'
-import { openChildAsideVia, openSessionVia, projectionOf, unsupportedOf } from '../services'
+import { CONTEXT_VIEW_ID, openChildAsideVia, openSessionVia, projectionOf, seedConversationViewVia, unsupportedOf } from '../services'
+import { useFleetMemberFocus } from '../viewFocus'
 import { useContextSession } from '../sessionData'
 import type { ViewKit } from '../viewkit'
 import type { FleetDetail } from '../../shared/types'
@@ -30,6 +22,7 @@ import { FleetSummary } from './fleetSummary'
 import { MemberBoard } from './memberBoard'
 import { TaskBoard } from './taskBoard'
 import { makeUpgradeGate } from './upgradeGate'
+import { useConversationSurface } from './useConversationSurface'
 
 export function makeFleetView(
   ctx: ClientCtx,
@@ -46,34 +39,46 @@ export function makeFleetView(
   function FleetBody(props: SessionStandardProps): ReactElement {
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : undefined
     const { source, data, pressure, breakdown, usage } = useContextSession(props)
+    const rootRef = useRef<HTMLDivElement | null>(null)
+    useConversationSurface(rootRef)
+    useLayoutEffect(() => {
+      /* v8 ignore next 3 */
+      const scroller = rootRef.current !== null
+        ? rootRef.current.closest('[data-conversation-scroll]')
+        : null
+      if (scroller !== null) scroller.scrollTop = 0
+    }, [sessionId])
     const self = data !== null ? agentSelfOf(data, pressure, breakdown, usage) : undefined
-    // The model arms only once the tab's own timeline landed: while the loading/failure screen
-    // stands, no snapshot subscription and no fleet-detail read fire.
-    const { forest, team: rowTeam } = useFleetModel(ctx, heads, sessionId, self, data !== null)
-    // The freshest team value is the tab's OWN projection when the viewed session leads the team;
-    // a teammate's view falls back to the lead row's list-block copy.
+    const { forest, team: rowTeam, titles } = useFleetModel(ctx, heads, sessionId, self, data !== null, 120)
     const teamDirect = projectionOf(props, 'agentTeam', teamOf)
     const team = teamDirect ?? rowTeam
-    const details = useFleetDetails()
+    const details = useFleetDetails(undefined, { concurrency: 4, refreshDelayMs: 750 })
     const [hoverId, setHoverId] = useState<string | null>(null)
     const [pinnedId, setPinnedId] = useState<string | null>(null)
-    // The boards' cap rides the network card: the task card grows with the graph beside it and
-    // bottoms out at its own default otherwise. The graph's NATURAL content height is what gets
-    // measured (last child's offset + the card's own bottom padding) — the stretched column's
-    // height would self-fulfill the cap and never bind when the members card drives the row.
+    const focusMember = useFleetMemberFocus(sessionId)
     const colsRef = useRef<HTMLDivElement | null>(null)
     useEffect(() => {
       const row = colsRef.current
-      /* v8 ignore start -- jsdom has neither ResizeObserver nor layout; the caps are visual. */
+      /* v8 ignore start */
       if (row === null || typeof ResizeObserver !== 'function') return
       const graph = row.querySelector<HTMLElement>('.lc-col-graph')
       const members = row.querySelector<HTMLElement>('.lc-members')
       const write = (): void => {
         let graphH = 0
         const card = graph?.firstElementChild as HTMLElement | undefined
-        if (card !== undefined && card.lastElementChild !== null) {
-          const pad = window.parseFloat(window.getComputedStyle(card).paddingBottom)
-          graphH = card.lastElementChild.getBoundingClientRect().bottom - card.getBoundingClientRect().top + pad
+        if (card !== undefined) {
+          const cardRect = card.getBoundingClientRect()
+          const canvas = card.querySelector<HTMLElement>('.lc-agents-canvas')
+          const stage = canvas?.closest<HTMLElement>('.lc-agents-stage') ?? null
+          const stageRect = stage?.getBoundingClientRect() ?? null
+          const canvasRect = canvas?.getBoundingClientRect() ?? null
+          const top = stageRect?.top ?? canvasRect?.top
+          const basis = stage !== null ? window.parseFloat(window.getComputedStyle(stage).flexBasis) : Number.NaN
+          const visible = Number.isFinite(basis) ? basis : canvasRect?.height ?? 0
+          if (top !== undefined) {
+            const pad = window.parseFloat(window.getComputedStyle(card).paddingBottom)
+            graphH = top - cardRect.top + visible + pad
+          }
         }
         row.style.setProperty('--lc-graph-h', `${Math.ceil(graphH)}px`)
         row.style.setProperty('--lc-members-h', members !== null ? `${Math.ceil(members.getBoundingClientRect().height)}px` : '0px')
@@ -85,7 +90,6 @@ export function makeFleetView(
       return () => { observer.disconnect() }
       /* v8 ignore stop */
     }, [forest, team])
-    /** The task board's owner filter and focus flash, shared with the members board. */
     const [ownerFilter, setOwnerFilter] = useState<string | null>(null)
     const [focusTaskId, setFocusTaskId] = useState<string | null>(null)
     const { book } = useModelPrices()
@@ -96,14 +100,10 @@ export function makeFleetView(
       [forest],
     )
 
-    // A pinned agent that left the family releases the pin instead of ringing a ghost.
     useEffect(() => {
       if (pinnedId !== null && !byId.has(pinnedId)) setPinnedId(null)
     }, [pinnedId, byId])
 
-    // The lead's own detail feeds the members board's roster facts. Every family node's detail
-    // rides too: a member card's model and reply, a delegation row's briefing prompt on the task
-    // board, and the comms merge's relay rows all fill in on first paint instead of after a scan.
     const leadId = team !== null ? team.members[0]?.id : undefined
     const detailStamp = forest === null ? '' : forest.nodes.map(n => `${n.id}@${n.updatedAt}`).join(',')
     useEffect(() => {
@@ -119,21 +119,17 @@ export function makeFleetView(
       return map
     }, [details.landed])
     const comms = useMemo(() => mergeComms(landedDetails), [landedDetails])
+    const attestedNames = useMemo(() => attestedNamesOf(comms), [comms])
 
-    const labelOf = (id: string): string => {
-      const node = byId.get(id)
-      if (node !== undefined) return node.label
-      const member = team?.members.find(m => m.id === id)
-      return member?.name ?? id
-    }
+    const leadDetail = leadId !== undefined ? landedDetails.get(leadId) ?? null : null
+    const agents = useMemo(
+      () => commsAgentsOf(forest?.nodes ?? [], team, leadDetail?.roster, attestedNames, t),
+      [attestedNames, forest, leadDetail, team, t],
+    )
 
-    /** A member card's open: the right Sidebar's subagent chat (the header catalog's own
-     * aside verb), addressed by the node's direct parent; a column that cannot take the
-     * resource, or a node without its parent edge, keeps the whole-view jump. */
     const open = (id: string): void => {
       const node = byId.get(id)
-      /* v8 ignore next 5 -- defensive arms: the opener only fires from a family card on a
-         session-scoped tab, so a family node always carries its direct parent edge. */
+      /* v8 ignore next 5 */
       if (openChildAsideVia(ctx, {
         childSessionId: id,
         parentSessionId: node?.parentId,
@@ -142,9 +138,11 @@ export function makeFleetView(
       openSessionVia(ctx, id)
     }
 
-    /** A graph-node or member-card pick rings the node, and narrows the task board to that
-     * agent's work — members by roster name, plain subagents by their own session; picking again
-     * releases both. */
+    const enter = (id: string): void => {
+      seedConversationViewVia(id, CONTEXT_VIEW_ID)
+      openSessionVia(ctx, id)
+    }
+
     const select = (id: string): void => {
       const next = pinnedId === id ? null : id
       setPinnedId(next)
@@ -153,10 +151,6 @@ export function makeFleetView(
       else if (ownerFilter === id || (member !== null && ownerFilter === member.name)) setOwnerFilter(null)
     }
 
-    // The picked agent's session id: a roster member joins by name, a plain subagent picks by
-    // its own — the one key the task board and the comms timeline both narrow by. A key neither
-    // can account for (a hostile snapshot's transient) rides raw: both boards name it on their
-    // chips and empty together, and the next sound snapshot restores them.
     const pickId = useMemo(() => {
       if (ownerFilter === null) return null
       return team?.members.find(m => m.name === ownerFilter)?.id ?? ownerFilter
@@ -164,7 +158,7 @@ export function makeFleetView(
 
     if (data === null) {
       return (
-        <div className="lc-root">
+        <div className="lc-root" ref={rootRef}>
           {source.detailState === 'failed'
             ? <DetailNote state="failed" onRetry={source.retryDetail} />
             : <div className="lc-empty">{t('loading')}</div>}
@@ -172,12 +166,7 @@ export function makeFleetView(
       )
     }
 
-    // The baseline gate must not hide behind whichever tab the reader opened: the dismissal ledger is keyed by
-    // session, so one dismissal holds across the Context tab and this one.
     const gate = unsupportedOf(data.unsupported)
-    const leadDetail = leadId !== undefined ? landedDetails.get(leadId) ?? null : null
-    /** A task-board row pick toggles the pin; a release also lets go of a task-board narrowing
-     * still pointing at that agent (the same pair select() manages for graph and member picks). */
     const pinToggle = (id: string | null): void => {
       const releasing = pinnedId === id
       setPinnedId(releasing ? null : id)
@@ -198,6 +187,8 @@ export function makeFleetView(
         onOwnerFilter={setOwnerFilter}
         focusTaskId={focusTaskId}
         onFocusTask={setFocusTaskId}
+        pinnedId={pinnedId}
+        hoverId={hoverId}
         onPinMember={pinToggle}
         onHoverMember={setHoverId}
         rich={rich}
@@ -205,11 +196,9 @@ export function makeFleetView(
         fmt={kit.fmt}
       />
     )
-    // The boards column's two cards stack; the network column is the graph alone, and either seat
-    // may be absent (no snapshot at all, or a team whose forest has not landed yet).
     const boardsColumn = forest !== null
       ? (
-        <div className="lc-col flex-1 min-w-[min(360px,100%)]">
+        <div className="lc-col lc-col-boards flex-1 min-w-[min(360px,100%)]">
           <MemberBoard
             team={team}
             forest={forest}
@@ -219,6 +208,7 @@ export function makeFleetView(
             hoverId={hoverId}
             onPin={select}
             onHover={setHoverId}
+            onEnter={enter}
             onOpen={open}
             ownerFilter={ownerFilter}
             onOwnerFilter={setOwnerFilter}
@@ -232,7 +222,7 @@ export function makeFleetView(
         ? <div className="lc-col flex-1 min-w-[min(360px,100%)]">{taskBoard}</div>
         : null
     return (
-      <div className="lc-root">
+      <div className="lc-root" ref={rootRef}>
         {forest !== null
           ? <FleetSummary forest={forest} team={team} book={book} currency={currency} t={t} fmt={kit.fmt} />
           : null}
@@ -248,6 +238,7 @@ export function makeFleetView(
                       team={team}
                       pinnedId={pinnedId}
                       hoverId={hoverId}
+                      focusId={focusMember}
                       onHover={setHoverId}
                       onSelect={select}
                       inspector={false}
@@ -259,18 +250,26 @@ export function makeFleetView(
             </div>
           )
           : null}
-        {forest !== null && !forest.solo
+        {forest !== null
           ? (
             <CommsPanel
-              nodes={forest.nodes}
               details={details}
               comms={comms}
-              labelOf={labelOf}
-              onPin={setPinnedId}
+              agents={agents}
+              titles={titles}
+              attested={attestedNames}
+              anchorId={sessionId}
               pickId={pickId}
-              onPickClear={() => { setOwnerFilter(null) }}
+              pinnedId={pinnedId}
+              onSelect={select}
+              onPickClear={() => {
+                setOwnerFilter(null)
+                setPinnedId(null)
+              }}
+              onOpen={open}
+              onEnter={enter}
+              rich={rich}
               t={t}
-              fmt={kit.fmt}
             />
           )
           : null}

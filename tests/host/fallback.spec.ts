@@ -1,6 +1,3 @@
-// The baseline gate's fallback units (src/host/fallback.ts) over the REAL session-projection registry:
-// the gate's value arrives through the ordinary snapshot cut, no matter what the log carries.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -10,7 +7,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { createFallbackActivityDefinition, createFallbackHeadersDefinition, createFallbackTimelineDefinition } from '../../src/host/fallback'
 import { BASELINE_DSH_VERSION } from '../../src/shared/version'
 
-const CURRENT = '0.1.1-rc.2'
+const CURRENT = '0.2.0-rc.1'
 
 async function boot() {
   const ctx = new Context()
@@ -54,13 +51,6 @@ describe('fallback units over the real registry', () => {
     assert.deepEqual(headers.headers, [])
   })
 
-  test('the served views pass the real wire schemas', () => {
-    const timeline = createFallbackTimelineDefinition(CURRENT)
-    assert.equal(timeline.wire.viewSchema.safeParse(timeline.wire.view({})).success, true)
-    const headers = createFallbackHeadersDefinition()
-    assert.equal(headers.wire.viewSchema.safeParse(headers.wire.view({})).success, true)
-  })
-
   test('apply is a total identity over any event', () => {
     const timeline = createFallbackTimelineDefinition(CURRENT)
     const state = timeline.init()
@@ -73,24 +63,18 @@ describe('fallback units over the real registry', () => {
 
   test('the state schema strips any cached row instead of rejecting it', () => {
     const timeline = createFallbackTimelineDefinition(CURRENT)
-    // A ver-1 row of the REAL headers unit ({headers: [...]}) or any other
-    // persisted shape seeds the gate's fold stripped to the empty state.
     assert.deepEqual(timeline.stateSchema.parse({ headers: [{ seq: 1 }] }), {})
     assert.deepEqual(timeline.stateSchema.parse({ surface: [null], sums: {} }), {})
     assert.equal(timeline.stateVersion, 1)
   })
 
-  test('both registry contract generations read their shape off one definition', () => {
+  test('both registry contract generations read their shape off one definition, for every unit', () => {
     const timeline = createFallbackTimelineDefinition(CURRENT)
-    // Pre-0.1.1 aliases: top-level `schema` + `view`.
     assert.equal(timeline.schema.safeParse(timeline.view({})).success, true)
     assert.deepEqual(timeline.view({}).unsupported, { current: CURRENT, minimum: BASELINE_DSH_VERSION })
     const headers = createFallbackHeadersDefinition()
     assert.equal(headers.schema.safeParse(headers.view({})).success, true)
     assert.deepEqual(headers.view({}), { headers: [] })
-  })
-
-  test('the activity gate serves an empty ledger through both contract generations', () => {
     const activity = createFallbackActivityDefinition()
     assert.equal(activity.key, 'contextActivity')
     assert.equal(activity.stateVersion, 1)

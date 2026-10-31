@@ -1,7 +1,9 @@
 import type { ContextEventRecord } from '../shared/types'
+import { useSyncExternalStore } from 'react'
 import { fmt, fmtDuration, fmtShare, fmtTime } from './format'
-import { makeEventText } from './components/events'
+import { makeEventText, type EventLabelParts } from './components/events'
 import type { Translate } from './i18n'
+import type { LocaleService } from './services'
 
 export interface ViewKit {
   t: Translate
@@ -11,19 +13,31 @@ export interface ViewKit {
   fmtShare: typeof fmtShare
   catLabel: (key: string) => string
   eventLabel: (ev: ContextEventRecord) => string
+  eventLabelParts: (ev: ContextEventRecord) => EventLabelParts
   eventAt: (ev: ContextEventRecord) => string | null
+  useLocaleTick(): void
 }
 
-export function makeViewKit(t: Translate): ViewKit {
-  const { eventLabel, eventAt } = makeEventText(t)
+const noopLocaleTick = (): void => {}
+
+export function makeViewKit(t: Translate, locale?: LocaleService): ViewKit {
+  const { eventLabel, eventLabelParts, eventAt } = makeEventText(t)
+  const subscribe = locale !== undefined && typeof locale.subscribe === 'function' ? locale.subscribe.bind(locale) : undefined
+  const useLocaleTick = subscribe === undefined
+    ? noopLocaleTick
+    : (): void => {
+      useSyncExternalStore(subscribe, () => locale?.getLocale?.().active ?? '')
+    }
   return {
     t,
     fmt,
     fmtTime,
     fmtDuration,
     fmtShare,
-    catLabel: (key: string) => t('cat.' + key),
+    catLabel: key => t('cat.' + key),
     eventLabel,
+    eventLabelParts,
     eventAt,
+    useLocaleTick,
   }
 }

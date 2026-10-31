@@ -1,21 +1,15 @@
-/**
- * Client-side harness boundary: the harness web-half surface this plugin
- * consumes, plus the sanitizers that re-prove every delivered value.
- *
- * The interfaces are type-only — the runtime services come from the user's
- * harness, so every face is re-proved at its call site.
- */
-
 import type { Context } from '@deepseek-ai/cordis'
 import type { ComponentType } from 'react'
 import type { AttachmentRef } from '../shared/attachment'
 import { estimateSystemTokens } from '../shared/estimate'
+import { PLUGIN_NAME } from './meta'
 import type { ActivityDay, ContextActivity, ContextBreakdown, ContextHeaders, ContextPressure, ContextTimeline, CostModelUsage, HeaderEpochContent, SystemPromptNode, TimingTotals, TokenUsage, ToolTimingTotals } from '../shared/types'
 
 export interface LocaleService {
   register(ns: string, dicts: Record<string, Record<string, string>>): () => void
   bind(ns: string): (key: string, params?: Record<string, string | number>) => string
   getLocale?(): { active: string }
+  subscribe?(listener: () => void): () => void
 }
 
 export interface SlotRegistration {
@@ -23,7 +17,6 @@ export interface SlotRegistration {
   id?: string
   order?: number
   key?: string
-  /** Dictionary namespace; the framework synthesizes the `t` seat from it. */
   locale?: string
   label?: () => string
   inject?: (sessionId?: string) => unknown
@@ -35,17 +28,9 @@ export interface SlotsService {
     registration: SlotRegistration,
     component: (props: { sessionId?: string } & Record<string, unknown>) => unknown,
   ): unknown
-  /** The slot ledger's raw entries view (`SlotCore.entries`): one stored record
-   * per seated entry, its `options` carrying the registered `id`/`order`/….
-   * Optional: an older face mounts without the second-mount guard. */
   entries?(name: string): unknown
 }
 
-/** Whether the page's slot ledger already seats an entry with `id` on the named
- * list slot. Reads the raw ledger (the view the session header renders), so a
- * seated entry is one the harness would paint — exactly what a second mount of
- * this bundle must not add. Fail-open: an absent, shape-shifted, or hostile
- * face reports false, so the mount proceeds and never blanks a working one. */
 export function entrySeated(ctx: ClientCtx, name: string, id: string): boolean {
   try {
     const entries = ctx.slots.entries?.(name)
@@ -60,7 +45,6 @@ export function entrySeated(ctx: ClientCtx, name: string, id: string): boolean {
   }
 }
 
-/** The harness `SidebarRightGuideEntry` subset a right-Sidebar tab type contributes. */
 export interface SidebarGuideEntryLike {
   order: number
   title: () => string
@@ -75,48 +59,32 @@ export interface SidebarTabDefinitionLike {
   guide?: readonly SidebarGuideEntryLike[]
 }
 
-/** The right Sidebar's tab-type registry (`ctx.sidebarRightTabs`), reached
- * through a deferred inject: a deployment without it composes fully (no pending fiber, no throw). */
 export interface SidebarTabsFace {
   register(definition: SidebarTabDefinitionLike): () => void
 }
 
-/** The opener's placement options the Sidebar face accepts (the harness's
- * `SidebarRightOpenResourceOptions`): the opening type's name, and whether to
- * claim a fresh pane instead of the resource's open occurrence. */
 export interface SidebarResourceOpenOptions {
   kind?: string
   preferNewPane?: boolean
 }
 
-/** The right Sidebar's navigation face (`ctx.sidebarRight`): `openResource`
- * claims a `dsh-resource://…` address — the shipped preview type for files,
- * the shipped subagent type for a chat. The caller falls back to its other
- * opener when the face is absent or refuses. */
 export interface SidebarResourceFace {
   openResource(address: string, options?: SidebarResourceOpenOptions): void
 }
 
-/** A finalized chat node: it carries the source surface event's `seq`, so the
- * browser joins its nodes on `seq` instead of projecting their content. */
 export interface ConversationNodeLike {
   kind: string
   seq: number
-  /** Durable message id; absent on synthetic/interrupted replies. */
   messageId?: unknown
   content?: readonly unknown[]
   blocks?: readonly unknown[]
   call?: { name: string; argsRaw: string } | null
   isError?: boolean
   summary?: string | null
-  /** Nested dsh ToolCallBlock[] tree of a PTC `run_code` dispatch; re-proved structurally in fileActivity. */
   subCalls?: readonly unknown[]
-  /** Tool-result presentation meta (a search's matched files), as the join delivers it. */
   meta?: unknown
 }
 
-/** dsh's `ImageAttachmentRef`, re-typed to stay free of an attachment-package
- * dependency. The durable log holds only this ref, never inline bytes. */
 export interface ImageRefLike {
   attachmentId: string
   name?: string
@@ -132,7 +100,6 @@ export interface UiConversationFace {
   imageUrl?(sessionId: string, attachment: ImageRefLike): Promise<string>
 }
 
-/** Session-authorized image loader; undefined off an absent/hostile service (metadata-only cards). */
 export function imageLoaderOf(
   ctx: ClientCtx,
   sessionId: string | undefined,
@@ -144,51 +111,40 @@ export function imageLoaderOf(
       const imageUrl = conversation.imageUrl.bind(conversation)
       return attachment => imageUrl(sessionId, attachment)
     }
-  } catch { /* absent or hostile service — metadata-only cards */ }
+  } catch {}
   return undefined
 }
 
-/** The named host path of one session-cited attachment (the plugin's own location route);
- * null resolves the browser's unavailable note. */
 export type AttachmentLocator = (attachment: AttachmentRef) => Promise<string | null>
 
-/** On-click opener of one attachment's preview; false = nothing took it. */
 export type AttachmentOpener = (attachment: AttachmentRef) => Promise<boolean>
 
-/** The `useChat` seat. The selector must return a reference-stable slice: a fresh object re-renders the view on every event. */
 export type UseChatLike = <T>(selector: (snapshot: unknown) => T) => T
 
-/** `ChatSnapshot.legacy.nodes`, or undefined when the seat delivers no real array; callers render without the join. */
 export function conversationNodesOf(props: {
   useChat?: UseChatLike
 }): readonly ConversationNodeLike[] | undefined {
   const useChat: unknown = props.useChat
   if (typeof useChat !== 'function') return undefined
   try {
-    // `s.legacy` is a stable object; the array is read outside the selector.
     const slice = (useChat as UseChatLike)((s: unknown) =>
       s !== null && typeof s === 'object' ? (s as { legacy?: unknown }).legacy : undefined)
     const nodes = slice !== null && typeof slice === 'object' ? (slice as { nodes?: unknown }).nodes : undefined
     return Array.isArray(nodes) ? nodes as readonly ConversationNodeLike[] : undefined
-  } catch { /* hostile seat — the join degrades to nothing */ }
+  } catch {}
   return undefined
 }
 
-/** The framework standard kit of a session-scope slot component. */
 export interface SessionStandardProps {
   sessionId?: string
   useProjection?: (key: string) => unknown
-  /** The chat-view snapshot seat. */
   useChat?: UseChatLike
 }
 
 export interface ContextViewProps extends SessionStandardProps {
-  /** Set only by the right-Sidebar registration, which drops the head cards a narrow column cannot serve. */
   host?: 'sidebar'
 }
 
-/** Read one projection key through the standard seat, narrowed at the
- * boundary. The seat is a hook: call it unconditionally at the top of the component, one call per key, in a stable order. */
 export function projectionOf<T>(props: SessionStandardProps, key: string, narrow: (value: unknown) => T | null): T | null {
   if (typeof props.useProjection !== 'function') return null
   return narrow(props.useProjection(key))
@@ -199,13 +155,11 @@ export type ClientCtx = Context & {
   slots: SlotsService
 }
 
-/** The boundary type is `Record<string, unknown>` on purpose, so every field read re-proves itself before borrowing a wire type. */
 export function asRecord(value: unknown): Record<string, unknown> | null {
   if (value === null || value === undefined || typeof value !== 'object') return null
   return value as Record<string, unknown>
 }
 
-/** A missing, non-numeric, or NaN field degrades to 0. */
 export function numOf(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
@@ -215,10 +169,10 @@ function objectsOf<T>(value: unknown): T[] {
   return value.filter((v): v is T => v !== null && typeof v === 'object')
 }
 
-/** The collection/floor block shared by the full snapshot (timelineOf) and the split detail (timelineSource.ts). */
 export function collectionsOf(data: Record<string, unknown>): Pick<ContextTimeline,
   'requests' | 'events' | 'nodes' | 'droppedNodes' | 'archive'
-  | 'surfaceFloor' | 'archiveFloor' | 'fileOps' | 'fileOpsFloor' | 'spans'> {
+  | 'surfaceFloor' | 'archiveFloor' | 'fileOps' | 'fileOpsFloor' | 'commands' | 'commandsFloor' | 'commandStats' | 'spans'> {
+  const commandStats = commandStatsOf(data.commandStats)
   return {
     requests: objectsOf(data.requests),
     events: objectsOf(data.events),
@@ -229,16 +183,28 @@ export function collectionsOf(data: Record<string, unknown>): Pick<ContextTimeli
     ...(typeof data.archiveFloor === 'number' ? { archiveFloor: data.archiveFloor } : {}),
     ...(data.fileOps !== undefined ? { fileOps: objectsOf(data.fileOps) } : {}),
     ...(typeof data.fileOpsFloor === 'number' ? { fileOpsFloor: data.fileOpsFloor } : {}),
+    ...(data.commands !== undefined ? { commands: objectsOf(data.commands) } : {}),
+    ...(typeof data.commandsFloor === 'number' ? { commandsFloor: data.commandsFloor } : {}),
+    ...(commandStats !== undefined ? { commandStats } : {}),
     ...(data.spans !== undefined ? { spans: objectsOf(data.spans) } : {}),
   }
 }
 
-/** A null/primitive entry passes a bare `Array.isArray` yet throws on the first property read, so it takes the sanitizing slow path. */
+function commandStatsOf(value: unknown): ContextTimeline['commandStats'] | undefined {
+  const data = asRecord(value)
+  if (data === null) return undefined
+  return {
+    runs: numOf(data.runs),
+    failed: numOf(data.failed),
+    ms: numOf(data.ms),
+    bg: numOf(data.bg),
+  }
+}
+
 function recordsOnly(value: unknown): boolean {
   return Array.isArray(value) && value.every(e => e !== null && typeof e === 'object')
 }
 
-/** The host's baseline-gate record (host/fallback.ts); anything but two version strings degrades to null. */
 export function unsupportedOf(value: unknown): { current: string; minimum: string } | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -246,7 +212,6 @@ export function unsupportedOf(value: unknown): { current: string; minimum: strin
   return { current: data.current, minimum: data.minimum }
 }
 
-/** Session-cost raw material: an unproved branch drops whole and buckets zero out, so garbage prices as zero, never NaN. */
 function costOf(value: unknown): ContextTimeline['cost'] | undefined {
   const data = asRecord(value)
   if (data === null || Array.isArray(data)) return undefined
@@ -286,14 +251,10 @@ function costFastOk(value: unknown): boolean {
   })
 }
 
-/** Narrow a delivered projection value to a RENDER-SAFE context timeline: a
- * non-record stays `null` (callers show the loading screen), while a record
- * failing the wire shape is SANITIZED, so a corrupt payload cannot throw during render and unmount the conversation view. */
 export function timelineOf(value: unknown): ContextTimeline | null {
   const data = asRecord(value)
   if (data === null) return null
   const current = data.current
-  // Fast-path shape check: the host always sends a full numeric breakdown and real collections; anything else is rebuilt below.
   const numericBreakdown = current !== null && typeof current === 'object'
     && ['system', 'tools', 'user', 'inject', 'skill', 'assistant', 'tool', 'total']
       .every(k => typeof (current as Record<string, unknown>)[k] === 'number')
@@ -305,22 +266,23 @@ export function timelineOf(value: unknown): ContextTimeline | null {
     && systemsFastOk(data.systems)
     && timingFastOk(data.timing)
     && costFastOk(data.cost)) {
-    // The untouched pass-through keeps the value reference-stable for the selector equality.
     return data as unknown as ContextTimeline
   }
   const safeCurrent: Record<string, unknown> = current !== null && typeof current === 'object' ? current as Record<string, unknown> : {}
   const cost = costOf(data.cost)
   const timing = timingOf(data.timing)
-  // The baseline-gate record survives sanitizing: a fallback payload failing the fast path must still pop the gate modal.
   const unsupported = unsupportedOf(data.unsupported)
-  // The split-generation head fields survive sanitizing too.
   const counts = countsOf(data.counts)
   const last = lastOf(data.last)
+  const generatedReasoning = optNumOf(data.generatedReasoning)
+  const generatedAnswerTokens = optNumOf(data.generatedAnswerTokens)
+  const generatedCallTokens = optNumOf(data.generatedCallTokens)
   const safe: ContextTimeline = {
     ok: true,
     ...(unsupported !== null ? { unsupported } : {}),
     ...(typeof data.model === 'string' ? { model: data.model } : {}),
     ...(typeof data.provider === 'string' ? { provider: data.provider } : {}),
+    ...(typeof data.reasoningEffort === 'string' ? { reasoningEffort: data.reasoningEffort } : {}),
     ...(typeof data.contextWindow === 'number' ? { contextWindow: data.contextWindow } : {}),
     ...(typeof data.maxOutputTokens === 'number' && Number.isFinite(data.maxOutputTokens) && data.maxOutputTokens > 0
       ? { maxOutputTokens: data.maxOutputTokens }
@@ -332,11 +294,17 @@ export function timelineOf(value: unknown): ContextTimeline | null {
       inject: numOf(safeCurrent.inject),
       skill: numOf(safeCurrent.skill),
       assistant: numOf(safeCurrent.assistant),
+      assistantReasoning: numOf(safeCurrent.assistantReasoning),
+      assistantAnswerTokens: numOf(safeCurrent.assistantAnswerTokens),
+      assistantCallTokens: numOf(safeCurrent.assistantCallTokens),
       tool: numOf(safeCurrent.tool),
       total: numOf(safeCurrent.total),
     },
     ...collectionsOf(data),
     ...(typeof data.images === 'number' ? { images: data.images } : {}),
+    ...(generatedReasoning !== undefined ? { generatedReasoning } : {}),
+    ...(generatedAnswerTokens !== undefined ? { generatedAnswerTokens } : {}),
+    ...(generatedCallTokens !== undefined ? { generatedCallTokens } : {}),
     ...(typeof data.toolCalls === 'number' ? { toolCalls: data.toolCalls } : {}),
     ...(typeof data.humanInputs === 'number' ? { humanInputs: data.humanInputs } : {}),
     ...(typeof data.answers === 'number' && Number.isFinite(data.answers) ? { answers: data.answers } : {}),
@@ -351,7 +319,6 @@ export function timelineOf(value: unknown): ContextTimeline | null {
   return safe
 }
 
-/** Live system-prompt nodes sorted by seq; a dropped entry leaves the browser on the header epoch. */
 function systemsOf(value: unknown): ContextTimeline['systems'] {
   const list = objectsOf<Record<string, unknown>>(value)
   const out: SystemPromptNode[] = []
@@ -365,7 +332,6 @@ function systemsOf(value: unknown): ContextTimeline['systems'] {
   return out.sort((a, b) => a.seq - b.seq)
 }
 
-/** Every entry must carry finite `seq`/`time`/`tokens`, else the payload takes the sanitizing slow path. */
 function systemsFastOk(value: unknown): boolean {
   if (value === undefined) return true
   if (!Array.isArray(value)) return false
@@ -378,7 +344,6 @@ function systemsFastOk(value: unknown): boolean {
   })
 }
 
-/** Split-head counts; an absent value stays absent (legacy generation) and callers derive the counts from the collections. */
 function countsOf(value: unknown): ContextTimeline['counts'] {
   const data = asRecord(value)
   if (data === null) return undefined
@@ -404,8 +369,6 @@ function lastOf(value: unknown): ContextTimeline['last'] {
   }
 }
 
-/** The token-meter `contextPressure` projection. Its three fields are independent last-wins records of different moments (dsh's
- * `ContextPressureProjection`), so each is re-proved alone and an absent value sends callers to their derived anchor. */
 export function contextPressureOf(value: unknown): ContextPressure | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -416,7 +379,6 @@ export function contextPressureOf(value: unknown): ContextPressure | null {
   return out
 }
 
-/** The token-meter `contextBreakdown` projection; a partial value degrades to null so the card uses the fold's own sums. */
 export function contextBreakdownOf(value: unknown): ContextBreakdown | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -427,9 +389,6 @@ export function contextBreakdownOf(value: unknown): ContextBreakdown | null {
   return { systemTokens, toolsTokens, messageTokens }
 }
 
-/** The token-meter `tokenUsage` projection. Its wire schema requires all four
- * buckets (dsh token-meter's `projectionSchema`), so a partial value degrades
- * whole to null rather than undercount the billed total. */
 export function tokenUsageOf(value: unknown): TokenUsage | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -441,17 +400,14 @@ export function tokenUsageOf(value: unknown): TokenUsage | null {
   return { uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }
 }
 
-/** A NaN or negative value degrades to 0 instead of leaking into donut shares. */
 function msNumOf(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
 }
 
-/** An optional timing scalar; anything but a non-negative number stays undefined, so the field never materializes as a zero. */
 function optNumOf(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
-/** Whole-value check for `timelineOf`'s pass-through path; anything but a well-formed timing object takes the sanitizing slow path. */
 function timingFastOk(value: unknown): boolean {
   if (value === undefined) return true
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
@@ -459,8 +415,7 @@ function timingFastOk(value: unknown): boolean {
   for (const k of ['wallMs', 'ttftMs', 'genMs', 'calls', 'toolsMs', 'toolCalls']) {
     if (typeof t[k] !== 'number') return false
   }
-  // Optional split/block scalars must pass the same non-negative gate the slow path applies.
-  for (const k of ['reasoningMs', 'textMs', 'toolArgMs', 'reasoningBlocks', 'textBlocks', 'toolArgBlocks']) {
+  for (const k of ['reasoningMs', 'textMs', 'toolArgMs', 'reasoningBlocks', 'textBlocks', 'toolArgBlocks', 'toolBusyMs', 'idleMs']) {
     const v = t[k]
     if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v < 0)) return false
   }
@@ -475,7 +430,6 @@ function timingFastOk(value: unknown): boolean {
   return true
 }
 
-/** Narrow delivered TimingTotals to a render-safe shape; one row failing the shape drops alone, so it never blanks the ranking. */
 export function timingOf(value: unknown): TimingTotals | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -483,7 +437,6 @@ export function timingOf(value: unknown): TimingTotals | null {
   const rawTools = data.tools
   if (rawTools !== null && typeof rawTools === 'object' && !Array.isArray(rawTools)) {
     for (const k in rawTools) {
-      // An own '__proto__' key would set the prototype instead of a row.
       if (k === '__proto__' || !Object.hasOwn(rawTools, k)) continue
       const row = (rawTools as Record<string, unknown>)[k]
       if (row === null || typeof row !== 'object') continue
@@ -502,7 +455,6 @@ export function timingOf(value: unknown): TimingTotals | null {
     toolCalls: msNumOf(data.toolCalls),
     tools,
   }
-  // Optional scalars stay absent when the host served none, so the card renders the un-split shape instead of meaningless zeros.
   const reasoning = optNumOf(data.reasoningMs)
   if (reasoning !== undefined) totals.reasoningMs = reasoning
   const reasoningBlocks = optNumOf(data.reasoningBlocks)
@@ -515,22 +467,22 @@ export function timingOf(value: unknown): TimingTotals | null {
   if (toolArgMs !== undefined) totals.toolArgMs = toolArgMs
   const toolArgBlocks = optNumOf(data.toolArgBlocks)
   if (toolArgBlocks !== undefined) totals.toolArgBlocks = toolArgBlocks
+  const toolBusyMs = optNumOf(data.toolBusyMs)
+  if (toolBusyMs !== undefined) totals.toolBusyMs = toolBusyMs
+  const idleMs = optNumOf(data.idleMs)
+  if (idleMs !== undefined) totals.idleMs = idleMs
   return totals
 }
 
-/**
- * The plugin's `contextHeaders` projection: request-header epoch METADATA
- * (boundaries, token prices, attribution); epoch CONTENT is fetched on demand
- * (historyPage.ts), never carried here.
- *
- * One malformed epoch degrades the WHOLE projection to null, because
- * downstream reads call `tool.name.toLowerCase()` and `b.tokens - a.tokens`
- * blindly.
- *
- * A pre-#37 host serving from its cache still carries the system TEXT in
- * place of its token price, so unpriced entries get the shared meter
- * heuristic here.
- */
+export function activeMsOf(timing: TimingTotals | null | undefined): number {
+  const wall = timing !== null && timing !== undefined && Number.isFinite(timing.wallMs) && timing.wallMs > 0
+    ? timing.wallMs
+    : 0
+  const idle = timing?.idleMs
+  const carved = idle !== undefined && Number.isFinite(idle) && idle > 0 ? Math.min(idle, wall) : 0
+  return wall - carved
+}
+
 export function headersOf(value: unknown): ContextHeaders | null {
   const headers = asRecord(value)
   if (headers === null || !Array.isArray(headers.headers)) return null
@@ -563,45 +515,141 @@ export function headersOf(value: unknown): ContextHeaders | null {
   } as unknown as ContextHeaders
 }
 
-/** The per-day `contextActivity` ledger behind the Overview heatmap and usage
- * chart. Absent stays null (an older host serves no such key); per-day re-proof drops just the bad entry or fee. */
 export function activityOf(value: unknown): ContextActivity | null {
   const data = asRecord(value)
   if (data === null) return null
   const rawDays = asRecord(data.days)
   if (rawDays === null || Array.isArray(rawDays)) return null
-  const days: Record<string, ActivityDay> = {}
-  let dirty = false
-  for (const key of Object.keys(rawDays)) {
-    const entry = asRecord(rawDays[key])
-    const tokens = entry?.tokens
-    const requests = entry?.requests
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)
-      || entry === null || Array.isArray(entry)
-      || typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0
-      || typeof requests !== 'number' || !Number.isFinite(requests) || requests < 0) {
-      dirty = true
-      continue
-    }
-    // The day's pricing record (additive-optional); an empty result drops whole (empty ≠ zero) and the day's figures survive.
-    const proved = costOf(entry.cost)
-    const cost = proved !== undefined && Object.keys(proved).length > 0 ? proved : undefined
-    if (entry.cost !== undefined && cost === undefined) dirty = true
-    // The day's skill table (additive-optional): a malformed tally drops just that name.
-    const skills = skillTalliesOf(entry.skills)
-    if (entry.skills !== undefined && skills === undefined) dirty = true
-    days[key] = {
-      tokens,
-      requests,
-      ...(cost !== undefined ? { cost } : {}),
-      ...(skills !== undefined ? { skills } : {}),
-    }
+  let drops: Set<string> | null = null
+  let fixes: Map<string, ActivityDay> | null = null
+  for (const key in rawDays) {
+    if (!Object.hasOwn(rawDays, key)) continue
+    const repaired = dayEntryOf(key, rawDays[key])
+    if (repaired === undefined) (drops ??= new Set()).add(key)
+    else if (repaired !== rawDays[key]) (fixes ??= new Map()).set(key, repaired)
   }
-  // The untouched pass-through keeps the value reference-stable for the selector equality.
-  return dirty ? { days } : data as unknown as ContextActivity
+  if (drops === null && fixes === null) return data as unknown as ContextActivity
+  const days: Record<string, ActivityDay> = {}
+  for (const key of Object.keys(rawDays)) {
+    if (drops?.has(key) === true) continue
+    days[key] = fixes?.get(key) ?? rawDays[key] as ActivityDay
+  }
+  return { days }
 }
 
-/** One day's skill-load table; a name needs a finite count and load instant, and an empty-after-scrubbing record drops whole. */
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/
+
+function dayEntryOf(key: string, raw: unknown): ActivityDay | undefined {
+  const entry = asRecord(raw)
+  const tokens = entry?.tokens
+  const requests = entry?.requests
+  if (!DAY_KEY.test(key)
+    || entry === null || Array.isArray(entry)
+    || typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0
+    || typeof requests !== 'number' || !Number.isFinite(requests) || requests < 0) {
+    return undefined
+  }
+  const turns = nonNegativeOf(entry.turns)
+  const toolCalls = nonNegativeOf(entry.toolCalls)
+  const toolsMs = nonNegativeOf(entry.toolsMs)
+  const wallMs = nonNegativeOf(entry.wallMs)
+  const clean = costWellFormed(entry.cost)
+    && skillTalliesWellFormed(entry.skills)
+    && (entry.turns === undefined || turns !== undefined)
+    && (entry.toolCalls === undefined || toolCalls !== undefined)
+    && (entry.toolsMs === undefined || toolsMs !== undefined)
+    && (entry.wallMs === undefined || wallMs !== undefined)
+  if (clean) return entry as unknown as ActivityDay
+  const costRaw = costOf(entry.cost)
+  const cost = costRaw !== undefined && Object.keys(costRaw).length > 0 ? costRaw : undefined
+  const skills = skillTalliesOf(entry.skills)
+  return {
+    tokens,
+    requests,
+    ...(cost !== undefined ? { cost } : {}),
+    ...(turns !== undefined ? { turns } : {}),
+    ...(toolCalls !== undefined ? { toolCalls } : {}),
+    ...(toolsMs !== undefined ? { toolsMs } : {}),
+    ...(wallMs !== undefined ? { wallMs } : {}),
+    ...(skills !== undefined ? { skills } : {}),
+  }
+}
+
+function nonNegativeOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+function costWellFormed(value: unknown): boolean {
+  if (value === undefined) return true
+  const data = asRecord(value)
+  if (data === null || Array.isArray(data)) return false
+  let any = false
+  for (const provider in data) {
+    if (!Object.hasOwn(data, provider)) continue
+    const models = asRecord(data[provider])
+    if (models === null || Array.isArray(models)) return false
+    any = true
+    for (const model in models) {
+      const periods = asRecord(models[model])
+      if (periods === null || Array.isArray(periods)) return false
+      for (const period of ['peak', 'off'] as const) {
+        const raw = periods[period]
+        if (raw === undefined) continue
+        const bucket = asRecord(raw)
+        if (bucket === null || Array.isArray(bucket)) return false
+        for (const k of ['uncached', 'cacheRead', 'cacheWrite', 'output']) {
+          const v = bucket[k]
+          if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v))) return false
+        }
+      }
+    }
+  }
+  return any
+}
+
+function skillTalliesWellFormed(value: unknown): boolean {
+  if (value === undefined) return true
+  const data = asRecord(value)
+  if (data === null || Array.isArray(data)) return false
+  let any = false
+  for (const name in data) {
+    if (!Object.hasOwn(data, name)) continue
+    const tally = asRecord(data[name])
+    const n = tally?.n
+    const last = tally?.last
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return false
+    if (typeof last !== 'number' || !Number.isFinite(last)) return false
+    any = true
+  }
+  return any
+}
+
+export function costFullyQuantified(value: unknown): boolean {
+  const data = asRecord(value)
+  if (data === null || Array.isArray(data)) return false
+  let any = false
+  for (const provider of Object.keys(data)) {
+    if (provider === '__proto__') return false
+    const models = asRecord(data[provider])
+    if (models === null || Array.isArray(models)) return false
+    for (const model of Object.keys(models)) {
+      if (model === '__proto__') return false
+      const periods = asRecord(models[model])
+      if (periods === null || Array.isArray(periods)) return false
+      for (const period of ['peak', 'off'] as const) {
+        const bucket = asRecord(periods[period])
+        if (bucket === null || Array.isArray(bucket)) continue
+        for (const k of ['uncached', 'cacheRead', 'cacheWrite', 'output']) {
+          const v = bucket[k]
+          if (typeof v !== 'number' || !Number.isFinite(v)) return false
+        }
+        any = true
+      }
+    }
+  }
+  return any
+}
+
 function skillTalliesOf(value: unknown): ActivityDay['skills'] | undefined {
   const data = asRecord(value)
   if (data === null || Array.isArray(data)) return undefined
@@ -621,16 +669,12 @@ function skillTalliesOf(value: unknown): ActivityDay['skills'] | undefined {
 
 export interface TriggerCandidate {
   name: string
-  /** Display title; the name itself when absent (a differing title renders the name as a trailing alias). */
   label?: string
-  /** Visual heading of this candidate's group; its presence suppresses the menu's source-title row. */
   section?: string
   description?: string
-  /** Row glyph, rendered at a 16px edge. */
   icon?: ComponentType<{ size?: number }>
 }
 
-/** Pick-moment snapshot of the trigger token span (draftRev CAS). */
 export interface TokenSpan {
   start: number
   end: number
@@ -647,7 +691,6 @@ export interface TriggerPick {
 
 export type SourcePickOutcome = 'handled' | undefined
 
-/** The harness input-trigger service (`ctx.inputTriggers`): one '/' source whose candidates, picks, and enter stay client-side. */
 export interface InputTriggersFace {
   registerSource(src: {
     trigger: '/'
@@ -666,35 +709,38 @@ export interface InputTriggersFace {
   }): () => void
 }
 
-/** The session scope (`ctx.sessions.scope`), used to dispatch the scoped consume-token event. */
 export interface SessionScopeFace {
   bail(subject: unknown, event: string, payload: unknown): unknown
 }
 
 export interface SessionsFace {
   scope(id: string): SessionScopeFace | undefined
-  /** Re-pull the session-list baseline; the overview rides it on open so backfill rows (backfill.ts) reach a long-connected browser. */
   refresh?(): Promise<unknown>
+  subagentAddress?(id: string): unknown
 }
 
 export interface HistoryEntryLike {
   event?: unknown
 }
 
-/** The gateway's seq-anchored history page verb (`remote.session.page`):
- * `throughSeq` is the inclusive log cut and must exist in the log, `beforeSeq`
- * the exclusive upper bound. Rows are `SessionHistoryRecord`s —
- * `{type:'event', event}` plus packed `{type:'chunks', …}` runs the mapper skips, since only streaming deltas pack. */
+export type SessionAddressLike =
+  | { kind: 'session'; sessionId: string }
+  | {
+    kind: 'subagent'
+    parentSessionId: string
+    childSessionId: string
+    mode: 'one-shot' | 'continuable' | 'unknown'
+  }
+
 export interface SessionPageFace {
   page(request: {
-    address: { kind: 'session'; sessionId: string }
+    address: SessionAddressLike
     throughSeq: number
     beforeSeq?: number
     maxMessages?: number
   }, signal?: AbortSignal): Promise<unknown>
 }
 
-/** The connection service face: the generic RPC caller and the loopback fact the harness's own open affordances gate on. */
 export interface ConnectionFace {
   isLoopback?: boolean
   rpc?: {
@@ -702,12 +748,10 @@ export interface ConnectionFace {
   }
 }
 
-/** The session-namespace workspace-opener remotes, ridden through the generic '/api' channel. */
 const OPEN_CHANNEL = '/api'
 const CAN_OPEN_ENDPOINT = 'session/canOpenWorkspacePath'
 const OPEN_ENDPOINT = 'session/openWorkspacePath'
 
-/** The connection's bound generic-RPC caller, or undefined off an absent/hostile service. */
 function rpcCallOf(ctx: ClientCtx): ((channel: string, endpoint: string, payload: unknown) => Promise<unknown>) | undefined {
   try {
     const rpc = asRecord((ctx.get('connection') as ConnectionFace | undefined)?.rpc)
@@ -715,14 +759,12 @@ function rpcCallOf(ctx: ClientCtx): ((channel: string, endpoint: string, payload
     if (rpc !== null && typeof fn === 'function') {
       return (fn as (channel: string, endpoint: string, payload: unknown) => Promise<unknown>).bind(rpc)
     }
-  } catch { /* absent or hostile connection — the caller degrades off */ }
+  } catch {}
   return undefined
 }
 
-/** The SESSION's workspace root — the `cwd` on its session-list row, not the host process's launch directory. */
 export function workspaceOf(ctx: ClientCtx, sessionId: string | undefined): string | undefined {
   if (typeof sessionId !== 'string' || sessionId === '') return undefined
-  // Host data: a hostile object may throw on the call or on property access.
   try {
     const sessions = ctx.get('sessions') as { list?: { getSnapshot(): unknown } } | undefined
     const snapshot = typeof sessions?.list?.getSnapshot === 'function' ? sessions.list.getSnapshot() : undefined
@@ -735,9 +777,36 @@ export function workspaceOf(ctx: ClientCtx, sessionId: string | undefined): stri
   }
 }
 
-/** Whether this deployment can hand a path to the native desktop: loopback AND
- * the session controller's opener capability answer over an RPC round-trip;
- * every absence, hostility, or transport failure resolves false. */
+export function sessionAddressOf(ctx: ClientCtx, sessionId: string): SessionAddressLike {
+  const plain: SessionAddressLike = { kind: 'session', sessionId }
+  if (typeof sessionId !== 'string' || sessionId === '') return plain
+  try {
+    const sessions = asRecord(ctx.get('sessions'))
+    if (sessions === null) return plain
+    const resolve = sessions.subagentAddress
+    const address = asRecord(typeof resolve === 'function' ? resolve.call(sessions, sessionId) : undefined)
+    const parentSessionId = address?.parentSessionId
+    if (typeof parentSessionId === 'string' && parentSessionId !== '' && parentSessionId !== sessionId) {
+      const mode = address?.mode
+      return {
+        kind: 'subagent',
+        parentSessionId,
+        childSessionId: sessionId,
+        mode: mode === 'one-shot' || mode === 'continuable' ? mode : 'unknown',
+      }
+    }
+    const list = asRecord(sessions.list)
+    const getSnapshot = list?.getSnapshot
+    const snapshot = typeof getSnapshot === 'function' ? asRecord((getSnapshot as () => unknown).call(list)) : null
+    const row = asRecord(asRecord(snapshot?.byId)?.[sessionId])
+    const parentId = row?.parentId
+    if (row?.origin === 'subagent' && typeof parentId === 'string' && parentId !== '' && parentId !== sessionId) {
+      return { kind: 'subagent', parentSessionId: parentId, childSessionId: sessionId, mode: 'unknown' }
+    }
+  } catch {}
+  return plain
+}
+
 export async function canOpenPathsOf(ctx: ClientCtx): Promise<boolean> {
   const call = rpcCallOf(ctx)
   if (call === undefined) return false
@@ -752,26 +821,18 @@ export async function canOpenPathsOf(ctx: ClientCtx): Promise<boolean> {
   }
 }
 
-/** The system path opener over the session controller's open remote, or undefined without an RPC caller; fire-and-forget. */
 export function openPathVia(ctx: ClientCtx): ((path: string) => void) | undefined {
   const call = rpcCallOf(ctx)
   if (call === undefined) return undefined
   return (path: string): void => {
     try {
-      // `args` is a plain object keyed by the remote's declared parameter
-      // names (the gateway's wire contract — an array is rejected host-side).
       void call(OPEN_CHANNEL, OPEN_ENDPOINT, { args: { request: { path } } })
-        .catch(() => { /* the open is best-effort; a failure stays silent */ })
-    } catch { /* same contract, for a synchronously throwing transport */ }
+        .catch(() => {})
+    } catch {}
   }
 }
 
-/** The right Sidebar's resource opener, or undefined when the column is absent
- * — the caller keeps its system-open degradation. `openResource` throws for an
- * unclaimed address or with no session surface, so the caller learns whether
- * the address was taken. The face is re-proved per open: a service can land or be revoked across an HMR reload. */
 export function openResourceVia(ctx: ClientCtx): ((address: string, options?: SidebarResourceOpenOptions) => boolean) | undefined {
-  // The untrusted face is re-proved as a record with a callable `openResource`.
   const faceOf = (): SidebarResourceFace | undefined => {
     try {
       const face = asRecord(ctx.get('sidebarRight'))
@@ -790,44 +851,54 @@ export function openResourceVia(ctx: ClientCtx): ((address: string, options?: Si
       face.openResource(address, options)
       return true
     } catch {
-      // No preview type claims it, or no session surface is mounted.
       return false
     }
   }
 }
 
-/** Jump to one session through the view owner's own selection verb
- * (`uiWorkspace.openSession`) — the sidebar row click rides the same verb and
- * the sessions service carries no selection verb. An absent or hostile face swallows, so a dead jump stays on the page. */
 export function openSessionVia(ctx: ClientCtx, id: string): void {
   try {
     const workspace = asRecord(ctx.get('uiWorkspace'))
     const open = workspace?.openSession
     if (typeof open === 'function') open.call(workspace, id)
-  } catch { /* absent or hostile face — the jump is best-effort */ }
+  } catch {}
 }
 
-/** The right Sidebar's subagent-chat resource address — the shipped subagent
- * catalog's canonical spelling for its "open in sidebar" verb, replicated
- * verbatim (the host publishes no helper): its parser accepts only this form. */
+export const CONTEXT_VIEW_ID = 'context'
+
+export function seedConversationViewVia(sessionId: string, view: string): void {
+  try {
+    const key = `dsh.conversation.${sessionId}`
+    let stored: Record<string, unknown> = {}
+    try {
+      const raw = localStorage.getItem(key)
+      const parsed: unknown = raw !== null ? JSON.parse(raw) : null
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) stored = parsed as Record<string, unknown>
+    } catch {}
+    stored.view = view
+    localStorage.setItem(key, JSON.stringify(stored))
+  } catch {}
+}
+
+export function openPluginSettings(ctx: ClientCtx): void {
+  try {
+    const navigation = asRecord(ctx.get('pluginNavigation'))
+    const open = navigation?.openBundle
+    if (typeof open === 'function') open.call(navigation, PLUGIN_NAME)
+  } catch {}
+}
+
 export function subagentChatAddressOf(address: { parentSessionId: string; childSessionId: string; mode: string }): string {
   const query = new URLSearchParams({ parent: address.parentSessionId, mode: address.mode })
   return `dsh-resource://subagentchat/session/${encodeURIComponent(address.childSessionId)}?${query}`
 }
 
-/** One subagent session's aside address as a family row supplies it: the direct
- * parent is the row's own edge, and a row without its subagent projection rides
- * the harness's own `unknown` mode. */
 export interface SubagentAddressLike {
   parentSessionId?: string
   childSessionId: string
   mode?: 'one-shot' | 'continuable' | 'unknown'
 }
 
-/** Open one subagent session in the right Sidebar's chat presentation — the
- * shipped catalog's aside verb (kind `subagentchat`, a new pane). False when
- * the parent edge is unknown, the column absent, or the address unclaimed:
- * the caller keeps its whole-view jump. */
 export function openChildAsideVia(ctx: ClientCtx, address: SubagentAddressLike): boolean {
   const { parentSessionId, childSessionId, mode } = address
   if (parentSessionId === undefined) return false
@@ -838,8 +909,6 @@ export function openChildAsideVia(ctx: ClientCtx, address: SubagentAddressLike):
   )
 }
 
-/** On-demand content for one surface-node seq: `null` when the durable log lacks the seq, rejects on transport failure. */
 export type ContentFetcher = (seq: number) => Promise<ConversationNodeLike | null>
 
-/** On-demand system prompt and tool schemas for one `contextHeaders` epoch seq (historyPage.ts); `null` when the log lacks the epoch. */
 export type HeaderFetcher = (seq: number) => Promise<HeaderEpochContent | null>

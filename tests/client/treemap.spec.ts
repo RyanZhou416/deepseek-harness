@@ -120,10 +120,9 @@ describe('mapOf grouping', () => {
     }
   })
 
-  test('a category past the fold cap keeps its top blocks and folds the tail into one “more” block', () => {
+  test('a category past the fold cap keeps its top blocks and folds the tail into one “more” block; exactly at the cap no fold happens', () => {
     const nodes: SurfaceNode[] = Array.from({ length: 13 }, (_, i) => surfaceNodeAt(i + 1, { tokens: 100 - i }))
-    const cats = mapOf(asm({ nodes }), kit.t, kit.catLabel)
-    const blocks = cats[0].blocks
+    const blocks = mapOf(asm({ nodes }), kit.t, kit.catLabel)[0].blocks
     assert.equal(blocks.length, 12)
     assert.deepEqual(blocks.map(b => b.label), [
       '#1', '#2', '#3', '#4', '#5', '#6', '#7', '#8', '#9', '#10', '#11', '2 more',
@@ -133,27 +132,22 @@ describe('mapOf grouping', () => {
     assert.equal(rest.count, 2)
     assert.equal(rest.elem, undefined)
     assert.equal(rest.query, undefined)
-  })
 
-  test('exactly at the cap no fold happens', () => {
-    const nodes: SurfaceNode[] = Array.from({ length: 12 }, (_, i) => surfaceNodeAt(i + 1, { tokens: 10 + i }))
-    const blocks = mapOf(asm({ nodes }), kit.t, kit.catLabel)[0].blocks
-    assert.equal(blocks.length, 12)
-    assert.ok(blocks.every(b => b.elem !== undefined))
+    const capped = Array.from({ length: 12 }, (_, i) => surfaceNodeAt(i + 1, { tokens: 10 + i }))
+    const exact = mapOf(asm({ nodes: capped }), kit.t, kit.catLabel)[0].blocks
+    assert.equal(exact.length, 12)
+    assert.ok(exact.every(b => b.elem !== undefined))
   })
 })
 
 describe('squarify', () => {
   const sized = (tokens: number, tag = ''): { tokens: number; tag: string } => ({ tokens, tag })
 
-  test('empty input, an all-zero list, and a degenerate box all lay out to nothing', () => {
+  test('empty, all-zero, degenerate, and single-item inputs lay out nothing or fill the box without a gap', () => {
     assert.deepEqual(squarify([], { x: 0, y: 0, w: 100, h: 100 }), [])
     assert.deepEqual(squarify([sized(0), sized(0)], { x: 0, y: 0, w: 100, h: 100 }), [])
     assert.deepEqual(squarify([sized(10)], { x: 0, y: 0, w: 0, h: 100 }), [])
     assert.deepEqual(squarify([sized(10)], { x: 0, y: 0, w: 100, h: 0 }), [])
-  })
-
-  test('a single item fills the box; zero-token neighbors drop without a gap', () => {
     assert.deepEqual(squarify([sized(10, 'a'), sized(0)], { x: 5, y: 6, w: 100, h: 50 }), [
       { item: { tokens: 10, tag: 'a' }, rect: { x: 5, y: 6, w: 100, h: 50 } }],
     )
@@ -191,7 +185,6 @@ describe('squarify', () => {
   })
 
   test('a new strip starts when the next item would worsen the strip’s worst aspect ratio', () => {
-    // 40/30/20/10 in a square: 20 breaks the first strip, 10 breaks the second (worked example from the algorithm).
     const out = squarify([sized(40, 'a'), sized(30, 'b'), sized(20, 'c'), sized(10, 'd')], { x: 0, y: 0, w: 100, h: 100 })
     assert.ok(Math.abs(out[0].rect.w - 70) < 1e-9 && Math.abs(out[0].rect.x) < 1e-9)
     assert.ok(Math.abs(out[1].rect.y - out[0].rect.h) < 1e-9, 'b stacks under a in the first strip')

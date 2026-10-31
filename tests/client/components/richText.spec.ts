@@ -11,12 +11,10 @@ const { RichText, RichSwitch, useRichMode } = makeRichText(kit)
 const SAMPLE = '# Title\n\nsome **bold** text'
 const JSON_SAMPLE = '{"name": "dsh", "meta": {"tags": ["a", "b"], "ver": 2}}'
 
-/** The raw body re-joined from its rendered line spans, i.e. the exact source text. */
 function rawText(container: ParentNode): string {
   return queryAll(container, '.lc-ts-line').map(line => line.textContent).join('\n')
 }
 
-/** Harness wiring the hook to the switch and the body, like the detail cards do. */
 function Harness(props: { text: string }) {
   const [mode, setMode, json] = useRichMode(props.text)
   return h('div', {}, h(RichSwitch, { mode, json, onPick: setMode }), h(RichText, { text: props.text, mode }))
@@ -31,25 +29,20 @@ describe('RichText', () => {
     await m.unmount()
   })
 
-  test('raw mode renders the exact source as one numbered line span per source line', async () => {
+  test('raw mode renders one numbered line span per source line, dropping only a trailing newline row', async () => {
     const m = await mount(h(RichText, { text: SAMPLE, mode: 'raw' }))
-    const pre = query(m.container, 'pre.lc-ts-desc-body')
     assert.equal(rawText(m.container), SAMPLE)
-    assert.equal(queryAll(pre, '.lc-ts-line').length, 3)
+    assert.equal(queryAll(m.container, '.lc-ts-line').length, 3)
     assert.equal(queryAll(m.container, 'h1').length, 0)
     await m.unmount()
-  })
 
-  test('raw mode drops the row of a trailing newline but keeps interior empty lines', async () => {
-    const m = await mount(h(RichText, { text: 'a\n\nb\n', mode: 'raw' }))
-    assert.deepEqual(queryAll(m.container, '.lc-ts-line').map(line => line.textContent), ['a', '', 'b'])
-    await m.unmount()
-  })
+    const trailing = await mount(h(RichText, { text: 'a\n\nb\n', mode: 'raw' }))
+    assert.deepEqual(queryAll(trailing.container, '.lc-ts-line').map(line => line.textContent), ['a', '', 'b'])
+    await trailing.unmount()
 
-  test('raw mode of empty text keeps a single empty line', async () => {
-    const m = await mount(h(RichText, { text: '', mode: 'raw' }))
-    assert.deepEqual(queryAll(m.container, '.lc-ts-line').map(line => line.textContent), [''])
-    await m.unmount()
+    const empty = await mount(h(RichText, { text: '', mode: 'raw' }))
+    assert.deepEqual(queryAll(empty.container, '.lc-ts-line').map(line => line.textContent), [''])
+    await empty.unmount()
   })
 
   test('json mode renders the tree two levels deep and restores the previously focused element', async () => {
@@ -59,12 +52,10 @@ describe('RichText', () => {
     const m = await mount(h(RichText, { text: JSON_SAMPLE, mode: 'json' }))
     const tree = query(m.container, '.lc-ts-desc-json [role=tree]')
     assert.equal(tree.getAttribute('aria-label'), 'JSON Content')
-    // Root entries plus the auto-opened second level: name, meta, and meta's own children.
     const rows = queryAll(m.container, '[role=treeitem]')
     assert.equal(rows.length, 4)
     assert.match(rows.map(r => r.textContent).join('|'), /tags/)
     assert.equal(document.activeElement, outside, 'the second-level auto-open never steals focus')
-    // A hover seats the row's copy action, titled through the localized copyButtonTitle.
     await hover(rows[0])
     const copy = query(m.container, '[data-json-copy-button]')
     assert.equal(copy.getAttribute('title'), 'Copy value; right-click for copy options')
@@ -99,13 +90,10 @@ describe('RichText', () => {
 })
 
 describe('jsonOf', () => {
-  test('parses whole-text objects and arrays, primitives inside brackets included', () => {
+  test('parses whole-text objects and arrays; rejects non-bracket leads, broken payloads, and trailing garbage', () => {
     assert.deepEqual(jsonOf('{"a": 1}'), { a: 1 })
     assert.deepEqual(jsonOf('  [1, "x"]\n'), [1, 'x'])
     assert.deepEqual(jsonOf('{}'), {})
-  })
-
-  test('rejects non-bracket leads, broken payloads, and trailing garbage', () => {
     assert.equal(jsonOf('plain text'), null)
     assert.equal(jsonOf('"quoted"'), null)
     assert.equal(jsonOf('{not json'), null)
@@ -129,26 +117,13 @@ describe('RichSwitch', () => {
     await click(buttons[1])
     assert.deepEqual(picks, ['raw', 'md'])
     await m.unmount()
-  })
 
-  test('raw mode marks the raw segment active instead', async () => {
-    const m = await mount(h(RichSwitch, { mode: 'raw', onPick: () => {} }))
-    const buttons = queryAll(m.container, '.lc-gran-btn')
-    assert.ok(buttons[0].className.includes('lc-gran-on'))
-    assert.ok(!buttons[1].className.includes('lc-gran-on'))
-    await m.unmount()
-  })
-
-  test('a JSON-detected body swaps the markdown segment for the JSON one', async () => {
-    const m = await mount(h(RichSwitch, { mode: 'json', json: true, onPick: () => {} }))
-    const buttons = queryAll(m.container, '.lc-gran-btn')
-    assert.equal(buttons.length, 2)
-    assert.equal(buttons[0].textContent, 'Raw')
-    assert.equal(buttons[1].textContent, 'JSON')
-    assert.equal(buttons[1].getAttribute('title'), 'View as JSON Tree')
-    assert.ok(buttons[1].className.includes('lc-gran-on'))
-    assert.equal(queryAll(m.container, '.lc-gran-btn').filter(b => b.textContent === 'Markdown').length, 0)
-    await m.unmount()
+    const json = await mount(h(RichSwitch, { mode: 'json', json: true, onPick: () => {} }))
+    const jsonButtons = queryAll(json.container, '.lc-gran-btn')
+    assert.deepEqual(jsonButtons.map(b => b.textContent), ['Raw', 'JSON'])
+    assert.equal(jsonButtons[1].getAttribute('title'), 'View as JSON Tree')
+    assert.ok(jsonButtons[1].className.includes('lc-gran-on'))
+    await json.unmount()
   })
 })
 
@@ -157,9 +132,9 @@ describe('useRichMode', () => {
     const m = await mount(h(Harness, { text: SAMPLE }))
     assert.ok(query(m.container, '.lc-ts-desc-md'))
     const buttons = queryAll(m.container, '.lc-gran-btn')
-    await click(buttons[0]) // Raw
+    await click(buttons[0])
     assert.equal(rawText(m.container), SAMPLE)
-    await click(queryAll(m.container, '.lc-gran-btn')[1]) // back to Markdown
+    await click(queryAll(m.container, '.lc-gran-btn')[1])
     assert.equal(query(m.container, '.lc-ts-desc-md h1').textContent, 'Title')
     await m.unmount()
   })
@@ -169,9 +144,9 @@ describe('useRichMode', () => {
     assert.ok(query(m.container, '.lc-ts-desc-json [role=tree]'))
     const buttons = queryAll(m.container, '.lc-gran-btn')
     assert.deepEqual(buttons.map(b => b.textContent), ['Raw', 'JSON'])
-    await click(buttons[0]) // Raw
+    await click(buttons[0])
     assert.equal(rawText(m.container), JSON_SAMPLE)
-    await click(queryAll(m.container, '.lc-gran-btn')[1]) // back to the tree
+    await click(queryAll(m.container, '.lc-gran-btn')[1])
     assert.ok(query(m.container, '.lc-ts-desc-json [role=tree]'))
     await m.unmount()
   })
@@ -189,7 +164,6 @@ describe('useRichMode', () => {
 describe('RichCopy', () => {
   const { RichCopy } = makeRichText(kit)
 
-  /** jsdom ships no clipboard API; stub the async one for the accepted path. */
   function stubClipboard(writeText: (text: string) => Promise<void>): void {
     Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText } })
   }
@@ -211,7 +185,7 @@ describe('RichCopy', () => {
     assert.deepEqual(writes, [SAMPLE], 'the exact source text reached the clipboard host')
     assert.ok(button.className.includes('lc-rich-copy-on'))
     assert.equal(button.getAttribute('title'), 'Copied')
-    await click(button) // inside the confirmation window: no second write
+    await click(button)
     assert.deepEqual(writes, [SAMPLE])
     await act(async () => { await vi.advanceTimersByTimeAsync(1200) })
     assert.ok(!button.className.includes('lc-rich-copy-on'))
@@ -236,7 +210,6 @@ describe('useRichFind', () => {
     vi.useRealTimers()
   })
 
-  /** Harness wiring the hook the way TextSection does: toggle + bar + the keyed, ref'd body. */
   function FindHarness(props: { text: string; mode?: RichMode }) {
     const find = useRichFind(props.text, props.mode ?? 'raw')
     return h('div', {},
@@ -246,7 +219,6 @@ describe('useRichFind', () => {
         h(RichText, { text: props.text, mode: props.mode ?? 'raw' })))
   }
 
-  /** Type into the find input the way React's onChange sees it. */
   async function type(input: HTMLInputElement, value: string): Promise<void> {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
     await act(async () => {
@@ -260,7 +232,6 @@ describe('useRichFind', () => {
     return query<HTMLInputElement>(container, '.lc-find-input')
   }
 
-  /** Settle the debounce window inside act. */
   async function settle(): Promise<void> {
     await act(async () => { await vi.advanceTimersByTimeAsync(150) })
   }
@@ -300,21 +271,18 @@ describe('useRichFind', () => {
     assert.ok(marks[0].className.includes('lc-find-mark-on'))
     assert.equal(queryAll(m.container, '.lc-find-mark-on').length, 1)
     await m.unmount()
-  })
 
-  test('rapid typing rescans once, on the final query only', async () => {
-    vi.useFakeTimers()
-    const m = await mount(h(FindHarness, { text: 'alpha alphabet beta' }))
-    const input = await openFind(m.container)
-    await type(input, 'a')
+    const rapid = await mount(h(FindHarness, { text: 'alpha alphabet beta' }))
+    const rapidInput = await openFind(rapid.container)
+    await type(rapidInput, 'a')
     await act(async () => { await vi.advanceTimersByTimeAsync(50) })
-    await type(input, 'al')
+    await type(rapidInput, 'al')
     await act(async () => { await vi.advanceTimersByTimeAsync(50) })
-    assert.equal(queryAll(m.container, '.lc-find-mark').length, 0, 'keystrokes inside the window never scanned')
-    await type(input, 'alp')
+    assert.equal(queryAll(rapid.container, '.lc-find-mark').length, 0, 'keystrokes inside the window never scanned')
+    await type(rapidInput, 'alp')
     await settle()
-    assert.deepEqual(queryAll(m.container, '.lc-find-mark').map(x => x.textContent), ['alp', 'alp'])
-    await m.unmount()
+    assert.deepEqual(queryAll(rapid.container, '.lc-find-mark').map(x => x.textContent), ['alp', 'alp'])
+    await rapid.unmount()
   })
 
   test('Enter and Shift+Enter cycle the active match with wraparound; the chevrons do the same', async () => {
@@ -345,7 +313,7 @@ describe('useRichFind', () => {
     await m.unmount()
   })
 
-  test('Escape folds the bar and clears the marks; the body text is byte-identical afterwards', async () => {
+  test('Escape clears the query and marks first, then folds the bar; the body text is byte-identical afterwards', async () => {
     vi.useFakeTimers()
     const source = 'Alpha beta ALPHA other'
     const m = await mount(h(FindHarness, { text: source }))
@@ -355,11 +323,46 @@ describe('useRichFind', () => {
     assert.equal(queryAll(m.container, '.lc-find-mark').length, 2)
     assert.equal(rawText(m.container), source, 'marks never alter the copyable source text')
     await act(async () => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', shiftKey: true, bubbles: true, cancelable: true }))
+    })
+    assert.equal(input.value, 'alpha', 'a modified Escape does not clear')
+    assert.equal(queryAll(m.container, '.lc-find').length, 1, 'nor does it fold the bar')
+    await act(async () => {
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     })
-    assert.equal(queryAll(m.container, '.lc-find').length, 0)
+    assert.equal(input.value, '', 'the typed query is cleared first')
+    assert.equal(queryAll(m.container, '.lc-find').length, 1, 'the bar stays open for a fresh query')
     assert.equal(queryAll(m.container, '.lc-find-mark').length, 0)
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    })
+    assert.equal(queryAll(m.container, '.lc-find').length, 0, 'an empty field folds the bar')
     assert.equal(rawText(m.container), source, 'the restore rebuilt the exact original text nodes')
+    await m.unmount()
+  })
+
+  test('a match spanning two text nodes is marked across both, and the restore rebuilds them', async () => {
+    vi.useFakeTimers()
+    const Body = () => h('div', {},
+      h('span', { style: { color: 'red' } }, 'alpha '),
+      h('span', {}, 'beta gamma'))
+    function SplitHarness() {
+      const find = useRichFind('alpha beta gamma', 'raw')
+      return h('div', {}, find.button, find.bar,
+        h('div', { key: find.bodyKey, ref: find.bodyRef, className: 'split-body' }, h(Body, {})))
+    }
+    const m = await mount(h(SplitHarness, {}))
+    const input = await openFind(m.container)
+    await type(input, 'alpha beta')
+    await settle()
+    const marks = queryAll(m.container, '.lc-find-mark')
+    assert.deepEqual(marks.map(x => x.textContent), ['alpha ', 'beta'], 'one mark per text node the match covers')
+    assert.equal(query(m.container, '.lc-find-count').textContent, '1/1', 'the pieces count as one match')
+    assert.ok(marks.every(mark => mark.className.includes('lc-find-mark-on')), 'every piece of the active match carries the active tone')
+    await type(input, '')
+    const body = query(m.container, '.split-body')
+    assert.equal(queryAll(body, '.lc-find-mark').length, 0)
+    assert.deepEqual(queryAll(body, 'span').map(span => span.textContent), ['alpha ', 'beta gamma'], 'the split nodes are back in one piece each')
     await m.unmount()
   })
 

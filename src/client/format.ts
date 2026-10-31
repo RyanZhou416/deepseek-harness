@@ -15,26 +15,36 @@ export function fmtBytes(n: number | null | undefined): string {
   return String(Math.round(n)) + ' B'
 }
 
-/** Cache-hit share of billed prompt input, TRUNCATED to two decimals (the figure
- * the harness chat stats line and the token card's corner show); the epsilon
- * absorbs float noise only. Null when nothing was billed. */
 export function cacheHitPercent(reads: number, billed: number): string | null {
   if (!(billed > 0)) return null
   const scaled = Math.trunc((reads / billed) * 100 * 100 + 1e-9)
   return `${Math.floor(scaled / 100)}.${String(scaled % 100).padStart(2, '0')}`
 }
 
-/** One shared formatter: building an Intl formatter per call costs ~50× the format itself. */
 const TIME_FMT = new Intl.DateTimeFormat('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
 
 export function fmtTime(t: number): string {
-  // en-GB zero-pads HH:MM:SS; an invalid date must show '—' (format throws RangeError).
   const d = new Date(t)
   if (isNaN(d.getTime())) return '—'
   return TIME_FMT.format(d)
 }
 
-/** Share of a whole: '<0.1%' for non-zero crumbs a 0.1%-precision figure would erase; shares cap at 100%. */
+const DATE_TIME_FMT = new Intl.DateTimeFormat('en-GB', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour12: false,
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+})
+
+export function fmtDateTime(t: number): string {
+  const d = new Date(t)
+  if (isNaN(d.getTime())) return '—'
+  return DATE_TIME_FMT.format(d)
+}
+
 export function fmtShare(part: number, total: number): string {
   if (!Number.isFinite(part) || !Number.isFinite(total) || total <= 0) return '—'
   if (part <= 0) return '0.0%'
@@ -43,7 +53,6 @@ export function fmtShare(part: number, total: number): string {
   return `${pct.toFixed(1)}%`
 }
 
-/** Whole-session durations in locale-free compact units; non-positive input shows the dash. */
 export function fmtDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '—'
   if (ms < 1000) return `${Math.round(ms)}ms`

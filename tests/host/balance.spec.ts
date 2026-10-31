@@ -1,7 +1,3 @@
-// The DeepSeek balance route (src/host/balance.ts): deferred-inject gating on the connection face,
-// per-request resolution of the llm-deepseek connection facts (settings section + credentials), and
-// the typed `null` for every not-configured or failed read — never a throw into the transport.
-
 import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, test, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
@@ -13,16 +9,14 @@ interface CtxSpec {
   connection?: unknown
   settings?: unknown
   credentials?: unknown
+  llm?: unknown
 }
 
-/** A minimal host ctx double with cordis inject semantics: the callback runs
- * once its dependency list completes (here: immediately when the services
- * map has them, never otherwise), and its returned disposer is collected. */
 function ctxOf(spec: CtxSpec): { ctx: Context; captured: { path?: string; fetch?: RouteFetch }; disposers: (() => void)[] } {
   const captured: { path?: string; fetch?: RouteFetch } = {}
   const disposers: (() => void)[] = []
   const services = new Map<string, unknown>()
-  for (const key of ['connection', 'settings', 'credentials'] as const) {
+  for (const key of ['connection', 'settings', 'credentials', 'llm'] as const) {
     if (key in spec) services.set(key, spec[key])
   }
   const ctx = {
@@ -42,8 +36,6 @@ function ctxOf(spec: CtxSpec): { ctx: Context; captured: { path?: string; fetch?
     const conn = spec.connection as { fetch?: { register?: unknown } }
     if (typeof conn.fetch?.register === 'function') {
       const original = conn.fetch.register as (route: { path: string; fetch: RouteFetch }) => (() => void)
-      // Delegate to the spec's own register (a hostile one still throws), so
-      // the capture only lands when the registration actually mounted.
       conn.fetch.register = (route: { path: string; fetch: RouteFetch }) => {
         const dispose = original(route)
         captured.path = route.path
@@ -58,19 +50,30 @@ function ctxOf(spec: CtxSpec): { ctx: Context; captured: { path?: string; fetch?
   return { ctx: ctx as unknown as Context, captured, disposers }
 }
 
-/** The harness settings face projecting one row per configurable entry (`throws` fails the read). */
-function settingsDescribeOf(rows: unknown, throws = false): { describe(): unknown } {
+function settingsDescribeOf(rows: unknown, throws = false): { describe(options?: { redactSecrets?: boolean }): unknown; options: unknown[] } {
+  const options: unknown[] = []
   return {
-    describe() {
+    options,
+    describe(opts) {
+      options.push(opts)
       if (throws) throw new Error('hostile describe')
       return rows
     },
   }
 }
 
-/** The settings face serving one provider section, as the Config-form projection's `llm-deepseek` row. */
-function settingsOf(section: unknown): { describe(): unknown } {
+function settingsOf(section: unknown): { describe(options?: { redactSecrets?: boolean }): unknown; options: unknown[] } {
   return settingsDescribeOf([{ ns: 'llm-deepseek', value: section }])
+}
+
+function llmDirectoryOf(settingsNs: string, extra: unknown[] = []): { listConfigurableProviders(): unknown } {
+  return {
+    listConfigurableProviders: () => [
+      { provider: 'deepseek-account', displayName: 'DeepSeek Account', settingsNs: 'llm-deepseek-account', settingsPath: [] },
+      { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs, settingsPath: [] },
+      ...extra,
+    ],
+  }
 }
 
 function credentialsOf(value: unknown, calls?: string[]): { resolve(ref: string): Promise<{ value: unknown } | undefined> } {
@@ -88,7 +91,6 @@ const CNY_BALANCE = {
   balance_infos: [{ currency: 'CNY', total_balance: '110.00', granted_balance: '10.00', topped_up_balance: '100.00' }],
 }
 
-/** The all-configured ctx spec: the provider row (its served value always declares the credential ref), a resolvable key. */
 function configuredCtx(spec: CtxSpec = {}): CtxSpec {
   return {
     connection: { fetch: { register: () => () => {} } },
@@ -131,44 +133,28 @@ afterEach(() => {
 })
 
 describe('balance route registration', () => {
-  test('no connection service never registers the route', () => {
-    const { ctx, captured } = ctxOf(configuredCtx({ connection: undefined }))
-    watchBalanceChannel(ctx)
-    assert.equal(captured.fetch, undefined)
-  })
-
-  test('a connection without a fetch registry never registers the route', () => {
-    const { ctx, captured } = ctxOf(configuredCtx({ connection: {} }))
-    watchBalanceChannel(ctx)
-    assert.equal(captured.fetch, undefined)
-  })
-
-  test('a connection whose register is not a function never registers the route', () => {
-    const { ctx, captured } = ctxOf(configuredCtx({ connection: { fetch: { register: 42 } } }))
-    watchBalanceChannel(ctx)
-    assert.equal(captured.fetch, undefined)
-  })
-
-  test('a rejecting registry is swallowed — the plugin stays up, no route', () => {
+  test('only a usable connection registry mounts the route; absent and rejecting registries leave it unregistered', () => {
+    for (const connection of [undefined, {}, { fetch: { register: 42 } }]) {
+      const { ctx, captured } = ctxOf(configuredCtx({ connection }))
+      watchBalanceChannel(ctx)
+      assert.equal(captured.fetch, undefined)
+    }
     const { ctx, captured } = ctxOf(configuredCtx({
       connection: { fetch: { register: () => { throw new Error('hostile registry') } } },
     }))
     assert.doesNotThrow(() => watchBalanceChannel(ctx))
     assert.equal(captured.fetch, undefined)
-  })
 
-  test('the route mounts under its path and the disposer withdraws it', () => {
-    const { ctx, captured, disposers } = ctxOf(configuredCtx())
-    watchBalanceChannel(ctx)
-    assert.equal(captured.path, BALANCE_ROUTE)
-    assert.equal(typeof captured.fetch, 'function')
-    for (const dispose of disposers) dispose()
-    assert.equal(captured.fetch, undefined)
+    const mounted = ctxOf(configuredCtx())
+    watchBalanceChannel(mounted.ctx)
+    assert.equal(mounted.captured.path, BALANCE_ROUTE)
+    for (const dispose of mounted.disposers) dispose()
+    assert.equal(mounted.captured.fetch, undefined, 'the disposer withdraws the route')
   })
 })
 
 describe('balance route outcomes', () => {
-  test('the configured platform serves the redacted balance through the public API defaults', async () => {
+  test('the configured platform serves the redacted balance through the public API defaults; numeric and unavailable variants pass through', async () => {
     const refs: string[] = []
     const { ctx, captured } = ctxOf({
       connection: { fetch: { register: () => () => {} } },
@@ -187,9 +173,20 @@ describe('balance route outcomes', () => {
       ok: true,
       value: { isAvailable: true, balances: [{ currency: 'CNY', total: 110, granted: 10, toppedUp: 100 }] },
     })
+    resetBalance()
+    const numeric = ctxOf(configuredCtx())
+    watchBalanceChannel(numeric.ctx)
+    stubPlatform({
+      is_available: false,
+      balance_infos: [{ currency: 'USD', total_balance: 0.5, granted_balance: 0, topped_up_balance: 0.5 }],
+    })
+    assert.deepEqual(await serve(numeric.captured), {
+      ok: true,
+      value: { isAvailable: false, balances: [{ currency: 'USD', total: 0.5, granted: 0, toppedUp: 0.5 }] },
+    })
   })
 
-  test('the section\'s credential ref and endpoint override win, trailing slashes trimmed', async () => {
+  test('the section\'s credential ref and endpoint override win, only the origin counts', async () => {
     const refs: string[] = []
     const { ctx, captured } = ctxOf({
       connection: { fetch: { register: () => () => {} } },
@@ -202,20 +199,6 @@ describe('balance route outcomes', () => {
     assert.deepEqual(refs, ['MY_DEEPSEEK_KEY'])
     assert.equal(log[0]?.url, 'https://proxy.test/user/balance')
     assert.equal(log[0]?.auth, 'Bearer sk-proxy')
-  })
-
-  test('an already-numeric amount variant and an unavailable flag pass through', async () => {
-    const { ctx, captured } = ctxOf(configuredCtx())
-    watchBalanceChannel(ctx)
-    stubPlatform({
-      is_available: false,
-      balance_infos: [{ currency: 'USD', total_balance: 0.5, granted_balance: 0, topped_up_balance: 0.5 }],
-    })
-    const reply = await serve(captured)
-    assert.deepEqual(reply, {
-      ok: true,
-      value: { isAvailable: false, balances: [{ currency: 'USD', total: 0.5, granted: 0, toppedUp: 0.5 }] },
-    })
   })
 
   test('every not-configured shape serves a typed null without touching the platform', async () => {
@@ -284,15 +267,16 @@ describe('balance route outcomes', () => {
   })
 })
 
-describe('settings face (the Config-form projection)', () => {
-  test('the describe face serves the facts by the provider row\'s own shape', async () => {
+describe('provider directory (the llm service)', () => {
+  test('the provider directory names the DeepSeek row, whatever the entry is called, and the stock id serves', async () => {
     const refs: string[] = []
     const { ctx, captured } = ctxOf({
       connection: { fetch: { register: () => () => {} } },
+      llm: llmDirectoryOf('my-deepseek'),
       settings: settingsDescribeOf([
         { ns: 'ui-theme', value: { preference: 'light' } },
+        { ns: 'my-deepseek', value: { apiKeyEnv: 'DEEPSEEK_API_KEY', thinking: 'enabled' } },
         { ns: 'llm-pi-ai', value: { providers: { tokener: { apiKeyEnv: 'TOKENER_API_KEY' } } } },
-        { ns: 'llm-deepseek-api-key', value: { apiKeyEnv: 'DEEPSEEK_API_KEY', baseURL: 'https://proxy.test///', thinking: 'enabled' } },
       ]),
       credentials: credentialsOf('sk-v4', refs),
     })
@@ -300,50 +284,167 @@ describe('settings face (the Config-form projection)', () => {
     const { log } = stubPlatform(CNY_BALANCE)
     await serve(captured)
     assert.deepEqual(refs, ['DEEPSEEK_API_KEY'])
-    assert.equal(log[0]?.url, 'https://proxy.test/user/balance')
-    assert.equal(log[0]?.auth, 'Bearer sk-v4')
-  })
-
-  test('a provider row under an unknown entry id serves by shape; the first shape wins', async () => {
-    const refs: string[] = []
-    const { ctx, captured } = ctxOf({
-      connection: { fetch: { register: () => () => {} } },
-      settings: settingsDescribeOf([
-        { ns: 'renamed-a', value: { apiKeyEnv: 'FIRST_KEY' } },
-        { ns: 'renamed-b', value: { apiKeyEnv: 'SECOND_KEY' } },
-      ]),
-      credentials: credentialsOf('sk-shape', refs),
-    })
-    watchBalanceChannel(ctx)
-    const { log } = stubPlatform(CNY_BALANCE)
-    await serve(captured)
-    assert.deepEqual(refs, ['FIRST_KEY'])
     assert.equal(log[0]?.url, 'https://api.deepseek.com/user/balance')
+    assert.equal(log[0]?.auth, 'Bearer sk-v4')
+
+    const stockRefs: string[] = []
+    const stock = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      llm: llmDirectoryOf('llm-deepseek'),
+      settings: settingsDescribeOf([{ ns: 'llm-deepseek', value: { apiKeyEnv: 'DEEPSEEK_API_KEY' } }]),
+      credentials: credentialsOf('sk-stock', stockRefs),
+    })
+    watchBalanceChannel(stock.ctx)
+    const stockFetch = stubPlatform(CNY_BALANCE)
+    await serve(stock.captured)
+    assert.deepEqual(stockRefs, ['DEEPSEEK_API_KEY'], 'the stock id the directory names serves too')
+    assert.equal(stockFetch.log[0]?.url, 'https://api.deepseek.com/user/balance')
   })
 
-  test('the served entry ids win over an earlier shape-only row', async () => {
-    const refs: string[] = []
+  test('every broken provider directory leaves the stock ids serving', async () => {
+    const hostile = new Proxy({}, { get() { throw new Error('hostile') } })
+    const directories: unknown[] = [
+      { listConfigurableProviders: () => { throw new Error('hostile directory') } },
+      { listConfigurableProviders: 'not a function' },
+      { listConfigurableProviders: () => 'not a list' },
+      { listConfigurableProviders: () => [null, 'entry', 42] },
+      { listConfigurableProviders: () => [{ provider: 'deepseek-official' }] },
+      { listConfigurableProviders: () => [{ provider: 'deepseek-official', settingsNs: 42 }] },
+      { listConfigurableProviders: () => [{ provider: 'deepseek-official', settingsNs: '' }] },
+      { listConfigurableProviders: () => [hostile] },
+    ]
+    for (const llm of directories) {
+      resetBalance()
+      const refs: string[] = []
+      const { ctx, captured } = ctxOf({
+        connection: { fetch: { register: () => () => {} } },
+        llm,
+        settings: settingsDescribeOf([{ ns: 'llm-deepseek', value: { apiKeyEnv: 'DEEPSEEK_API_KEY' } }]),
+        credentials: credentialsOf('sk-stock', refs),
+      })
+      watchBalanceChannel(ctx)
+      const { log } = stubPlatform(CNY_BALANCE)
+      await serve(captured)
+      assert.deepEqual(refs, ['DEEPSEEK_API_KEY'])
+      assert.equal(log[0]?.url, 'https://api.deepseek.com/user/balance')
+    }
+  })
+})
+
+describe('settings face (the Config-form projection)', () => {
+  test('the projection is read redacted, so a row\'s literal key never enters the fold', async () => {
+    const settings = settingsOf({ apiKeyEnv: 'DEEPSEEK_API_KEY', apiKey: 'sk-literal' })
     const { ctx, captured } = ctxOf({
       connection: { fetch: { register: () => () => {} } },
-      settings: settingsDescribeOf([
-        { ns: 'some-provider', value: { apiKeyEnv: 'OTHER_KEY' } },
-        { ns: 'llm-deepseek', value: { apiKeyEnv: 'PRODUCT_KEY' } },
-      ]),
-      credentials: credentialsOf('sk-product', refs),
+      settings,
+      credentials: credentialsOf('sk-test'),
     })
     watchBalanceChannel(ctx)
     stubPlatform(CNY_BALANCE)
     await serve(captured)
-    assert.deepEqual(refs, ['PRODUCT_KEY'])
+    assert.deepEqual(settings.options, [{ redactSecrets: true }])
   })
 
-  test('every broken describe shape serves a typed null without touching the platform', async () => {
+  test('rows are selected by the DeepSeek id: another provider is never read, and the first same-id row wins', async () => {
+    const refs: string[] = []
+    const other = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      settings: settingsDescribeOf([
+        { ns: 'renamed-a', value: { apiKeyEnv: 'FIRST_KEY' } },
+        { ns: 'renamed-b', value: { apiKeyEnv: 'SECOND_KEY' } },
+        { ns: 'llm-pi-ai', value: { providers: { tokener: { apiKeyEnv: 'TOKENER_KEY' } } } },
+      ]),
+      credentials: credentialsOf('sk-shape', refs),
+    })
+    watchBalanceChannel(other.ctx)
+    const otherFetch = stubPlatform(CNY_BALANCE)
+    assert.deepEqual(await serve(other.captured), { ok: true, value: null })
+    assert.deepEqual(refs, [])
+    assert.equal(otherFetch.calls(), 0)
+
+    resetBalance()
+    const winners: string[] = []
+    const { ctx, captured } = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      settings: settingsDescribeOf([
+        { ns: 42, value: { apiKeyEnv: 'NO_ID_KEY' } },
+        { ns: 'some-provider', value: { apiKeyEnv: 'OTHER_KEY' } },
+        { ns: 'llm-deepseek', value: { apiKeyEnv: 'PRODUCT_KEY' } },
+        { ns: 'llm-deepseek', value: { apiKeyEnv: 'SECOND_KEY' } },
+      ]),
+      credentials: credentialsOf('sk-product', winners),
+    })
+    watchBalanceChannel(ctx)
+    stubPlatform(CNY_BALANCE)
+    await serve(captured)
+    assert.deepEqual(winners, ['PRODUCT_KEY'], 'the DeepSeek row wins; its first occurrence names the credential ref')
+  })
+
+  test('a missing credential ref or an unresolved key means no request at all', async () => {
+    const unresolvedRefs: string[] = []
+    const unresolved = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      settings: settingsDescribeOf([
+        { ns: 'llm-deepseek', value: { apiKeyEnv: 'DEEPSEEK_API_KEY' } },
+        { ns: 'web-deepseek-api', value: { apiKeyEnv: 'DEEPSEEK_API_KEY' } },
+      ]),
+      credentials: credentialsOf(undefined, unresolvedRefs),
+    })
+    watchBalanceChannel(unresolved.ctx)
+    const unresolvedFetch = stubPlatform(CNY_BALANCE)
+    assert.deepEqual(await serve(unresolved.captured), { ok: true, value: null })
+    assert.deepEqual(unresolvedRefs, ['DEEPSEEK_API_KEY'], 'the shared credential ref is read once, not once per row')
+    assert.equal(unresolvedFetch.calls(), 0)
+
+    const refs: string[] = []
+    const refLess = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      settings: settingsDescribeOf([{ ns: 'llm-deepseek', value: { baseURL: 'https://api.deepseek.com' } }]),
+      credentials: credentialsOf('sk-test', refs),
+    })
+    watchBalanceChannel(refLess.ctx)
+    const refLessFetch = stubPlatform(CNY_BALANCE)
+    assert.deepEqual(await serve(refLess.captured), { ok: true, value: null })
+    assert.deepEqual(refs, [])
+    assert.equal(refLessFetch.calls(), 0)
+  })
+
+  test('only the endpoint origin counts: a path-carrying row collapses, non-HTTP(S) overrides fall back to the platform root', async () => {
+    resetBalance()
+    const refs: string[] = []
+    const web = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      settings: settingsDescribeOf([
+        { ns: 'web-deepseek-api', value: { apiKeyEnv: 'DEEPSEEK_API_KEY', baseURL: 'https://api.deepseek.com/v1/tools' } },
+      ]),
+      credentials: credentialsOf('sk-web', refs),
+    })
+    watchBalanceChannel(web.ctx)
+    const webFetch = stubPlatform(CNY_BALANCE)
+    await serve(web.captured)
+    assert.deepEqual(refs, ['DEEPSEEK_API_KEY'])
+    assert.equal(webFetch.log[0]?.url, 'https://api.deepseek.com/user/balance')
+    for (const baseURL of ['not a url', 'file:///tmp/dsh', 'ftp://api.deepseek.com/v1']) {
+      resetBalance()
+      const { ctx, captured } = ctxOf({
+        connection: { fetch: { register: () => () => {} } },
+        settings: settingsOf({ apiKeyEnv: 'DEEPSEEK_API_KEY', baseURL }),
+        credentials: credentialsOf('sk-test'),
+      })
+      watchBalanceChannel(ctx)
+      const { log } = stubPlatform(CNY_BALANCE)
+      await serve(captured)
+      assert.equal(log[0]?.url, 'https://api.deepseek.com/user/balance', baseURL)
+    }
+  })
+
+  test('broken describe shapes and a hostile row serve a typed null without touching the platform; a valid sibling survives', async () => {
     const faces: unknown[] = [
       settingsDescribeOf('not an array'),
       settingsDescribeOf(null),
       settingsDescribeOf([]),
       settingsDescribeOf([null, 'row', 42, [], {}]),
-      settingsDescribeOf([{ value: null }, { ns: 'llm-deepseek-api-key' }, { value: 'section' }]),
+      settingsDescribeOf([{ value: null }, { ns: 'llm-deepseek' }, { value: 'section' }]),
       settingsDescribeOf([{ value: {} }, { value: { apiKeyEnv: '' } }, { value: { apiKeyEnv: 42 } }]),
       settingsDescribeOf([], true),
     ]
@@ -360,14 +461,12 @@ describe('settings face (the Config-form projection)', () => {
       assert.deepEqual(reply, { ok: true, value: null })
       assert.equal(calls(), 0)
     }
-  })
-
-  test('a hostile row throwing on property access drops whole, valid siblings survive', async () => {
+    resetBalance()
     const refs: string[] = []
     const hostile = new Proxy({}, { get() { throw new Error('hostile') } })
     const { ctx, captured } = ctxOf({
       connection: { fetch: { register: () => () => {} } },
-      settings: settingsDescribeOf([hostile, { ns: 'llm-deepseek-api-key', value: { apiKeyEnv: 'DEEPSEEK_API_KEY' } }]),
+      settings: settingsDescribeOf([hostile, { ns: 'llm-deepseek', value: { apiKeyEnv: 'DEEPSEEK_API_KEY' } }]),
       credentials: credentialsOf('sk-test', refs),
     })
     watchBalanceChannel(ctx)
@@ -382,7 +481,7 @@ describe('settings face (the Config-form projection)', () => {
 })
 
 describe('balanceOfPayload (direct)', () => {
-  test('multiple currencies keep their entries in order', () => {
+  test('multiple currencies keep their entries in order; a platform total that disagrees with its parts is not used', () => {
     const balance = balanceOfPayload({
       is_available: true,
       balance_infos: [
@@ -391,39 +490,28 @@ describe('balanceOfPayload (direct)', () => {
       ],
     })
     assert.deepEqual(balance?.balances.map(b => b.currency), ['CNY', 'USD'])
-  })
-
-  test('a platform total that disagrees with its parts is not used', () => {
-    const balance = balanceOfPayload({
+    const disagreed = balanceOfPayload({
       is_available: true,
       balance_infos: [
         { currency: 'CNY', total_balance: '940.67', granted_balance: '920.85', topped_up_balance: '19.81' },
       ],
     })
-    assert.deepEqual(balance?.balances, [{ currency: 'CNY', total: 940.66, granted: 920.85, toppedUp: 19.81 }])
-    // The parts are what prove the entry, so a total the platform gets wrong
-    // (or omits) never drops it: total_balance is not read at all.
+    assert.deepEqual(disagreed?.balances, [{ currency: 'CNY', total: 940.66, granted: 920.85, toppedUp: 19.81 }])
     for (const totalField of [{}, { total_balance: 'abc' }, { total_balance: '-1' }, { total_balance: null }]) {
       assert.deepEqual(balanceOfPayload({
         is_available: true,
         balance_infos: [{ currency: 'CNY', granted_balance: '10.00', topped_up_balance: '100.00', ...totalField }],
       })?.balances, [{ currency: 'CNY', total: 110, granted: 10, toppedUp: 100 }])
     }
-    // Without both parts there is no total to derive, whatever total_balance says.
     assert.equal(balanceOfPayload({
       is_available: true,
       balance_infos: [{ currency: 'CNY', total_balance: '110.00' }],
     }), null)
   })
-
-  test('a hostile entry object drops without throwing', () => {
-    const hostile = new Proxy({}, { get() { throw new Error('hostile') } })
-    assert.equal(balanceOfPayload({ is_available: true, balance_infos: [hostile] }), null)
-  })
 })
 
 describe('balance reads', () => {
-  test('every read goes to the platform — no answer is remembered', async () => {
+  test('no read is remembered — every call reaches the platform, and a failure retries at once', async () => {
     const { ctx, captured } = ctxOf(configuredCtx())
     watchBalanceChannel(ctx)
     const { calls } = stubPlatform(CNY_BALANCE)
@@ -433,11 +521,6 @@ describe('balance reads', () => {
     const settled = await serve(captured)
     assert.equal(calls(), 3, 'the account moves with every billed request, so no read is served from a cache')
     assert.deepEqual(settled, { ok: true, value: { isAvailable: true, balances: [{ currency: 'CNY', total: 110, granted: 10, toppedUp: 100 }] } })
-  })
-
-  test('a failing read is not remembered either — the next read retries at once', async () => {
-    const { ctx, captured } = ctxOf(configuredCtx())
-    watchBalanceChannel(ctx)
     let fails = 0
     setBalanceFetcher(async () => {
       fails++

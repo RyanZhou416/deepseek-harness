@@ -17,8 +17,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
         run: |
-          # One case-insensitive substring per line; a title matching any of
-          # them gets the issue closed as not planned.
+          # One case-insensitive substring per line; a title matching any of them is closed as not planned.
           patterns=(
             'dsh-plugin.org'
           )

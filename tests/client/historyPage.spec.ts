@@ -1,5 +1,3 @@
-// historyPage (src/client/historyPage.ts): raw durable-log pages mapped into the browser's conversation-node shapes.
-
 import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -8,10 +6,11 @@ import {
   subscribeHistoryFace, watchHistoryFaces, useHistoryFace,
 } from '../../src/client/historyPage'
 import type { ReactElement } from 'react'
+import { sessionAddressOf } from '../../src/client/services'
+import type { SessionAddressLike } from '../../src/client/services'
 import { asClientCtx, TestClientCtx } from './helpers/harness'
 import { flush, mount } from './helpers/kit'
 
-/** One well-formed history row. */
 function row(type: string, seq: number, data: unknown): unknown {
   return { event: { type, seq, time: seq, data } }
 }
@@ -23,33 +22,34 @@ describe('pageNodesOf — the durable-page mapper', () => {
       42,
       {},
       { event: null },
-      { event: { type: 'user/message' } }, // no seq
+      { event: { type: 'user/message' } },
       { event: { type: 'user/message', seq: Number.NaN } },
       row('request/header', 1, {}),
       row('turn/end', 2, {}),
-      row('tool/call', 4, {}), // no callId: nothing recorded
-      row('compaction/summary', 5, {}), // no compactionId
-      row('compaction/summary', 6, { compactionId: 'k0', summary: [{ type: 'text', text: '   ' }] }), // blank summary
-      row('compaction/summary', 7, { compactionId: 'k0b', summary: 'not-an-array' }), // malformed summary
+      row('tool/call', 4, {}),
+      row('compaction/summary', 5, {}),
+      row('compaction/summary', 6, { compactionId: 'k0', summary: [{ type: 'text', text: '   ' }] }),
+      row('compaction/summary', 7, { compactionId: 'k0b', summary: 'not-an-array' }),
     ])
     assert.equal(nodes.size, 0)
-    // An envelope with no data at all still maps to an empty user node.
     assert.deepEqual(pageNodesOf([{ event: { type: 'user/message', seq: 3 } }]).get(3), {
       kind: 'user', seq: 3, content: [],
     })
   })
 
-  test('call heads degrade missing names and raw arguments safely', () => {
+  test('call heads degrade missing names and raw arguments, and read the message toolCallId when the source omits it', () => {
     const page = [
       row('tool/call', 10, { callId: 'c1' }),
       row('tool/result', 11, { message: { source: { callId: 'c1' }, content: [] } }),
+      row('tool/call', 20, { callId: 'cb', name: 'read', arguments: '{"path":"a.ts"}' }),
+      row('tool/result', 21, { message: { role: 'tool', toolCallId: 'cb', content: [] } }),
     ]
     const nodes = pageNodesOf(page)
     assert.deepEqual(nodes.get(11)?.call, { name: '?', argsRaw: '' })
+    assert.deepEqual(nodes.get(21)?.call, { name: 'read', argsRaw: '{"path":"a.ts"}' })
   })
 
   test('bare event envelopes without the {event} wrapper map identically', () => {
-    // Shape-drift tolerance: a face that serves the envelope unwrapped.
     const nodes = pageNodesOf([{ type: 'user/message', seq: 45, time: 45, data: { content: [{ type: 'text', text: 'bare' }] } }])
     assert.deepEqual(nodes.get(45), { kind: 'user', seq: 45, content: [{ type: 'text', text: 'bare' }] })
     assert.equal(pageNodesOf([{ type: 'user/message', seq: 46 }]).get(46)?.kind, 'user')
@@ -57,17 +57,28 @@ describe('pageNodesOf — the durable-page mapper', () => {
     assert.equal(pageNodesOf([{ event: 42 }, { event: 'x' }]).size, 0, 'non-envelope event fields drop')
   })
 
-  test('a tool result without any message shape still joins empty', () => {
-    const nodes = pageNodesOf([row('tool/result', 12, {})])
-    assert.deepEqual(nodes.get(12), { kind: 'tool-result', seq: 12, call: null, content: [], isError: false })
-  })
-
-  test('the call head reads the message toolCallId when the source omits it', () => {
+  test('tool results pair with their in-page call head; isError rides the message mark', () => {
     const page = [
-      row('tool/call', 20, { callId: 'cb', name: 'read', arguments: '{"path":"a.ts"}' }),
-      row('tool/result', 21, { message: { role: 'tool', toolCallId: 'cb', content: [] } }),
+      row('tool/call', 30, { callId: 'c9', name: 'bash', arguments: '{"command":"pwd"}' }),
+      row('tool/result', 31, {
+        message: { role: 'tool', toolCallId: 'c9', isError: true, source: { kind: 'tool', callId: 'c9' }, content: [{ type: 'text', text: 'out' }] },
+      }),
+      row('tool/result', 32, {
+        message: { role: 'tool', toolCallId: 'missing', isError: true, source: { kind: 'tool', callId: 'missing' }, content: [] },
+      }),
+      row('tool/result', 33, { message: {} }),
+      row('tool/result', 34, {}),
     ]
-    assert.deepEqual(pageNodesOf(page).get(21)?.call, { name: 'read', argsRaw: '{"path":"a.ts"}' })
+    const nodes = pageNodesOf(page)
+    const paired = nodes.get(31)
+    assert.deepEqual(paired?.call, { name: 'bash', argsRaw: '{"command":"pwd"}' })
+    assert.deepEqual(paired?.content, [{ type: 'text', text: 'out' }], 'the direct content blocks')
+    assert.equal(paired?.isError, true, 'the message error mark')
+    assert.equal(nodes.get(32)?.isError, true, 'the mark without a pairable call')
+    assert.equal(nodes.get(32)?.call, null)
+    assert.deepEqual(nodes.get(33)?.content, [])
+    assert.equal(nodes.get(33)?.isError, false)
+    assert.deepEqual(nodes.get(34), { kind: 'tool-result', seq: 34, call: null, content: [], isError: false })
   })
 
   test('user messages map with their durable content blocks', () => {
@@ -76,7 +87,6 @@ describe('pageNodesOf — the durable-page mapper', () => {
     assert.ok(n !== undefined)
     assert.equal(n.kind, 'user')
     assert.deepEqual(n.content, [{ type: 'text', text: 'hello' }])
-    // Missing/invalid content degrades to an empty array, never undefined.
     assert.deepEqual(pageNodesOf([row('user/message', 11, {}) ]).get(11)?.content, [])
   })
 
@@ -90,7 +100,6 @@ describe('pageNodesOf — the durable-page mapper', () => {
           { type: 'image', attachment: { attachmentId: 'a1' } },
           { type: 'mystery', foo: 1 },
           'junk',
-          // Degraded shapes: missing facts fall back per field.
           { type: 'text' },
           { type: 'image' },
           { type: 'tool-call', arguments: '{}' },
@@ -110,39 +119,13 @@ describe('pageNodesOf — the durable-page mapper', () => {
       { kind: 'image' },
       { kind: 'tool-call', name: '?', argsRaw: '{}' },
     ])
-  })
-
-  test('an assistant event without a message still joins (empty blocks)', () => {
     assert.deepEqual(pageNodesOf([row('assistant/message', 21, {})]).get(21), { kind: 'assistant', seq: 21, blocks: [] })
-  })
-
-  test('tool results pair with their in-page call head; isError rides the message mark', () => {
-    const page = [
-      row('tool/call', 30, { callId: 'c9', name: 'bash', arguments: '{"command":"pwd"}' }),
-      row('tool/result', 31, {
-        message: { role: 'tool', toolCallId: 'c9', isError: true, source: { kind: 'tool', callId: 'c9' }, content: [{ type: 'text', text: 'out' }] },
-      }),
-      row('tool/result', 32, {
-        message: { role: 'tool', toolCallId: 'missing', isError: true, source: { kind: 'tool', callId: 'missing' }, content: [] },
-      }),
-      row('tool/result', 33, { message: {} }),
-    ]
-    const nodes = pageNodesOf(page)
-    const paired = nodes.get(31)
-    assert.deepEqual(paired?.call, { name: 'bash', argsRaw: '{"command":"pwd"}' })
-    assert.deepEqual(paired?.content, [{ type: 'text', text: 'out' }], 'the direct content blocks')
-    assert.equal(paired?.isError, true, 'the message error mark')
-    assert.equal(nodes.get(32)?.isError, true, 'the mark without a pairable call')
-    assert.equal(nodes.get(32)?.call, null)
-    assert.deepEqual(nodes.get(33)?.content, [])
-    assert.equal(nodes.get(33)?.isError, false)
   })
 
   test('a compaction checkpoint renders as a compaction marker with its summary text', () => {
     const page = [
       row('compaction/summary', 40, {
         compactionId: 'k1',
-        // Mixed block shapes: only string texts join the summary.
         summary: [{ type: 'other' }, null, { type: 'text', text: 'the' }, { type: 'text', text: ' gist' }, 42],
       }),
       row('user/message', 41, { source: { kind: 'plugin', plugin: 'dsh-compaction', compactionId: 'k1' }, content: [{ type: 'text', text: '<envelope>' }] }),
@@ -151,10 +134,8 @@ describe('pageNodesOf — the durable-page mapper', () => {
     const nodes = pageNodesOf(page)
     assert.deepEqual(nodes.get(41), { kind: 'compaction', seq: 41, summary: 'the gist' })
     assert.deepEqual(nodes.get(42), { kind: 'compaction', seq: 42, summary: null }, 'summary outside the page degrades to null')
-    // An ordinary plugin injection is NOT a checkpoint — it stays a user node.
     const plain = pageNodesOf([row('user/message', 43, { source: { kind: 'plugin', plugin: 'other' }, content: [] })])
     assert.equal(plain.get(43)?.kind, 'user')
-    // A scalar data envelope degrades to an empty record (no source to read).
     assert.deepEqual(
       pageNodesOf([{ event: { type: 'user/message', seq: 44, data: 'scalar' } }]).get(44),
       { kind: 'user', seq: 44, content: [] },
@@ -162,11 +143,6 @@ describe('pageNodesOf — the durable-page mapper', () => {
   })
 })
 
-/** Arm the DECLARED inject with one `remote` facade (the way the harness
- * serves it) and prove the fetchers read through that path only. The direct
- * `remote.session` service is hostile on purpose — an undeclared read of the
- * traced proxy throws on the real host, so the declared path must be the one
- * that carries the read. Dispose the returned ctx to unload the slot. */
 function armHistoryFaces(remote: unknown): TestClientCtx {
   const ctx = new TestClientCtx()
   ctx.setService('remote', remote)
@@ -175,10 +151,10 @@ function armHistoryFaces(remote: unknown): TestClientCtx {
   return ctx
 }
 
-/** One raw durable-log event, as a page record carries it. */
 const ev = (type: string, seq: number, data: unknown) => ({ type, seq, time: seq, data })
 
-/** The gateway session-page face: records of `{type:'event', event}` rows. */
+const plainOf = (sessionId: string) => (): SessionAddressLike => ({ kind: 'session', sessionId })
+
 const pageFace = (events: unknown[], calls: unknown[] = [], envelope: (records: unknown[]) => unknown = (r) => ({ ok: true, value: { records: r } })) => ({
   page: (request: unknown) => {
     calls.push(request)
@@ -188,7 +164,8 @@ const pageFace = (events: unknown[], calls: unknown[] = [], envelope: (records: 
 
 describe('makeContentFetcher — the per-session targeted read', () => {
   test('undefined while the declared slot holds no face', () => {
-    assert.equal(makeContentFetcher('s'), undefined)
+    assert.equal(makeContentFetcher(plainOf('s')), undefined)
+    assert.equal(makeHeaderFetcher(plainOf('s')), undefined)
   })
 
   test('fetches the page anchored past the seq, maps it, and caches the hit', async () => {
@@ -196,41 +173,53 @@ describe('makeContentFetcher — the per-session targeted read', () => {
     const ctx = armHistoryFaces({ session: pageFace([
       ev('user/message', 7, { content: [{ type: 'text', text: 'CACHED BODY' }] }),
     ], calls) })
-    const fetch = makeContentFetcher('sess-1')!
+    const fetch = makeContentFetcher(plainOf('sess-1'))!
     assert.deepEqual(calls, [])
     const node = await fetch(7)
     assert.deepEqual(calls, [{ address: { kind: 'session', sessionId: 'sess-1' }, throughSeq: 7, beforeSeq: 8 }])
     assert.equal((node?.content as { text: string }[])[0]?.text, 'CACHED BODY')
-    // Second read hits the closure cache — no second RPC.
     const again = await fetch(7)
     assert.equal(again, node)
     assert.equal(calls.length, 1)
-    // Unload clears the slot: nothing stales across plugin reloads.
     ctx.dispose()
-    assert.equal(makeContentFetcher('sess-1'), undefined, 'the unloaded slot leaves no face behind')
+    assert.equal(makeContentFetcher(plainOf('sess-1')), undefined, 'the unloaded slot leaves no face behind')
+  })
+
+  test('the landed cache stays bounded; the least recently read seq drops first', async () => {
+    const calls: unknown[] = []
+    const events = Array.from({ length: 200 }, (_, i) => ev('user/message', i + 1, { content: [{ type: 'text', text: `m${i}` }] }))
+    const ctx = armHistoryFaces({ session: pageFace(events, calls) })
+    const fetch = makeContentFetcher(plainOf('cap'))!
+    for (let seq = 1; seq <= 200; seq++) await fetch(seq)
+    assert.equal(calls.length, 200)
+    await fetch(130)
+    assert.equal(calls.length, 200, 'seq 130 survived the cap')
+    await fetch(1)
+    assert.equal(calls.length, 201, 'seq 1 was evicted and refetched')
+    await fetch(130)
+    await fetch(200)
+    assert.equal(calls.length, 201, 'refreshed and newest entries still replay')
+    ctx.dispose()
   })
 
   test('a page without the seq resolves null; an empty records page too', async () => {
     const calls: unknown[] = []
     const ctx = armHistoryFaces({ session: pageFace([ev('user/message', 9, {})], calls) })
-    const fetch = makeContentFetcher('s')!
+    const fetch = makeContentFetcher(plainOf('s'))!
     assert.equal(await fetch(500), null)
     ctx.dispose()
     const empty = armHistoryFaces({ session: pageFace([]) })
-    assert.equal(await makeContentFetcher('s')!(1), null)
+    assert.equal(await makeContentFetcher(plainOf('s'))!(1), null)
     empty.dispose()
   })
 
   test('a payload with no rows array at all rejects (never claims absence)', async () => {
     const ctx = armHistoryFaces({ session: pageFace([], [], () => ({ ok: true, value: {} })) })
-    await assert.rejects(makeContentFetcher('s')!(1))
+    await assert.rejects(makeContentFetcher(plainOf('s'))!(1))
     ctx.dispose()
   })
 
   test('a hostile or shapeless declared face leaves the slot unset (issue #42)', () => {
-    // The traced proxy can throw on the property READ itself, or serve a
-    // null / primitive / verb-less / hostile-verb face — the declared
-    // callback contains all of it, the slot stays unset, and the fetcher degrades instead of taking the view down.
     const remotes = [
       { get session() { throw new Error('traced read failed') } },
       { session: null },
@@ -240,40 +229,34 @@ describe('makeContentFetcher — the per-session targeted read', () => {
     ]
     for (const remote of remotes) {
       const ctx = armHistoryFaces(remote)
-      assert.equal(makeContentFetcher('s'), undefined)
+      assert.equal(makeContentFetcher(plainOf('s')), undefined)
       ctx.dispose()
     }
   })
 
-  test('the declared inject never fires without both remote services', () => {
-    const ctx = new TestClientCtx()
-    // Only `remote`: the injected fiber requires BOTH names, so nothing fires.
-    ctx.setService('remote', { session: {} })
-    watchHistoryFaces(asClientCtx(ctx))
-    assert.equal(makeContentFetcher('s'), undefined)
-    ctx.dispose()
-  })
+  test('the declared inject never fires without both remote services, and tolerates shapeless ones', () => {
+    const withoutSession = new TestClientCtx()
+    withoutSession.setService('remote', { session: {} })
+    watchHistoryFaces(asClientCtx(withoutSession))
+    assert.equal(makeContentFetcher(plainOf('s')), undefined)
+    withoutSession.dispose()
 
-  test('the declared inject tolerates a shapeless remote service', () => {
-    const ctx = new TestClientCtx()
-    // Both names exist but the facade bears no session namespace: the callback fires and leaves the slot unset, never throwing.
-    ctx.setService('remote', {})
-    ctx.setService('remote.session', {})
-    watchHistoryFaces(asClientCtx(ctx))
-    assert.equal(makeContentFetcher('s'), undefined)
-    ctx.dispose()
+    const shapeless = new TestClientCtx()
+    shapeless.setService('remote', {})
+    shapeless.setService('remote.session', {})
+    watchHistoryFaces(asClientCtx(shapeless))
+    assert.equal(makeContentFetcher(plainOf('s')), undefined)
+    shapeless.dispose()
   })
 
   test('the page face maps its records', async () => {
     const calls: unknown[] = []
-    // The real shape: the remote resolves to the ClientResult itself.
     const records = [
       { type: 'event', event: ev('user/message', 7, { content: [{ type: 'text', text: 'PAGED BODY' }] }) },
-      // A packed chunk-row record projects to nothing — only final events matter.
       { type: 'chunks', event: { type: 'chunkrow/text-chunks', seq: 8, time: 8, data: { turn: 1, step: 0, index: 0, dt: [1], texts: ['delta'] } } },
     ]
     const ctx = armHistoryFaces({ session: pageFace([], calls, () => ({ ok: true, value: { records } })) })
-    const node = await makeContentFetcher('sess-9')!(7)
+    const node = await makeContentFetcher(plainOf('sess-9'))!(7)
     assert.deepEqual(calls, [{
       address: { kind: 'session', sessionId: 'sess-9' },
       throughSeq: 7,
@@ -281,68 +264,50 @@ describe('makeContentFetcher — the per-session targeted read', () => {
     }])
     assert.equal((node?.content as { text: string }[])[0]?.text, 'PAGED BODY')
     ctx.dispose()
-    // A bare (non-enveloped) SessionPage passes too.
     const bare = armHistoryFaces({ session: pageFace([], [], () => ({ records })) })
-    assert.equal((await makeContentFetcher('s')!(7))?.kind, 'user')
+    assert.equal((await makeContentFetcher(plainOf('s'))!(7))?.kind, 'user')
     bare.dispose()
   })
 
-  test('page-face failures reject so the caller can offer a retry', async () => {
-    const badTop = armHistoryFaces({ session: { page: async () => ({ ok: false, error: { message: 'gone' } }) } })
-    await assert.rejects(makeContentFetcher('s')!(1))
-    badTop.dispose()
-    const garbage = armHistoryFaces({ session: { page: async () => ({ records: 'nope' }) } })
-    await assert.rejects(makeContentFetcher('s')!(1))
-    garbage.dispose()
-    const broken = armHistoryFaces({ session: { page: async () => { throw new Error('transport down') } } })
-    await assert.rejects(makeContentFetcher('s')!(1), /transport down/)
-    broken.dispose()
-  })
-
-  test('a system/message event maps its prompt text', async () => {
+  test('a system/message event maps its prompt text; whitespace-only renders and no text block maps to null', async () => {
     const ctx = armHistoryFaces({ session: pageFace([
       ev('system/message', 7, { message: { content: [{ type: 'text', text: 'the prompt' }, { type: 'text', text: ' line two' }] } }),
+      ev('system/message', 8, { message: { content: [{ type: 'text', text: '   ' }] } }),
+      ev('system/message', 9, { message: { content: [{ type: 'image', attachment: {} }] } }),
+      ev('system/message', 10, { message: {} }),
+      ev('system/message', 11, {}),
+      ev('system/message', 12, { message: { content: [7, null] } }),
     ]) })
-    const content = await makeHeaderFetcher('s')!(7)
-    assert.deepEqual(content, { system: 'the prompt line two', tools: [] })
-    ctx.dispose()
-  })
-
-  test('a whitespace-only system prompt renders (never reads as absent), and no text block maps to null', async () => {
-    const ctx = armHistoryFaces({ session: pageFace([
-      ev('system/message', 7, { message: { content: [{ type: 'text', text: '   ' }] } }),
-      ev('system/message', 8, { message: { content: [{ type: 'image', attachment: {} }] } }),
-      ev('system/message', 9, { message: {} }),
-      ev('system/message', 10, {}),
-      ev('system/message', 11, { message: { content: [7, null] } }),
-    ]) })
-    const fetch = makeHeaderFetcher('s')!
-    assert.deepEqual(await fetch(7), { system: '   ', tools: [] })
-    assert.equal(await fetch(8), null, 'no text block: nothing to render')
-    assert.equal(await fetch(9), null)
+    const fetch = makeHeaderFetcher(plainOf('s'))!
+    assert.deepEqual(await fetch(7), { system: 'the prompt line two', tools: [] })
+    assert.deepEqual(await fetch(8), { system: '   ', tools: [] })
+    assert.equal(await fetch(9), null, 'no text block: nothing to render')
     assert.equal(await fetch(10), null)
-    assert.equal(await fetch(11), null, 'primitive elements carry no text')
+    assert.equal(await fetch(11), null)
+    assert.equal(await fetch(12), null, 'primitive elements carry no text')
     ctx.dispose()
   })
 
   test('malformed rpc envelopes reject so the caller can offer a retry', async () => {
-    const nullResponse = armHistoryFaces({ session: { page: async () => null } })
-    await assert.rejects(makeContentFetcher('s')!(1))
-    nullResponse.dispose()
-    const noResult = armHistoryFaces({ session: { page: async () => ({}) } })
-    await assert.rejects(makeContentFetcher('s')!(1))
-    noResult.dispose()
-    const scalarValue = armHistoryFaces({ session: { page: async () => ({ ok: true, value: 'nope' }) } })
-    await assert.rejects(makeContentFetcher('s')!(1))
-    scalarValue.dispose()
+    for (const page of [
+      async () => null,
+      async () => ({}),
+      async () => ({ ok: true, value: 'nope' }),
+      async () => ({ ok: false, value: undefined }),
+      async () => ({ ok: true, value: { records: 'nope' } }),
+      async () => { throw new Error('transport down') },
+    ]) {
+      const ctx = armHistoryFaces({ session: { page } })
+      await assert.rejects(makeContentFetcher(plainOf('s'))!(1))
+      ctx.dispose()
+    }
+    const broken = armHistoryFaces({ session: { page: async () => { throw new Error('transport down') } } })
+    await assert.rejects(makeHeaderFetcher(plainOf('s'))!(1), /transport down/)
+    broken.dispose()
   })
 })
 
 describe('makeHeaderFetcher — the lazy epoch content read', () => {
-  test('undefined while the declared slot holds no face', () => {
-    assert.equal(makeHeaderFetcher('s'), undefined)
-  })
-
   test('fetches the epoch page, maps the raw header, and caches per seq', async () => {
     const calls: unknown[] = []
     const headerEvent = {
@@ -352,14 +317,14 @@ describe('makeHeaderFetcher — the lazy epoch content read', () => {
           tools: [
             { name: 'bash', description: 'run a command', parameters: { type: 'object' } },
             { name: 'mcp__gh__issue', description: '', plugin: 'mcp:github' },
-            null, // hostile entry degrades to an unnamed row
+            null,
             42,
           ],
         },
       },
     }
     const ctx = armHistoryFaces({ session: pageFace([headerEvent], calls) })
-    const fetch = makeHeaderFetcher('sess')!
+    const fetch = makeHeaderFetcher(plainOf('sess'))!
     const content = await fetch(5)
     assert.deepEqual(calls, [{ address: { kind: 'session', sessionId: 'sess' }, throughSeq: 5, beforeSeq: 6 }])
     assert.equal(content?.system, undefined, 'a header epoch never carries prompt text (it lives in system/message)')
@@ -371,32 +336,26 @@ describe('makeHeaderFetcher — the lazy epoch content read', () => {
     assert.equal(content?.tools[1]?.schema, headerEvent.data.header.tools[1])
     assert.equal(content?.tools[2]?.name, '?')
     assert.equal(content?.tools[3]?.name, '?')
-    // Cached: the second read of the epoch costs no RPC.
     assert.equal(await fetch(5), content)
     assert.equal(calls.length, 1)
     ctx.dispose()
-  })
-
-  test('an epoch with no system text and an absent tools list maps to empty tools', async () => {
-    const ctx = armHistoryFaces({ session: pageFace([ev('request/header', 2, { header: {} })]) })
-    const content = await makeHeaderFetcher('s')!(2)
-    assert.deepEqual(content, { tools: [] })
-    assert.equal('system' in (content ?? {}), false)
-    ctx.dispose()
+    const bare = armHistoryFaces({ session: pageFace([ev('request/header', 2, { header: {} })]) })
+    const empty = await makeHeaderFetcher(plainOf('s'))!(2)
+    assert.deepEqual(empty, { tools: [] }, 'an absent tools list maps to empty tools')
+    assert.equal('system' in (empty ?? {}), false)
+    bare.dispose()
   })
 
   test('a page holding OLDER epochs caches them for free alongside the picked one', async () => {
-    // Prompt text comes from system/message epochs; header epochs are tools-only.
     const olderSys = ev('system/message', 1, { message: { content: [{ type: 'text', text: 'OLD' }] } })
     const older = ev('request/header', 2, { header: { tools: [] } })
     const picked = ev('request/header', 5, { header: { tools: [] } })
     const calls: unknown[] = []
     const ctx = armHistoryFaces({ session: pageFace([olderSys, older, picked], calls) })
-    const fetch = makeHeaderFetcher('s')!
+    const fetch = makeHeaderFetcher(plainOf('s'))!
     const c5 = await fetch(5)
     assert.deepEqual(c5, { tools: [] })
     assert.deepEqual(calls, [{ address: { kind: 'session', sessionId: 's' }, throughSeq: 5, beforeSeq: 6 }])
-    // The older epochs resolve from the cache — no second page read.
     const c2 = await fetch(2)
     assert.deepEqual(c2, { tools: [] })
     const c1 = await fetch(1)
@@ -407,44 +366,99 @@ describe('makeHeaderFetcher — the lazy epoch content read', () => {
 
   test('a page without the epoch resolves null; a non-header-only page too', async () => {
     const ctx = armHistoryFaces({ session: pageFace([ev('user/message', 9, {}), ev('request/header', 3, {})]) })
-    const fetch = makeHeaderFetcher('s')!
+    const fetch = makeHeaderFetcher(plainOf('s'))!
     assert.equal(await fetch(500), null, 'the seq is not on the page')
     assert.equal(await fetch(3), null, 'a header envelope without a header object maps to nothing')
     ctx.dispose()
   })
+})
 
-  test('malformed rpc envelopes reject so the caller can offer a retry', async () => {
-    const rejector = armHistoryFaces({ session: { page: async () => ({ ok: false, value: undefined }) } })
-    await assert.rejects(makeHeaderFetcher('s')!(1))
-    rejector.dispose()
-    const rowsGarbage = armHistoryFaces({ session: { page: async () => ({ ok: true, value: { records: 'nope' } }) } })
-    await assert.rejects(makeHeaderFetcher('s')!(1))
-    rowsGarbage.dispose()
-    const broken = armHistoryFaces({ session: { page: async () => { throw new Error('transport down') } } })
-    await assert.rejects(makeHeaderFetcher('s')!(1), /transport down/)
-    broken.dispose()
+describe('subagent sessions — the read carries the durable parent address (issue #193)', () => {
+  const resolverFor = (ctx: TestClientCtx, sessionId: string) => (): SessionAddressLike => sessionAddressOf(asClientCtx(ctx), sessionId)
+
+  test('a direct child reads its prompt and tool definitions under the subagent address', async () => {
+    const calls: unknown[] = []
+    const ctx = armHistoryFaces({ session: pageFace([
+      ev('system/message', 7, { message: { content: [{ type: 'text', text: 'child prompt' }] } }),
+      ev('request/header', 8, { header: { tools: [{ name: 'bash', description: 'run a command' }] } }),
+    ], calls) })
+    ctx.setService('sessions', { subagentAddress: () => ({ parentSessionId: 'parent', childSessionId: 'child', mode: 'continuable' }) })
+    const fetch = makeHeaderFetcher(resolverFor(ctx, 'child'))!
+    assert.deepEqual(await fetch(7), { system: 'child prompt', tools: [] })
+    const tools = await fetch(8)
+    assert.equal(tools?.tools[0]?.name, 'bash')
+    assert.equal(tools?.tools[0]?.description, 'run a command')
+    assert.deepEqual(calls, [{
+      address: { kind: 'subagent', parentSessionId: 'parent', childSessionId: 'child', mode: 'continuable' },
+      throughSeq: 7,
+      beforeSeq: 8,
+    }])
+    ctx.dispose()
+  })
+
+  test('a nested child names its DIRECT parent, never the root', async () => {
+    const calls: unknown[] = []
+    const ctx = armHistoryFaces({ session: pageFace([ev('user/message', 3, { content: [] })], calls) })
+    ctx.setService('sessions', {
+      subagentAddress: (id: string) => (id === 'grandchild'
+        ? { parentSessionId: 'child', childSessionId: 'grandchild', mode: 'one-shot' }
+        : undefined),
+    })
+    await makeContentFetcher(resolverFor(ctx, 'grandchild'))!(3)
+    assert.deepEqual((calls[0] as { address: unknown }).address, {
+      kind: 'subagent', parentSessionId: 'child', childSessionId: 'grandchild', mode: 'one-shot',
+    })
+    ctx.dispose()
+  })
+
+  test('a plain session keeps the plain address under the same resolver', async () => {
+    const calls: unknown[] = []
+    const ctx = armHistoryFaces({ session: pageFace([ev('user/message', 3, { content: [] })], calls) })
+    ctx.setService('sessions', { subagentAddress: () => undefined })
+    await makeContentFetcher(resolverFor(ctx, 's'))!(3)
+    assert.deepEqual((calls[0] as { address: unknown }).address, { kind: 'session', sessionId: 's' })
+    ctx.dispose()
+  })
+
+  test('a parent learned after a refused read heals the retry', async () => {
+    const learned: { address?: { parentSessionId: string; childSessionId: string; mode: 'continuable' } } = {}
+    const calls: { address: { kind: string } }[] = []
+    const ctx = armHistoryFaces({
+      session: {
+        page: (request: { address: { kind: string } }) => {
+          calls.push(request)
+          const rows = [{ type: 'event', event: ev('system/message', 7, { message: { content: [{ type: 'text', text: 'healed' }] } }) }]
+          return request.address.kind === 'session'
+            ? Promise.resolve({ ok: false, value: undefined })
+            : Promise.resolve({ ok: true, value: { records: rows } })
+        },
+      },
+    })
+    ctx.setService('sessions', { subagentAddress: () => learned.address })
+    const fetch = makeHeaderFetcher(resolverFor(ctx, 'child'))!
+    await assert.rejects(fetch(7))
+    learned.address = { parentSessionId: 'parent', childSessionId: 'child', mode: 'continuable' }
+    assert.deepEqual(await fetch(7), { system: 'healed', tools: [] })
+    assert.deepEqual(calls[1]?.address, {
+      kind: 'subagent', parentSessionId: 'parent', childSessionId: 'child', mode: 'continuable',
+    })
+    ctx.dispose()
   })
 })
 
 describe('the declared-face store — resolution, revocation, and the mount race', () => {
   test('the face resolves late (watch armed before the services) and clears on unload', () => {
-    // The RACE the reactive seat exists for: the plugin applies (and its slot
-    // components mount) before `remote` composes — the inject is pending, the
-    // fetchers degrade, and only the face landing later upgrades them.
     const ctx = new TestClientCtx()
     watchHistoryFaces(asClientCtx(ctx))
     assert.equal(historyFace(), undefined)
-    assert.equal(makeContentFetcher('s'), undefined)
-    // Arming the two services replays the pending inject, like cordis; the
-    // face rides INSIDE the `remote` facade (the declared path), while the
-    // `remote.session` service key stays hostile, as on the real host.
+    assert.equal(makeContentFetcher(plainOf('s')), undefined)
     ctx.setService('remote.session', { get page() { throw new Error('cannot get property "remote.session" without inject') } })
     ctx.setService('remote', { session: pageFace([ev('user/message', 1, {})]) })
     assert.ok(historyFace() !== undefined, 'the late-fired inject resolved the face')
-    assert.ok(makeContentFetcher('s') !== undefined, 'a fetcher built after the landing face exists')
+    assert.ok(makeContentFetcher(plainOf('s')) !== undefined, 'a fetcher built after the landing face exists')
     ctx.dispose()
     assert.equal(historyFace(), undefined, 'unload revokes the face')
-    assert.equal(makeContentFetcher('s'), undefined)
+    assert.equal(makeContentFetcher(plainOf('s')), undefined)
   })
 
   test('subscribers hear resolution and revocation; unsubscribing stops the channel', () => {
@@ -469,14 +483,12 @@ describe('the declared-face store — resolution, revocation, and the mount race
     watchHistoryFaces(asClientCtx(ctx))
     const m = await mount(h(FaceProbe))
     assert.equal(m.container.textContent, 'no-face', 'a mount before the inject sees no face')
-    // The face lands mid-mount: the subscription re-renders the probe.
     await act(async () => {
       ctx.setService('remote.session', { get page() { throw new Error('cannot get property "remote.session" without inject') } })
       ctx.setService('remote', { session: pageFace([ev('user/message', 1, {})]) })
     })
     await flush()
     assert.equal(m.container.textContent, 'has-face', 'the landing face re-renders the racer')
-    // Revocation (plugin reload) flows through the same channel.
     await act(async () => {
       ctx.dispose()
     })

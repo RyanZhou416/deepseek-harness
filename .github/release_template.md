@@ -37,4 +37,5 @@ dsh plugin --profile web update dsh-context@latest
 
 ## Contributors
 
-- [@handle](https://github.com/handle)
+- @contributor1
+- @contributor2

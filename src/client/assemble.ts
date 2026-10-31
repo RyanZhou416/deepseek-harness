@@ -1,15 +1,8 @@
-/** Per-step context assembly — the pure reconstruction behind the Context browser card. A request record
- * was snapshotted by the Host exactly as dispatched: header in force plus the model-visible surface
- * BEFORE the response landed. Coverage is honest: when the served window cannot contain the full answer
- * (older live nodes dropped, removals past archive retention), the result carries the flags the UI turns into notices. */
-
 import type { ContextHeaders, ContextTimeline, HeaderRecord, SurfaceNode, SystemPromptNode } from '../shared/types'
 
 export interface Assembled {
   live: boolean
   header: HeaderRecord | null
-  /** Resolved from the timeline's live `systems` nodes; on rows folded before that field existed, the
-   *  header epoch's own envelope figure stands in. */
   system: SystemPromptNode | null
   nodes: SurfaceNode[]
   missingLive: number
@@ -25,9 +18,6 @@ export function headerAt(headers: ContextHeaders | null, seq: number | null): He
   return null
 }
 
-/** The LAST live system node at or before `seq` carrying tokens — exactly the host fold's "last nonempty
- * surviving system" rule, so it agrees with the per-step `system` figure the fold recorded. Rows folded
- * before `systems` existed fall back to the header epoch's figure. */
 export function systemAt(
   data: ContextTimeline,
   header: HeaderRecord | null,
@@ -66,8 +56,6 @@ export function assemble(data: ContextTimeline, headers: ContextHeaders | null, 
 
   let missingLive = 0
   if (data.droppedNodes > 0) {
-    // Live: every dropped live node is part of the current context. A past step: the dropped slice sits at
-    // or below `surfaceFloor`, so only a step after it is flagged (an older step's subset is not overstated).
     if (live || (data.surfaceFloor !== undefined && seq > data.surfaceFloor)) {
       missingLive = data.droppedNodes
     }

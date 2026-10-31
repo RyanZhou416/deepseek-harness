@@ -1,0 +1,20 @@
+[
+  {
+    "id": "deepseek-platform",
+    "name": "DeepSeek",
+    "url": "https://www.deepseek.com/harness/",
+    "icon": "https://cdn.simpleicons.org/deepseek",
+    "slogan": {
+      "zh": "探索未至之境。",
+      "en": "Into the Unknown."
+    },
+    "promotion": {
+      "zh": "DeepSeek Harness桌面端现已发布!",
+      "en": "DeepSeek Harness desktop app is now available!"
+    },
+    "tooltip": {
+      "zh": "特别感谢 DeepSeek 开放平台，为智能体开发者提供强大而易用的模型服务。通过一个 API Key 接入最新模型，把更多时间留给创造。",
+      "en": "Special thanks to DeepSeek Platform for making capable, developer-friendly models accessible to agent builders. Connect the latest models with one API key and spend more time creating."
+    }
+  }
+]

@@ -55,7 +55,8 @@ function artifactBanner(): string {
   return ['/**', ...lines, ' */', ''].join('\n')
 }
 
-// The platform-module subset this plugin requires: the shell seeds these specifiers into the frozen browser module table, so the bundle must leave them to the injected `require`. Anything else the client half imports is a build error (the purity gate below), so this list stays exactly what the bundle requires.
+// The platform-module subset this plugin requires: the shell seeds these specifiers into the frozen browser module table, so the bundle
+// must leave them to the injected `require`. Anything else is a build error (the purity gate below).
 const PLATFORM_MODULES = [
   'react', 'react/jsx-runtime', 'react-dom',
   '@deepseek-ai/dsh-client-ui-primitives',
@@ -72,7 +73,6 @@ const requested = new Set([
 ])
 const isRequested = (specifier: string): boolean => requested.has(specifier)
 
-// A production dependency is on disk in a real install and stays an import; everything else inlines.
 const productionDeps = new Set([
   ...Object.keys(pkg.dependencies ?? {}),
   ...Object.keys(pkg.peerDependencies ?? {}),
@@ -84,6 +84,17 @@ const isProductionDependency = (specifier: string): boolean =>
   productionPatterns.some(pattern => pattern.test(specifier))
 
 const NODE_ENV = process.env.NODE_ENV ?? 'production'
+
+// The watch build feeds the local dsh web server, which loads the emitted JavaScript alone; skipping the declaration
+// file and the source maps keeps the watcher's rebuild churn and resident set low. `pnpm run build` keeps every artifact.
+const WATCH = process.env.DSH_CTX_WATCH === '1'
+
+// Rolldown wraps each rebuild's artifacts in napi objects that a pressure-free V8 never finalizes, so a watcher's resident set
+// climbs with every rebuild; watch.sh exposes gc and every successful build collects.
+const collectGarbage = (): void => {
+  const maybeGc = globalThis as typeof globalThis & { gc?: () => void }
+  maybeGc.gc?.()
+}
 
 // CSS channels, mirrored from packages/client/tsdown.client.ts. The virtual ids must NOT end in `.css`: tsdown's css-pipeline guard matches on that suffix.
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
@@ -117,7 +128,6 @@ function sourceAssetPath(source: string, importer: string): string {
   return resolvePath(dirname(importer), source)
 }
 
-// The one sheet whose Tailwind utilities are compiled; every other sheet stays plain CSS.
 const TAILWIND_ENTRY = 'tailwind.css'
 
 interface WatchCapable {
@@ -212,14 +222,13 @@ export default defineConfig([
     platform: 'node',
     target: 'es2024',
     fixedExtension: false,
-    minify: true,
-    // Local diagnosis only: the npm package never ships a .map (the `files` allowlist), so this stays a repo artifact.
-    sourcemap: true,
+    minify: !WATCH,
+    sourcemap: false,
     // The host half's Config/projection types are the integration contract other plugins compile against.
-    dts: true,
+    dts: !WATCH,
     clean: true,
-    // The banner stays off index.d.ts so the published types remain a pure declaration file.
-    banner: () => ({ js: artifactBanner() }),
+    banner: () => ({ js: artifactBanner(), dts: artifactBanner() }),
+    onSuccess: collectGarbage,
     outputOptions: { comments: OUTPUT_COMMENTS },
     deps: {
       neverBundle: isProductionDependency,
@@ -236,10 +245,9 @@ export default defineConfig([
     target: 'es2024',
     // A .d.cts would wrap the banner/footer and break parsing; profiling consumes the bundle's own sourcemap instead.
     dts: false,
-    sourcemap: true,
+    sourcemap: false,
     clean: false,
-    // The one artifact the browser downloads and parses.
-    minify: true,
+    minify: !WATCH,
     deps: {
       // A require() the module table cannot answer is a guaranteed runtime throw.
       neverBundle: isRequested,
@@ -260,6 +268,7 @@ export default defineConfig([
     },
     // Top-level `banner` routes to rolldown's postBanner, which lands after minification, so the header comment keeps its formatting.
     banner: () => ({ js: artifactBanner() }),
+    onSuccess: collectGarbage,
     plugins: [{
       name: 'dsh-svg-raw',
       // The emblem (icon.svg) is the package's single graphic source, shared with the Host's package-meta reader through package.json `icon`.

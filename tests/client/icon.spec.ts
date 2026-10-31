@@ -1,12 +1,8 @@
-// The Context emblem (src/client/icon.tsx): the bundled document sheet behind the right-Sidebar tab type's glyph and
-// chip-title seats. Bundled rather than read off the harness primitives, so these specs render the real component; the
-// same sheet ships as the package-root icon.svg, pinned in lockstep by a spec here.
-
 import { readFile } from 'node:fs/promises'
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { ContextIcon, makeContextTabTitle } from '../../src/client/icon'
+import { ContextIcon, InsightPanelIcon, makeContextTabTitle } from '../../src/client/icon'
 import { makeKit, mount, query, queryAll, text } from './helpers/kit'
 
 describe('ContextIcon', () => {
@@ -18,7 +14,6 @@ describe('ContextIcon', () => {
     assert.equal(svg.getAttribute('viewBox'), '0 0 1024 1024')
     assert.equal(svg.getAttribute('class'), 'lc-title-icon')
     assert.equal(svg.getAttribute('aria-hidden'), 'true')
-    // Every stroke carries its own fixed fill — the sheet stays polychrome.
     const paths = queryAll<SVGPathElement>(m.container, 'path')
     assert.equal(paths.length, 10)
     const fills = paths.map(p => p.getAttribute('fill'))
@@ -36,6 +31,14 @@ describe('ContextIcon', () => {
     await m.unmount()
   })
 
+  test('the panel-list glyph defaults to the mono seat at 18px', async () => {
+    const m = await mount(h(InsightPanelIcon))
+    const svg = query<SVGSVGElement>(m.container, 'svg')
+    assert.equal(svg.getAttribute('width'), '18')
+    assert.ok(svg.innerHTML.includes('currentColor'), 'the mono mask inks the sheet')
+    await m.unmount()
+  })
+
   test('the mono seat inks the sheet in the current colour at the harness line weight', async () => {
     const m = await mount(h(ContextIcon, { mono: true }))
     const svg = query<SVGSVGElement>(m.container, 'svg')
@@ -46,11 +49,7 @@ describe('ContextIcon', () => {
       1,
       'one current-colour shape carries the whole glyph',
     )
-    // The plugin ships one artwork: the drawing appears exactly once, in the
-    // complement mask that each eroding shift is painted through.
     assert.equal(queryAll<SVGPathElement>(m.container, 'path').length, 10)
-    // The inset itself: a white flood minus one black shift per axis
-    // direction, 17 units each — the source's 98-unit bars less the harness weight's 64 makes for two 17s.
     const [hole, thin] = queryAll<SVGMaskElement>(m.container, 'mask')
     assert.match(hole.id, /-hole$/)
     assert.match(thin.id, /-thin$/)
@@ -74,9 +73,6 @@ describe('ContextIcon', () => {
   })
 
   test('the package-root icon.svg stays in lockstep with the component', async () => {
-    // The static file is what the Host's package-meta reader serves to the
-    // Plugins page (package.json `icon`), so a component edit that skips the
-    // file — or a manual file edit that skips the component — fails here.
     const raw = await readFile('icon.svg', 'utf8')
     const svgPaths = [...raw.matchAll(/<path d="([^"]+)" fill="([^"]+)"\/>/g)].map(([, d, fill]) => ({ d, fill }))
     const m = await mount(h(ContextIcon, {}))

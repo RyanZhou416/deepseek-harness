@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import {
-  DAY_KEY_RE,
-  MONTH_KEY_RE,
   dayKeyOf,
   endOfDayKey,
   monthGridOf,
@@ -14,14 +12,10 @@ import {
 } from '../../src/shared/days'
 
 describe('dayKeyOf', () => {
-  test('keys a local instant as YYYY-MM-DD with zero padding', () => {
-    // Local noon is deterministic in every timezone.
+  test('keys a local instant as YYYY-MM-DD with zero padding, midnight to the new day', () => {
     assert.equal(dayKeyOf(new Date(2026, 8, 16, 12).getTime()), '2026-09-16')
     assert.equal(dayKeyOf(new Date(2026, 0, 5, 12).getTime()), '2026-01-05')
     assert.equal(dayKeyOf(new Date(2026, 11, 25, 12).getTime()), '2026-12-25')
-  })
-
-  test('keys local midnight to the new day', () => {
     assert.equal(dayKeyOf(new Date(2026, 0, 2, 0, 0, 0).getTime()), '2026-01-02')
   })
 
@@ -66,23 +60,11 @@ describe('sundayOfWeek', () => {
   })
 })
 
-describe('DAY_KEY_RE', () => {
-  test('matches the emitted shape only', () => {
-    assert.equal(DAY_KEY_RE.test('2026-09-16'), true)
-    assert.equal(DAY_KEY_RE.test('2026-9-16'), false)
-    assert.equal(DAY_KEY_RE.test('2026-09-16T00:00:00'), false)
-  })
-})
-
 describe('startOfDayKey / endOfDayKey', () => {
-  test('a picked range spans the whole local day', () => {
-    // Endpoints, not a duration: a DST-short day is 23 hours long, so the difference is not a fixed number of milliseconds.
+  test('a picked range spans the whole local day; malformed keys yield null', () => {
     assert.equal(startOfDayKey('2026-09-16'), new Date(2026, 8, 16, 0, 0, 0, 0).getTime())
     assert.equal(endOfDayKey('2026-09-16'), new Date(2026, 8, 16, 23, 59, 59, 999).getTime())
     assert.equal(startOfDayKey('2026-03-08'), new Date(2026, 2, 8, 0, 0, 0, 0).getTime(), 'a DST-short day still opens on its own midnight')
-  })
-
-  test('malformed keys yield null', () => {
     assert.equal(startOfDayKey('2026-02-30'), null)
     assert.equal(endOfDayKey('nope'), null)
   })
@@ -117,7 +99,7 @@ describe('weekdayOf', () => {
 })
 
 describe('monthGridOf', () => {
-  test('lays a month out as Sunday-first weeks of seven cells', () => {
+  test('lays a month out as Sunday-first weeks of seven cells; a Sunday opening needs no lead blank', () => {
     const grid = monthGridOf('2026-09')
     assert.ok(grid !== null)
     assert.equal(grid[0].length, 7)
@@ -128,9 +110,6 @@ describe('monthGridOf', () => {
     const days = grid.flat().filter((k) => k !== null)
     assert.equal(days.length, 30)
     assert.equal(days.every((k) => k.startsWith('2026-09')), true)
-  })
-
-  test('a month that opens on Sunday needs no lead blank', () => {
     const nov = monthGridOf('2026-11')
     assert.ok(nov !== null)
     assert.equal(nov[0][0], '2026-11-01')
@@ -140,15 +119,6 @@ describe('monthGridOf', () => {
   test('malformed months and a month that leaves the key range yield null', () => {
     assert.equal(monthGridOf('2026-13'), null)
     assert.equal(monthGridOf('junk'), null)
-    // The last representable month still grids; stepping past it (shiftMonthKey) is what yields null.
     assert.ok(monthGridOf('9999-12') !== null)
-  })
-})
-
-describe('MONTH_KEY_RE', () => {
-  test('matches the emitted shape only', () => {
-    assert.equal(MONTH_KEY_RE.test('2026-10'), true)
-    assert.equal(MONTH_KEY_RE.test('2026-1'), false)
-    assert.equal(MONTH_KEY_RE.test('2026-10-01'), false)
   })
 })

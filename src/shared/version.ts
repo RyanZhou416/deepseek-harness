@@ -1,11 +1,5 @@
-/** The harness-version gate's shared arithmetic: the supported dsh baseline and the compare
- * behind it. Dependency-free runtime code used by both halves (the host probes and gates; the
- * client displays the wire record). The baseline mirrors docs/compatibility.md and the
- * package's `dsh.compatibility.dshReleases` declaration. */
+export const BASELINE_DSH_VERSION = '0.2.0-rc.2'
 
-export const BASELINE_DSH_VERSION = '0.1.7-rc.2'
-
-/** Release-channel rank at an equal X.Y.Z: a final release > rc > beta > alpha. */
 function channelRank(channel: 'alpha' | 'beta' | 'rc'): number {
   return channel === 'rc' ? 3 : channel === 'beta' ? 2 : 1
 }
@@ -19,7 +13,6 @@ export interface ParsedVersion {
   serial: number
 }
 
-/** Parse `v?X.Y.Z[-(alpha|beta|rc)[.N]][+build]`; other channels (nightly, dev, …) do not parse — the gate fails open on them. */
 export function parseVersion(version: string): ParsedVersion | null {
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)(?:\.(\d+))?)?(?:\+[0-9a-z.-]+)?$/i.exec(version.trim())
   if (match === null) return null
@@ -41,8 +34,6 @@ function compareParsed(a: ParsedVersion, b: ParsedVersion): number {
   return a.serial - b.serial
 }
 
-/** FAIL OPEN by design: an unparseable version (a dev/nightly build) must not blank a working
- * deployment, so only a proven below-baseline release trips the gate. */
 export function meetsBaseline(version: string, baseline: string = BASELINE_DSH_VERSION): boolean {
   const v = parseVersion(version)
   const b = parseVersion(baseline)

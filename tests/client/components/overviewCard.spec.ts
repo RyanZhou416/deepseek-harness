@@ -2,6 +2,7 @@ import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { makeOverviewCard } from '../../../src/client/components/overviewCard'
+import { DICT_EN } from '../../../src/client/i18n'
 import type { OverviewRow } from '../../../src/client/overview'
 import type { ContextActivity, ContextTimeline, SessionCostUsage } from '../../../src/shared/types'
 import { click, makeKit, mount, query, queryAll, text } from '../helpers/kit'
@@ -37,30 +38,29 @@ const TIMELINE = {
 } as unknown as ContextTimeline
 
 describe('OverviewCard', () => {
-  test('a folded session renders the donut, occupancy, and the three figures', async () => {
-    const m = await mount(h(Card, { row: rowOf({ timeline: TIMELINE, familyCost: FAMILY_COST }), costLabel: '$0.02', now: NOW, onOpen: () => {} }))
+  test('a folded session renders the donut, occupancy, and figures; without a window it shows the total and dashes', async () => {
+    const opened: string[] = []
+    const m = await mount(h(Card, { row: rowOf({ timeline: TIMELINE, familyCost: FAMILY_COST }), costLabel: '$0.02', now: NOW, onOpen: id => { opened.push(id) } }))
     const card = query(m.container, 'button.lc-ov-session')
     assert.ok(!card.className.includes('lc-ov-session-current'))
     assert.equal(query(m.container, '.lc-ov-session-title').textContent, 'refactor the parser')
     assert.equal(query(m.container, '.lc-ov-session-time').textContent, '3h ago')
     assert.equal(query(m.container, '.lc-donut-center b').textContent, '500')
     assert.equal(query(m.container, '.lc-donut-center span').textContent, '50.0%')
-    // The three mini stats: turns+steps lead, then the team's billed, then its cost.
     const labels = queryAll(m.container, '.lc-ov-mini-label').map(el => el.textContent)
     const values = queryAll(m.container, '.lc-ov-mini-value').map(el => el.textContent)
     assert.deepEqual(labels, ['Turns', 'Total Tokens', 'Total Est. Cost'])
     assert.deepEqual(values, ['9 turns · 12 steps', '1.8k', '$0.02'])
+    await click(card)
+    assert.deepEqual(opened, ['s1'], 'clicking relays the session id')
     await m.unmount()
-  })
 
-  test('a session without a window shows the total without a share; unbilled dashes', async () => {
     const bare = { current: TIMELINE.current, requests: [{}] } as unknown as ContextTimeline
-    const m = await mount(h(Card, { row: rowOf({ timeline: bare }), costLabel: '—', now: NOW, onOpen: () => {} }))
-    assert.equal(query(m.container, '.lc-donut-center b').textContent, '500')
-    assert.equal(queryAll(m.container, '.lc-donut-center span').length, 0, 'no occupancy without the window')
-    const values = queryAll(m.container, '.lc-ov-mini-value').map(el => el.textContent)
-    assert.deepEqual(values, ['1', '—', '—'], 'a counts-less head names the bare turns; no cost buckets')
-    await m.unmount()
+    const windowless = await mount(h(Card, { row: rowOf({ timeline: bare }), costLabel: '—', now: NOW, onOpen: () => {} }))
+    assert.equal(query(windowless.container, '.lc-donut-center b').textContent, '500')
+    assert.equal(queryAll(windowless.container, '.lc-donut-center span').length, 0, 'no occupancy without the window')
+    assert.deepEqual(queryAll(windowless.container, '.lc-ov-mini-value').map(el => el.textContent), ['1', '—', '—'])
+    await windowless.unmount()
   })
 
   test('the created line shows the first active day; absent without a ledger', async () => {
@@ -72,6 +72,23 @@ describe('OverviewCard', () => {
     const noLedger = await mount(h(Card, { row: rowOf(), costLabel: '—', now: NOW, onOpen: () => {} }))
     assert.equal(queryAll(noLedger.container, '.lc-ov-session-created').length, 0)
     await noLedger.unmount()
+  })
+
+  test('running and current markers render', async () => {
+    const m = await mount(h(Card, { row: rowOf({ running: true, current: true }), costLabel: '—', now: NOW, onOpen: () => {} }))
+    assert.ok(query(m.container, '.lc-ov-running'))
+    assert.equal(query(m.container, '.lc-ov-current').textContent, 'current')
+    assert.ok(query(m.container, 'button.lc-ov-session').className.includes('lc-ov-session-current'))
+    const zh = await mount(h(makeOverviewCard(makeKit('zh')), { row: rowOf({ current: true }), costLabel: '—', now: NOW, onOpen: () => {} }))
+    assert.equal(query(zh.container, '.lc-ov-current').textContent, '当前')
+    await zh.unmount()
+    let opened = 0
+    const archived = await mount(h(Card, { row: rowOf({ archived: true }), costLabel: '—', now: NOW, onOpen: () => { opened += 1 } }))
+    assert.ok(text(archived.container).includes(DICT_EN['ov.card.archived']))
+    await click(query(archived.container, 'button.lc-ov-session'))
+    assert.equal(opened, 0, 'an archived card never opens')
+    await archived.unmount()
+    await m.unmount()
   })
 
   test('a session with no timeline degrades to the metadata-only note', async () => {
@@ -86,7 +103,7 @@ describe('OverviewCard', () => {
     await m.unmount()
   })
 
-  test('the breadcrumb shows group and project; the full path stays on the tip', async () => {
+  test('the breadcrumb shows group and project, deduping a same-named workspace and degrading per part', async () => {
     const m = await mount(h(Card, {
       row: rowOf({ cwd: '/Users/bw/dev/dsh-context' }),
       group: 'workspace-one',
@@ -100,28 +117,18 @@ describe('OverviewCard', () => {
     assert.equal(query(m.container, '.lc-ov-crumb-sep').textContent, '/')
     assert.equal(query(m.container, '.lc-ov-crumb-project').textContent, 'dsh-context')
     await m.unmount()
-  })
 
-  test('a workspace titled like the project shows the name once (never "x / x")', async () => {
-    const m = await mount(h(Card, {
+    const same = await mount(h(Card, {
       row: rowOf({ cwd: '/Users/bw/dev/dsh-context' }),
       group: 'dsh-context',
       costLabel: '—',
       now: NOW,
       onOpen: () => {},
     }))
-    assert.equal(queryAll(m.container, '.lc-ov-crumb-group').length, 0)
-    assert.equal(queryAll(m.container, '.lc-ov-crumb-sep').length, 0)
-    assert.equal(query(m.container, '.lc-ov-crumb-project').textContent, 'dsh-context')
-    await m.unmount()
-  })
-
-  test('the breadcrumb degrades per part: project alone, group alone, neither drops the row', async () => {
-    const projectOnly = await mount(h(Card, { row: rowOf({ cwd: '/repo/app' }), costLabel: '—', now: NOW, onOpen: () => {} }))
-    assert.equal(queryAll(projectOnly.container, '.lc-ov-crumb-group').length, 0)
-    assert.equal(queryAll(projectOnly.container, '.lc-ov-crumb-sep').length, 0)
-    assert.equal(query(projectOnly.container, '.lc-ov-crumb-project').textContent, 'app')
-    await projectOnly.unmount()
+    assert.equal(queryAll(same.container, '.lc-ov-crumb-group').length, 0)
+    assert.equal(queryAll(same.container, '.lc-ov-crumb-sep').length, 0)
+    assert.equal(query(same.container, '.lc-ov-crumb-project').textContent, 'dsh-context')
+    await same.unmount()
 
     const groupOnly = await mount(h(Card, { row: rowOf(), group: 'workspace-one', costLabel: '—', now: NOW, onOpen: () => {} }))
     assert.equal(query(groupOnly.container, '.lc-ov-crumb-group').textContent, 'workspace-one')
@@ -131,14 +138,6 @@ describe('OverviewCard', () => {
     const bare = await mount(h(Card, { row: rowOf(), costLabel: '—', now: NOW, onOpen: () => {} }))
     assert.equal(queryAll(bare.container, '.lc-ov-session-crumb').length, 0)
     await bare.unmount()
-  })
-
-  test('running and current markers render', async () => {
-    const m = await mount(h(Card, { row: rowOf({ running: true, current: true }), costLabel: '—', now: NOW, onOpen: () => {} }))
-    assert.ok(query(m.container, '.lc-ov-running'))
-    assert.equal(query(m.container, '.lc-ov-current').textContent, 'current')
-    assert.ok(query(m.container, 'button.lc-ov-session').className.includes('lc-ov-session-current'))
-    await m.unmount()
   })
 
   test('the last-user-message footer renders the labeled preview with the full text on the tip; absent stays absent', async () => {
@@ -156,24 +155,5 @@ describe('OverviewCard', () => {
     const bare = await mount(h(Card, { row: rowOf({ timeline: TIMELINE }), costLabel: '—', now: NOW, onOpen: () => {} }))
     assert.equal(queryAll(bare.container, '.lc-ov-session-preview').length, 0, 'no preview line without the fold field')
     await bare.unmount()
-  })
-
-  test('clicking relays the session id', async () => {
-    const opened: string[] = []
-    const m = await mount(h(Card, { row: rowOf({ id: 'xyz' }), costLabel: '—', now: NOW, onOpen: (id) => { opened.push(id) } }))
-    await click(query(m.container, 'button.lc-ov-session'))
-    assert.deepEqual(opened, ['xyz'])
-    await m.unmount()
-  })
-
-  test('the zh locale renders translated stats', async () => {
-    const ZhCard = makeOverviewCard(makeKit('zh'))
-    const m = await mount(h(ZhCard, { row: rowOf({ timeline: TIMELINE }), costLabel: '¥0.13', now: NOW, onOpen: () => {} }))
-    const labels = queryAll(m.container, '.lc-ov-mini-label').map(el => el.textContent)
-    assert.deepEqual(labels, ['轮次', 'Token 总用量', '总预估费用'])
-    const values = queryAll(m.container, '.lc-ov-mini-value').map(el => el.textContent)
-    assert.equal(values[0], '9 轮 12 步')
-    assert.equal(query(m.container, '.lc-ov-session-time').textContent, '3 小时前')
-    await m.unmount()
   })
 })

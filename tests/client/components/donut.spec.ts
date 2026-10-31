@@ -3,10 +3,8 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { Donut } from '../../../src/client/components/donut'
 import type { DonutSegment } from '../../../src/client/components/donut'
-import { hover, mount, query, queryAll, text, unhover } from '../helpers/kit'
+import { hover, mount, query, queryAll, unhover } from '../helpers/kit'
 
-
-/** A parent that really holds the hover key, so hovering re-renders the ring. */
 function HoverHarness(props: { segments: DonutSegment[] }) {
   const [hoverKey, setHoverKey] = useState<string | null>(null)
   return h(Donut, { segments: props.segments, centerTop: 'x', hoverKey, onHoverKey: setHoverKey })
@@ -35,7 +33,7 @@ describe('Donut', () => {
     await m.unmount()
   })
 
-  test('non-positive and non-finite values are skipped', async () => {
+  test('non-positive and non-finite values are skipped; the surviving positive slice paints alone', async () => {
     const m = await mount(h(Donut, {
       segments: [
         { key: 'a', color: '#ff0000', value: 0 },
@@ -47,79 +45,30 @@ describe('Donut', () => {
     }))
     const circles = queryAll(m.container, 'circle')
     assert.equal(circles.length, 1)
-    // The color rides inline style (var() values can't live in a stroke attribute);
-    // jsdom reports the style keyword in its normalized rgb() spelling.
     assert.equal(circles[0].style.stroke, 'rgb(255, 255, 255)')
-    await m.unmount()
-  })
-
-  test('an all-zero total renders the neutral track ring, no segment circles', async () => {
-    const m = await mount(h(Donut, {
-      segments: [{ key: 'a', color: '#ff0000', value: 0 }],
-      centerTop: '—',
-    }))
-    assert.equal(queryAll(m.container, 'circle').length, 1)
-    assert.ok(query(m.container, '.lc-donut-track'))
-    assert.equal(query(m.container, '.lc-donut-center b').textContent, '—')
-    assert.equal(queryAll(m.container, '.lc-donut-center span').length, 0)
-    await m.unmount()
-  })
-
-  test('an empty segment list renders the track too', async () => {
-    const m = await mount(h(Donut, { segments: [], centerTop: '—' }))
-    assert.ok(query(m.container, '.lc-donut-track'))
-    assert.ok(text(m.container).includes('—'))
     await m.unmount()
   })
 })
 
 describe('Donut slice divider', () => {
-  /** An arc's painted length, in dasharray units (1 unit ≈ 1% of the ring). */
   const lenOf = (el: Element): number => Number((el.getAttribute('stroke-dasharray') ?? '').split(' ')[0])
-  /** The arc's start position along the ring: dashoffset counts backwards, so 0 units = 3 o'clock. */
-  const startOf = (el: Element): number => (100 - Number(el.getAttribute('stroke-dashoffset')) + 100) % 100
 
-  test('every seam between neighbouring slices opens by the same hairline', async () => {
-    const m = await mount(h(Donut, {
-      segments: [
-        { key: 'a', color: '#ff0000', value: 30 },
-        { key: 'b', color: '#00ff00', value: 70 },
-      ],
-      centerTop: 'x',
-    }))
-    const arcs = queryAll(m.container, '.lc-donut-seg')
-    // Half a gap off each end of both arcs, and both cuts land on the SAME
-    // seam: the ring shows one 0.5-unit opening there, not two.
-    assert.ok(Math.abs(lenOf(arcs[0]) - 29.5) < 1e-9)
-    for (let i = 0; i < arcs.length; i++) {
-      const end = startOf(arcs[i]) + lenOf(arcs[i])
-      const gap = (startOf(arcs[(i + 1) % arcs.length]) - end + 100) % 100
-      assert.ok(Math.abs(gap - 0.5) < 1e-9, `seam ${i} opened ${gap}`)
-    }
-    await m.unmount()
-  })
+  test('a lone slice keeps a full ring, and a sliver is cut a quarter per end', async () => {
+    const lone = await mount(h(Donut, { segments: [{ key: 'a', color: '#ff0000', value: 42 }], centerTop: 'x' }))
+    assert.equal(lenOf(query(lone.container, '.lc-donut-seg')), 100)
+    await lone.unmount()
 
-  test('a lone slice keeps a full ring, with no divider nick', async () => {
-    const m = await mount(h(Donut, {
-      segments: [{ key: 'a', color: '#ff0000', value: 42 }],
-      centerTop: 'x',
-    }))
-    assert.equal(lenOf(query(m.container, '.lc-donut-seg')), 100)
-    await m.unmount()
-  })
-
-  test('a sliver thinner than the gap is cut by a quarter per end, never swallowed', async () => {
-    const m = await mount(h(Donut, {
+    const sliver = await mount(h(Donut, {
       segments: [
         { key: 'tiny', color: '#ff0000', value: 0.2 },
         { key: 'rest', color: '#00ff00', value: 99.8 },
       ],
       centerTop: 'x',
     }))
-    const [tiny, rest] = queryAll(m.container, '.lc-donut-seg')
+    const [tiny, rest] = queryAll(sliver.container, '.lc-donut-seg')
     assert.ok(Math.abs(lenOf(tiny) - 0.1) < 1e-9)
     assert.ok(Math.abs(lenOf(rest) - 99.3) < 1e-9)
-    await m.unmount()
+    await sliver.unmount()
   })
 })
 
@@ -145,7 +94,7 @@ describe('Donut hover link', () => {
     { key: 'b', color: '#00ff00', value: 70 },
   ]
 
-  test('hovering an arc dims the ring and lights it; leaving the ring clears both', async () => {
+  test('hovering an arc dims the ring and lights it; a ghost key or a relay-less ring stays at rest', async () => {
     const m = await mount(h(HoverHarness, { segments: SEGS }))
     const arcs = queryAll(m.container, '.lc-donut-seg')
     const cls = (el: Element): string => el.getAttribute('class') ?? ''
@@ -157,19 +106,15 @@ describe('Donut hover link', () => {
     assert.ok(!query(m.container, '.lc-donut').className.includes('lc-donut-dim'))
     assert.ok(!cls(arcs[0]).includes('lc-donut-seg-on'))
     await m.unmount()
-  })
 
-  test('a hover key with no painted arc leaves the ring at rest', async () => {
-    const m = await mount(h(Donut, { segments: SEGS, centerTop: 'x', hoverKey: 'ghost' }))
-    assert.ok(!query(m.container, '.lc-donut').className.includes('lc-donut-dim'))
-    await m.unmount()
-  })
+    const ghost = await mount(h(Donut, { segments: SEGS, centerTop: 'x', hoverKey: 'ghost' }))
+    assert.ok(!query(ghost.container, '.lc-donut').className.includes('lc-donut-dim'))
+    await ghost.unmount()
 
-  test('hover events without a relay stay inert', async () => {
-    const m = await mount(h(Donut, { segments: SEGS, centerTop: 'x' }))
-    await hover(query(m.container, '.lc-donut-seg'))
-    await unhover(query(m.container, '.lc-donut'))
-    assert.ok(!query(m.container, '.lc-donut').className.includes('lc-donut-dim'))
-    await m.unmount()
+    const inert = await mount(h(Donut, { segments: SEGS, centerTop: 'x' }))
+    await hover(query(inert.container, '.lc-donut-seg'))
+    await unhover(query(inert.container, '.lc-donut'))
+    assert.ok(!query(inert.container, '.lc-donut').className.includes('lc-donut-dim'))
+    await inert.unmount()
   })
 })

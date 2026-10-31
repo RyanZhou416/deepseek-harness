@@ -1,8 +1,7 @@
 name: Publish to npm
 
-# Fires on a release tag (v*) push. Publishing uses npm Trusted Publishing
-# (OIDC), so no long-lived token is needed — the npm-side trusted publisher
-# must be configured with this exact workflow filename.
+# Fires on a release tag (v*) push. Publishing uses npm Trusted Publishing (OIDC), so no long-lived
+# token is needed — the npm-side trusted publisher must be configured with this exact workflow filename.
 on:
   push:
     tags:
@@ -19,13 +18,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Check the DeeSeek Harness plugin
-        # `next` = the newest published generation (0.2.0-rc.2), whose npm
-        # dependency closure is complete; `latest` still serves the other
-        # supported line (0.1.7-rc.2).
+        # `dshVersion` defaults to `latest`, which serves the newest supported release (0.2.1-rc.2).
         uses: bowenliang123/dsh-plugin-checker@v1
 
-      # No `packageManager` field in this plugin's package.json, so both
-      # workflows pin the version explicitly.
+      # No `packageManager` field in this plugin's package.json, so both workflows pin the version explicitly.
       - uses: pnpm/action-setup@v6
         with:
           version: latest
@@ -48,12 +44,8 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      # The `compat` vitest project inside `pnpm test` stages the REAL harness
-      # sources at every supported baseline tag (tests/baselines.ts is the
-      # source of truth — keep this fetch list in step when a baseline is
-      # added) and runs the built plugin through them; it skips silently
-      # without the tags, so this fetch sits BEFORE Test. Only the tags are
-      # fetched, so the clone stays shallow.
+      # The `compat` project stages the REAL harness sources at every baseline tag (tests/baselines.ts is the source
+      # of truth — keep this fetch list in step); it skips silently without the tags, so this fetch sits BEFORE Test.
       - name: Fetch the dsh baseline tags
         run: |
           mkdir -p .tmp/dsh-repo
@@ -61,8 +53,8 @@ jobs:
           git init -q
           git remote add origin https://github.com/deepseek-ai/deepseek-harness.git
           git fetch --depth 1 -q origin \
-            refs/tags/dsh-v0.1.7-rc.2:refs/tags/dsh-v0.1.7-rc.2 \
-            refs/tags/dsh-v0.2.0-rc.2:refs/tags/dsh-v0.2.0-rc.2
+            refs/tags/dsh-v0.2.0-rc.2:refs/tags/dsh-v0.2.0-rc.2 \
+            refs/tags/dsh-v0.2.1-rc.2:refs/tags/dsh-v0.2.1-rc.2
 
       - name: Test
         run: DSH_REPO="$PWD/.tmp/dsh-repo" pnpm test
@@ -76,8 +68,7 @@ jobs:
             exit 1
           fi
 
-      # Trusted publishing (OIDC) — no NODE_AUTH_TOKEN required; npm >= 11.5.1
-      # exchanges the Actions OIDC token for a short-lived publish credential
-      # and attaches provenance automatically.
+      # Trusted publishing (OIDC) — no NODE_AUTH_TOKEN required; npm >= 11.5.1 exchanges the Actions OIDC
+      # token for a short-lived publish credential and attaches provenance automatically.
       - name: Publish to npm
         run: npm publish

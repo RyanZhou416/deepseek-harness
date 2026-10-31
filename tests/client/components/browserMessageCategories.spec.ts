@@ -5,25 +5,20 @@ import type { ContextBrowserProps } from '../../../src/client/components/browser
 import type { ContextHeaders } from '../../../src/shared/types'
 import type { ConversationNodeLike, ImageLoader } from '../../../src/client/services'
 import { click, flush, mount, query, queryAll, surfaceNode, text } from '../helpers/kit'
-import { Browser, catRow, elemRows, kit, props, tl, typeToolSearch } from './browserHarness'
+import { Browser, catRow, elemRows, filterStat, kit, props, tl, typeToolSearch } from './browserHarness'
 
 describe('ContextBrowser message categories', () => {
-  // One rich live surface exercising every NodeContent/BlocksBody branch.
   const convNodes: ConversationNodeLike[] = [
-    // user with two images then text (image group flush mid-loop + trailing)
     { kind: 'user', seq: 1, content: [
       { type: 'image', attachment: { attachmentId: 'a1', name: 'one.png', bytes: 2048, width: 100, height: 50 } },
       { type: 'image', attachment: { attachmentId: 'a2' } },
       { type: 'text', text: 'with images' },
     ] },
-    // user with text then one image
     { kind: 'user', seq: 2, content: [
       { type: 'text', text: 'one pic' },
       { kind: 'image', attachment: { attachmentId: 'a3' } },
     ] },
-    // user without a content array → hint fallback
     { kind: 'user', seq: 5 },
-    // assistant full block cascade
     { kind: 'assistant', seq: 68, blocks: [
       { kind: 'text', text: 'final answer' },
       { type: 'reasoning', text: 'thinking hard' },
@@ -43,17 +38,13 @@ describe('ContextBrowser message categories', () => {
       'plain string block',
       { foo: 'bar' },
     ] },
-    // assistant without blocks but with content (legacy shape)
     { kind: 'assistant', seq: 67, content: [{ type: 'text', text: 'legacy body' }] },
-    // assistant summary sources
     { kind: 'assistant', seq: 62, blocks: [{ kind: 'tool-call', name: 'write', argsRaw: '{"file_path":"a.ts"}' }] },
     { kind: 'assistant', seq: 63, blocks: [{ kind: 'tool-call', name: 'read', argsRaw: '{}' }] },
     { kind: 'assistant', seq: 64, blocks: [{ kind: 'tool-call', name: 'edit', argsRaw: '{"path":"b.ts"}' }] },
-    // compaction nodes
     { kind: 'compaction', seq: 70, summary: 'SUMMARY BODY' },
     { kind: 'compaction', seq: 71, summary: null },
     { kind: 'compaction', seq: 72, summary: '' },
-    // inject join
     { kind: 'user', seq: 54, content: [{ type: 'text', text: 'relay body full' }] },
   ]
 
@@ -98,12 +89,10 @@ describe('ContextBrowser message categories', () => {
     const rows = elemRows(m)
     assert.equal(rows.length, 8, 'user + compaction nodes, newest first')
     assert.equal(text(query(rows[0], '.lc-br-preview')), 'empty summary')
-    // Attachment chips ride the collapsed row (seq 1 ×2 images, seq 2 ×1).
     const rowOf = (preview: string) => rows.find(r => text(r).includes(preview)) as HTMLElement
     assert.ok(text(rowOf('with images')).includes('Attachments ×2'))
     assert.ok(text(rowOf('one pic')).includes('Attachments'))
     assert.ok(!text(rowOf('one pic')).includes('×'))
-    // Open seq 1: the chip makes way for the grid; loader resolves two cards.
     await click(rowOf('with images'))
     await flush()
     let content = query(m.container, '.lc-br-content')
@@ -117,7 +106,6 @@ describe('ContextBrowser message categories', () => {
     assert.ok(text(content).includes('100×50'))
     await click(elemRows(m).find(r => text(r).includes('with images')) as HTMLElement)
 
-    // Open seq 2: single image, load REJECTS → error placeholder.
     await click(rowOf('one pic'))
     await flush()
     content = query(m.container, '.lc-br-content')
@@ -125,29 +113,27 @@ describe('ContextBrowser message categories', () => {
     assert.ok(text(query(content, '.lc-att-err')).includes('⚠'))
     await click(elemRows(m).find(r => text(r).includes('one pic')) as HTMLElement)
 
-    // Join missed with preview text: content section + the window note.
     await click(rowOf('fallback text'))
     content = query(m.container, '.lc-br-content')
     assert.ok(text(content).includes('fallback text'))
     assert.ok(text(content).includes('outside the loaded message window'))
     await click(elemRows(m).find(r => text(r).includes('fallback text')) as HTMLElement)
 
-    // Join missed without text (seq 4, rows newest-first: 72,71,70,5,4,…): the note alone.
     assert.ok(text(rows[4]).includes('(non-text message)'))
     await click(rows[4])
     content = query(m.container, '.lc-br-content')
     assert.ok(text(content).includes('outside the loaded message window'))
     assert.ok(!text(content).includes('Content'))
-    await m.unmount()
-  })
-
-  test('user node whose conversation entry carries no content array shows the note', async () => {
-    const m = await mountBrowser()
-    await click(catRow(m, 'user'))
     await click(elemRows(m).find(r => text(r).includes('no content array')) as HTMLElement)
-    const content = query(m.container, '.lc-br-content')
+    content = query(m.container, '.lc-br-content')
     assert.ok(text(content).includes('outside the loaded message window'))
     await m.unmount()
+
+    const noLoader = await mountBrowser({ loadImage: undefined })
+    await click(catRow(noLoader, 'user'))
+    await click(elemRows(noLoader).find(r => text(r).includes('one pic')) as HTMLElement)
+    assert.equal(queryAll(noLoader.container, '.lc-att-ph').length, 1, 'no loader → placeholder')
+    await noLoader.unmount()
   })
 
   test('a single-node category opens its node with the category', async () => {
@@ -172,22 +158,30 @@ describe('ContextBrowser message categories', () => {
     const input = query<HTMLInputElement>(m.container, '.lc-br-tool-search')
     assert.equal(input.placeholder, 'Filter by message text…')
     const previews = () => elemRows(m).map(r => text(query(r, '.lc-br-preview')))
+    assert.equal(filterStat(m), '×8 ≈40')
     await typeToolSearch(m, 'summary')
     assert.deepEqual(previews(), ['empty summary', 'summary node'])
-    // No match keeps the toolbar mounted so the filter can be cleared.
+    assert.equal(filterStat(m), '×2 ≈12')
     await typeToolSearch(m, 'zzz')
     assert.equal(elemRows(m).length, 0)
+    assert.equal(filterStat(m), '×0 ≈0')
     assert.ok(text(m.container).includes('No rows match the current filter'))
     assert.equal(queryAll(m.container, '.lc-br-tool-search').length, 1)
     await typeToolSearch(m, '')
     assert.equal(elemRows(m).length, 8)
+    assert.equal(filterStat(m), '×8 ≈40')
 
-    // The call-breadcrumb tag matches too — both the fold's stamp ('bash › write')
-    // and the join-recovered breadcrumb on a mixed text+calls reply.
     await click(catRow(m, 'assistant'))
     assert.equal(query<HTMLInputElement>(m.container, '.lc-br-tool-search').value, '', 'another category opens unfiltered')
+    assert.equal(filterStat(m), '×8 ≈60')
     await typeToolSearch(m, 'bash')
     assert.deepEqual(previews(), ['full cascade', 'done all'])
+    assert.equal(filterStat(m), '×2 ≈28')
+    await typeToolSearch(m, 'thinking hard')
+    assert.deepEqual(elemRows(m).map(r => text(query(r, '.lc-br-preview'))), ['full cascade'])
+    await typeToolSearch(m, '42')
+    assert.equal(elemRows(m).length, 0)
+    assert.ok(text(query(m.container, '.lc-br-body')).includes('No rows match the current filter'))
     await m.unmount()
   })
 
@@ -199,26 +193,31 @@ describe('ContextBrowser message categories', () => {
     assert.equal(query(toolctl, '.lc-gran').getAttribute('title'), kit.t('browser.kindTip'))
     assert.equal(query<HTMLInputElement>(toolctl, '.lc-br-tool-search').placeholder, 'Filter by reply, calls, or thinking…')
     const chips = () => queryAll<HTMLButtonElement>(m.container, '.lc-br-toolctl .lc-gran-btn')
-    // Counts over ALL of the shown step's rows: thinking rides the join's
-    // reasoning block (seq 68), tools the joined calls (62/63/64/68) plus the
-    // unjoined node's `calls` stamp (61), answers the joined text blocks plus the nodes' own text (61/66/67/68).
     assert.deepEqual(chips().map(c => text(c)), ['Thinking1', 'Tools5', 'Answer4'])
     const previews = () => elemRows(m).map(r => text(query(r, '.lc-br-preview')))
     assert.equal(elemRows(m).length, 8)
 
+    await typeToolSearch(m, 'bash')
+    assert.equal(elemRows(m).length, 2)
+    assert.deepEqual(chips().map(c => text(c)), ['Thinking1', 'Tools2', 'Answer2'], 'counts follow the search lens')
+    await typeToolSearch(m, '')
+    assert.equal(elemRows(m).length, 8)
+    assert.deepEqual(chips().map(c => text(c)), ['Thinking1', 'Tools5', 'Answer4'], 'clearing the search restores the step totals')
+
     await click(chips()[1])
     assert.ok(chips()[1].className.includes('lc-gran-on'))
     assert.deepEqual(previews(), ['full cascade', 'b.ts', '(empty reply)', 'a.ts', 'done all'])
-    // The counts report the step's composition — the text lens narrows on top of them.
     await typeToolSearch(m, 'done')
     assert.deepEqual(previews(), ['done all'])
-    assert.deepEqual(chips().map(c => text(c)), ['Thinking1', 'Tools5', 'Answer4'])
+    assert.deepEqual(chips().map(c => text(c)), ['Thinking0', 'Tools1', 'Answer1'], 'counts follow the search lens')
     await typeToolSearch(m, 'zzz')
     assert.equal(elemRows(m).length, 0)
     assert.ok(text(query(m.container, '.lc-br-body')).includes('No rows match the current filter'))
     assert.equal(chips().length, 3, 'the chips stay mounted on an empty match')
+    assert.deepEqual(chips().map(c => text(c)), ['Thinking0', 'Tools0', 'Answer0'])
     await typeToolSearch(m, '')
     assert.equal(elemRows(m).length, 5)
+    assert.deepEqual(chips().map(c => text(c)), ['Thinking1', 'Tools5', 'Answer4'], 'the kind pick does not narrow the restored totals')
 
     await click(chips()[1])
     assert.equal(elemRows(m).length, 8)
@@ -238,12 +237,34 @@ describe('ContextBrowser message categories', () => {
     await m.unmount()
   })
 
+  test('the Answer kind follows the fold-stamped reply text, never a blank join text block', async () => {
+    const data = tl({
+      current: { system: 0, tools: 0, user: 0, inject: 0, skill: 0, assistant: 16, tool: 0, total: 16 },
+      nodes: [
+        surfaceNode({ seq: 2, cat: 'assistant', tokens: 8, calls: ['bash'] }),
+        surfaceNode({ seq: 3, cat: 'assistant', tokens: 8, text: 'real reply' }),
+      ],
+    })
+    const blankTextConvNodes: ConversationNodeLike[] = [
+      { kind: 'assistant', seq: 2, blocks: [
+        { kind: 'text', text: '\n\n' },
+        { kind: 'tool-call', name: 'bash', argsRaw: '{}' },
+      ] },
+      { kind: 'assistant', seq: 3, blocks: [{ kind: 'text', text: 'real reply' }] },
+    ]
+    const m = await mount(h(Browser, props({ data, convNodes: blankTextConvNodes })))
+    await click(catRow(m, 'assistant'))
+    const chips = () => queryAll<HTMLButtonElement>(m.container, '.lc-br-toolctl .lc-gran-btn')
+    assert.deepEqual(chips().map(c => text(c)), ['Thinking0', 'Tools1', 'Answer1'])
+    await click(chips()[2])
+    assert.deepEqual(elemRows(m).map(r => text(query(r, '.lc-br-preview'))), ['real reply'])
+    await m.unmount()
+  })
+
   test('call-name capsules and heads are inert: a click never reveals the schema row', async () => {
     const headers: ContextHeaders = { headers: [{ seq: 1, time: 1, systemTokens: 3, tools: [{ name: 'bash', tokens: 5 }, { name: 'write', tokens: 3 }] }] }
     const m = await mountBrowser({ headers })
     await click(catRow(m, 'assistant'))
-    // The breadcrumb capsule is plain text on the row button: a click bubbles to the row's own toggle —
-    // the row opens and nothing navigates to Tool Schemas.
     const crumbRow = elemRows(m).find(r => text(r).includes('done all')) as HTMLElement
     await click(query(crumbRow, '.lc-br-tag'))
     assert.ok(!text(query(m.container, '.lc-br-cat-open')).includes('Tool Schemas'), 'no category jump')
@@ -258,46 +279,6 @@ describe('ContextBrowser message categories', () => {
     const on = queryAll(m.container, '.lc-br-elem-on')
     assert.equal(on.length, 1)
     assert.ok(text(on[0]).includes('full cascade'), 'the open row never moved')
-    await m.unmount()
-  })
-
-  test('repeated call names fold into ×N capsules in first-appearance order', async () => {
-    const headers: ContextHeaders = { headers: [{ seq: 1, time: 1, systemTokens: 3, tools: [{ name: 'bash', tokens: 5 }, { name: 'write', tokens: 3 }] }] }
-    const data = tl({
-      current: { system: 0, tools: 0, user: 0, inject: 0, skill: 0, assistant: 8, tool: 0, total: 8 },
-      nodes: [surfaceNode({ seq: 2, cat: 'assistant', tokens: 8, calls: ['bash', 'write', 'bash', 'bash'] })],
-    })
-    const m = await mount(h(Browser, props({ data, headers })))
-    await click(catRow(m, 'assistant'))
-    // 'bash › write › bash › bash' groups into two capsules: the repeat multiplier keeps the first-appearance order.
-    const row = elemRows(m)[0]
-    const caps = queryAll(row, '.lc-br-tag')
-    assert.deepEqual(caps.map(c => text(c)), ['bash ×3', 'write'])
-    await m.unmount()
-  })
-
-  test('the assistant text filter scans the join’s reasoning blocks', async () => {
-    const m = await mountBrowser()
-    await click(catRow(m, 'assistant'))
-    // 'thinking hard' rides seq 68's reasoning block — no tag, preview, or node text carries it.
-    await typeToolSearch(m, 'thinking hard')
-    const rows = elemRows(m)
-    assert.equal(rows.length, 1)
-    assert.ok(text(rows[0]).includes('full cascade'))
-    // A malformed reasoning block (non-string text) drops from the scan whole — its value matches nothing.
-    await typeToolSearch(m, '42')
-    assert.equal(elemRows(m).length, 0)
-    assert.ok(text(query(m.container, '.lc-br-body')).includes('No rows match the current filter'))
-    await typeToolSearch(m, '')
-    assert.equal(elemRows(m).length, 8)
-    await m.unmount()
-  })
-
-  test('user images render a placeholder when no loader is wired', async () => {
-    const m = await mountBrowser({ loadImage: undefined })
-    await click(catRow(m, 'user'))
-    await click(elemRows(m).find(r => text(r).includes('one pic')) as HTMLElement)
-    assert.equal(queryAll(m.container, '.lc-att-ph').length, 1)
     await m.unmount()
   })
 
@@ -336,50 +317,41 @@ describe('ContextBrowser message categories', () => {
     assert.ok(argVals.some(s => s.includes('command') && s.includes('ls')))
     assert.ok(argVals.some(s => s.includes('timeout') && s.includes('30')))
     assert.ok(argVals.some(s => s.includes('opts') && s.includes('{"a":1}')))
-    // Unparseable args show raw; absent args show nothing.
     assert.ok(text(content).includes('not json'))
     assert.ok(text(content).includes('inner result'))
     await flush()
-    // b1 rejects (error), b2 resolves.
     assert.equal(queryAll(content, '.lc-att-err').length, 1)
     assert.equal(queryAll(content, '.lc-att-thumb img').length, 1)
-    await m.unmount()
-  })
 
-  test('assistant with a legacy content array renders the generic content section', async () => {
-    const m = await mountBrowser()
-    await click(catRow(m, 'assistant'))
     await click(elemRows(m).find(r => text(r).includes('legacy')) as HTMLElement)
-    const content = query(m.container, '.lc-br-content')
-    assert.ok(text(content).includes('Content'))
-    assert.ok(text(content).includes('legacy body'))
+    assert.ok(text(query(m.container, '.lc-br-content')).includes('legacy body'), 'a legacy content array renders the generic section')
+    await click(elemRows(m).find(r => text(r).includes('legacy')) as HTMLElement)
+    await click(elemRows(m).find(r => text(r).includes('(empty reply)') && !text(r).includes('read')) as HTMLElement)
+    assert.ok(text(query(m.container, '.lc-br-content')).includes('outside the loaded message window'), 'no join → only the window note')
     await m.unmount()
-  })
 
-  test('assistant without a join shows only the window note', async () => {
-    const m = await mountBrowser()
-    await click(catRow(m, 'assistant'))
-    const row = elemRows(m).find(r => text(r).includes('(empty reply)') && !text(r).includes('read')) as HTMLElement
-    await click(row)
-    const content = query(m.container, '.lc-br-content')
-    assert.ok(text(content).includes('outside the loaded message window'))
-    await m.unmount()
+    const headers: ContextHeaders = { headers: [{ seq: 1, time: 1, systemTokens: 3, tools: [{ name: 'bash', tokens: 5 }, { name: 'write', tokens: 3 }] }] }
+    const repeated = tl({
+      current: { system: 0, tools: 0, user: 0, inject: 0, skill: 0, assistant: 8, tool: 0, total: 8 },
+      nodes: [surfaceNode({ seq: 2, cat: 'assistant', tokens: 8, calls: ['bash', 'write', 'bash', 'bash'] })],
+    })
+    const folded = await mount(h(Browser, props({ data: repeated, headers })))
+    await click(catRow(folded, 'assistant'))
+    assert.deepEqual(queryAll(elemRows(folded)[0], '.lc-br-tag').map(c => text(c)), ['bash ×3', 'write'])
+    await folded.unmount()
   })
 
   test('compaction nodes: summary text, null and empty summaries', async () => {
     const m = await mountBrowser()
     await click(catRow(m, 'user'))
     const rows = elemRows(m)
-    // Newest first: 72 (empty summary), 71 (null summary), 70 (summary node).
     await click(rows[2])
     let content = query(m.container, '.lc-br-content')
     assert.ok(text(content).includes('Summary'))
     assert.ok(text(content).includes('SUMMARY BODY'))
-    // Null summary → empty body.
     await click(rows[1])
     content = query(m.container, '.lc-br-content')
     assert.equal(text(content), '')
-    // Empty-string summary → empty body.
     await click(rows[0])
     content = query(m.container, '.lc-br-content')
     assert.equal(text(content), '')
@@ -409,12 +381,9 @@ describe('ContextBrowser message categories', () => {
     const data = tl({
       current: { system: 0, tools: 0, user: 0, inject: 45, skill: 0, assistant: 0, tool: 0, total: 45 },
       nodes: [
-        // Stamped rows: the identity the events card names replaces the raw content preview (which stays one expand away).
         surfaceNode({ seq: 50, cat: 'inject', tokens: 9, form: 'snapshot', name: '@deepseek-ai/dsh-system-prompt', text: 'policy sections' }),
         surfaceNode({ seq: 51, cat: 'inject', tokens: 9, form: 'instructions', name: 'AGENTS.md', text: '<system-reminder> instructions' }),
-        // Unstamped (rows folded before the stamp existed): content stands.
         surfaceNode({ seq: 52, cat: 'inject', tokens: 9, form: 'snapshot', text: 'state' }),
-        // Hostile drift: a non-string / empty stamp degrades to the content.
         surfaceNode({ seq: 53, cat: 'inject', tokens: 9, name: 42 as never, text: 'drift body' }),
         surfaceNode({ seq: 54, cat: 'inject', tokens: 9, name: '', text: 'empty body' }),
       ],
@@ -430,7 +399,6 @@ describe('ContextBrowser message categories', () => {
     assert.ok(tags.includes('State Snapshot|Snapshot: state'))
     assert.ok(tags.includes('Context Injection|drift body'))
     assert.ok(tags.includes('Context Injection|empty body'))
-    // The folded content left the preview but stays in the filter's lens.
     await typeToolSearch(m, 'policy sections')
     assert.deepEqual(elemRows(m).map(r => text(query(r, '.lc-br-preview'))), ['@deepseek-ai/dsh-system-prompt'])
     await typeToolSearch(m, 'AGENTS.md')
@@ -445,14 +413,10 @@ describe('ContextBrowser message categories', () => {
     const data = tl({
       current: { system: 0, tools: 0, user: 0, inject: 0, skill: 40, assistant: 0, tool: 0, total: 40 },
       nodes: [
-        // An invocation message previews its own text; the catalog digest tags
-        // its form; the `skill`-tool load (no node text) previews the call.
         surfaceNode({ seq: 70, cat: 'skill', tokens: 9, skill: 'code-review', text: 'skill body' }),
         surfaceNode({ seq: 71, cat: 'skill', tokens: 9, form: 'catalog' }),
         surfaceNode({ seq: 72, cat: 'skill', tokens: 9, tool: 'skill', skill: 'grilling' }),
-        // Hostile drift: a skill node with neither a name nor a form.
         surfaceNode({ seq: 73, cat: 'skill', tokens: 4 }),
-        // A stamped catalog digest previews its source identity, not the digest text.
         surfaceNode({ seq: 74, cat: 'skill', tokens: 9, form: 'catalog', name: 'skill-catalog', text: 'digest body' }),
       ],
     })

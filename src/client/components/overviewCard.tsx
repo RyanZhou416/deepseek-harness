@@ -18,8 +18,6 @@ export function makeOverviewCard(kit: ViewKit): (props: OverviewCardProps) => Re
   return function OverviewCard(props: OverviewCardProps): ReactElement {
     const { row } = props
     const timeline = row.timeline
-    // The two money figures ride the TEAM scope (the whole subtree); the donut and the turns stay the session's own —
-    // the ring reads the session's CURRENT context.
     const billed = billedOf(row)
     const occupancy = timeline !== null && typeof timeline.contextWindow === 'number' && timeline.contextWindow > 0
       ? fmtShare(timeline.current.total, timeline.contextWindow)
@@ -27,7 +25,6 @@ export function makeOverviewCard(kit: ViewKit): (props: OverviewCardProps) => Re
     const turns = turnsOf(timeline)
     const steps = timeline?.counts?.steps
     const turnsLabel = steps === undefined ? String(turns) : t('ov.card.turns', { n: turns, s: steps })
-    // A workspace whose title IS the project (the common single-repo case) shows the name ONCE, never "dsh-context / dsh-context".
     const project = projectOf(row.cwd)
     const group = props.group !== undefined && props.group !== project ? props.group : undefined
     const created = createdDayOf(row.activity)

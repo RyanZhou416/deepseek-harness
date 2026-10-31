@@ -1,18 +1,12 @@
-// revealScroll (src/client/revealScroll.ts) — the jump's landing reveal against real jsdom DOM: the nearest
-// ancestor that ACTUALLY scrolls (overflowing style alone is not enough) takes the rect-delta scroll.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { revealInScrollParent } from '../../src/client/revealScroll'
+import { alignRowInCard, revealInScrollParent, revealRowInCard, scrollIntoViewIfPossible } from '../../src/client/revealScroll'
 
-/** A viewport rect carrying only the top the reveal reads. */
 const top = (t: number): DOMRect => ({ top: t }) as DOMRect
 
-/** An overflow-styled scroller holding the anchor, stubbed with real overflow and viewport tops. */
 function mounted(oy: 'auto' | 'scroll', scrollerTop: number, anchorTop: number): { scroller: HTMLDivElement; anchor: HTMLDivElement } {
   const scroller = document.createElement('div')
   scroller.style.overflowY = oy
-  // jsdom reports 0 for both — an operative scroller must overflow its box.
   Object.defineProperty(scroller, 'scrollHeight', { value: 500 })
   Object.defineProperty(scroller, 'clientHeight', { value: 200 })
   scroller.getBoundingClientRect = () => top(scrollerTop)
@@ -24,52 +18,134 @@ function mounted(oy: 'auto' | 'scroll', scrollerTop: number, anchorTop: number):
 }
 
 describe('revealInScrollParent', () => {
-  test("scrolls the nearest 'auto' ancestor so the anchor tops its scrollport", () => {
-    const { scroller, anchor } = mounted('auto', 100, 450)
-    scroller.scrollTop = 42
-    assert.equal(revealInScrollParent(anchor), true)
-    assert.equal(scroller.scrollTop, 392, 'the rect delta lands the anchor flush: 42 + (450 − 100)')
-    scroller.remove()
+  test("scrolls the nearest 'auto' or 'scroll' ancestor so the anchor tops its scrollport; a grow-with-content box is skipped", () => {
+    const auto = mounted('auto', 100, 450)
+    auto.scroller.scrollTop = 42
+    assert.equal(revealInScrollParent(auto.anchor), true)
+    assert.equal(auto.scroller.scrollTop, 392, 'the rect delta lands the anchor flush: 42 + (450 − 100)')
+    auto.scroller.remove()
+
+    const scroll = mounted('scroll', 0, 200)
+    assert.equal(revealInScrollParent(scroll.anchor), true)
+    assert.equal(scroll.scroller.scrollTop, 200)
+    scroll.scroller.remove()
+
+    const grown = mounted('auto', 0, 300)
+    const inner = document.createElement('div')
+    inner.style.overflowY = 'auto'
+    Object.defineProperty(inner, 'scrollHeight', { value: 300 })
+    Object.defineProperty(inner, 'clientHeight', { value: 300 })
+    inner.appendChild(grown.anchor)
+    grown.scroller.appendChild(inner)
+    assert.equal(revealInScrollParent(grown.anchor), true)
+    assert.equal(grown.scroller.scrollTop, 300, 'the real scroller above takes the delta')
+    grown.scroller.remove()
   })
 
-  test("an overflow-y 'scroll' ancestor is taken the same way", () => {
-    const { scroller, anchor } = mounted('scroll', 0, 200)
-    assert.equal(revealInScrollParent(anchor), true)
-    assert.equal(scroller.scrollTop, 200)
-    scroller.remove()
-  })
-
-  test('a grow-with-content box (auto yet never overflowing) is skipped for the real scroller above', () => {
-    // The Context tab's own `.lc-root` shape on layouts where an OUTER
-    // container scrolls: styled auto, scrollHeight == clientHeight — taking
-    // it would scroll a no-op while the real scroller waits above.
-    const { scroller, anchor } = mounted('auto', 0, 300)
-    const grown = document.createElement('div')
-    grown.style.overflowY = 'auto'
-    Object.defineProperty(grown, 'scrollHeight', { value: 300 })
-    Object.defineProperty(grown, 'clientHeight', { value: 300 })
-    grown.appendChild(anchor)
-    scroller.appendChild(grown)
-    assert.equal(revealInScrollParent(anchor), true)
-    assert.equal(scroller.scrollTop, 300, 'the real scroller above takes the delta')
-    scroller.remove()
-  })
-
-  test('a plain ancestor chain to body scrolls nothing and reports false', () => {
-    const anchor = document.createElement('div')
-    document.body.appendChild(anchor)
-    assert.equal(revealInScrollParent(anchor), false)
-    anchor.remove()
-  })
-
-  test('a detached anchor bottoms out at the null parent: false', () => {
+  test('a plain ancestor chain to body, a detached anchor, and a hostile chain all report false without throwing', () => {
+    const plain = document.createElement('div')
+    document.body.appendChild(plain)
+    assert.equal(revealInScrollParent(plain), false)
+    plain.remove()
     assert.equal(revealInScrollParent(document.createElement('div')), false)
-  })
-
-  test('a hostile chain never throws', () => {
     const hostile = {
       get parentElement(): never { throw new Error('boom') },
     } as unknown as Element
     assert.equal(revealInScrollParent(hostile), false)
+  })
+})
+
+describe('revealRowInCard', () => {
+  const rect = (t: number, b: number): DOMRect => ({ top: t, bottom: b }) as DOMRect
+
+  function mounted(rowTop: number, rowBottom: number, regionOverflow = true): {
+    page: HTMLDivElement; card: HTMLDivElement; region: HTMLDivElement; row: HTMLDivElement
+  } {
+    const page = document.createElement('div')
+    const card = document.createElement('div')
+    const region = document.createElement('div')
+    const row = document.createElement('div')
+    region.appendChild(row)
+    card.appendChild(region)
+    page.appendChild(card)
+    document.body.appendChild(page)
+    Object.defineProperty(region, 'scrollHeight', { value: regionOverflow ? 600 : 300 })
+    Object.defineProperty(region, 'clientHeight', { value: regionOverflow ? 200 : 300 })
+    region.getBoundingClientRect = () => rect(0, 200)
+    row.getBoundingClientRect = () => rect(rowTop, rowBottom)
+    region.scrollTop = 30
+    page.scrollTop = 55
+    return { page, card, region, row }
+  }
+
+  test('a row above or below the visible slice scrolls the rows region to it; a fully visible row scrolls nothing', () => {
+    const above = mounted(-10, 20)
+    revealRowInCard(above.region.parentElement, above.row)
+    assert.equal(above.region.scrollTop, 20, 'the row reaches the slice top: 30 − (0 − (−10))')
+    assert.equal(above.page.scrollTop, 55, 'nothing above the card moves')
+    const below = mounted(250, 280)
+    revealRowInCard(below.region.parentElement, below.row)
+    assert.equal(below.region.scrollTop, 110, 'the row reaches the slice bottom: 30 + (280 − 200)')
+
+    const visible = mounted(10, 60)
+    revealRowInCard(visible.region.parentElement, visible.row)
+    assert.equal(visible.region.scrollTop, 30)
+    assert.equal(visible.page.scrollTop, 55)
+  })
+
+  test('a region that does not overflow ends the walk at the card; a null card, null row, or outside row does nothing', () => {
+    const still = mounted(250, 280, false)
+    revealRowInCard(still.card, still.row)
+    assert.equal(still.region.scrollTop, 30)
+    assert.equal(still.card.scrollTop, 0)
+    assert.equal(still.page.scrollTop, 55)
+
+    const { card, row } = mounted(0, 10)
+    const stranger = document.createElement('div')
+    document.body.appendChild(stranger)
+    assert.doesNotThrow(() => {
+      revealRowInCard(null, row)
+      revealRowInCard(card, null)
+      revealRowInCard(card, stranger)
+    })
+    stranger.remove()
+  })
+
+  test('alignRowInCard puts the row top at the region top (honoring an inset) and ignores non-overflow, null, and outside cases', () => {
+    const { card, region, row } = mounted(250, 280)
+    alignRowInCard(card, row)
+    assert.equal(region.scrollTop, 280, 'the row top lands at the region top: 30 + (250 − 0)')
+    const above = mounted(-10, 20)
+    alignRowInCard(above.card, above.row)
+    assert.equal(above.region.scrollTop, 20)
+    const inset = mounted(250, 280)
+    alignRowInCard(inset.card, inset.row, 30)
+    assert.equal(inset.region.scrollTop, 250, 'the inset leaves room for a sticky group head: 30 + (250 − 0 − 30)')
+
+    const still = mounted(250, 280, false)
+    alignRowInCard(still.card, still.row)
+    assert.equal(still.region.scrollTop, 30)
+    const stranger = document.createElement('div')
+    assert.doesNotThrow(() => {
+      alignRowInCard(card, null)
+      alignRowInCard(card, stranger)
+      alignRowInCard(null, row)
+    })
+  })
+})
+
+describe('scrollIntoViewIfPossible', () => {
+  test('a null element or one without the verb is a no-op; the live verb receives the options', () => {
+    const bare = document.createElement('div')
+    Object.defineProperty(bare, 'scrollIntoView', { value: undefined })
+    assert.doesNotThrow(() => {
+      scrollIntoViewIfPossible(null)
+      scrollIntoViewIfPossible(bare)
+    })
+    const calls: (ScrollIntoViewOptions | undefined)[] = []
+    const el = document.createElement('div')
+    el.scrollIntoView = (options?: boolean | ScrollIntoViewOptions) => { calls.push(options as ScrollIntoViewOptions | undefined) }
+    scrollIntoViewIfPossible(el, { block: 'nearest', behavior: 'smooth' })
+    assert.deepEqual(calls, [{ block: 'nearest', behavior: 'smooth' }])
   })
 })

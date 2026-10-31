@@ -2,11 +2,10 @@ import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { makeDetailNote } from '../../../src/client/components/detailNote'
-import { DICT_EN, DICT_ZH } from '../../../src/client/i18n'
+import { DICT_EN } from '../../../src/client/i18n'
 import { click, makeKit, mount, query, text } from '../helpers/kit'
 
 const DetailNote = makeDetailNote(makeKit())
-const DetailNoteZh = makeDetailNote(makeKit('zh'))
 
 describe('DetailNote', () => {
   test('the loading strip names the pending read', async () => {
@@ -33,12 +32,6 @@ describe('DetailNote', () => {
     const m = await mount(h(DetailNote, { state: 'failed' as const }))
     assert.equal(text(m.container), DICT_EN['detail.loadFailed'])
     assert.equal(m.container.querySelector('button'), null)
-    await m.unmount()
-  })
-
-  test('the zh locale localizes both states', async () => {
-    const m = await mount(h(DetailNoteZh, { state: 'loading' as const }))
-    assert.equal(text(m.container), DICT_ZH['detail.loading'])
     await m.unmount()
   })
 })

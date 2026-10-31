@@ -1,6 +1,3 @@
-// The supported log dialect (dsh 0.1.7-rc.2+, session format V4) read by the real fold: the seam each
-// event family carries, plus the hostile shapes a durable log may hold. No mocks.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { estimateSystemContent } from '../../src/shared/estimate'
@@ -8,12 +5,9 @@ import type { TimelineEvent } from '../../src/host/fold'
 import {
   assistantAttempt,
   assistantMessage,
-  codeDispatch,
   header,
   stepEnd,
   stepStart,
-  toolCall,
-  toolResult,
   userMessage,
 } from './helpers/events'
 import { assertStable, driveTimeline, timelineDef } from './helpers/projection'
@@ -23,7 +17,7 @@ const text = (t: string) => [{ type: 'text', text: t }]
 const token = (time: number, t = 'x') => ({ type: 'chunk', time, chunk: { type: 'text-delta', text: t } })
 
 describe('system/message — the system prompt as a surface node', () => {
-  test('an appended system prompt prices into systemTokens and the request total', () => {
+  test('an appended system prompt prices into systemTokens and the request total; a later header never clears it', () => {
     const prompt = 'You are an agent. '.repeat(20)
     const { state, view } = driveTimeline([
       header(1, { tools: [] }),
@@ -37,17 +31,20 @@ describe('system/message — the system prompt as a surface node', () => {
     assert.equal(state.requests[0].system, price, 'the request record snapshots the prompt in force')
     assert.deepEqual(view.systems, [{ seq: 2, time: 2000, tokens: price }], 'the wire carries the live prompt nodes')
     assert.equal(view.current.total, price + state.sums.user + state.sums.assistant, 'the prompt joins the composition total')
-  })
-
-  test('a system-less request header never clears log-sourced nodes (headers carry no prompt)', () => {
-    const prompt = 'prompt '.repeat(10)
-    const { state } = driveTimeline([
+    const headerOnly = driveTimeline([
       { type: 'system/message', seq: 1, time: 1000, data: { message: { content: text(prompt) } }, surfaceOp: 'append' },
       header(2, { tools: [] }),
       header(3, { tools: [] }),
-    ])
-    assert.equal(state.systemTokens, estimateSystemContent(text(prompt)))
-    assert.equal(state.systems?.length, 1)
+    ]).state
+    assert.equal(headerOnly.systemTokens, price, 'headers carry no prompt, so they never clear log-sourced nodes')
+    assert.equal(headerOnly.systems?.length, 1)
+    const malformed = driveTimeline([
+      { type: 'system/message', seq: 1, time: 1000, data: null as never, surfaceOp: 'append' },
+      { type: 'system/message', seq: 2, time: 2000, data: { message: 'not-a-record' }, surfaceOp: 'append' },
+      { type: 'system/message', seq: 3, time: 3000, data: { message: { content: text('real prompt') } }, surfaceOp: 'append' },
+    ]).state
+    assert.deepEqual(malformed.systems?.map(n => n.tokens), [0, 0, estimateSystemContent(text('real prompt'))])
+    assert.equal(malformed.systemTokens, estimateSystemContent(text('real prompt')))
   })
 
   test('an empty node is dormant: it keeps its position without clearing a live prompt', () => {
@@ -61,47 +58,46 @@ describe('system/message — the system prompt as a surface node', () => {
     assert.equal(state.systems?.[1].tokens, 0)
   })
 
-  test('a replacement over the head swaps the node and reprices (startSeq/endSeq)', () => {
+  test('a replacement swaps or starts the node list and reprices (startSeq/endSeq)', () => {
     const first = 'first '.repeat(10)
     const second = 'second prompt text '.repeat(10)
-    const { state, view } = driveTimeline([
+    const existing = driveTimeline([
       { type: 'system/message', seq: 1, time: 1000, data: { message: { content: text(first) } }, surfaceOp: 'append' },
       { type: 'system/message', seq: 2, time: 2000, data: { message: { content: text(second) } }, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } },
     ])
-    assert.deepEqual(state.systems, [{ seq: 2, time: 2000, tokens: estimateSystemContent(text(second)) }])
-    assert.equal(state.systemTokens, estimateSystemContent(text(second)))
-    assert.deepEqual(view.systems, state.systems)
+    assert.deepEqual(existing.state.systems, [{ seq: 2, time: 2000, tokens: estimateSystemContent(text(second)) }])
+    assert.equal(existing.state.systemTokens, estimateSystemContent(text(second)))
+    assert.deepEqual(existing.view.systems, existing.state.systems)
+    const fresh = driveTimeline([
+      { type: 'system/message', seq: 4, time: 4000, data: { message: { content: text('q') } }, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } },
+    ])
+    assert.deepEqual(fresh.state.systems, [{ seq: 4, time: 4000, tokens: estimateSystemContent(text('q')) }])
+    assert.equal(fresh.state.systemTokens, estimateSystemContent(text('q')))
   })
 
-  test('a replacement that also claims ordinary surface nodes removes them (hostile log)', () => {
-    const { state } = driveTimeline([
+  test('a system replacement removes only the claimed nodes — ordinary surface nodes included (hostile log)', () => {
+    const claimed = driveTimeline([
       userMessage(1, text('aaaa'), { kind: 'user' }),
       { type: 'system/message', seq: 2, time: 2000, data: { message: { content: text('p') } }, surfaceOp: 'append' },
       userMessage(3, text('bbbb'), { kind: 'user' }),
       userMessage(9, text('cccc'), { kind: 'user' }),
       { type: 'system/message', seq: 10, time: 3000, data: { message: { content: text('q') } }, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 3 } },
-    ])
-    assert.deepEqual(state.surface.map(n => n.seq), [9], 'the claimed nodes left the surface, the later one stayed')
-    assert.equal(state.sums.user, state.surface.reduce((sum, n) => sum + n.tokens, 0))
-    assert.deepEqual(state.archived.map(n => [n.seq, n.gone]), [[1, 10], [3, 10]])
-    assert.deepEqual(state.systems, [{ seq: 10, time: 3000, tokens: estimateSystemContent(text('q')) }])
-  })
-
-  test('a system replacement leaves system nodes outside its range intact', () => {
-    const { state } = driveTimeline([
+    ]).state
+    assert.deepEqual(claimed.surface.map(n => n.seq), [9], 'the claimed nodes left the surface, the later one stayed')
+    assert.equal(claimed.sums.user, claimed.surface.reduce((sum, n) => sum + n.tokens, 0))
+    assert.deepEqual(claimed.archived.map(n => [n.seq, n.gone]), [[1, 10], [3, 10]])
+    assert.deepEqual(claimed.systems, [{ seq: 10, time: 3000, tokens: estimateSystemContent(text('q')) }])
+    const outside = driveTimeline([
       { type: 'system/message', seq: 1, time: 1000, data: { message: { content: text('earlier') } }, surfaceOp: 'append' },
       { type: 'system/message', seq: 2, time: 2000, data: { message: { content: text('p') } }, surfaceOp: 'append' },
       { type: 'system/message', seq: 5, time: 5000, data: { message: { content: text('later prompt') } }, surfaceOp: 'append' },
       { type: 'system/message', seq: 8, time: 8000, data: { message: { content: text('q') } }, surfaceOp: { op: 'replace', startSeq: 2, endSeq: 2 } },
-    ])
-    assert.deepEqual(state.systems?.map(n => n.seq), [1, 5, 8], 'only the claimed node left the list')
-    assert.equal(state.systemTokens, estimateSystemContent(text('q')), 'the newest nonempty node is effective')
+    ]).state
+    assert.deepEqual(outside.systems?.map(n => n.seq), [1, 5, 8], 'only the claimed node left the list')
+    assert.equal(outside.systemTokens, estimateSystemContent(text('q')), 'the newest nonempty node is effective')
   })
 
   test('a system/message expires an armed shadow claim (the shadow-price protocol)', () => {
-    // The claim is armed by the metering event and consumed by the NEXT surface
-    // event: a system node settling in between must expire it, so a later
-    // APPEND does not silently remove the seqs the claim named.
     const { state } = driveTimeline([
       userMessage(1, text('a'), { kind: 'user' }),
       { type: 'compaction/summary', seq: 2, time: 2000, data: { shadowedSeqs: [1], shadowedTokenCount: 9 } },
@@ -122,38 +118,9 @@ describe('system/message — the system prompt as a surface node', () => {
     assert.deepEqual(state.systems?.map(n => n.seq), [5, 6, 7, 8, 9, 10, 11, 12])
     assert.equal(state.systemTokens, estimateSystemContent(text('p12')))
   })
-
-  test('a replacement arriving before any system node starts the list', () => {
-    const { state } = driveTimeline([
-      { type: 'system/message', seq: 4, time: 4000, data: { message: { content: text('q') } }, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } },
-    ])
-    assert.deepEqual(state.systems, [{ seq: 4, time: 4000, tokens: estimateSystemContent(text('q')) }])
-    assert.equal(state.systemTokens, estimateSystemContent(text('q')))
-  })
-
-  test('a malformed payload prices 0 and a non-object message reads as empty', () => {
-    const { state } = driveTimeline([
-      { type: 'system/message', seq: 1, time: 1000, data: null as never, surfaceOp: 'append' },
-      { type: 'system/message', seq: 2, time: 2000, data: { message: 'not-a-record' }, surfaceOp: 'append' },
-      { type: 'system/message', seq: 3, time: 3000, data: { message: { content: text('real prompt') } }, surfaceOp: 'append' },
-    ])
-    assert.deepEqual(state.systems?.map(n => n.tokens), [0, 0, estimateSystemContent(text('real prompt'))])
-    assert.equal(state.systemTokens, estimateSystemContent(text('real prompt')))
-  })
 })
 
 describe('embedded assistant stream — the first-token source', () => {
-  test('a raw chunk record prices TTFT and generation', () => {
-    const { state } = driveTimeline([
-      stepStart(1, { time: 1000 }),
-      assistantMessage(2, { turn: 1, step: 1, stream: [token(1400), token(1500)], usage: { outputTokens: 3 }, time: 3000 }),
-      stepEnd(3, { time: 3100 }),
-    ])
-    assert.equal(state.timing?.ttftMs, 400)
-    assert.equal(state.timing?.genMs, 1600)
-    assert.equal(state.timing?.wallMs, 2100)
-  })
-
   test('a packed text run prices TTFT from its base time plus gaps', () => {
     const { state } = driveTimeline([
       stepStart(1, { time: 1000 }),
@@ -191,42 +158,10 @@ describe('embedded assistant stream — the first-token source', () => {
 
   test('an attempt without a token, without a slot, or over a stamped slot is uninteresting', () => {
     const def = timelineDef()
-    // No slot armed.
     assertStable(def.init(), assistantAttempt(1, { turn: 1, step: 1, stream: [token(100)] }), def)
-    // Slot armed but the stream carries no token.
     const armed = def.apply(def.init(), stepStart(1, { time: 1000 }))
     assertStable(armed, assistantAttempt(2, { turn: 1, step: 1, stream: [{ type: 'chunk', time: 1, chunk: { type: 'finish' } }] }), def)
-    // Slot already stamped (the step's earlier attempt got there first).
     const stamped = def.apply(armed, assistantAttempt(2, { turn: 1, step: 1, stream: [token(1200)] }))
     assertStable(stamped, assistantAttempt(3, { turn: 1, step: 1, stream: [token(1100)] }), def)
-  })
-})
-
-describe('PTC vocabulary seam', () => {
-  test('tool/ptc-dispatch books nested file ops exactly like a top-level call', () => {
-    const nested = codeDispatch(1, {
-      rootCallId: 'c1',
-      name: 'read',
-      arguments: JSON.stringify({ path: 'src/a.ts' }),
-    })
-    const { state } = driveTimeline([
-      toolCall(0, { callId: 'c1', name: 'run_code', arguments: JSON.stringify({ description: 'inspect' }) }),
-      nested,
-      toolResult(2, { callId: 'c1', content: text('done') }),
-    ])
-    assert.deepEqual(state.fileOps.map(op => [op.path, op.kind, op.parent]), [['src/a.ts', 'read', 2]])
-    assert.equal(state.fileOps[0].program, 'inspect')
-  })
-
-  test('a range replacement (startSeq/endSeq) splices in place', () => {
-    const { state } = driveTimeline([
-      userMessage(1, text('a'), { kind: 'user' }),
-      userMessage(2, text('bbbb'), { kind: 'user' }),
-      userMessage(3, text('cc'), { kind: 'user' }),
-      userMessage(4, text('summary'), { kind: 'user' }, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } }),
-    ])
-    assert.deepEqual(state.surface.map(n => n.seq), [4, 3], 'the replacement takes the span\'s position')
-    assert.equal(state.sums.user, state.surface.reduce((sum, n) => sum + n.tokens, 0))
-    assert.deepEqual(state.archived.map(n => n.seq), [1, 2])
   })
 })

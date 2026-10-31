@@ -1,6 +1,3 @@
-// Step brief (src/client/brief.ts): node merge/sort, the per-step brief (response hit, opener scan,
-// mid-turn inputs), and the tooltip reply previews.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { briefNodes, briefOf } from '../../src/client/brief'
@@ -24,98 +21,49 @@ function timeline(nodes: SurfaceNode[], archive: SurfaceNode[]): ContextTimeline
 }
 
 describe('briefNodes', () => {
-  test('merges live and archived nodes sorted by seq', () => {
+  test('merges live and archived nodes sorted by seq; an out-of-range index yields no brief', () => {
     const data = timeline([surfaceNodeAt(5), surfaceNodeAt(1)], [surfaceNodeAt(3, { gone: 9 }), surfaceNodeAt(2, { gone: 9 })])
     assert.deepEqual(briefNodes(data).map(n => n.seq), [1, 2, 3, 5])
-  })
-})
-
-describe('briefOf index bounds', () => {
-  test('an out-of-range index yields no brief', () => {
     assert.equal(briefOf([], [req(1)], -1), null)
     assert.equal(briefOf([], [req(1)], 1), null)
   })
 })
 
 describe('briefOf response', () => {
-  test('the assistant node at the request seq is the response', () => {
+  test('only an assistant node at the request seq is a response', () => {
     const nodes = [surfaceNodeAt(5, { cat: 'assistant', text: 'hi' })]
-    const brief = briefOf(nodes, [req(5, { turn: 1 })], 0)
-    assert.equal(brief?.response, nodes[0])
-  })
-
-  test('a non-assistant node at the request seq is not a response', () => {
-    const brief = briefOf([surfaceNodeAt(5)], [req(5, { turn: 1 })], 0)
-    assert.equal(brief?.response, undefined)
-  })
-
-  test('no node at the request seq means no response', () => {
-    const brief = briefOf([surfaceNodeAt(4)], [req(5, { turn: 1 })], 0)
-    assert.equal(brief?.response, undefined)
+    assert.equal(briefOf(nodes, [req(5, { turn: 1 })], 0)?.response, nodes[0])
+    assert.equal(briefOf([surfaceNodeAt(5)], [req(5, { turn: 1 })], 0)?.response, undefined, 'a non-assistant node is not a response')
+    assert.equal(briefOf([surfaceNodeAt(4)], [req(5, { turn: 1 })], 0)?.response, undefined, 'no node at the seq means no response')
   })
 })
 
 describe('briefOf opener scan', () => {
-  test('the opener is the newest user message before the turn starts', () => {
+  test('the opener is the newest user message before the turn starts, scoped to the turn window', () => {
     const nodes = [surfaceNodeAt(1), surfaceNodeAt(2), surfaceNodeAt(3, { cat: 'tool' }), surfaceNodeAt(5, { cat: 'assistant' })]
-    const brief = briefOf(nodes, [req(5, { turn: 1 })], 0)
-    assert.equal(brief?.opener, nodes[1])
-  })
-
-  test('no user message in the window means no opener', () => {
-    const nodes = [surfaceNodeAt(3, { cat: 'tool' }), surfaceNodeAt(5, { cat: 'assistant' })]
-    const brief = briefOf(nodes, [req(5, { turn: 1 })], 0)
-    assert.equal(brief?.opener, undefined)
-  })
-
-  test('the scan stops at the previous turn’s last bar', () => {
-    const nodes = [surfaceNodeAt(1), surfaceNodeAt(3, { cat: 'assistant' }), surfaceNodeAt(5, { cat: 'tool' }), surfaceNodeAt(7, { cat: 'assistant' })]
-    const requests = [req(3, { turn: 1 }), req(7, { turn: 2 })]
-    const brief = briefOf(nodes, requests, 1)
-    // The user at seq 1 lies at/below the lower bound (3) and is not found.
-    assert.equal(brief?.opener, undefined)
-  })
-
-  test('a user message inside the window of a later turn is found', () => {
-    const nodes = [surfaceNodeAt(3, { cat: 'assistant' }), surfaceNodeAt(5), surfaceNodeAt(7, { cat: 'assistant' })]
-    const requests = [req(3, { turn: 1 }), req(7, { turn: 2 })]
-    const brief = briefOf(nodes, requests, 1)
-    assert.equal(brief?.opener, nodes[1])
+    assert.equal(briefOf(nodes, [req(5, { turn: 1 })], 0)?.opener, nodes[1])
+    assert.equal(briefOf([surfaceNodeAt(3, { cat: 'tool' }), surfaceNodeAt(5, { cat: 'assistant' })], [req(5, { turn: 1 })], 0)?.opener, undefined, 'no user message in the window')
+    const turnNodes = [surfaceNodeAt(1), surfaceNodeAt(3, { cat: 'assistant' }), surfaceNodeAt(5, { cat: 'tool' }), surfaceNodeAt(7, { cat: 'assistant' })]
+    const turnRequests = [req(3, { turn: 1 }), req(7, { turn: 2 })]
+    assert.equal(briefOf(turnNodes, turnRequests, 1)?.opener, undefined, 'the scan stops at the previous turn’s last bar')
+    const later = [surfaceNodeAt(3, { cat: 'assistant' }), surfaceNodeAt(5), surfaceNodeAt(7, { cat: 'assistant' })]
+    assert.equal(briefOf(later, turnRequests, 1)?.opener, later[1], 'a user message inside the later turn’s window is found')
   })
 })
 
 describe('briefOf inputs', () => {
-  test('a mid-turn step collects the nodes since the previous bar', () => {
+  test('a mid-turn step collects the nodes since the previous bar, up to the request seq', () => {
     const nodes = [surfaceNodeAt(2), surfaceNodeAt(3, { cat: 'assistant' }), surfaceNodeAt(4, { cat: 'tool' }), surfaceNodeAt(5), surfaceNodeAt(7, { cat: 'assistant' })]
     const requests = [req(3, { turn: 1 }), req(7, { turn: 1 })]
-    const brief = briefOf(nodes, requests, 1)
-    assert.deepEqual(brief?.inputs.map(n => n.seq), [4, 5])
+    assert.deepEqual(briefOf(nodes, requests, 1)?.inputs.map(n => n.seq), [4, 5])
+    const tail = [surfaceNodeAt(4, { cat: 'tool' }), surfaceNodeAt(9, { cat: 'tool' })]
+    const tailRequests = [req(3, { turn: 1 }), req(7, { turn: 1 })]
+    assert.deepEqual(briefOf(tail, tailRequests, 1)?.inputs.map(n => n.seq), [4], 'the scan stops at the request seq even past the node tail')
   })
 
-  test('the input scan stops at the request seq even past the node tail', () => {
-    const nodes = [surfaceNodeAt(4, { cat: 'tool' }), surfaceNodeAt(9, { cat: 'tool' })]
-    const requests = [req(3, { turn: 1 }), req(7, { turn: 1 })]
-    const brief = briefOf(nodes, requests, 1)
-    assert.deepEqual(brief?.inputs.map(n => n.seq), [4])
-  })
-
-  test('a turn start has no inputs row', () => {
-    const nodes = [surfaceNodeAt(4, { cat: 'tool' }), surfaceNodeAt(5)]
-    const requests = [req(3, { turn: 1 }), req(7, { turn: 2 })]
-    const brief = briefOf(nodes, requests, 1)
-    assert.deepEqual(brief?.inputs, [])
-  })
-
-  test('requests without turn fields share the default turn', () => {
-    const nodes = [surfaceNodeAt(4, { cat: 'tool' })]
-    const requests = [req(3), req(7)]
-    const brief = briefOf(nodes, requests, 1)
-    assert.deepEqual(brief?.inputs.map(n => n.seq), [4])
-  })
-
-  test('a missing previous turn field differs from a numbered turn', () => {
-    const requests = [req(3), req(7, { turn: 2 })]
-    const brief = briefOf([], requests, 1)
-    assert.deepEqual(brief?.inputs, [])
+  test('a turn start and a missing previous turn field both yield no inputs row; requests without turn fields share the default turn', () => {
+    assert.deepEqual(briefOf([surfaceNodeAt(4, { cat: 'tool' }), surfaceNodeAt(5)], [req(3, { turn: 1 }), req(7, { turn: 2 })], 1)?.inputs, [])
+    assert.deepEqual(briefOf([], [req(3), req(7, { turn: 2 })], 1)?.inputs, [])
+    assert.deepEqual(briefOf([surfaceNodeAt(4, { cat: 'tool' })], [req(3), req(7)], 1)?.inputs.map(n => n.seq), [4])
   })
 })

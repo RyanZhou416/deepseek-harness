@@ -1,13 +1,8 @@
-// Durable session-event envelope builders for the fold specs. Shapes mirror the harness's durable vocabulary (`SessionEventMap` in
-// @deepseek-ai/dsh-session, plus the dsh-compaction declaration-merged `compaction/*` family) — the same envelopes a real session log
-// carries, minus fields the fold never reads.
-
 import type { TimelineEvent } from '../../../src/host/fold'
 import type { ContentBlock, MessageSource } from '../../../src/host/pricing'
 
 let clock = 0
 
-/** Monotonic timestamps, so folded records stay time-ordered without thinking. */
 export function at(time?: number): number {
   clock += 1000
   return time ?? clock
@@ -18,7 +13,6 @@ export function header(seq: number, opts: {
   model?: unknown
   provider?: unknown
   reason?: 'initial' | 'resume' | 'change'
-  /** Override the whole config object (e.g. to omit model/provider). */
   config?: unknown
   time?: number
 } = {}): TimelineEvent {
@@ -31,7 +25,6 @@ export function requestContext(seq: number, data?: Record<string, unknown>): Tim
   return { type: 'request/context', seq, time: at(), ...(data === undefined ? {} : { data }) }
 }
 
-/** user/message: the durable payload IS the message (deriveEventMessage returns data). */
 export function userMessage(seq: number, content: ContentBlock[], source?: MessageSource | null, opts: {
   time?: number
   surfaceOp?: TimelineEvent['surfaceOp']
@@ -47,8 +40,20 @@ export function toolCall(seq: number, opts: {
   arguments?: string
   turn?: number
   step?: number
+  time?: number
 }): TimelineEvent {
-  return { type: 'tool/call', seq, time: at(), data: { callId: opts.callId, name: opts.name, arguments: opts.arguments ?? '{}' } }
+  return {
+    type: 'tool/call',
+    seq,
+    time: at(opts.time),
+    data: {
+      callId: opts.callId,
+      name: opts.name,
+      arguments: opts.arguments ?? '{}',
+      ...(opts.turn !== undefined ? { turn: opts.turn } : {}),
+      ...(opts.step !== undefined ? { step: opts.step } : {}),
+    },
+  }
 }
 
 export function stepStart(seq: number, opts: { time?: number } = {}): TimelineEvent {
@@ -59,15 +64,10 @@ export function stepEnd(seq: number, opts: { time?: number } = {}): TimelineEven
   return { type: 'step/end', seq, time: at(opts.time) }
 }
 
-/** tool/result: the model-visible message rides data.message — the first-class
- * tool-role message (the lifted `toolCallId`/`isError`, direct content) whose
- * tool source carries the callId the fold pairs on. */
 export function toolResult(seq: number, opts: {
   callId: string
   content: ContentBlock[]
-  /** The durable error mark: `message.isError`. */
   error?: boolean
-  /** The bounded presentation meta (search matches / read window) on the durable event. */
   meta?: unknown
   time?: number
 }): TimelineEvent {
@@ -83,14 +83,11 @@ export function toolResult(seq: number, opts: {
   return { type: 'tool/result', seq, time: at(opts.time), data, surfaceOp: 'append' }
 }
 
-/** assistant/message: the durable payload nests the message under `data.message`. */
 export function assistantMessage(seq: number, opts: {
   turn?: number
   step?: number
   content?: ContentBlock[]
-  /** Widened: hostile fixtures ride the same field (the fold re-proves every bucket). */
   usage?: Record<string, unknown>
-  /** The embedded provider stream (raw `chunk` records and packed runs). */
   stream?: unknown
   time?: number
   surfaceOp?: TimelineEvent['surfaceOp']
@@ -103,7 +100,6 @@ export function assistantMessage(seq: number, opts: {
   return { type: 'assistant/message', seq, time: at(opts.time), data, surfaceOp: opts.surfaceOp ?? 'append' }
 }
 
-/** assistant/attempt: a settled model attempt that committed no surface message. */
 export function assistantAttempt(seq: number, opts: {
   turn?: number
   step?: number
@@ -118,7 +114,6 @@ export function assistantAttempt(seq: number, opts: {
   }
 }
 
-/** system/message: the system prompt as a surface node. */
 export function systemMessage(seq: number, opts: {
   turn?: number
   step?: number
@@ -151,17 +146,85 @@ export function planMode(seq: number, data?: Record<string, unknown>): TimelineE
   return { type: 'plan/mode', seq, time: at(), ...(data === undefined ? {} : { data }) }
 }
 
-/** session/end-seed: the fork/seed boundary marker; `data` widened for hostile fixtures. */
 export function endSeed(seq: number, data?: unknown): TimelineEvent {
   return { type: 'session/end-seed', seq, time: at(), ...(data === undefined ? {} : { data }) as Record<string, unknown> }
 }
 
-/** An event the fold does not care about (a todo write, a turn marker, …). */
 export function foreign(seq: number, type = 'todo/write'): TimelineEvent {
   return { type, seq, time: at(), data: {} }
 }
 
-/** A nested PTC (Code Mode) dispatch settling inside a run_code program. */
+export function codeDispatchStart(seq: number, opts: {
+  rootCallId?: unknown
+  parentCallId?: unknown
+  subCallId?: unknown
+  name?: unknown
+  arguments?: unknown
+  time?: number
+}): TimelineEvent {
+  return {
+    type: 'tool/ptc-dispatch-start',
+    seq,
+    time: at(opts.time),
+    data: {
+      rootCallId: opts.rootCallId,
+      parentCallId: opts.parentCallId ?? opts.rootCallId,
+      subCallId: opts.subCallId ?? `${String(opts.rootCallId)}:code:0`,
+      name: opts.name,
+      arguments: opts.arguments,
+    },
+  }
+}
+
+export function jobRegistered(seq: number, opts: {
+  jobId?: unknown
+  callId?: unknown
+  startedAt?: unknown
+  time?: number
+}): TimelineEvent {
+  return {
+    type: 'job/registered',
+    seq,
+    time: at(opts.time),
+    data: {
+      jobId: opts.jobId ?? 'job-1',
+      owner: 'session',
+      kind: 'bash',
+      label: 'cmd',
+      startedAt: opts.startedAt,
+      toolCall: { callId: opts.callId, rootCallId: opts.callId },
+    },
+  }
+}
+
+export function jobSettled(seq: number, opts: {
+  jobId?: unknown
+  callId?: unknown
+  finishedAt?: unknown
+  status?: unknown
+  detail?: unknown
+  time?: number
+}): TimelineEvent {
+  return {
+    type: 'job/settled',
+    seq,
+    time: at(opts.time),
+    data: {
+      jobId: opts.jobId ?? 'job-1',
+      owner: 'session',
+      kind: 'bash',
+      label: 'cmd',
+      startedAt: 0,
+      toolCall: { callId: opts.callId, rootCallId: opts.callId },
+      finishedAt: opts.finishedAt,
+      status: opts.status ?? 'completed',
+      cause: 'producer',
+      producerReported: true,
+      detail: opts.detail,
+    },
+  }
+}
+
 export function codeDispatch(seq: number, opts: {
   rootCallId?: unknown
   parentCallId?: unknown
@@ -169,6 +232,7 @@ export function codeDispatch(seq: number, opts: {
   name?: unknown
   arguments?: unknown
   isError?: unknown
+  content?: unknown
   time?: number
 }): TimelineEvent {
   return {
@@ -182,7 +246,7 @@ export function codeDispatch(seq: number, opts: {
       name: opts.name,
       arguments: opts.arguments,
       isError: opts.isError ?? false,
-      content: [],
+      content: opts.content ?? [],
     },
   }
 }

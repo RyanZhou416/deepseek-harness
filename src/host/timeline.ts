@@ -1,39 +1,22 @@
-/**
- * The `contextTimeline` session projection unit — the plugin's data plane.
- *
- * This is the whole Host half after the v0.9 data-path migration: instead of
- * serving snapshots over a custom `/dsh-context` RPC channel, the plugin
- * registers one pure projection unit on the harness's
- * `ctx.sessionProjections` registry. The framework then:
- *   - drives the fold per committed `session/event` (eager, incremental),
- *   - persists the unit state through `ctx.sessionProjectionCache`
- *     (checkpointed rows, cold-read ladder, resume-safe),
- *   - delivers finished values to the browser as a `session/projection` push
- *     frame plus a tail-page baseline, where the Client reads them through
- *     the framework-standard `useProjection('contextTimeline')` seat.
- *
- * The unit is pure mathematics (init/apply/view) — it holds no subscriptions
- * and never touches the client. The wire value is the same Snapshot the UI
- * has always rendered (shared/types.ts), so the Client renders unchanged.
- */
-
 import { z } from 'zod'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Config } from './config'
 import { resolveBounds } from './config'
-import type { ProjectionDefinition } from './compat'
+import type { WiredProjection } from './projection'
 import type { ContextTimeline } from '../shared/types'
 import { applyTimeline } from './fold'
 import { createTimelineState } from './foldState'
 import type { TimelineState } from './foldState'
 import { buildTimelineHead, buildTimelineView } from './foldWire'
 
-/** Validate the wire payload before it leaves the host (strict: no drift). */
 const surfaceNodeSchema = z.object({
   seq: z.number().int().nonnegative(),
   time: z.number().optional(),
   cat: z.enum(['user', 'inject', 'skill', 'assistant', 'tool']),
   tokens: z.number().int().nonnegative(),
+  reasoning: z.number().int().nonnegative().optional(),
+  answerTokens: z.number().int().nonnegative().optional(),
+  callTokens: z.number().int().nonnegative().optional(),
   imgs: z.number().int().nonnegative().optional(),
   gone: z.number().int().nonnegative().optional(),
   form: z.string().optional(),
@@ -45,7 +28,6 @@ const surfaceNodeSchema = z.object({
   calls: z.array(z.string()).optional(),
 }).strict()
 
-/** One live system-prompt node (shared/types.ts SystemPromptNode). */
 const systemPromptNodeSchema = z.object({
   seq: z.number().int().nonnegative(),
   time: z.number(),
@@ -65,13 +47,9 @@ const requestRecordSchema = z.object({
   tool: z.number().int().nonnegative(),
   total: z.number().int().nonnegative(),
   prompt: z.number().int().nonnegative().optional(),
-  /** Skill-machinery tokens (issue #66). The fold writes it on every record;
-   * optional so rows folded before the category existed still parse. */
   skill: z.number().int().nonnegative().optional(),
   cacheRead: z.number().int().nonnegative().optional(),
   output: z.number().int().nonnegative().optional(),
-  /** The request's step active milliseconds (see RequestRecord.activeMs).
-   * Optional so a record whose step never closed (the live tail) still parses. */
   activeMs: z.number().nonnegative().optional(),
   stepCount: z.number().int().positive().optional(),
 }).strict()
@@ -94,7 +72,6 @@ const contextEventSchema = z.object({
   step: z.number().optional(),
 }).strict()
 
-/** The fold-derived file-operation record (shared/types.ts FileOpRecord). */
 const fileOpSchema = z.object({
   seq: z.number().int().nonnegative(),
   path: z.string(),
@@ -116,7 +93,50 @@ const fileOpSchema = z.object({
   gone: z.number().int().nonnegative().optional(),
 }).strict()
 
-/** One painted span of the timing strip (shared/types.ts TimingSpan). */
+const commandSchema = z.object({
+  seq: z.number().int().nonnegative(),
+  resultSeq: z.number().int().nonnegative().optional(),
+  time: z.number(),
+  tool: z.string(),
+  cmd: z.string(),
+  cmdTruncated: z.literal(true).optional(),
+  description: z.string().optional(),
+  cwd: z.string().optional(),
+  timeoutMs: z.number().positive().optional(),
+  background: z.literal(true).optional(),
+  sandbox: z.string().optional(),
+  codeMode: z.literal(true).optional(),
+  parent: z.number().int().nonnegative().optional(),
+  turn: z.number().optional(),
+  step: z.number().optional(),
+  start: z.number(),
+  end: z.number().optional(),
+  status: z.enum(['running', 'completed', 'failed', 'killed']),
+  exit: z.number().int().optional(),
+  exitInferred: z.literal(true).optional(),
+  signal: z.string().optional(),
+  timedOut: z.literal(true).optional(),
+  stopped: z.literal(true).optional(),
+  denied: z.literal(true).optional(),
+  err: z.boolean(),
+  outChars: z.number().int().nonnegative().optional(),
+  outTruncated: z.literal(true).optional(),
+  stderr: z.literal(true).optional(),
+  derived: z.literal(true).optional(),
+  gone: z.number().int().nonnegative().optional(),
+}).strict()
+
+const commandStateSchema = commandSchema.extend({
+  call: z.string().optional(),
+}).strict()
+
+const commandStatsSchema = z.object({
+  runs: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  ms: z.number().nonnegative(),
+  bg: z.number().int().nonnegative(),
+}).strict()
+
 const timingSpanSchema = z.object({
   kind: z.enum(['ttft', 'reasoning', 'text', 'toolarg', 'tools', 'other']),
   start: z.number(),
@@ -130,6 +150,9 @@ const currentSchema = z.object({
   inject: z.number().int().nonnegative(),
   skill: z.number().int().nonnegative(),
   assistant: z.number().int().nonnegative(),
+  assistantReasoning: z.number().int().nonnegative().optional(),
+  assistantAnswerTokens: z.number().int().nonnegative().optional(),
+  assistantCallTokens: z.number().int().nonnegative().optional(),
   tool: z.number().int().nonnegative(),
   total: z.number().int().nonnegative(),
 }).strict()
@@ -148,7 +171,6 @@ const costModelSchema = z.object({
 
 const costModelsSchema = z.record(z.string(), costModelSchema)
 
-/** The session-cost wire shape — shared by every projection that serves one (activity.ts imports it). */
 export const costUsageSchema = z.record(z.string(), costModelsSchema)
 
 const toolTimingSchema = z.object({
@@ -160,7 +182,6 @@ const timingTotalsSchema = z.object({
   wallMs: z.number().nonnegative(),
   ttftMs: z.number().nonnegative(),
   genMs: z.number().nonnegative(),
-  // Additive-optional: rows cached before the generation split, the block counts, or the throughput seat existed must keep parsing.
   reasoningMs: z.number().nonnegative().optional(),
   reasoningBlocks: z.number().int().nonnegative().optional(),
   textMs: z.number().nonnegative().optional(),
@@ -171,51 +192,47 @@ const timingTotalsSchema = z.object({
   speedMs: z.number().nonnegative().optional(),
   calls: z.number().int().nonnegative(),
   toolsMs: z.number().nonnegative(),
+  toolBusyMs: z.number().nonnegative().optional(),
+  idleMs: z.number().nonnegative().optional(),
   toolCalls: z.number().int().nonnegative(),
   tools: z.record(z.string(), toolTimingSchema),
 }).strict()
 
-/** The baseline-gate record the fallback unit serves (see fallback.ts). */
 const unsupportedSchema = z.object({
   current: z.string(),
   minimum: z.string(),
 }).strict()
 
-/** The stats board's precomputed count figures (the split head — see Snapshot.counts). */
 const countsSchema = z.object({
   turns: z.number().int().nonnegative(),
   steps: z.number().int().nonnegative(),
   injects: z.number().int().nonnegative(),
   compactions: z.number().int().nonnegative(),
   prunes: z.number().int().nonnegative(),
-  // Additive-optional like every head field derived at view time: a cached row restores with its full event set.
   skills: z.number().int().nonnegative().optional(),
 }).strict()
 
-/** The newest retained request's billing summary (the split head's headline anchor). */
 const lastSchema = z.object({
   seq: z.number(),
   total: z.number().int().nonnegative(),
   prompt: z.number().int().nonnegative().optional(),
 }).strict()
 
-/** One wire contract for both generations: the SPLIT head (envelope scalars +
- * counts/last/detailRev; the heavy collections stay absent — they ride the
- * on-demand detail channel, host/detail.ts) and the INLINE value
- * (channel-less hosts and the fallback unit carry the collections in place).
- * The collections are therefore optional on the schema; the split marker is `detailRev` (present ⟺ split). */
 export const contextTimelineSchema = z.object({
   ok: z.literal(true),
   unsupported: unsupportedSchema.optional(),
   model: z.string().optional(),
   provider: z.string().optional(),
+  reasoningEffort: z.string().optional(),
   contextWindow: z.number().optional(),
   maxOutputTokens: z.number().positive().optional(),
   current: currentSchema,
   images: z.number().int().nonnegative().optional(),
+  generatedReasoning: z.number().int().nonnegative().optional(),
+  generatedAnswerTokens: z.number().int().nonnegative().optional(),
+  generatedCallTokens: z.number().int().nonnegative().optional(),
   toolCalls: z.number().int().nonnegative().optional(),
   humanInputs: z.number().int().nonnegative().optional(),
-  // Additive-optional like humanInputs: rows folded before the field existed read without it, and clients degrade to zero.
   answers: z.number().int().nonnegative().optional(),
   lastUser: z.string().optional(),
   counts: countsSchema.optional(),
@@ -233,14 +250,17 @@ export const contextTimelineSchema = z.object({
   archiveFloor: z.number().int().nonnegative().optional(),
   fileOps: z.array(fileOpSchema).optional(),
   fileOpsFloor: z.number().int().nonnegative().optional(),
+  commands: z.array(commandSchema).optional(),
+  commandsFloor: z.number().int().nonnegative().optional(),
+  commandStats: commandStatsSchema.optional(),
   spans: z.array(timingSpanSchema).optional(),
 }).strict() as unknown as z.ZodType<ContextTimeline>
 
-/** The persisted fold-state schema (the registry's `stateSchema`
- * contract). Validates the plain-JSON `TimelineState` before a checkpoint
- * row seeds a fold — the same shape guarantee the projection cache's plain-JSON precondition already enforces at write time. */
 const timelineStateSchema = z.object({
   surface: z.array(surfaceNodeSchema),
+  assistantReasoning: z.number().int().nonnegative(),
+  assistantAnswerTokens: z.number().int().nonnegative(),
+  assistantCallTokens: z.number().int().nonnegative(),
   sums: z.object({
     user: z.number().int().nonnegative(),
     inject: z.number().int().nonnegative(),
@@ -253,6 +273,7 @@ const timelineStateSchema = z.object({
   toolsTokens: z.number().int().nonnegative(),
   model: z.string().optional(),
   provider: z.string().optional(),
+  reasoningEffort: z.string().optional(),
   lastModel: z.string().optional(),
   contextWindow: z.number().optional(),
   maxOutputTokens: z.number().positive().optional(),
@@ -261,6 +282,9 @@ const timelineStateSchema = z.object({
   events: z.array(contextEventSchema),
   archived: z.array(surfaceNodeSchema),
   cost: costUsageSchema.optional(),
+  generatedReasoning: z.number().int().nonnegative().optional(),
+  generatedAnswerTokens: z.number().int().nonnegative().optional(),
+  generatedCallTokens: z.number().int().nonnegative().optional(),
   archiveFloor: z.number().optional(),
   timing: timingTotalsSchema.optional(),
   humanInputs: z.number().int().nonnegative().optional(),
@@ -273,43 +297,34 @@ const timelineStateSchema = z.object({
   stepWaits: z.array(z.object({ start: z.number(), end: z.number() }).strict()).optional(),
   stepApprovals: z.record(z.string(), z.number()).optional(),
   stepRequestSeq: z.number().optional(),
+  stepBeats: z.array(z.number()).optional(),
+  stepBeatsFull: z.boolean().optional(),
   callNames: z.record(z.string(), z.object({ name: z.string(), start: z.number(), argsRaw: z.string().optional() }).strict()),
   pendingShadowedSeqs: z.array(z.number()).optional(),
   pendingShadowEventSeq: z.number().optional(),
   detailRev: z.number().int().nonnegative().optional(),
   fileOps: z.array(fileOpSchema),
   fileOpsFloor: z.number().int().nonnegative().optional(),
+  commands: z.array(commandStateSchema),
+  commandsFloor: z.number().int().nonnegative().optional(),
+  commandStats: commandStatsSchema.optional(),
+  pendingCodeCmds: z.record(z.string(), z.array(commandStateSchema)).optional(),
   spans: z.array(timingSpanSchema),
   stepSpans: z.array(timingSpanSchema).optional(),
   pendingCodeOps: z.record(z.string(), z.array(fileOpSchema)).optional(),
 }) as unknown as z.ZodType<TimelineState>
 
-/**
- * The `contextTimeline` projection unit, created per plugin instance with its config-resolved retention bounds.
- *
- * The registry serves the value only when the unit carries a `wire` block; a unit without one is host-only and the
- * Context tab would wait on its loading screen forever.
- *
- * `slim` picks the wire generation PER SERVE, as a liveness probe rather than a fixed flag: while the on-demand
- * detail channel is live the value is the slim head, and before it arms (or on a deployment whose connection
- * services never compose) the inline value keeps the tab working end to end. Both generations validate against the
- * same schema and fold the same state, so the split is view-only.
- */
-export function createContextTimelineDefinition(config: Config, slim: () => boolean): ProjectionDefinition<'contextTimeline', TimelineState> {
+export function createContextTimelineDefinition(config: Config, slim: () => boolean): WiredProjection<'contextTimeline', TimelineState> {
   const bounds = resolveBounds(config)
   const view = (state: TimelineState): ContextTimeline =>
     slim() ? buildTimelineHead(state) : buildTimelineView(state, bounds)
-  const definition: ProjectionDefinition<'contextTimeline', TimelineState> = {
+  const definition: WiredProjection<'contextTimeline', TimelineState> = {
     key: 'contextTimeline',
     stateSchema: timelineStateSchema,
     wire: { viewSchema: contextTimelineSchema, view },
     init: () => createTimelineState(),
     apply: (state: TimelineState, event: SessionEvent) => applyTimeline(state, event as Parameters<typeof applyTimeline>[1], bounds),
-    // Bump on any change to the persisted state shape or the fold's semantics, which invalidates cached rows and
-    // makes them refold from the durable log. A field the log can still backfill, or one the view derives at serve
-    // time, must NOT bump: invalidating every in-generation row orphans the key for idle sessions, which have no
-    // refresh channel until they go live again.
-    stateVersion: 28,
+    stateVersion: 36,
   }
   return definition
 }

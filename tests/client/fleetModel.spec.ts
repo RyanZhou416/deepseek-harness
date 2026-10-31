@@ -1,10 +1,7 @@
-// fleetModel.ts — the shared family model seat and the fleet-detail read ledger.
-
 import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test, vi } from 'vitest'
 import {
-  commsStaleOf,
   teamOfSnapshot,
   useFleetDetails,
   useFleetModel,
@@ -30,7 +27,7 @@ describe('teamOfSnapshot', () => {
   const team = { members: [{ id: 'root', name: 'lead', role: 'lead', phase: 'active' }], tasks: [] }
 
   test('the first carrying family row wins — DFS pre-order starts at the root', () => {
-    const forest = { nodes: [nodeOf('root'), nodeOf('kid', { parentId: 'root' })], edges: [], overflow: 0, solo: false }
+    const forest = { nodes: [nodeOf('root'), nodeOf('kid', { parentId: 'root' })], edges: [], solo: false }
     const snapshot = {
       byId: {
         kid: { projectionValues: { agentTeam: { members: [{ id: 'kid', name: 'k', role: 'lead', phase: 'active' }], tasks: [] } } },
@@ -41,7 +38,7 @@ describe('teamOfSnapshot', () => {
   })
 
   test('degrades: no forest, no byId, no carrier row, or a malformed value', () => {
-    const forest = { nodes: [nodeOf('root')], edges: [], overflow: 0, solo: true }
+    const forest = { nodes: [nodeOf('root')], edges: [], solo: true }
     assert.equal(teamOfSnapshot(null, forest), null)
     assert.equal(teamOfSnapshot({}, forest), null)
     assert.equal(teamOfSnapshot({ byId: null }, forest), null)
@@ -52,22 +49,8 @@ describe('teamOfSnapshot', () => {
   })
 })
 
-describe('commsStaleOf', () => {
-  test('a landed read behind the row stamp is stale', () => {
-    const landed = new Map<string, { detail: FleetDetail | null; updatedAt: number }>([
-      ['a', { detail: null, updatedAt: 5 }],
-    ])
-    assert.equal(commsStaleOf([nodeOf('a', { updatedAt: 6 })], landed), true)
-    assert.equal(commsStaleOf([nodeOf('a', { updatedAt: 5 })], landed), false)
-    assert.equal(commsStaleOf([nodeOf('b', { updatedAt: 99 })], landed), false)
-    assert.equal(commsStaleOf([], landed), false)
-  })
-})
-
-/** A probe component exposing the hook's value to the test. */
 describe('useFleetModel', () => {
   function sessionsFace(byId: Record<string, unknown>, refreshed: string[]) {
-    // The snapshot object must stay reference-stable across reads: useSyncExternalStore loops on a fresh one.
     const snapshot = { byId }
     return {
       list: {
@@ -115,6 +98,7 @@ describe('useFleetModel', () => {
     const m = await mount(h(Probe))
     assert.equal(box.current?.forest?.nodes.length, 2)
     assert.equal(box.current?.team?.members[0]?.name, 'lead')
+    assert.equal(box.current?.titles.get('s1'), 'Main')
     assert.deepEqual(refreshed, ['s1'])
     await m.unmount()
     ctx.dispose()
@@ -143,16 +127,16 @@ describe('useFleetModel', () => {
   })
 })
 
-describe('useFleetDetails', () => {
-  function probeDetails(cache: FleetDetailCache): { box: { current: FleetDetailState | null }; Probe: () => null } {
-    const box: { current: FleetDetailState | null } = { current: null }
-    function Probe(): null {
-      box.current = useFleetDetails(cache)
-      return null
-    }
-    return { box, Probe }
+function probeDetails(cache: FleetDetailCache, options?: { concurrency?: number; refreshDelayMs?: number }): { box: { current: FleetDetailState | null }; Probe: () => null } {
+  const box: { current: FleetDetailState | null } = { current: null }
+  function Probe(): null {
+    box.current = useFleetDetails(cache, options)
+    return null
   }
+  return { box, Probe }
+}
 
+describe('useFleetDetails', () => {
   function detailCache(serve: (id: string) => FleetDetail | null): FleetDetailCache {
     const cache = new FleetDetailCache()
     vi.spyOn(cache, 'fetch').mockImplementation((id: string) => Promise.resolve(serve(id)))
@@ -171,17 +155,15 @@ describe('useFleetDetails', () => {
     assert.equal(box.current?.pending.size, 0)
     assert.equal(box.current?.landed.get('a')?.detail?.initialPrompt, 'prompt of a')
 
-    // Same or older stamp: no new read.
     act(() => { state.request('a', 1) })
     assert.equal(box.current?.pending.size, 0)
-    // A newer stamp refetches.
     act(() => { state.request('a', 2) })
     await act(async () => {})
     assert.equal(box.current?.landed.get('a')?.updatedAt, 2)
     await m.unmount()
   })
 
-  test('two in-flight reads for one session settle into one pending drain', async () => {
+  test('two in-flight reads for one session: the stale landing is dropped and the latest drains pending', async () => {
     const cache = new FleetDetailCache()
     const releases: Array<(d: FleetDetail | null) => void> = []
     vi.spyOn(cache, 'fetch').mockImplementation(() => new Promise((resolve) => { releases.push(resolve) }))
@@ -189,84 +171,75 @@ describe('useFleetDetails', () => {
     const m = await mount(h(Probe))
     const state = box.current as FleetDetailState
 
-    // A fresher stamp mid-flight re-reads but never double-marks pending.
     act(() => { state.request('a', 1) })
     act(() => { state.request('a', 2) })
     assert.equal(box.current?.pending.size, 1)
-    // The older read lands first: pending drains (the newer read is untracked by design — its
-    // landing settles the ledger line), then the newer read's landing takes the newer stamp.
     await act(async () => { releases[0](null) })
-    assert.equal(box.current?.pending.size, 0)
-    assert.equal(box.current?.landed.get('a')?.updatedAt, 1)
+    assert.equal(box.current?.pending.size, 1, 'the older stamp must not drain the newer read')
+    assert.equal(box.current?.landed.get('a'), undefined)
     await act(async () => { releases[1]({ messages: [], truncated: false }) })
     assert.equal(box.current?.pending.size, 0)
     assert.equal(box.current?.landed.get('a')?.updatedAt, 2)
     await m.unmount()
   })
 
-  test('scan requests every node; refresh re-reads them', async () => {
-    let reads = 0
+  test('a newer excerpt stamp lets the opened card refetch its full text once', async () => {
+    const stamps: number[] = []
     const cache = new FleetDetailCache()
-    vi.spyOn(cache, 'fetch').mockImplementation(() => {
-      reads += 1
-      return Promise.resolve(null)
+    vi.spyOn(cache, 'fetch').mockImplementation((_id: string, stamp: number, full?: boolean) => {
+      if (full === true) stamps.push(stamp)
+      return Promise.resolve({ messages: [], truncated: false })
     })
     const { box, Probe } = probeDetails(cache)
     const m = await mount(h(Probe))
     const state = box.current as FleetDetailState
-    const nodes = [nodeOf('a', { updatedAt: 1 }), nodeOf('b', { updatedAt: 1 })]
 
-    act(() => { state.scan(nodes) })
-    await act(async () => {})
-    assert.equal(reads, 2)
-    assert.equal(box.current?.landed.size, 2)
-
-    act(() => { box.current?.refresh(nodes) })
-    await act(async () => {})
-    assert.equal(reads >= 3, true)
-    await m.unmount()
-  })
-
-  test('a landing after unmount updates nothing', async () => {
-    const cache = new FleetDetailCache()
-    let release: (d: FleetDetail | null) => void = () => {}
-    vi.spyOn(cache, 'fetch').mockImplementation(() => new Promise((resolve) => { release = resolve }))
-    const { box, Probe } = probeDetails(cache)
-    const m = await mount(h(Probe))
-    const state = box.current as FleetDetailState
     act(() => { state.request('a', 1) })
-    await m.unmount()
-    release(null)
-    await flush()
-    assert.equal(box.current?.landed.size, 0)
-  })
-
-  test('a full landing after unmount updates nothing', async () => {
-    const cache = new FleetDetailCache()
-    let release: (d: FleetDetail | null) => void = () => {}
-    vi.spyOn(cache, 'fetch').mockImplementation((_id: string, _stamp: number, full?: boolean) => {
-      if (full !== true) return Promise.resolve(null)
-      return new Promise((resolve) => { release = resolve })
-    })
-    const { box, Probe } = probeDetails(cache)
-    const m = await mount(h(Probe))
-    const state = box.current as FleetDetailState
+    await act(async () => {})
     act(() => { state.requestFull('a') })
+    await act(async () => {})
+    act(() => { state.requestFull('a') })
+    await act(async () => {})
+    assert.deepEqual(stamps, [1], 'the same stamp replays from the full ledger')
+
+    act(() => { state.request('a', 2) })
+    await act(async () => {})
+    act(() => { state.requestFull('a') })
+    await act(async () => {})
+    assert.deepEqual(stamps, [1, 2], 'a newer session stamp refreshes the open card')
     await m.unmount()
-    release({ messages: [], truncated: false, lastReply: { time: 1, text: 'late' } })
-    await flush()
-    assert.equal(box.current?.fullLanded.size, 0)
   })
 
-  test('requestFull reads the full ledger once per session and lands fullLanded', async () => {
+  test('a landing after unmount updates nothing, for the excerpt and full ledgers alike', async () => {
+    for (const full of [false, true]) {
+      const cache = new FleetDetailCache()
+      let release: (d: FleetDetail | null) => void = () => {}
+      vi.spyOn(cache, 'fetch').mockImplementation((_id: string, _stamp: number, isFull?: boolean) => {
+        if (full && isFull !== true) return Promise.resolve(null)
+        return new Promise((resolve) => { release = resolve })
+      })
+      const { box, Probe } = probeDetails(cache)
+      const m = await mount(h(Probe))
+      const state = box.current as FleetDetailState
+      act(() => {
+        if (full) state.requestFull('a')
+        else state.request('a', 1)
+      })
+      await m.unmount()
+      release(null)
+      await flush()
+      assert.equal(box.current?.landed.size, 0)
+      assert.equal(box.current?.fullLanded.size, 0)
+    }
+  })
+
+  test('requestFull reads once per session, lands a detail or null, and never touches the excerpt ledger', async () => {
     let fullReads = 0
     const cache = new FleetDetailCache()
-    vi.spyOn(cache, 'fetch').mockImplementation((_id: string, _stamp: number, full?: boolean) => {
-      if (full === true) {
-        fullReads += 1
-        return Promise.resolve({ messages: [], truncated: false, lastReply: { time: 1, text: 'FULL' } })
-      }
-      return Promise.resolve(null)
+    vi.spyOn(cache, 'fetch').mockImplementation((id: string, _stamp: number, full?: boolean) => {
+      if (full !== true) return Promise.resolve(null)
+      fullReads += 1
+      return Promise.resolve(id === 'a' ? { messages: [], truncated: false, lastReply: { time: 1, text: 'FULL' } } : null)
     })
     const { box, Probe } = probeDetails(cache)
     const m = await mount(h(Probe))
@@ -274,40 +247,53 @@ describe('useFleetDetails', () => {
 
     act(() => { state.requestFull('a') })
     assert.equal(box.current?.fullPending.has('a'), true)
-    // A second ask is deduped to the same single read.
     act(() => { state.requestFull('a') })
     await act(async () => {})
     assert.equal(fullReads, 1)
     assert.equal(box.current?.fullPending.size, 0)
     assert.equal(box.current?.fullLanded.get('a')?.lastReply?.text, 'FULL')
     assert.equal(box.current?.landed.size, 0, 'the excerpt ledger stays untouched')
+
+    act(() => { state.requestFull('b') })
+    await act(async () => {})
+    assert.equal(box.current?.fullLanded.get('b') ?? null, null, 'the absence path lands as null')
+    assert.equal(box.current?.fullPending.size, 0)
+    act(() => { state.requestFull('b') })
+    await act(async () => {})
+    assert.equal(fullReads, 2, 'a settled ask is deduped even when it read nothing')
     await m.unmount()
   })
 
-  test('a read serving nothing lands null once and never re-reads', async () => {
-    let fullReads = 0
+  test('the full state keeps only the most recently opened cards and replays an evicted one', async () => {
+    let reads = 0
     const cache = new FleetDetailCache()
-    vi.spyOn(cache, 'fetch').mockImplementation((_id: string, _stamp: number, full?: boolean) => {
-      if (full !== true) return Promise.resolve(null)
-      fullReads += 1
-      // A transport failure settles as null inside the cache (its own catch); the hook's
-      // contract is a total promise.
-      return Promise.resolve(null)
+    vi.spyOn(cache, 'fetch').mockImplementation(() => {
+      reads += 1
+      return Promise.resolve({ messages: [], truncated: false })
     })
     const { box, Probe } = probeDetails(cache)
     const m = await mount(h(Probe))
     const state = box.current as FleetDetailState
-    act(() => { state.requestFull('a') })
+    act(() => {
+      for (let i = 0; i < 9; i++) state.requestFull(`s${i}`)
+    })
     await act(async () => {})
-    assert.equal(box.current?.fullLanded.get('a') ?? null, null, 'the absence path lands as null')
+    assert.equal(box.current?.fullLanded.size, 8)
+    assert.equal(box.current?.fullLanded.has('s0'), false)
+    assert.equal(box.current?.fullLanded.has('s8'), true)
     assert.equal(box.current?.fullPending.size, 0)
-    act(() => { state.requestFull('a') })
+    assert.equal(reads, 9)
+
+    act(() => { (box.current as FleetDetailState).requestFull('s0') })
     await act(async () => {})
-    assert.equal(fullReads, 1, 'a settled ask is deduped even when it read nothing')
+    assert.equal(reads, 10, 'the evicted card replays from the cache')
+    assert.equal(box.current?.fullLanded.has('s0'), true)
+    assert.equal(box.current?.fullLanded.size, 8)
+    assert.equal(box.current?.fullLanded.has('s1'), false)
     await m.unmount()
   })
 
-  test('a later full landing replaces the first; the pending set drains exactly once', async () => {
+  test('a stale full landing is dropped; the latest drains pending exactly once', async () => {
     const releases: Array<(d: FleetDetail | null) => void> = []
     const cache = new FleetDetailCache()
     vi.spyOn(cache, 'fetch').mockImplementation((_id: string, _stamp: number, full?: boolean) => {
@@ -318,39 +304,143 @@ describe('useFleetDetails', () => {
     const m = await mount(h(Probe))
     const state = box.current as FleetDetailState
 
-    // The excerpt arms the stamp the full read rides; the fold's read spells from it.
     act(() => { state.request('a', 5) })
     await act(async () => {})
     act(() => { state.requestFull('a') })
-    // A refresh released the ledger line mid-flight; the next unfold asks again — two reads
-    // in flight, one pending mark.
-    act(() => { state.refresh([nodeOf('a', { updatedAt: 5 })]) })
+    act(() => { state.request('a', 6) })
+    await act(async () => {})
     act(() => { state.requestFull('a') })
     assert.equal(releases.length, 2)
     assert.equal(box.current?.fullPending.size, 1)
 
-    // Both flights settle on the SAME value (a cache-hit replay): the first landing writes the
-    // map; the second's identity bail-out writes nothing new.
-    const landed: FleetDetail = { messages: [], truncated: false, lastReply: { time: 1, text: 'first' } }
-    await act(async () => { releases[0]!(landed) })
-    assert.equal(box.current?.fullLanded.get('a')?.lastReply?.text, 'first')
-    assert.equal(box.current?.fullPending.size, 0, 'the first landing drains the set')
-    await act(async () => { releases[1]!(landed) })
-    assert.equal(box.current?.fullLanded.get('a')?.lastReply?.text, 'first')
+    const stale: FleetDetail = { messages: [], truncated: false, lastReply: { time: 1, text: 'stale' } }
+    await act(async () => { releases[0]!(stale) })
+    assert.equal(box.current?.fullLanded.get('a'), undefined, 'the older stamp is stale')
+    assert.equal(box.current?.fullPending.size, 1)
+
+    const latest: FleetDetail = { messages: [], truncated: false, lastReply: { time: 2, text: 'latest' } }
+    await act(async () => { releases[1]!(latest) })
+    assert.equal(box.current?.fullLanded.get('a')?.lastReply?.text, 'latest')
     assert.equal(box.current?.fullPending.size, 0)
     await m.unmount()
   })
 
-  test('refresh drops both ledgers', async () => {
+})
+
+describe('useFleetDetails scheduling', () => {
+  test('a bounded concurrency queue fills in order and drains pending exactly once', async () => {
     const cache = new FleetDetailCache()
-    const invalidated: string[] = []
-    vi.spyOn(cache, 'invalidate').mockImplementation(id => { invalidated.push(id) })
-    const { box, Probe } = probeDetails(cache)
+    const releases: Array<{ id: string; release: (d: FleetDetail | null) => void }> = []
+    vi.spyOn(cache, 'fetch').mockImplementation((id: string) => new Promise((resolve) => {
+      releases.push({ id, release: resolve })
+    }))
+    const { box, Probe } = probeDetails(cache, { concurrency: 1 })
     const m = await mount(h(Probe))
     const state = box.current as FleetDetailState
-    act(() => { state.requestFull('a') })
-    act(() => { state.refresh([nodeOf('a', { updatedAt: 1 })]) })
-    assert.deepEqual(invalidated, ['a'])
+    act(() => {
+      state.request('a', 1)
+      state.request('b', 1)
+    })
+    assert.equal(box.current?.pending.size, 2)
+    assert.deepEqual(releases.map(r => r.id), ['a'])
+    await act(async () => { releases[0].release({ messages: [], truncated: false }) })
+    assert.deepEqual(releases.map(r => r.id), ['a', 'b'])
+    assert.equal(box.current?.pending.has('a'), false)
+    assert.equal(box.current?.pending.has('b'), true)
+    await act(async () => { releases[1].release({ messages: [], truncated: false }) })
+    assert.equal(box.current?.pending.size, 0)
+    assert.equal(box.current?.landed.size, 2)
     await m.unmount()
+  })
+
+  test('a landed card debounces its refresh and keeps the old detail visible meanwhile', async () => {
+    vi.useFakeTimers()
+    const reads: number[] = []
+    const cache = new FleetDetailCache()
+    vi.spyOn(cache, 'fetch').mockImplementation((_id: string, stamp: number) => {
+      reads.push(stamp)
+      return Promise.resolve({ messages: [], truncated: false })
+    })
+    const { box, Probe } = probeDetails(cache, { refreshDelayMs: 50 })
+    const m = await mount(h(Probe))
+    const state = box.current as FleetDetailState
+    act(() => { state.request('a', 1) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    assert.equal(box.current?.landed.get('a')?.updatedAt, 1)
+    act(() => { (box.current as FleetDetailState).request('a', 2) })
+    assert.equal(box.current?.pending.has('a'), false, 'a refresh never blanks a landed card')
+    assert.deepEqual(reads, [1])
+    await act(async () => { await vi.advanceTimersByTimeAsync(40) })
+    assert.deepEqual(reads, [1], 'the window holds')
+    await act(async () => { await vi.advanceTimersByTimeAsync(20) })
+    assert.deepEqual(reads, [1, 2])
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    assert.equal(box.current?.landed.get('a')?.updatedAt, 2)
+    await m.unmount()
+    vi.useRealTimers()
+  })
+})
+
+describe('useFleetDetails — failure and queue replacement', () => {
+  test('a rejected read settles its pending mark without landing', async () => {
+    const cache = new FleetDetailCache()
+    vi.spyOn(cache, 'fetch').mockRejectedValue(new Error('offline'))
+    const { box, Probe } = probeDetails(cache)
+    const m = await mount(h(Probe))
+    act(() => { (box.current as FleetDetailState).request('a', 1) })
+    await act(async () => {})
+    assert.equal(box.current?.pending.size, 0)
+    assert.equal(box.current?.landed.size, 0)
+    await m.unmount()
+  })
+
+  test('a queued id keeps only its newest stamp while the slot is busy', async () => {
+    const cache = new FleetDetailCache()
+    const releases: Array<{ id: string; stamp: number; release: (d: FleetDetail | null) => void }> = []
+    vi.spyOn(cache, 'fetch').mockImplementation((id: string, stamp: number) => new Promise((resolve) => {
+      releases.push({ id, stamp, release: resolve })
+    }))
+    const { box, Probe } = probeDetails(cache, { concurrency: 1 })
+    const m = await mount(h(Probe))
+    act(() => {
+      ;(box.current as FleetDetailState).request('a', 1)
+      ;(box.current as FleetDetailState).request('b', 1)
+      ;(box.current as FleetDetailState).request('b', 2)
+    })
+    assert.deepEqual(releases.map(r => `${r.id}@${r.stamp}`), ['a@1'])
+    await act(async () => { releases[0].release(null) })
+    assert.deepEqual(releases.map(r => `${r.id}@${r.stamp}`), ['a@1', 'b@2'])
+    await act(async () => { releases[1].release(null) })
+    assert.equal(box.current?.landed.get('b')?.updatedAt, 2)
+    await m.unmount()
+  })
+})
+
+describe('useFleetDetails — refresh window edges', () => {
+  test('a newer stamp resets the armed window, and unmount cancels it', async () => {
+    vi.useFakeTimers()
+    const reads: number[] = []
+    const cache = new FleetDetailCache()
+    vi.spyOn(cache, 'fetch').mockImplementation((_id: string, stamp: number) => {
+      reads.push(stamp)
+      return Promise.resolve({ messages: [], truncated: false })
+    })
+    const { box, Probe } = probeDetails(cache, { refreshDelayMs: 50 })
+    const m = await mount(h(Probe))
+    act(() => { (box.current as FleetDetailState).request('a', 1) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    act(() => { (box.current as FleetDetailState).request('a', 2) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(30) })
+    act(() => { (box.current as FleetDetailState).request('a', 3) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(40) })
+    assert.deepEqual(reads, [1], 'the first window was reset by the newer stamp')
+    await act(async () => { await vi.advanceTimersByTimeAsync(10) })
+    assert.deepEqual(reads, [1, 3])
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    act(() => { (box.current as FleetDetailState).request('a', 4) })
+    await m.unmount()
+    await vi.advanceTimersByTimeAsync(100)
+    assert.deepEqual(reads, [1, 3], 'an unmounted card never fires its pending refresh')
+    vi.useRealTimers()
   })
 })

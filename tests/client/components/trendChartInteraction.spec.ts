@@ -1,7 +1,6 @@
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { attachMarkers } from '../../../src/client/components/trendChart'
 import { CATS } from '../../../src/client/categories'
 import type { ContextEventRecord } from '../../../src/shared/types'
 import { click, hover, mount, query, queryAll, unhover } from '../helpers/kit'
@@ -25,7 +24,6 @@ describe('TrendChart selection and hover linking', () => {
     await m.update(h(TrendChart, propsOf([x1, x2], { ...handlers, selectedSeq: 2 })))
     assert.ok(bars(m.container)[1].className.includes('lc-bar-selected'))
 
-    // activeTurn against a turnless bar: 0 (its ?? fallback) mismatches turn 5, matches turn 0.
     await m.update(h(TrendChart, propsOf([x1, x2], { ...handlers, selectedSeq: 2, activeTurn: 5 })))
     assert.ok(!bars(m.container)[0].className.includes('lc-bar-in-turn'))
     await m.update(h(TrendChart, propsOf([x1, x2], { ...handlers, selectedSeq: 2, activeTurn: 0 })))
@@ -46,15 +44,12 @@ describe('TrendChart category hover-link', () => {
     const chart = query(m.container, '.lc-chart')
     assert.equal(chart.hasAttribute('data-catdim'), false)
 
-    // Every total-mode segment is tagged with its category; a zero-value category renders no segment to light.
     const segs = queryAll(chart, '.lc-bar[data-seq="1"] .lc-bar-stack > .lc-cat-seg')
     assert.deepEqual(segs.map(s => s.getAttribute('data-cat')), CATS.map(c => c.key))
 
-    // The hovered key rides the container attribute — the dim/highlight pairing itself is CSS.
     await m.update(h(TrendChart, propsOf([r1, r2, r3], { hoverCat: 'tools' })))
     assert.equal(query(m.container, '.lc-chart').getAttribute('data-catdim'), 'tools')
 
-    // Delta mode: diverging stacks' segments are tagged the same way — an all-shrinking pair hangs all seven below the line.
     const big = req(4, { turn: 3, step: 0, system: 200, tools: 100, user: 60, inject: 40, skill: 30, assistant: 80, tool: 120 })
     await m.update(h(TrendChart, propsOf([big, r1], { mode: 'delta', hoverCat: 'user' })))
     const deltaChart = query(m.container, '.lc-chart')
@@ -73,7 +68,6 @@ describe('TrendChart category focus (the browser open category)', () => {
 
   test('total mode plots only the focused category, rescaled to its own max, and the tip names it', async () => {
     const m = await mount(h(TrendChart, propsOf([r1, r2], { focusCat: 'tool' })))
-    // maxTotal follows the focused figure (60 / 120), not the bars' whole compositions (300 / 600).
     assert.equal(query(m.container, '.lc-axis-top').textContent, '120')
     const bs = bars(m.container)
     const segs1 = queryAll(bs[0], '.lc-bar-stack > div')
@@ -89,10 +83,16 @@ describe('TrendChart category focus (the browser open category)', () => {
       [kit.t('tip.step', { t: 1, s: 0, n: 2 }), kit.t('tip.cat', { cat: kit.catLabel('tool'), n: '60' })],
     )
     await m.unmount()
+
+    for (const focusCat of ['nope', null]) {
+      const degraded = await mount(h(TrendChart, propsOf([r1, r2], { focusCat })))
+      assert.equal(queryAll(bars(degraded.container)[0], '.lc-bar-stack > div').length, 6, 'an unknown key or explicit null degrades to the unfocused chart')
+      assert.equal(query(degraded.container, '.lc-axis-top').textContent, '600')
+      await degraded.unmount()
+    }
   })
 
   test('the focused figure is the raw fold value; a category at zero everywhere keeps the unit axis', async () => {
-    // r1a carries usage: the focused tool value (60) still plots as-is — no provider rescale.
     const r1a = req(1, { turn: 1, step: 0, prompt: 600 })
     const m = await mount(h(TrendChart, propsOf([r1a, r2], { focusCat: 'tool' })))
     assert.equal(query(m.container, '.lc-axis-top').textContent, '120')
@@ -111,7 +111,6 @@ describe('TrendChart category focus (the browser open category)', () => {
     const grown = req(2, { turn: 1, step: 1, system: 130, tools: 50, user: 30, inject: 20, assistant: 40, tool: 60, total: 330 })
     const shrunk = req(3, { turn: 2, step: 0, system: 90, tools: 50, user: 30, inject: 20, assistant: 40, tool: 60, total: 290 })
     const m = await mount(h(TrendChart, propsOf([base, grown, shrunk], { mode: 'delta', focusCat: 'system' })))
-    // Only the system deltas (+30 / -40) drive the scale: maxUp 30, maxDown 40.
     assert.equal(query(m.container, '.lc-axis-top').textContent, '+30')
     assert.equal(query(m.container, '.lc-axis-bot').textContent, '-40')
     const bs = bars(m.container)
@@ -129,14 +128,6 @@ describe('TrendChart category focus (the browser open category)', () => {
     await m.unmount()
   })
 
-  test('an unknown focus key and an explicit null degrade to the unfocused chart', async () => {
-    for (const focusCat of ['nope', null]) {
-      const m = await mount(h(TrendChart, propsOf([r1, r2], { focusCat })))
-      assert.equal(queryAll(bars(m.container)[0], '.lc-bar-stack > div').length, 6)
-      assert.equal(query(m.container, '.lc-axis-top').textContent, '600')
-      await m.unmount()
-    }
-  })
 })
 
 describe('TrendChart markers', () => {
@@ -144,9 +135,7 @@ describe('TrendChart markers', () => {
     const reqs = [req(1, { turn: 1, step: 0 }), req(2, { turn: 1, step: 1 }), req(3, { turn: 2, step: 0 })]
     const compaction: ContextEventRecord = { seq: 2, time: 1700000000000, kind: 'compaction', count: 5, fromTurn: 1, fromStep: 0, turn: 1, step: 1 }
     const prune: ContextEventRecord = { seq: 3, time: 1700000060000, kind: 'prune' }
-    const markers = attachMarkers(reqs, [compaction, prune])
-    assert.equal(markers[1], compaction)
-    assert.equal(markers[2], prune)
+    const markers = [undefined, compaction, prune]
 
     const m = await mount(h(TrendChart, propsOf(reqs, { markers })))
     const glyph = queryAll(m.container, '.lc-bar-marker')
@@ -156,7 +145,6 @@ describe('TrendChart markers', () => {
       glyph[0].getAttribute('title'),
       '✂ ' + kit.t('events.range', { t: 1, a: 0, b: 1 }) + ' — ' + kit.t('ev.compaction', { n: 5 }),
     )
-    // No host-stamped position → bare label title.
     assert.equal(glyph[1].getAttribute('title'), '✂ ' + kit.t('ev.prune'))
     await m.unmount()
   })
@@ -181,7 +169,6 @@ describe('TrendChart tooltips', () => {
     )
     assert.equal(query(m.container, '.lc-chart-tip').style.transform, 'translate(7px, 0)')
 
-    // Turnless/step-less bars fall back to Turn 0 · Step 0.
     await m.update(h(TrendChart, propsOf(reqs, { ...handlers, hoveredSeq: 4 })))
     assert.deepEqual(
       queryAll(query(m.container, '.lc-chart-tip'), 'span').map(r => r.textContent),

@@ -1,12 +1,7 @@
-/** The skill catalog behind the Insights page's skill card: one POST to the
- * plugin's `/api/dsh-context/skills` route per panel open, anchored on the
- * current session; a failed read renders the tallies unenriched. */
-
 import type { SkillInfo } from '../shared/types'
 import { SKILLS_ROUTE } from './apiRoutes'
 import { asRecord } from './services'
 
-/** Narrow the route's payload: the name is the join key and must prove itself; path and source ride only when proved. */
 export function skillInfoListOf(value: unknown): SkillInfo[] | null {
   const list = asRecord(value)?.skills
   if (!Array.isArray(list)) return null
@@ -24,9 +19,6 @@ export function skillInfoListOf(value: unknown): SkillInfo[] | null {
   return out
 }
 
-/** One route read, narrowed into the card's name-keyed join map. The session id
- * lets the host resolve the workspace AND the preset scope (discovery mounts on
- * agent presets, so a cwd alone lists only global layers). Never rejects; later names win. */
 export async function readSkillCatalog(
   cwd: string | undefined,
   sessionId: string | undefined,
@@ -52,7 +44,6 @@ export async function readSkillCatalog(
 
 type TextCopier = (text: string) => Promise<void>
 
-/** The clipboard write through the platform API (absent off a secure context). */
 const defaultCopier: TextCopier = async (text) => {
   const clipboard = (globalThis.navigator as { clipboard?: { writeText?: unknown } } | undefined)?.clipboard
   if (typeof clipboard?.writeText !== 'function') throw new Error('clipboard unavailable')
@@ -65,8 +56,6 @@ export function setSkillCopier(next: TextCopier | null): void {
   copier = next ?? defaultCopier
 }
 
-/** Copy the skill's path for the card's footer click, resolving whether the write
- * landed so the "copied" flash never claims a failed write. */
 export async function copySkillPath(path: string): Promise<boolean> {
   try {
     await copier(path)
