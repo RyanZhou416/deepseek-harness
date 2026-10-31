@@ -1820,3 +1820,19 @@ The Session-header subagent catalog dropdown in `packages/client/ui-subagent/src
 **Preservation rule.** Do not restore a catalog-level `useSessionStatus(value => value)` subscription, a shared per-level `now` interval, per-entry `{ ...entry, activity }` copies, or a scroll listener that reacts to the menu's own scrolling. Do not remove the tooltip portal, `content-visibility` or the `aria-setsize`/`aria-posinset` attributes without restoring the tree semantics they protect. Windowing is deliberately not used: it would drop offscreen rows from find-in-page and DOM-based keyboard navigation.
 
 **Focused verification.** `pnpm exec vitest run packages/client/ui-subagent/tests` covers inner-scroll placement, unchanged-position no-commit, unrelated-status isolation, per-row status and timer updates, projection-rebuild row reuse, Home/End wraparound over 300 rows and the tooltip portal; each case fails when its guard is reverted.
+
+### Windows browser handoff without the Node/PowerShell launcher
+
+`dsh web` hands the tokenized URL to `%SystemRoot%\System32\rundll32.exe` as one argv element (`url.dll,FileProtocolHandler`), so `ShellExecute` resolves the default browser with no command shell parsing the URL; the removed path was Node → `open` → PowerShell, which delayed the first window by about 0.3–1.5 s. The Windows launch stays shell-free, absolute-pathed, detached and hidden, uses the scrubbed environment and keeps the stderr failure diagnostic; `rundll32` exits 0 when no default browser exists, so that case shows the system chooser instead of a DSH diagnostic. Non-Windows platforms keep `open`.
+
+**Preservation rule.** Do not restore `cmd /c start` (it truncates the token URL at `&`), `explorer.exe` (it splits on `,` and `=`), or the Node/PowerShell chain on Windows; keep the scrubbed environment and nonzero-exit reporting, and leave macOS, Linux, containers, WSL and `BROWSER` on `open`.
+
+**Focused verification.** `pnpm exec vitest run packages/bundle/web-app/tests` pins the Windows argv, options, environment, `unref` and failure reason and the unchanged non-Windows helper argv; `apps/cli/tests/web-browser-open.expected.e2e.ts` under `pnpm run test:expected` emulates the Windows handoff through `apps/cli/tests/fixtures/web-browser-open/`.
+
+### Startup header listings skip the historical corpus fingerprint
+
+`SessionPersistence.listHeaders()` returns `list()`'s exact selection, pending-snapshot visibility and failure order without revisions. The Workspace startup and attach-validation header index, Session Query stored pulls and the Session Controller cold-title fold use it, and the cold-title fold forwards the main listing's archived and subagent exclusions. Before, any listed pre-v4 artifact made `list()` fingerprint the whole corpus; with archived legacy Sessions still recorded in Workspace accounts, Web startup spent about 19k extra `readdir` and `stat` calls on it. `list()` and `stat()` remain the only revision carriers, so a legacy parent's revision still changes when a hidden child changes.
+
+**Preservation rule.** Keep header-only consumers on `listHeaders()` and keep `historicalCorpusRevision` on `list()`/`stat()`; do not drop recorded archived members from the Workspace header index to save this cost, and do not let the cold-title fold list without the main listing's exclusions.
+
+**Focused verification.** `pnpm exec vitest run packages/session/session-persistence-jsonl/tests/listing-cost.spec.ts packages/session/session-persistence/tests packages/workspace/workspace/tests packages/session-query/session-query/tests packages/api/session-controller/tests` covers the bounded directory reads and the `list()` negative control, revision invalidation after a hidden child rewrite, the `listHeaders` contract, the Workspace startup index and the forwarded title-fold exclusions.
