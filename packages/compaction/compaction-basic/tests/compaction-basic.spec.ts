@@ -26,6 +26,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { agentEvents, type Agent, type RequestErrorAction } from '@deepseek-ai/dsh-agent'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
@@ -1398,6 +1399,10 @@ describe('default one-shot summarizer', () => {
     const result = await compact.compactRegion(nodes[start]!, nodes[start + 1]!, agent(session, MODEL), SIGNAL)
 
     expect(adapter.lastOptions).not.toHaveProperty('system')
+    // This composition has no system-prompt service, so the helper states no
+    // sections and the adapter's exact-text fallback owns the harness
+    // paragraphs instead.
+    expect(adapter.lastOptions).not.toHaveProperty('systemSections')
     expect(adapter.lastOptions?.tools).toEqual(tools)
     expect(adapter.lastOptions?.messages.slice(0, -1)).toEqual(prefix)
     const instruction = adapter.lastOptions?.messages.at(-1)
@@ -1408,6 +1413,32 @@ describe('default one-shot summarizer', () => {
     expect(Object.isFrozen(instruction?.content[0])).toBe(true)
     expect(result.shadowedSeqs).toEqual(nodes.slice(start, start + 2))
     if (system !== undefined) expect(session.surface.nodes[0]).toBe(nodes[0])
+  })
+
+  it('keeps summarizing when prompt re-assembly fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionProjectionRegistry)
+    void new TokenMeter(ctx)
+    await ctx.plugin(SystemPrompt)
+    ctx.systemPrompt.section({
+      name: 'unavailable',
+      order: 0,
+      text: () => { throw new Error('prompt unavailable') },
+    })
+    const adapter = new ScriptedAdapter([{ type: 'text', text: 'summary' }])
+    ctx.llm.registerAdapter([MODEL], adapter)
+    const compact = new ExposedCompactionEngine(ctx, { auto: false })
+    try {
+      const session = conversation(1)
+      await compact.runSummarize({ messages: [createSystemMessage('REPLAYED SYSTEM')] }, agent(session, MODEL))
+      // A failed re-assembly only loses section identity; the replay still runs
+      // and the adapter's exact-text fallback owns the harness paragraphs.
+      expect(adapter.lastOptions).not.toHaveProperty('systemSections')
+      expect(adapter.lastOptions?.messages[0]).toMatchObject({ role: 'system' })
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 
   it('requires complete raw output when a subclass marks one local LLM stream call', () => {

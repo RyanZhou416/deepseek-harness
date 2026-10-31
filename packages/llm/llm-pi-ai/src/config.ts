@@ -317,7 +317,10 @@ export interface PiAiProviderProfile {
    * A helper class (`compaction`, `auxiliary`)
    * keeps the caller's non-harness system, layout `none`, and no markers, so it
    * under-emits the subscription helper form (billing, identity, three five-minute
-   * markers) that the worker's frame does not admit; a main or
+   * markers) that the worker's frame does not admit. A helper that states no
+   * matching section assembly drops the exact DSH identity, source, and
+   * Web-surface paragraphs by their owned texts, leaving every other caller
+   * paragraph untouched; a main or
    * subagent request that cannot state a real boundary, or that names no class
    * at all, is served as the current non-wire-parity request instead of a
    * partial wire-parity body. The three header names are adapter-owned on every

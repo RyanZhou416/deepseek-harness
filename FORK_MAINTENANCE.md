@@ -1633,8 +1633,13 @@ filter: drop `harness:source`/`app:web-surface`, replace `harness:identity`,
 keep other caller sections; a helper that states matching sections forwards the
 filtered caller text, layout `none`, no markers. `compaction-basic` supplies
 those sections from the current assembly because it replays the committed system
-message; a helper without sections keeps its replayed system unchanged. The
-three `x-cc-*` headers are added in the adapter's existing
+message; a helper without sections drops the exact DSH identity, source and
+Web-surface paragraphs by their owned texts (named section texts cover a
+versioned assembly that still states them), and only a whole paragraph compares
+equal. An older value-bearing paragraph with no section identity is not guessed
+at. The owned fallback texts mirror `packages/core/system-prompt` and
+`packages/context/harness-dev-context`; a change there must update the adapter
+constants and their tests. The three `x-cc-*` headers are added in the adapter's existing
 per-request header construction; they are adapter-owned on every route, a
 profile that spells one is refused at resolution, and the request construction
 also strips it. That construction also removes the worker-planned cache betas

@@ -591,16 +591,22 @@ function withClaudeCodeFieldOrder(payload: Record<string, unknown>): Record<stri
  * The caller's system blocks of one `cc3` request, without a caller identity line.
  *
  * The client emits the identity line at most once, so a caller block equal to
- * it is dropped before the policy's own block opens the array.
+ * it is dropped before the policy's own block opens the array. A helper with no
+ * matching section assembly also drops the DSH-owned harness paragraphs by
+ * exact text, because the wire never forwards them.
  * @param systemValue - the request's system value: a block array, or text for a transport that sends one.
- * @returns the caller blocks in order, with any identity line removed.
+ * @param harnessTexts - the exact harness paragraphs to drop, when the request
+ *   states no matching assembly; absent keeps every caller paragraph.
+ * @returns the caller blocks in order, with the identity line and any named
+ *   harness paragraph removed.
  */
-function cc3CallerSystem(systemValue: unknown): unknown[] {
+function cc3CallerSystem(systemValue: unknown, harnessTexts?: ReadonlySet<string>): unknown[] {
   /* v8 ignore next 3 -- pi-ai serializes `system` as a block array; the string form is handled for a transport that sends one */
   const systemBlocks = typeof systemValue === 'string'
     ? systemValue.length === 0 ? [] : [{ type: 'text', text: systemValue }]
     : arrayOf(systemValue)
-  return (systemBlocks ?? []).filter(block => !isIdentityBlock(block))
+  const caller = (systemBlocks ?? []).filter(block => !isIdentityBlock(block))
+  return harnessTexts === undefined ? caller : withoutHarnessParagraphBlocks(caller, harnessTexts)
 }
 
 /**
@@ -628,18 +634,22 @@ function cc3CallerSystem(systemValue: unknown): unknown[] {
  * @param payload - the Anthropic Messages request fields pi-ai built.
  * @param lifetime - the marker lifetime this request's class declares.
  * @param systemText - the caller's filtered prompt sections, when the request
- *   states an assembly; absent keeps the caller system the transport built.
+ *   states a matching assembly; absent keeps the caller system the transport
+ *   built.
+ * @param harnessTexts - the exact DSH harness paragraphs a helper drops when it
+ *   states no matching assembly; absent keeps every caller paragraph.
  * @returns the fields with the policy's identity block and markers in place.
  */
 function withCc3Markers(
   payload: Record<string, unknown>,
   lifetime: Cc3MarkerLifetime,
   systemText?: string,
+  harnessTexts?: ReadonlySet<string>,
 ): Record<string, unknown> {
   const toolBlocks = arrayOf(payload['tools'])
   const messageBlocks = arrayOf(payload['messages'])
   const callerSystem = systemText === undefined
-    ? cc3CallerSystem(payload['system'])
+    ? cc3CallerSystem(payload['system'], harnessTexts)
     : systemText.length === 0 ? [] : [{ type: 'text', text: systemText }]
   const system: unknown[] = [
     withCc3Marker({ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }, lifetime),
@@ -711,6 +721,46 @@ const CC_WIRE_DROPPED_PROMPT_SECTIONS: ReadonlySet<string> = new Set(['harness:s
  */
 const CC_WIRE_IDENTITY_PROMPT_SECTION = 'harness:identity'
 
+/**
+ * The exact DSH prompt paragraphs a helper can still replay when it states no
+ * matching section assembly — the `system-prompt` built-in identity line and
+ * the current `harness-dev-context` source and Web-surface paragraphs.
+ *
+ * These are the DSH-owned fallbacks for a compaction replay that carries no
+ * sections (a composition without the prompt service, or a failed re-assembly).
+ * Only a whole paragraph compares equal here; a caller paragraph that merely
+ * contains one of these texts is left untouched. A Session that admitted an
+ * older value-bearing paragraph is covered by its named section text when the
+ * request still states sections; an old paragraph with no section identity is
+ * not guessed at.
+ */
+const DSH_IDENTITY_PROMPT_TEXT = 'You are an AI agent powered by DeepSeek Harness.'
+
+const DSH_HARNESS_SOURCE_PROMPT_TEXT = 'The runtime context names the DeepSeek Harness implementation checkout. '
+  + 'The checkout location and current working directory are separate values and may differ; '
+  + 'never infer the working directory from the checkout path. Use pwd to determine the current working directory. '
+  + 'Use this checkout only to inspect or extend DSH itself.'
+
+const DSH_WEB_SURFACE_PROMPT_TEXT = 'You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. '
+  + 'When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. '
+  + 'The browser provides no implicit DOM, route, or screenshot context. '
+  + 'The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while '
+  + '`pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. '
+  + 'Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. '
+  + 'Starting another server does not update this GUI. '
+  + 'The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. '
+  + 'Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.'
+
+/** DSH-owned paragraphs a helper may drop when it has no matching section assembly. */
+const DSH_HARNESS_PROMPT_TEXTS: readonly string[] = [
+  DSH_IDENTITY_PROMPT_TEXT,
+  DSH_HARNESS_SOURCE_PROMPT_TEXT,
+  DSH_WEB_SURFACE_PROMPT_TEXT,
+]
+
+/** No paragraph is withheld; a request whose system is already the caller's own. */
+const NO_HARNESS_TEXTS: ReadonlySet<string> = new Set()
+
 /** One request's prompt sections after the CC-wire filter, in the forms each body needs. */
 interface CcPromptSections {
   /** Kept section text in assembly order, joined as the render joined it. */
@@ -757,6 +807,73 @@ function ccPromptSections(options: GenerateOptions): CcPromptSections | undefine
     staticText: stable.join('\n\n'),
     dynamicText: session.join('\n\n'),
   }
+}
+
+/**
+ * The DSH-owned paragraphs a helper may drop when its sections do not match.
+ *
+ * The defaults cover a request that carries no section metadata at all. A
+ * request that still states sections contributes the exact text of any section
+ * named `harness:identity`, `harness:source`, or `app:web-surface`, which also
+ * covers a Session whose admitted prompt holds an older paragraph for one of
+ * those sections.
+ * @param options - the assembled request.
+ * @returns the exact paragraphs this helper may remove.
+ */
+function ccHarnessSectionTexts(options: GenerateOptions): ReadonlySet<string> {
+  const texts = new Set(DSH_HARNESS_PROMPT_TEXTS)
+  for (const section of options.systemSections ?? []) {
+    if (section.text.length === 0) continue
+    if (CC_WIRE_DROPPED_PROMPT_SECTIONS.has(section.name) || section.name === CC_WIRE_IDENTITY_PROMPT_SECTION) {
+      texts.add(section.text)
+    }
+  }
+  return texts
+}
+
+/**
+ * Remove DSH-owned harness paragraphs from one text, leaving every other
+ * paragraph byte-for-byte.
+ * @param text - one system text or block text.
+ * @param texts - the exact paragraphs a CC wire never forwards.
+ * @returns the remaining text, or undefined when no paragraph remains.
+ */
+function withoutHarnessParagraphText(text: string, texts: ReadonlySet<string>): string | undefined {
+  const kept = text.split('\n\n').filter(paragraph => !texts.has(paragraph))
+  return kept.length === 0 ? undefined : kept.join('\n\n')
+}
+
+/**
+ * Remove DSH-owned harness paragraphs from one system block list.
+ * @param blocks - the system blocks to filter.
+ * @param texts - the exact paragraphs a CC wire never forwards.
+ * @returns the remaining blocks, each other paragraph byte-for-byte.
+ */
+function withoutHarnessParagraphBlocks(blocks: readonly unknown[], texts: ReadonlySet<string>): unknown[] {
+  return blocks.flatMap((block) => {
+    /* v8 ignore next -- pi-ai builds every system block as an object */
+    if (!isRequestPayload(block) || typeof block['text'] !== 'string') return [block]
+    const text = withoutHarnessParagraphText(block['text'], texts)
+    return text === undefined ? [] : [{ ...block, text }]
+  })
+}
+
+/**
+ * Remove DSH-owned harness paragraphs from one system value.
+ *
+ * Only a paragraph equal to a {@link ccHarnessSectionTexts} entry is removed;
+ * a caller paragraph that merely contains one of those texts is untouched.
+ * @param value - a system string, block array, or absent value.
+ * @param texts - the exact paragraphs a CC wire never forwards.
+ * @returns the filtered system value, or undefined when nothing remains.
+ */
+function withoutHarnessParagraphs(value: unknown, texts: ReadonlySet<string>): unknown {
+  /* v8 ignore next -- pi-ai serializes a system prompt as a block array; the string form is for a transport that sends one */
+  if (typeof value === 'string') return withoutHarnessParagraphText(value, texts)
+  const blocks = arrayOf(value)
+  if (blocks === undefined) return value
+  const kept = withoutHarnessParagraphBlocks(blocks, texts)
+  return kept.length === 0 ? undefined : kept
 }
 
 /**
@@ -1077,14 +1194,20 @@ function ccWireParityMessage(value: unknown, expandText: boolean): unknown {
  * is already stripped, so the off form only withholds the worker's plan.
  * @param payload - the Anthropic Messages request fields pi-ai built.
  * @param request - the request's resolved wire-parity decisions.
+ * @param harnessTexts - the exact DSH harness paragraphs a helper drops when it
+ *   states no matching assembly; an empty set keeps every caller paragraph.
  * @returns the replacement fields.
  */
-function withCcWireParityBody(payload: Record<string, unknown>, request: CcWireParityRequest): Record<string, unknown> {
+function withCcWireParityBody(
+  payload: Record<string, unknown>,
+  request: CcWireParityRequest,
+  harnessTexts: ReadonlySet<string>,
+): Record<string, unknown> {
   const boundary = request.boundary
   const system = boundary !== undefined
     ? ccWireParitySystem(boundary)
     : request.systemText === undefined
-      ? withoutSystemMarkers(payload['system'])
+      ? withoutHarnessParagraphs(withoutSystemMarkers(payload['system']), harnessTexts)
       // Every kept section was harness-owned when the filtered text is empty, so
       // the helper sends no system rather than an empty block array.
       : request.systemText.length === 0 ? undefined : [{ type: 'text', text: request.systemText }]
@@ -1137,6 +1260,8 @@ function withCcWireParityBody(payload: Record<string, unknown>, request: CcWireP
  * @param helper - whether the request is a helper call; see {@link isHelperRequest}.
  * @param cc3SystemText - the filtered caller prompt sections a `cc3` request
  *   sends, absent when it states no matching assembly.
+ * @param helperHarnessTexts - the exact DSH harness paragraphs a helper drops
+ *   when it states no matching assembly; absent keeps every caller paragraph.
  * @param withholdsEagerToolStreaming - whether this model sets
  *   `supportsEagerToolInputStreaming: false`, which makes pi-ai derive a beta
  *   the pinned wire does not declare; see {@link withoutToolStreamingBeta}.
@@ -1148,17 +1273,18 @@ function withAnthropicPayloadPolicy(
   ccWireParity: CcWireParityRequest | undefined,
   helper: boolean,
   cc3SystemText: string | undefined,
+  helperHarnessTexts: ReadonlySet<string> | undefined,
   withholdsEagerToolStreaming: boolean,
 ): Record<string, unknown> | undefined {
   /* v8 ignore next -- pi-ai hands the hook the request fields it built, always an object */
   if (!isRequestPayload(payload)) return undefined
   if (profile.ccWireParity === true && ccWireParity !== undefined) {
-    let next = withCcWireParityBody(payload, ccWireParity)
+    let next = withCcWireParityBody(payload, ccWireParity, helperHarnessTexts ?? NO_HARNESS_TEXTS)
     if (withholdsEagerToolStreaming) next = withoutToolStreamingBeta(next)
     return next
   }
   const cc3 = profile.cacheMarkerPolicy === 'cc3'
-  let next = cc3 ? withCc3Markers(payload, helper ? '5m' : '1h', cc3SystemText) : payload
+  let next = cc3 ? withCc3Markers(payload, helper ? '5m' : '1h', cc3SystemText, helperHarnessTexts) : payload
   // The extended beta permits the one-hour lifetime the `cc3` policy writes; a
   // helper keeps the API's default and declares no beta for it.
   if (profile.extendedCacheBeta === true && !(cc3 && helper)) next = withExtendedCacheBeta(next)
@@ -1620,6 +1746,15 @@ export class PiAiAdapter extends LlmAdapter {
       // The helper class is the one other request-level decision the payload
       // policy reads: it selects the `cc3` marker lifetime.
       const helper = isHelperRequest(request)
+      // A helper that could not state a matching assembly still drops the
+      // DSH-owned harness paragraphs by exact text, so a compaction replay
+      // cannot leak them. Named section texts cover a versioned prompt whose
+      // current assembly no longer joins to the replayed system.
+      const helperHarnessTexts = helper
+        && ccWireParity?.systemText === undefined
+        && cc3SystemText === undefined
+        ? ccHarnessSectionTexts(request)
+        : undefined
       const reasoning = resolveReasoningLevel(
         model,
         options.reasoningEffort ?? profile.reasoning,
@@ -1681,7 +1816,7 @@ export class PiAiAdapter extends LlmAdapter {
       const payloadOptions = payloadPolicy
         ? {
           onPayload: (payload: unknown) => withAnthropicPayloadPolicy(
-            payload, profile, ccWireParity, helper, cc3SystemText, withholdsEagerToolStreaming,
+            payload, profile, ccWireParity, helper, cc3SystemText, helperHarnessTexts, withholdsEagerToolStreaming,
           ),
         }
         : {}
