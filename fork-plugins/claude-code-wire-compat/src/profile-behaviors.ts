@@ -2,6 +2,8 @@
 
 import type { ClaudeCodeProtocolProfile } from "./contracts.js";
 import { CLAUDE_CODE_2_1_195_PROFILE } from "./profiles/claude-code-2.1.195.js";
+import { CLAUDE_CODE_2_1_233_PROFILE } from "./profiles/claude-code-2.1.233.js";
+import { CLAUDE_CODE_2_1_280_PROFILE } from "./profiles/claude-code-2.1.280.js";
 
 /**
  * Per-profile behaviour dispatch.
@@ -42,9 +44,28 @@ export interface ClaudeCodeProfileBehaviors {
    *
    * Consumed by `createBillingBlock` in `fingerprint.ts`. False means the
    * segments are dropped silently even when the caller supplies both, which is
-   * what a client with no parameter for them does.
+   * what a client with no parameter for them does. True for 2.1.233 and later.
    */
   readonly billingChainSegments: boolean;
+
+  /**
+   * Whether the billing block may carry the `cc_turn_origin` segment.
+   *
+   * Consumed by `createBillingBlock` in `fingerprint.ts`. A 2.1.280 addition:
+   * the 2.1.233 builder has no parameter for it, so that profile drops the
+   * value silently. True for 2.1.280 and later.
+   */
+  readonly billingTurnOriginSegment: boolean;
+
+  /**
+   * Whether the billing block may carry the `cc_prompt_index` and
+   * `cc_turn_index` segment pair.
+   *
+   * Consumed by `createBillingBlock` in `fingerprint.ts`. A 2.1.288 addition:
+   * the 2.1.280 builder has no parameter for the pair, so that profile drops
+   * the value silently. True for 2.1.288 and later.
+   */
+  readonly billingTurnPositionSegments: boolean;
 
   /**
    * Whether `claude-opus-4-5` takes its `effort` capability from the predicate
@@ -61,22 +82,49 @@ export interface ClaudeCodeProfileBehaviors {
 /**
  * Upstream 2.1.195: derivation is predicate-driven, the request builder has no
  * request-derived token ceiling, and the billing block has no parameter for
- * conversation chaining.
+ * conversation chaining or turn segments.
  */
 const LEGACY_BEHAVIORS: ClaudeCodeProfileBehaviors = Object.freeze({
   requestDerivedTokenCeiling: false,
   billingChainSegments: false,
+  billingTurnOriginSegment: false,
+  billingTurnPositionSegments: false,
   opus45EffortException: true,
 });
 
 /**
- * Upstream 2.1.222 and later: derivation is catalogue-first, so the
- * `claude-opus-4-5` exception does not apply, and both of the newer request
- * behaviours are present.
+ * Upstream 2.1.233: catalogue-first derivation and the two conversation-chaining
+ * segments, but no turn-origin or turn-position parameter yet.
  */
-const MODERN_BEHAVIORS: ClaudeCodeProfileBehaviors = Object.freeze({
+const MODERN_233_BEHAVIORS: ClaudeCodeProfileBehaviors = Object.freeze({
   requestDerivedTokenCeiling: true,
   billingChainSegments: true,
+  billingTurnOriginSegment: false,
+  billingTurnPositionSegments: false,
+  opus45EffortException: false,
+});
+
+/**
+ * Upstream 2.1.280: the turn-origin parameter exists; the prompt/turn index
+ * pair does not.
+ */
+const MODERN_280_BEHAVIORS: ClaudeCodeProfileBehaviors = Object.freeze({
+  requestDerivedTokenCeiling: true,
+  billingChainSegments: true,
+  billingTurnOriginSegment: true,
+  billingTurnPositionSegments: false,
+  opus45EffortException: false,
+});
+
+/**
+ * Upstream 2.1.288 and later: catalogue-first derivation, conversation
+ * chaining, and both turn segment groups.
+ */
+const CURRENT_BEHAVIORS: ClaudeCodeProfileBehaviors = Object.freeze({
+  requestDerivedTokenCeiling: true,
+  billingChainSegments: true,
+  billingTurnOriginSegment: true,
+  billingTurnPositionSegments: true,
   opus45EffortException: false,
 });
 
@@ -90,25 +138,25 @@ export function profileBehaviors(
   profile: ClaudeCodeProtocolProfile,
 ): ClaudeCodeProfileBehaviors {
   /*
-   * ---- Demarcated: the ONLY per-version identity comparison in `src/`. ----
+   * ---- Demarcated: the ONLY per-version identity comparisons in `src/`. ----
    *
-   * The split is 2.1.195 versus 2.1.222+, and it is structural rather than a
-   * capability flag: these are differences in what the upstream builder is
-   * written to do, not values it reads from a catalogue. 2.1.195 is the one
-   * profile ported from the older builder, so it is the one named here.
+   * Each comparison is structural rather than a capability flag: these are
+   * differences in what the upstream builder is written to do, not values it
+   * reads from a catalogue. The named profiles are the ones whose builder
+   * differs from the next tier, so a profile ported from a client newer than
+   * 2.1.288 inherits the current behaviour and needs no edit here.
    *
-   * The default is deliberately the MODERN side. A profile ported from a
-   * client newer than 2.1.233 inherits the current behaviour and needs no edit
-   * here; only a profile ported from a client OLDER than 2.1.222 would, and
-   * adding one is a decision that should require touching this module. Written
-   * the other way round — naming the modern profiles and defaulting to legacy
-   * — every new profile would silently regress to 2.1.195 semantics.
-   *
-   * `test/governance/version-dispatch.test.ts` asserts this comparison is
-   * here, and that it is nowhere else.
+   * `test/governance/version-dispatch.test.ts` asserts these comparisons are
+   * here, and that they are nowhere else.
    */
   if (profile.id === CLAUDE_CODE_2_1_195_PROFILE.id) {
     return LEGACY_BEHAVIORS;
   }
-  return MODERN_BEHAVIORS;
+  if (profile.id === CLAUDE_CODE_2_1_233_PROFILE.id) {
+    return MODERN_233_BEHAVIORS;
+  }
+  if (profile.id === CLAUDE_CODE_2_1_280_PROFILE.id) {
+    return MODERN_280_BEHAVIORS;
+  }
+  return CURRENT_BEHAVIORS;
 }

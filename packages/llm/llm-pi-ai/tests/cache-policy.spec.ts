@@ -7,7 +7,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createAssistantMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createAssistantMessage, createSystemMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
@@ -895,5 +895,723 @@ describe('CC wire parity body', () => {
     // block replaces a prompt it does not have.
     expect(body['system']).toBeUndefined()
     expect(markersOf(body)).toEqual([])
+  })
+})
+
+/**
+ * The real harness-owned prompt sections: the DeepSeek identity line the wire
+ * replaces, the two process-describing sections it never forwards, a caller
+ * block holding the pinned identity text, a caller's stable rules, and the
+ * session-specific remainder.
+ */
+const HARNESS_SECTIONS = [
+  { name: 'harness:identity', text: 'You are an AI agent powered by DeepSeek Harness.', stable: true },
+  { name: 'harness:source', text: 'The runtime context names the DeepSeek Harness implementation checkout.', stable: true },
+  { name: 'app:web-surface', text: 'You are interacting with the user through the DeepSeek Harness Web GUI.', stable: true },
+  { name: 'app:instructions', text: 'Stable route instructions.', stable: true },
+  { name: 'caller:identity', text: IDENTITY, stable: true },
+  { name: 'session:state', text: 'Current session state.', stable: false },
+]
+
+/** The caller's kept prompt text: every section except the three harness ones and the identity duplicate. */
+const CALLER_PROMPT = 'Stable route instructions.\n\nCurrent session state.'
+
+/** A request whose real harness sections join to its leading system text. */
+function harnessRequest(overrides: Record<string, unknown> = {}) {
+  return {
+    ...PROBE,
+    system: HARNESS_SECTIONS.map(section => section.text).join('\n\n'),
+    systemSections: HARNESS_SECTIONS,
+    ...overrides,
+  }
+}
+
+/** The harness text a CC wire must never forward. */
+function expectNoHarnessPrompt(body: Record<string, unknown>): void {
+  const wire = JSON.stringify(body)
+  expect(wire).not.toContain('You are an AI agent powered by DeepSeek Harness.')
+  expect(wire).not.toContain('The runtime context names the DeepSeek Harness implementation checkout.')
+  expect(wire).not.toContain('You are interacting with the user through the DeepSeek Harness Web GUI.')
+  // The caller's own sections survive on every wire.
+  expect(wire).toContain('Stable route instructions.')
+  expect(wire).toContain('Current session state.')
+}
+
+describe('prompt-section filtering on the cc3 wire and parity helpers', () => {
+  it('drops the harness sections on a cc3 main request and keeps the caller prompt', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, { ...harnessRequest({ provider: 'cache-cc3', requestClass: 'main' }) })
+
+    const body = server.requests[0] as Record<string, unknown>
+    // The pinned identity line replaces harness:identity, the two
+    // process-describing sections and a caller duplicate identity line are
+    // dropped, and the caller's other sections remain in assembly order.
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: CALLER_PROMPT, cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expectNoHarnessPrompt(body)
+    expect(JSON.stringify(body).match(/You are Claude Code, Anthropic's official CLI for Claude\./gu)).toHaveLength(1)
+    expect(betasOf(server.headers[0] ?? {})).toEqual([EXTENDED_CACHE_TTL_BETA])
+  })
+
+  it('drops the harness sections on a cc3 helper request at the five-minute lifetime', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, { ...harnessRequest({ provider: 'cache-cc3', purpose: 'compaction' }) })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: CALLER_PROMPT, cache_control: { type: 'ephemeral' } },
+    ])
+    expect(JSON.stringify(body)).not.toContain('"ttl"')
+    expectNoHarnessPrompt(body)
+    // The helper's slot count is unchanged: identity, caller prompt, last user block.
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
+      ['.system[0].cache_control', { type: 'ephemeral' }],
+      ['.system[1].cache_control', { type: 'ephemeral' }],
+    ])
+    expect(betasOf(server.headers[0] ?? {})).toEqual([])
+  })
+
+  it('keeps the caller system unchanged when the sections no longer describe it', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    // A prompt committed in history no longer equals the current assembly, so
+    // there is no section text to substitute: rewriting it from the current
+    // sections would drop caller content, so the cc3 policy forwards it whole.
+    await assemble(ctx, {
+      ...PROBE,
+      provider: 'cache-cc3',
+      system: 'Committed prompt.\n\nState one.',
+      systemSections: HARNESS_SECTIONS,
+      requestClass: 'main',
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: 'Committed prompt.\n\nState one.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+  })
+
+  it('drops the harness sections on a parity helper and under-emits the subscription helper form', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        apiKeyEnv: 'CACHE_POLICY_KEY',
+        ccWireParity: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    await assemble(ctx, { ...harnessRequest({ provider: 'parity-main', purpose: 'compaction' }) })
+
+    const headers = server.headers[0] ?? {}
+    const body = server.requests[0] as Record<string, unknown>
+    expect(headers['x-cc-request-class']).toBe('compaction')
+    expect(headers['x-cc-system-layout']).toBe('none')
+    expect(headers['x-cc-cache-intent']).toBe('helper')
+    // The conservative helper form the worker's frame admits: the caller's
+    // non-harness system only, no billing or identity block, and no cache
+    // marker. It deliberately under-emits the subscription helper's billing +
+    // identity + three five-minute markers, which the frame cannot carry.
+    expect(body['system']).toEqual([{ type: 'text', text: CALLER_PROMPT }])
+    expect(markersOf(body)).toEqual([])
+    expect(JSON.stringify(body)).not.toContain('"ttl"')
+    expectNoHarnessPrompt(body)
+    expect(JSON.stringify(body).match(/You are Claude Code, Anthropic's official CLI for Claude\./gu)).toBeNull()
+    // The pool splices `metadata.user_id` into every forwarded request,
+    // helpers included, so the canonical slot is still part of the body.
+    expect(body['metadata']).toEqual({})
+  })
+
+  it('omits a helper system that held only harness sections', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        apiKeyEnv: 'CACHE_POLICY_KEY',
+        ccWireParity: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    const harnessOnly = HARNESS_SECTIONS.slice(0, 3)
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'parity-main',
+      system: harnessOnly.map(section => section.text).join('\n\n'),
+      systemSections: harnessOnly,
+      purpose: 'session-title',
+      messages: [userText('title this')],
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    // Dropping every section leaves nothing to forward: the helper omits the
+    // field instead of sending an empty system array.
+    expect(body['system']).toBeUndefined()
+    expect(markersOf(body)).toEqual([])
+  })
+
+  it('sends only the pinned identity when a cc3 helper states only harness sections', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    const harnessOnly = HARNESS_SECTIONS.slice(0, 3)
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      system: harnessOnly.map(section => section.text).join('\n\n'),
+      systemSections: harnessOnly,
+      purpose: 'compaction',
+      messages: [userText('compact this')],
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    // The matching filter kept no caller section, so the cc3 body is the pinned
+    // identity block alone plus the last-user marker.
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral' } },
+    ])
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
+      ['.system[0].cache_control', { type: 'ephemeral' }],
+    ])
+  })
+
+  it('filters a real compaction-shaped cc3 request that replays its system as a message', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    // Compaction replays the committed system prompt as the leading history
+    // message instead of `GenerateOptions.system`; the sections must still drive
+    // the filter.
+    const prompt = HARNESS_SECTIONS.map(section => section.text).join('\n\n')
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      purpose: 'compaction',
+      messages: [createSystemMessage(prompt), userText('compact this')],
+      systemSections: HARNESS_SECTIONS,
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: CALLER_PROMPT, cache_control: { type: 'ephemeral' } },
+    ])
+    expect(JSON.stringify(body)).not.toContain('"ttl"')
+    expectNoHarnessPrompt(body)
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
+      ['.system[0].cache_control', { type: 'ephemeral' }],
+      ['.system[1].cache_control', { type: 'ephemeral' }],
+    ])
+    expect(betasOf(server.headers[0] ?? {})).toEqual([])
+  })
+
+  it('filters a real compaction-shaped parity helper and keeps its conservative form', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        apiKeyEnv: 'CACHE_POLICY_KEY',
+        ccWireParity: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    const prompt = HARNESS_SECTIONS.map(section => section.text).join('\n\n')
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'parity-main',
+      purpose: 'compaction',
+      messages: [createSystemMessage(prompt), userText('compact this')],
+      systemSections: HARNESS_SECTIONS,
+    })
+
+    const headers = server.headers[0] ?? {}
+    const body = server.requests[0] as Record<string, unknown>
+    expect(headers['x-cc-request-class']).toBe('compaction')
+    expect(headers['x-cc-system-layout']).toBe('none')
+    expect(headers['x-cc-cache-intent']).toBe('helper')
+    expect(body['system']).toEqual([{ type: 'text', text: CALLER_PROMPT }])
+    expect(markersOf(body)).toEqual([])
+    expectNoHarnessPrompt(body)
+  })
+})
+
+/** The DSH-owned prompt paragraphs the fallback must remove when no sections match. */
+const DSH_IDENTITY_TEXT = 'You are an AI agent powered by DeepSeek Harness.'
+
+const DSH_SOURCE_TEXT = 'The runtime context names the DeepSeek Harness implementation checkout. '
+  + 'The checkout location and current working directory are separate values and may differ; '
+  + 'never infer the working directory from the checkout path. Use pwd to determine the current working directory. '
+  + 'Use this checkout only to inspect or extend DSH itself.'
+
+const DSH_WEB_SURFACE_TEXT = 'You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. '
+  + 'When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. '
+  + 'The browser provides no implicit DOM, route, or screenshot context. '
+  + 'The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while '
+  + '`pnpm run dev:web` is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. '
+  + 'Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. '
+  + 'Starting another server does not update this GUI. '
+  + 'The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. '
+  + 'Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.'
+
+const DSH_HARNESS_PROMPT = `${DSH_IDENTITY_TEXT}\n\n${DSH_SOURCE_TEXT}\n\n${DSH_WEB_SURFACE_TEXT}`
+
+describe('sectionless harness-text fallback', () => {
+  it('drops the DSH paragraphs from a cc3 helper that states no sections', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      purpose: 'compaction',
+      messages: [createSystemMessage(`${DSH_HARNESS_PROMPT}\n\nOld state.`), userText('compact this')],
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Old state.', cache_control: { type: 'ephemeral' } },
+    ])
+    expect(JSON.stringify(body)).not.toContain(DSH_IDENTITY_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_SOURCE_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_WEB_SURFACE_TEXT)
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
+      ['.system[0].cache_control', { type: 'ephemeral' }],
+      ['.system[1].cache_control', { type: 'ephemeral' }],
+    ])
+  })
+
+  it('drops the DSH paragraphs from a cc3 main request that states no sections', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    // A replayed main prompt with no section identity: the DSH paragraphs are
+    // dropped by exact text and the pinned identity line is prepended. The note
+    // merely CONTAINS the DSH identity sentence, so it survives byte-for-byte.
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      requestClass: 'main',
+      messages: [createSystemMessage(
+        `${DSH_HARNESS_PROMPT}\n\nCaller state.\n\nNote: You are an AI agent powered by DeepSeek Harness. Keep this.`,
+      ), userText('hello')],
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      {
+        type: 'text',
+        text: 'Caller state.\n\nNote: You are an AI agent powered by DeepSeek Harness. Keep this.',
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      },
+    ])
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    const wire = JSON.stringify(body)
+    expect(wire).not.toContain(DSH_SOURCE_TEXT)
+    expect(wire).not.toContain(DSH_WEB_SURFACE_TEXT)
+    expect(wire).toContain('Keep this.')
+    // One DSH identity occurrence remains, and only inside the caller's note:
+    // the paragraph itself is gone.
+    expect(wire.split(DSH_IDENTITY_TEXT)).toHaveLength(2)
+    expect(betasOf(server.headers[0] ?? {})).toEqual([EXTENDED_CACHE_TTL_BETA])
+  })
+
+  it('drops the DSH paragraphs and a duplicate identity line from a sectionless cc3 subagent request', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      requestClass: 'subagent',
+      messages: [createSystemMessage(
+        `${DSH_HARNESS_PROMPT}\n\n${IDENTITY}\n\nCaller subagent rules.`,
+      ), userText('hello')],
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    // The pinned identity block opens the array once, the DSH paragraphs and the
+    // caller's duplicate identity block are dropped, and the caller rule survives.
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: 'Caller subagent rules.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(JSON.stringify(body).match(/You are Claude Code, Anthropic's official CLI for Claude\./gu)).toHaveLength(1)
+    expect(JSON.stringify(body)).not.toContain(DSH_IDENTITY_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_SOURCE_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_WEB_SURFACE_TEXT)
+  })
+
+  it('uses named section texts for a sectionless cc3 main request whose assembly no longer joins', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    const legacySource = 'Legacy harness source paragraph for this checkout.'
+    const legacyWeb = 'Legacy Web-surface paragraph for this GUI.'
+    const versionedSections = [
+      { name: 'harness:identity', text: DSH_IDENTITY_TEXT, stable: true },
+      { name: 'harness:source', text: legacySource, stable: true },
+      { name: 'app:web-surface', text: legacyWeb, stable: true },
+      { name: 'session:state', text: 'Current session state.', stable: false },
+    ]
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      requestClass: 'main',
+      messages: [createSystemMessage(
+        `${DSH_IDENTITY_TEXT}\n\n${legacySource}\n\n${legacyWeb}\n\nOld session state.`,
+      ), userText('hello')],
+      systemSections: versionedSections,
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: 'Old session state.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(JSON.stringify(body)).not.toContain(DSH_IDENTITY_TEXT)
+    expect(JSON.stringify(body)).not.toContain(legacySource)
+    expect(JSON.stringify(body)).not.toContain(legacyWeb)
+  })
+
+  it('applies the sectionless fallback to a parity-capable main request that cannot state a boundary', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        apiKeyEnv: 'CACHE_POLICY_KEY',
+        ccWireParity: true,
+        cacheMarkerPolicy: 'cc3',
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    // The route proved the wire, but this main request states no section
+    // assembly, so it falls back to the cc3 body and still filters the harness
+    // paragraphs.
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'parity-main',
+      requestClass: 'main',
+      messages: [createSystemMessage(`${DSH_HARNESS_PROMPT}\n\nCaller state.`), userText('hello')],
+    })
+
+    const headers = server.headers[0] ?? {}
+    const body = server.requests[0] as Record<string, unknown>
+    expect(headers['x-cc-request-class']).toBeUndefined()
+    expect(headers['x-cc-system-layout']).toBeUndefined()
+    expect(headers['x-cc-cache-intent']).toBeUndefined()
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: 'Caller state.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expect(JSON.stringify(body)).not.toContain(DSH_IDENTITY_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_SOURCE_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_WEB_SURFACE_TEXT)
+  })
+
+  it('drops the DSH paragraphs from a parity helper that states no sections', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        apiKeyEnv: 'CACHE_POLICY_KEY',
+        ccWireParity: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'parity-main',
+      purpose: 'compaction',
+      messages: [createSystemMessage(`${DSH_HARNESS_PROMPT}\n\nOld state.`), userText('compact this')],
+    })
+
+    const headers = server.headers[0] ?? {}
+    const body = server.requests[0] as Record<string, unknown>
+    expect(headers['x-cc-request-class']).toBe('compaction')
+    expect(headers['x-cc-system-layout']).toBe('none')
+    expect(headers['x-cc-cache-intent']).toBe('helper')
+    expect(body['system']).toEqual([{ type: 'text', text: 'Old state.' }])
+    expect(markersOf(body)).toEqual([])
+    expect(JSON.stringify(body)).not.toContain(DSH_IDENTITY_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_SOURCE_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_WEB_SURFACE_TEXT)
+
+    // A replay that held only harness paragraphs has no system left at all.
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'parity-main',
+      purpose: 'compaction',
+      messages: [createSystemMessage(DSH_HARNESS_PROMPT), userText('compact this')],
+    })
+    const empty = server.requests[1] as Record<string, unknown>
+    expect(empty['system']).toBeUndefined()
+    expect(markersOf(empty)).toEqual([])
+  })
+
+  it('uses named section texts when a versioned prompt no longer joins to the assembly', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    // The admitted prompt holds this session's older harness paragraphs; the
+    // current assembly states the same named sections but a different session
+    // remainder, so the join does not match and only the named texts can guide
+    // the fallback.
+    const legacySource = 'Legacy harness source paragraph for this checkout.'
+    const legacyWeb = 'Legacy Web-surface paragraph for this GUI.'
+    const versionedSections = [
+      { name: 'harness:identity', text: DSH_IDENTITY_TEXT, stable: true },
+      { name: 'harness:source', text: legacySource, stable: true },
+      { name: 'app:web-surface', text: legacyWeb, stable: true },
+      { name: 'empty:section', text: '', stable: true },
+      { name: 'session:state', text: 'Current session state.', stable: false },
+    ]
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      purpose: 'compaction',
+      messages: [createSystemMessage(
+        `${DSH_IDENTITY_TEXT}\n\n${legacySource}\n\n${legacyWeb}\n\nOld session state.`,
+      ), userText('compact this')],
+      systemSections: versionedSections,
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Old session state.', cache_control: { type: 'ephemeral' } },
+    ])
+    expect(JSON.stringify(body)).not.toContain(DSH_IDENTITY_TEXT)
+    expect(JSON.stringify(body)).not.toContain(legacySource)
+    expect(JSON.stringify(body)).not.toContain(legacyWeb)
   })
 })

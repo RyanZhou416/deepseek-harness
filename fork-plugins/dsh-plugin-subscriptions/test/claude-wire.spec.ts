@@ -13,12 +13,15 @@ import {
   BETA_REGISTRY_2_1_288,
   CLAUDE_CODE_2_1_288_PROFILE,
   ClaudeCodeWireError,
+  IDENTITY_TEXT,
 } from '@tormentalabs/claude-code-wire-compat'
 import { IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
   boundedTwoLevelMap,
   buildClaudeWireRequest as buildClaudeWireRequestWithContinuation,
+  CLAUDE_CLIENT_RUNTIME,
+  CLAUDE_CLIENT_RUNTIME_VERSION,
   CLAUDE_USER_AGENT,
   claudeRequestClass,
   mapClaudeWireError,
@@ -153,11 +156,14 @@ test('buildClaudeWireRequest emits the billing and identity blocks and the corre
   assert.equal(built.url, 'https://api.anthropic.com/v1/messages?beta=true')
   const body = parseBody(built)
   const system = body.system as { type: string; text: string; cache_control?: unknown }[]
-  assert.match(system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.288\.[0-9a-f]{3}; cc_entrypoint=claude-desktop; cch=00000;/)
-  // A non-interactive run with no appended system prompt sends the agent line,
-  // not the interactive CLI one; the user agent and attribution entrypoint stay
-  // `cli`, which is what `claude --print` reports.
-  assert.equal(system[1].text, 'You are a Claude agent, built on Anthropic\'s Claude Agent SDK.')
+  // The desktop presentation is one identity: the billing entrypoint, the user agent and
+  // the body's identity line all claim the interactive `claude-desktop` client. The turn
+  // segments follow the prompt id in the client's order.
+  assert.match(
+    system[0].text,
+    /^x-anthropic-billing-header: cc_version=2\.1\.288\.[0-9a-f]{3}; cc_entrypoint=claude-desktop; cch=00000; cc_prompt_id=[0-9a-f-]{36}; cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;$/,
+  )
+  assert.equal(system[1].text, 'You are Claude Code, Anthropic\'s official CLI for Claude.')
   // The genuine client defines the reporting text but never pushes it into a
   // request, so a request that carries it would be distinguishable.
   assert.ok(!system.some((block) => block.text.startsWith('# Reporting outcomes')), 'no reporting block is injected')
@@ -180,11 +186,16 @@ test('headers carry the pinned plan and the session identity', async () => {
   assert.equal(headers.get('x-claude-code-session-id'), wireSessionId('sess-1'))
   assert.ok((headers.get('anthropic-beta') ?? '').length > 0, 'beta header is composed by the builder')
   assert.match(headers.get('x-client-request-id') ?? '', /^[0-9a-f-]{36}$/)
-  assert.equal(headers.get('x-stainless-runtime'), 'node')
-  // The version of the runtime that issues the request, which on this path is the
-  // process building it. A compiled-in value would name a runtime that sent nothing:
-  // the Bun transport replaces this field with its own `process.version`.
-  assert.equal(headers.get('x-stainless-runtime-version'), process.version)
+  assert.equal(headers.get('x-stainless-runtime'), CLAUDE_CLIENT_RUNTIME)
+  // The pinned (runtime, version) pair the desktop client reports, carried unchanged
+  // through the transport. A host-derived version would pair the pinned `node` runtime
+  // with a Bun or Node release the claimed client is not.
+  assert.equal(headers.get('x-stainless-runtime-version'), CLAUDE_CLIENT_RUNTIME_VERSION)
+  assert.deepEqual(
+    [CLAUDE_CLIENT_RUNTIME, CLAUDE_CLIENT_RUNTIME_VERSION],
+    ['node', 'v22.19.0'],
+    'the pair names the pinned Node release',
+  )
   // The SDK sets this on every request. The plugin asserted the opposite until the carve showed otherwise.
   assert.equal(headers.get('accept'), 'application/json')
 })
@@ -486,6 +497,49 @@ test('cc_prompt_id is derived from the session and the turn, and reused across t
   assert.notEqual(otherSession.body, first.body, 'so the request bytes differ with it')
 })
 
+test('the billing turn segments follow the prompt anchor and its continuations', async () => {
+  // The desktop prompt is human, and the client reports the transcript's prompt and
+  // turn ordinals as one pair after the turn origin. A tool continuation repeats its
+  // prompt's anchor; the next user prompt adds one to both indices.
+  const first = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-turns'), ACCOUNT)
+  assert.match(
+    parseBody(first).system[0].text,
+    / cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;$/,
+  )
+
+  const continuation = await buildClaudeWireRequest(options(), session(), toolStep(), 32_000, undefined, undefined, wireSessionId('sess-turns'), ACCOUNT)
+  assert.match(
+    parseBody(continuation).system[0].text,
+    / cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;$/,
+    'a tool continuation repeats the prompt anchor',
+  )
+  assert.equal(promptIdOf(continuation), promptIdOf(first), 'and the same prompt id')
+
+  const second = await buildClaudeWireRequest(options(), session(), secondTurn(), 32_000, undefined, undefined, wireSessionId('sess-turns'), ACCOUNT)
+  assert.match(
+    parseBody(second).system[0].text,
+    / cc_turn_origin=human; cc_prompt_index=2; cc_turn_index=2;$/,
+    'the next user prompt advances both indices',
+  )
+  assert.notEqual(promptIdOf(second), promptIdOf(first))
+})
+
+test('a conversation with no user prompt states no turn position', async () => {
+  // The client's index guard requires a turn index of at least 1, so a request whose
+  // history carries no user prompt omits the pair rather than inventing one.
+  const assistantOnly: TranslatableMessage[] = [
+    { role: 'assistant', content: [{ type: 'text', text: 'summary' }] },
+  ]
+  const built = await buildClaudeWireRequest(
+    options(), session(), assistantOnly, 32_000, undefined, undefined,
+    wireSessionId('sess-no-user'), ACCOUNT,
+  )
+  const billing = parseBody(built).system[0].text
+  assert.match(billing, / cc_turn_origin=human;$/)
+  assert.ok(!billing.includes('cc_prompt_index='))
+  assert.ok(!billing.includes('cc_turn_index='))
+})
+
 test('the wire builder fails without a backfilled identity', async () => {
   const { deviceId: _dropped, ...incomplete } = session()
   await assert.rejects(
@@ -627,7 +681,8 @@ test('a machine-local harness section is not sent', async () => {
   // The harness identity section is replaced by this route's own line.
   assert.match(text, /local agent harness/, 'the route identity is carried')
   const system = parseBody(built).system as { text: string }[]
-  assert.equal(system.filter(block => block.text.includes('You are a')).length, 2, 'the client block plus the deployment line')
+  assert.equal(system.filter(block => block.text === IDENTITY_TEXT).length, 1, 'the client identity line')
+  assert.equal(system.filter(block => block.text.includes('local agent harness')).length, 1, 'plus the deployment line')
 })
 
 /**

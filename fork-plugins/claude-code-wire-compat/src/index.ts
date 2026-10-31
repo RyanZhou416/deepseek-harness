@@ -32,6 +32,7 @@ export type {
   ClaudeCodeProtocolProfile,
   ClaudeCodeRequestInput,
   ClaudeCodeRuntimeIdentity,
+  ClaudeCodeTurnPosition,
   ClaudeCodeWireErrorCode,
   ContextManagementConfig,
   HeaderPair,

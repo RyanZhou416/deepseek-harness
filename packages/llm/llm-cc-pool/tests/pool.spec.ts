@@ -1,8 +1,18 @@
 /** The mac-pool provider facts and catalogue resolved through the generic pi-ai resolver. */
 
 import { Context } from '@deepseek-ai/cordis'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { CredentialProvider, credentialRef } from '@deepseek-ai/dsh-credentials'
+import type {
+  CredentialInfo,
+  CredentialKey,
+  CredentialRecord,
+  CredentialRecordEntry,
+  CredentialRecordInfo,
+  CredentialRef,
+  ResolvedCredential,
+} from '@deepseek-ai/dsh-credentials'
 import LlmRuntime, { createSystemMessage } from '@deepseek-ai/dsh-llm'
+import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import {
   POOL_CAPACITY_CODE,
   POOL_RATE_LIMITED_CODE,
@@ -115,6 +125,9 @@ describe('fixed mac-pool route', () => {
         reasoning: true,
         compat: { forceAdaptiveThinking: true },
       })
+      // Fine-grained tool streaming is a first-party flag the pinned carve
+      // leaves off by default; pi-ai's per-model default would turn it on.
+      expect(model.compat).toMatchObject({ supportsEagerToolInputStreaming: false })
       expect(model.thinkingLevelMap).toEqual({
         off: null,
         minimal: null,
@@ -378,6 +391,13 @@ const WIRE_PARITY_PROBE = {
   requestClass: 'main' as const,
 }
 
+/** One tool declaration, so a request carries a declaration whose wire features are inspectable. */
+const ECHO: ToolSchema = {
+  name: 'echo',
+  description: 'Echo text back.',
+  parameters: { type: 'object', properties: { text: { type: 'string' } } },
+}
+
 /**
  * A capability reply in the pool's exact `{protocol, ccWireParity, buildId}`
  * form.
@@ -470,6 +490,83 @@ async function mountProbed(
 }
 
 /**
+ * A credentials provider whose next `resolve` is controlled by the test, so a
+ * credential lookup can be held open, rejected, or satisfied after mount.
+ */
+class DeferredCredentials extends CredentialProvider {
+  /** The promise the next `resolve` call returns. */
+  next: Promise<ResolvedCredential | undefined> = Promise.resolve(undefined)
+
+  override resolve(_ref: CredentialRef): Promise<ResolvedCredential | undefined> {
+    return this.next
+  }
+
+  override describe(_ref: CredentialRef): Promise<CredentialInfo> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override set(_ref: CredentialRef, _value: string): Promise<void> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override unset(_ref: CredentialRef): Promise<void> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override readRecord(_key: CredentialKey): Promise<CredentialRecord | undefined> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override describeRecord(_key: CredentialKey): Promise<CredentialRecordInfo> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override listRecords(): Promise<readonly CredentialRecordEntry[]> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override modifyRecord(
+    _key: CredentialKey,
+    _mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>,
+  ): Promise<CredentialRecord | undefined> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override deleteRecord(_key: CredentialKey): Promise<void> {
+    return Promise.reject(new Error('not used'))
+  }
+}
+
+/**
+ * Mount the LLM runtime, a test-controlled credentials provider, and the pool
+ * route with wire parity requested, so the load probe waits on the provider.
+ * @param next - the credential lookup the load probe starts with.
+ * @returns the context, the fetch capture, and the mounted credentials provider.
+ */
+async function mountDeferredCredentials(
+  next?: Promise<ResolvedCredential | undefined>,
+): Promise<{
+  ctx: Context
+  capture: PoolFetchCapture
+  credentials: DeferredCredentials
+}> {
+  vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+  const capture = capturePoolFetch(request => request.url === CAPABILITIES_URL
+    ? capabilityReply('pool-build-1')
+    : anthropicSuccessResponse())
+  vi.stubGlobal('fetch', capture.fetch)
+  const ctx = new Context()
+  context = ctx
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(DeferredCredentials)
+  const credentials = ctx.get('credentials')
+  if (!(credentials instanceof DeferredCredentials)) throw new Error('the test credentials provider did not mount')
+  if (next !== undefined) credentials.next = next
+  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ccWireParity: true })
+  return { ctx, capture, credentials }
+}
+
+/**
  * Wait until the route declares the wire parity member headers.
  *
  * The load probe is a fire-and-forget request, so its proof lands at an
@@ -514,6 +611,37 @@ describe('CC wire parity capability proof', () => {
     expect(wire).not.toContain('The runtime context names the DeepSeek Harness implementation checkout.')
     expect(wire).not.toContain('You are interacting with the user through the DeepSeek Harness Web GUI.')
     expect(wire.match(/You are Claude Code, Anthropic's official CLI for Claude\./gu)).toHaveLength(1)
+  })
+
+  it('omits eager_input_streaming on the proved parity wire and the default wire', async () => {
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? capabilityReply('pool-build-1')
+      : anthropicSuccessResponse())
+    await awaitWireParity(ctx, capture)
+
+    await assemble(ctx, { ...WIRE_PARITY_PROBE, tools: [ECHO] })
+    const parity = modelCalls(capture).at(-1) as CapturedRequest
+    const parityTools = parity.body['tools'] as Record<string, unknown>[]
+    // The pinned carve leaves fine-grained tool streaming off by default and the
+    // subscription route omits it, so the parity body announces no such feature.
+    expect(parityTools[0]).not.toHaveProperty('eager_input_streaming')
+    // pi-ai derives a fine-grained tool-streaming beta from that compat, and the
+    // parity body removes it because the pinned wire declares neither member.
+    expect(parity.body).not.toHaveProperty('betas')
+    expect(parity.headers.get('anthropic-beta')).toBeNull()
+
+    // A classless request falls back to the route's cc3 wire, which must omit the
+    // same flag: the model-level compat fixes it for every request class.
+    const { requestClass: _requestClass, ...classless } = WIRE_PARITY_PROBE
+    await assemble(ctx, { ...classless, tools: [ECHO] })
+    const fallback = modelCalls(capture).at(-1) as CapturedRequest
+    expect(declaresWireParity(fallback)).toBe(false)
+    const fallbackTools = fallback.body['tools'] as Record<string, unknown>[]
+    expect(fallbackTools[0]).not.toHaveProperty('eager_input_streaming')
+    // The default wire still carries the pinned identity block and the three
+    // markers this route's policy owns.
+    expect(JSON.stringify(fallback.body)).toContain('You are Claude Code, Anthropic\'s official CLI for Claude.')
+    expect(JSON.stringify(fallback.body).match(/"cache_control"/gu)).toHaveLength(3)
   })
 
   it('declares cache intent off and sends the parity body for the caching-disabled lifetime', async () => {
@@ -653,9 +781,10 @@ describe('CC wire parity capability proof', () => {
     await assemble(ctx, WIRE_PARITY_PROBE)
     expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
 
-    // The next request is back on the three-marker wire without asking the
-    // endpoint again: the marked refusal is evidence against the proof, not a
-    // trigger for another probe.
+    // The next request is back on the three-marker wire immediately. The marked
+    // refusal clears the proof and schedules another probe after the cooldown,
+    // so the route is not permanently off; the separate case below advances that
+    // cooldown and observes the probe.
     refuse = false
     await assemble(ctx, WIRE_PARITY_PROBE)
     const after = modelCalls(capture).at(-1) as CapturedRequest
@@ -664,6 +793,42 @@ describe('CC wire parity capability proof', () => {
     expect(body.match(/"cache_control"/gu)).toHaveLength(3)
     expect(body).toContain('"ttl":"1h"')
     expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('re-probes after the marked 503 cooldown and serves the wire again', async () => {
+    vi.useFakeTimers()
+    try {
+      let refuse = false
+      let probes = 0
+      const { ctx, capture } = await mountProbed((request) => {
+        if (request.url !== CAPABILITIES_URL) {
+          return refuse ? wireParityRefusal() : anthropicSuccessResponse()
+        }
+        probes += 1
+        return capabilityReply(`pool-build-${probes}`)
+      })
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+
+      refuse = true
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      refuse = false
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      const fallback = modelCalls(capture).at(-1) as CapturedRequest
+      expect(declaresWireParity(fallback)).toBe(false)
+      expectCc3Wire(fallback)
+      // The refusal scheduled the next probe, but not before the cooldown.
+      expect(capabilityCalls(capture)).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(capabilityCalls(capture)).toHaveLength(2)
+
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+      expect(capabilityCalls(capture)).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('keeps the proof on a 503 that carries no wire parity marker', async () => {
@@ -683,6 +848,86 @@ describe('CC wire parity capability proof', () => {
     await assemble(ctx, WIRE_PARITY_PROBE)
     expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
     expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('retries a failed load probe and turns the wire on after a later proof', async () => {
+    let probes = 0
+    const firstProbe = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed((request) => {
+      if (request.url !== CAPABILITIES_URL) return anthropicSuccessResponse()
+      probes += 1
+      return probes === 1 ? firstProbe.promise : capabilityReply('pool-build-retry')
+    })
+    const logs: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
+
+    // The first request waits for the failed load probe and serves the cc3 wire.
+    const pending = assemble(ctx, WIRE_PARITY_PROBE)
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
+    firstProbe.resolve(bareServerError())
+    await pending
+    const first = modelCalls(capture).at(-1) as CapturedRequest
+    expect(declaresWireParity(first)).toBe(false)
+    expectCc3Wire(first)
+    // A failed probe is visible, not debug-only.
+    expect(logs.some(args => args.some(arg => String(arg).includes('CC wire parity probe failed')))).toBe(true)
+
+    // The bounded backoff retries; the second probe proves the wire, and the
+    // retry does not leave the route permanently off.
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(2) }, { timeout: 10_000 })
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+  })
+
+  it('waits for the load probe before the first routed request decides the wire', async () => {
+    const answer = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? answer.promise
+      : anthropicSuccessResponse())
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
+
+    // The first request cannot prepare a snapshot before the probe answers. It
+    // also carries a live cancellation signal, so the readiness wait takes the
+    // cancellable path.
+    const controller = new AbortController()
+    const pending = assemble(ctx, { ...WIRE_PARITY_PROBE, signal: controller.signal })
+    await new Promise((resolve) => { setTimeout(resolve, 20) })
+    expect(modelCalls(capture)).toHaveLength(0)
+
+    answer.resolve(capabilityReply('pool-build-1'))
+    await pending
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+  })
+
+  it('serves the current wire when the initial probe misses the readiness deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const answer = Promise.withResolvers<Response>()
+      const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+        ? answer.promise
+        : anthropicSuccessResponse())
+
+      // The probe stays pending past the bounded wait; the first request then
+      // proceeds on the non-parity wire, and the probe keeps running.
+      const pending = assemble(ctx, WIRE_PARITY_PROBE)
+      await vi.advanceTimersByTimeAsync(6_000)
+      await pending
+      const first = modelCalls(capture).at(-1) as CapturedRequest
+      expect(declaresWireParity(first)).toBe(false)
+      expectCc3Wire(first)
+
+      // A later request does not pay the deadlined wait again while the probe is
+      // still pending.
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(false)
+
+      answer.resolve(capabilityReply('pool-build-late'))
+      await vi.advanceTimersByTimeAsync(0)
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('replaces the proof and keeps the wire when a later probe answers a different build', async () => {
@@ -723,5 +968,80 @@ describe('CC wire parity capability proof', () => {
     // The fallback is the route's own three-marker bytes, not a partial wire.
     expect(JSON.stringify(after.body).match(/"cache_control"/gu)).toHaveLength(3)
     expect(capabilityCalls(capture)).toHaveLength(2)
+  })
+
+  it('stops waiting for the load probe when the request cancels', async () => {
+    const answer = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? answer.promise
+      : anthropicSuccessResponse())
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
+
+    const controller = new AbortController()
+    const pending = assemble(ctx, { ...WIRE_PARITY_PROBE, signal: controller.signal })
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+    controller.abort()
+    const result = await pending
+    expect(result.finish.kind).toBe('aborted')
+    expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('does not probe when wire parity is not requested', async () => {
+    const { ctx, capture } = await mountProbed(() => anthropicSuccessResponse(), { ccWireParity: false })
+    ctx.emit('credentials/reference-updated', credentialRef(API_KEY_REF))
+    await new Promise((resolve) => { setTimeout(resolve, 20) })
+    expect(capabilityCalls(capture)).toHaveLength(0)
+  })
+
+  it('retries a rejected credential lookup and turns the wire on after it resolves', async () => {
+    const gate = Promise.withResolvers<ResolvedCredential | undefined>()
+    const { ctx, capture, credentials } = await mountDeferredCredentials(gate.promise)
+    const logs: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
+
+    const pending = assemble(ctx, WIRE_PARITY_PROBE)
+    gate.reject(new Error('credential store closed'))
+    await pending
+    expect(logs.some(args => args.some(arg => String(arg).includes('member credential unavailable')))).toBe(true)
+
+    // The bounded retry asks again; a stored credential proves the wire.
+    credentials.next = Promise.resolve({ value: 'key', source: 'test' })
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) }, { timeout: 10_000 })
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+  })
+
+  it('caps the failed-probe backoff and keeps trying', async () => {
+    vi.useFakeTimers()
+    try {
+      const { capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+        ? bareServerError()
+        : anthropicSuccessResponse())
+      await vi.advanceTimersByTimeAsync(0)
+      expect(capabilityCalls(capture)).toHaveLength(1)
+
+      // 2 s, 4 s, 8 s, 16 s, 32 s, then the 60 s ceiling twice.
+      let expected = 1
+      for (const delay of [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000]) {
+        await vi.advanceTimersByTimeAsync(delay)
+        expected += 1
+        expect(capabilityCalls(capture)).toHaveLength(expected)
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('wakes a request waiting on the load probe when the fiber disposes', async () => {
+    const gate = Promise.withResolvers<ResolvedCredential | undefined>()
+    const { ctx, capture } = await mountDeferredCredentials(gate.promise)
+    const pending = assemble(ctx, WIRE_PARITY_PROBE)
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+
+    await ctx.fiber.dispose()
+    context = undefined
+    gate.reject(new Error('credential store closed'))
+    await pending
+    expect(capabilityCalls(capture)).toHaveLength(0)
   })
 })

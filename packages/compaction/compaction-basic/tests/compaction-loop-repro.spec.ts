@@ -175,6 +175,14 @@ function waitForIdle(ctx: Context, agent: Agent): Promise<void> {
 
 function overflowHistorySeed(): readonly SessionEvent[] {
   const session = Session.create(SessionId('overflow-history-seed'))
+  // A real conversation's surface head is the loop's committed system prompt.
+  // This is the testkit's default assembly (the built-in harness identity), so
+  // the compaction replay and the current assembly state the same text.
+  session.append('system/message', {
+    turn: 0,
+    step: 0,
+    message: createSystemMessage('You are an AI agent powered by DeepSeek Harness.'),
+  }, { surfaceOp: 'append' })
   for (let turn = 1; turn <= 2; turn += 1) {
     const sentinel = turn === 1 ? 'OLD HISTORY SENTINEL' : 'RECENT HISTORY'
     session.append('turn/start', {
@@ -407,7 +415,17 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
 
         expect(adapter.conversationRequests).toHaveLength(2)
         expect(adapter.summaryRequests).toHaveLength(1)
-        const instruction = adapter.summaryRequests[0]!.messages.at(-1)?.content
+        // The helper replayed the committed system prompt as its leading system
+        // message, and the request also carries the current assembled sections
+        // so a CC wire can filter the harness-describing ones.
+        const summary = adapter.summaryRequests[0]!
+        const leading = summary.messages[0]
+        expect(leading?.role).toBe('system')
+        const leadingText = leading?.content.map(block => (block.type === 'text' ? block.text : '')).join('') ?? ''
+        const summarySections = summary.systemSections ?? []
+        expect(summarySections.map(section => section.name)).toContain('harness:identity')
+        expect(summarySections.map(section => section.text).join('\n\n')).toBe(leadingText)
+        const instruction = summary.messages.at(-1)?.content
           .map(block => (block.type === 'text' ? block.text : ''))
           .join('') ?? ''
         expect(instruction).toContain('Write concise English engineering prose.')

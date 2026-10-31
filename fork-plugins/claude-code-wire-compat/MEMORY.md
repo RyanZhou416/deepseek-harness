@@ -2744,3 +2744,25 @@ exceeds the ceiling, and a caller-supplied `userId` replacement is not resized a
 `tengu_polished_dewdrop` flag) to resolve to `drop` or `block`; the flag's own default resolves
 to nothing. A first-party client therefore sends the `thinking-binding-controls-2026-08-01`
 beta WITHOUT the field, which is what this package already did.
+
+## 2026-10-31 — The turn segments reach the billing block, gated by builder tier
+
+The 2026-10-10 audit's finding that `cc_turn_origin` is never emitted is closed. The 2.1.280
+builder (`seg_2961.js` `t0n` at 2143) takes a sixth parameter and appends
+` cc_turn_origin=<origin>;`; the 2.1.288 builder (`seg_3379.js` `m4r` at 2285, called by `iHo`
+at `seg_3483.js` 728639) takes a seventh and appends
+` cc_prompt_index=<n>; cc_turn_index=<m>;` after it. Each is `profileBehaviors`' question: the
+origin flag is true from 2.1.280, the index-pair flag from 2.1.288, and an unrecognised profile
+inherits the newest tier.
+
+The guards are transcribed, not invented. Origin matches `/^[a-z][a-z_]{0,31}$/`. The index pair
+is emitted only when both are integers, `promptIndex >= 0`, `turnIndex >= 1`, each `<= 1e7`, and
+`promptIndex <= turnIndex`; otherwise both are dropped silently, on the same discipline as
+`cc_prompt_id`. The caller states the values because the package cannot derive a transcript
+anchor from a raw body — the plugin's provider route derives them from the prompt it serves,
+and the Mac pool's overlay did the same before the builder could.
+
+The desktop identity line is deliberately not a builder default: `invocation` omitted selects
+the interactive CLI line, while `isNonInteractive` selects the Agent SDK lines. The plugin
+route now omits it, matching the `claude-desktop` entrypoint, user agent and billing segment;
+the library still reproduces the headless shapes for a caller that states one.

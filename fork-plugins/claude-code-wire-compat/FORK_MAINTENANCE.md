@@ -65,6 +65,24 @@ consistent with the wire:
   so the header and the body cannot disagree about a marked or uncatalogued
   id.
 
+A third delta ports the 2.1.288 billing turn segments. `createBillingBlock`
+now appends `cc_turn_origin=<origin>;` (2.1.280 and later) followed by
+`cc_prompt_index=<n>; cc_turn_index=<m>;` (2.1.288 and later), from the
+optional `turnOrigin` and `turnPosition` request inputs. `profileBehaviors`
+gates each group on the builder tier that has its parameter, and the guards are
+upstream's: origin `/^[a-z][a-z_]{0,31}$/`; both indices integers with
+`promptIndex >= 0`, `turnIndex >= 1`, each `<= 1e7`, and
+`promptIndex <= turnIndex`. A malformed value is dropped silently, never
+interpolated.
+
+**Preservation rule.** Keep the tier gates in `profile-behaviors.ts` (origin
+from 2.1.280, the index pair from 2.1.288, an unrecognised profile on the newest
+tier) and keep the two index segments emitted together. Do not move either
+segment into a profile module or a `profile.id` comparison outside
+`profile-behaviors.ts`; `test/governance/version-dispatch.test.ts` fails that.
+Do not widen the guards: a value the client cannot vouch for must not reach the
+wire in any form.
+
 ## Build and verification
 
 This package builds with its own TypeScript 6 toolchain; in the DSH checkout
@@ -83,15 +101,17 @@ Focused regression for the fork delta (from this directory, using the DSH
 checkout's vitest):
 
 ```powershell
-node ..\..\node_modules\vitest\vitest.mjs run test/validation/cache-control-strip.test.ts test/validation/beta-registry-2.1.280.test.ts test/validation/betas-2.1.280-push-sites.test.ts
+node ..\..\node_modules\vitest\vitest.mjs run test/validation/cache-control-strip.test.ts test/validation/beta-registry-2.1.280.test.ts test/validation/betas-2.1.280-push-sites.test.ts test/validation/billing-turn-segments.test.ts test/validation/desktop-identity-coherence.test.ts test/validation/profile-behaviors.test.ts test/validation/system-prompt-joining.test.ts
 ```
 
-The full upstream suite is green in this fork: 3659 tests pass with
+The full upstream suite is green in this fork: 3709 tests pass with
 `npm_execpath` unset, including both `test/pack/pack-policy.test.ts` cases.
 `test/runtime/runtime-neutral.test.ts` pins the closed runtime export set; the
 fork exports `normalizeModelId` from the package root and records it together
 with the already-exported `supportsContextManagement`, so the runtime-neutral
-test passes rather than failing on an unpinned export.
+test passes rather than failing on an unpinned export. The coverage gate passes
+as well (statements 98.84, branches 98.15, functions 100, lines 99.58; the
+thresholds are 98/97/100/99).
 
 One environment trap makes a local full run look worse than the committed
 tree: `test/docs/provenance.test.ts` compares exact header lines, so a CRLF
@@ -107,8 +127,9 @@ when running the suite: a DSH shell exports it as pnpm 11, which rejects
    `docs/`, `release-manifests/`, `package.json`, and TypeScript/Vitest
    configuration over this directory (exclude `.git`, `node_modules`,
    `dist`, coverage, and `*.tgz`).
-2. Re-apply the `applyMessageCacheControl` spread (the diff is in this file)
-   and the `prepare` script.
+2. Re-apply the `applyMessageCacheControl` spread (the diff is in this file),
+   the model-identity and mid-conversation-system deltas, and the billing turn
+   segments and their tier gates; keep the `prepare` script.
 3. Keep this file and the README fork note.
 4. Build `dist`, run the focused regression above, then run the
    subscriptions plugin's `pnpm test`.

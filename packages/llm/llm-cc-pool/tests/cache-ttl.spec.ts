@@ -20,6 +20,14 @@ import type { CapturedRequest } from './harness.ts'
 /** The Anthropic beta a one-hour prompt-cache lifetime declares. */
 const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
 
+/**
+ * The beta pi-ai derives when a model withholds the per-tool
+ * `eager_input_streaming` field. The route withholds the field to match the
+ * pinned carve and subscription wire; a body with no CC payload policy keeps
+ * pi-ai's derived beta, which is the one case this suite expects it.
+ */
+const FINE_GRAINED_TOOL_STREAMING_BETA = 'fine-grained-tool-streaming-2025-05-14'
+
 /** The beta that selects a cache scope; this route never declares one. */
 const CACHE_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
 
@@ -182,6 +190,9 @@ describe('pool prompt-cache policy', () => {
     expect(JSON.stringify(request.body).match(/"cache_control"/gu)).toHaveLength(3)
     const tools = request.body['tools'] as Record<string, unknown>[]
     expect(tools.every(tool => !('cache_control' in tool))).toBe(true)
+    // The pinned carve leaves fine-grained tool streaming off by default and the
+    // subscription route omits it; pi-ai's per-model default would announce it.
+    expect(tools.every(tool => !('eager_input_streaming' in tool))).toBe(true)
     expect(betasOf(request)).toEqual([EXTENDED_CACHE_TTL_BETA])
     expect(betasOf(request)).not.toContain(CACHE_SCOPE_BETA)
     expect(JSON.stringify(request.body)).not.toContain('"scope"')
@@ -396,7 +407,11 @@ describe('pool prompt-cache policy', () => {
     // pinned field order or metadata placeholder.
     expect(markersOf(request.body)).toEqual([])
     expect(JSON.stringify(request.body)).not.toContain('cache_control')
-    expect(betasOf(request)).toEqual([])
+    // This route states no CC payload policy, so the body is pi-ai's own: it
+    // keeps the fine-grained tool-streaming beta pi-ai derives from the model
+    // that withholds the per-tool eager field. The cc3 and parity wires remove
+    // that derived beta because the pinned client declares neither.
+    expect(betasOf(request)).toEqual([FINE_GRAINED_TOOL_STREAMING_BETA])
     expect(JSON.stringify(request.body)).not.toContain(IDENTITY)
     expect(request.body['system']).toEqual([{ type: 'text', text: 'You are the pool test assistant.' }])
     expect(request.body['metadata']).toBeUndefined()

@@ -14,6 +14,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { IDENTITY_TEXT } from '@tormentalabs/claude-code-wire-compat'
 import { buildClaudeWireRequest } from '../src/providers/claude-wire.js'
 import {
   forgetUnifiedRateLimit,
@@ -191,4 +192,43 @@ test('one account report is never read for another account', async () => {
   assert.deepEqual(await declaresHour('acct-clean', session()), { ttl: true, beta: true })
   assert.deepEqual(await declaresHour('acct-on-ov', session()), { ttl: false, beta: false })
   forgetUnifiedRateLimit()
+})
+
+test('a helper call carries the single documented identity, billing and 5m form', async () => {
+  // The helper path is the same builder as the main path: one interactive identity line,
+  // one billing block with the prompt-anchored turn segments, and only the server-default
+  // (five-minute) ephemeral cache markers because a helper takes no hour. No extra helper
+  // header is invented, and the header plan keeps the pinned transport user agent.
+  forgetUnifiedRateLimit()
+  const built = await buildClaudeWireRequest(
+    options('session-title'), session(), history(), 32_000, undefined, undefined,
+    { sessionId: wireSessionId('acct-helper-form'), atisPin: undefined, previousRequestId: undefined },
+    'acct-helper-form',
+  )
+  const body = JSON.parse(built.body) as {
+    system: { text: string; cache_control?: unknown }[]
+    messages: { content: { cache_control?: unknown }[] }[]
+  }
+  const system = body.system
+  assert.match(
+    system[0].text,
+    / cc_prompt_id=[0-9a-f-]{36}; cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;$/,
+  )
+  assert.equal(system[1].text, IDENTITY_TEXT, 'the interactive identity line')
+  assert.deepEqual(system[1].cache_control, { type: 'ephemeral' }, 'a five-minute identity marker')
+  // Every marker this request carries is the plain ephemeral form; the hour marker and the
+  // beta that declares it are both absent.
+  const markers = [
+    ...system.map((block) => block.cache_control),
+    ...body.messages.flatMap((message) => message.content.map((block) => block.cache_control)),
+  ].filter((marker) => marker !== undefined)
+  assert.ok(markers.length > 0, 'the request carries its own markers')
+  for (const marker of markers) {
+    assert.deepEqual(marker, { type: 'ephemeral' })
+  }
+  assert.equal(String(built.body).includes('"ttl"'), false)
+  const headers = new Map(built.headers.map(([name, value]) => [name.toLowerCase(), value]))
+  assert.equal(headers.get('user-agent'), 'claude-cli/2.1.288 (external, claude-desktop)')
+  assert.equal(headers.get('x-stainless-helper'), undefined, 'no helper header is invented')
+  assert.equal((headers.get('anthropic-beta') ?? '').includes('extended-cache-ttl'), false)
 })

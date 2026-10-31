@@ -2,7 +2,10 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildClaudeCodeRequest } from "../../src/index.js";
+import {
+  buildClaudeCodeRequest,
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+} from "../../src/index.js";
 
 const base = {
   accessToken: "sentinel-token-public-surface-91f2",
@@ -94,5 +97,40 @@ describe("caller system joining", () => {
         cache_control: { type: "ephemeral", ttl: "1h" },
       },
     ]);
+  });
+});
+
+/**
+ * The dynamic-boundary layout goes through the cache-control pass, not only the
+ * assembler: the static side keeps its global scope, the dynamic side stays
+ * plain, and the caller's ttl is refreshed onto both without moving a marker.
+ */
+describe("dynamic-boundary layout through the cache-control pass", () => {
+  it("refreshes both sides and leaves the identity block unmarked", async () => {
+    const result = await buildClaudeCodeRequest({
+      ...base,
+      cacheControl: { enabled: true, ttl: "1h", systemBreakpoint: false, messageBreakpoint: false },
+      system: [
+        "STATIC-SIDE",
+        SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+        "DYNAMIC-SIDE",
+      ],
+    });
+    const system = JSON.parse(result.body)["system"] as {
+      text: string;
+      cache_control?: { type: string; ttl?: string; scope?: string };
+    }[];
+    const identity = system.find((block) => block.text.includes("You are Claude Code"));
+    expect(identity?.cache_control).toBeUndefined();
+    expect(system.find((block) => block.text === "STATIC-SIDE")?.cache_control).toEqual({
+      type: "ephemeral",
+      ttl: "1h",
+      scope: "global",
+    });
+    expect(system.find((block) => block.text === "DYNAMIC-SIDE")?.cache_control).toEqual({
+      type: "ephemeral",
+      ttl: "1h",
+    });
+    expect(result.body).not.toContain(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
   });
 });

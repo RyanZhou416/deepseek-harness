@@ -22,6 +22,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **The `cc_turn_origin`, `cc_prompt_index` and `cc_turn_index` billing
+  segments.** The 2.1.280 builder gained a turn-origin parameter and the
+  2.1.288 builder gained a seventh parameter carrying the transcript's prompt
+  and turn ordinals. `ClaudeCodeRequestInput.turnOrigin` and
+  `ClaudeCodeRequestInput.turnPosition` supply them, and `profileBehaviors`
+  gates each group on the builder that has its parameter: origin from 2.1.280,
+  the index pair from 2.1.288. Upstream's own guards decide emission, so a
+  malformed origin or an out-of-range pair is omitted silently rather than
+  interpolated.
 - **`normalizeModelId` is a public export.** A consumer that keys its own tables
   by model id (context and output limits, thinking shape, effort levels, fast
   tier) must ask the same identity question the catalogue lookup asks, or a dated,
