@@ -44,7 +44,7 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs'
-import { copyFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { connect } from 'node:net'
 import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
@@ -872,6 +872,40 @@ export async function stagedWorkspaceManifest(
 }
 
 /**
+ * Link a workspace package's runtime dependencies into its staging directory.
+ *
+ * The staged manifest drops `dependencies` so the profile install does not try
+ * to resolve workspace ranges from a registry. The package's `lib/` still
+ * imports those packages, so each runtime dependency must stay resolvable from
+ * the staged directory. The repository install only exposes hoisted packages;
+ * a package that is linked into one workspace package (for example the vendored
+ * schemastery) is not necessarily at the repository root.
+ * @param plugin - workspace plugin definition.
+ * @param source - source package manifest.
+ * @param staging - staging directory being populated.
+ */
+async function linkWorkspaceRuntimeDependencies(
+  plugin: PluginDefinition,
+  source: PluginManifest,
+  staging: string,
+): Promise<void> {
+  const names = new Set([
+    ...Object.keys(source.dependencies ?? {}),
+    ...Object.keys(source.optionalDependencies ?? {}),
+  ])
+  for (const name of names) {
+    const segments = name.split('/')
+    const target = join(plugin.directory, 'node_modules', ...segments)
+    if (!existsSync(target)) {
+      fail(`${plugin.name} does not expose its runtime dependency ${name} in ${plugin.directory}/node_modules`)
+    }
+    const link = join(staging, 'node_modules', ...segments)
+    await mkdir(dirname(link), { recursive: true })
+    await symlink(realpathSync(target), link, process.platform === 'win32' ? 'junction' : 'dir')
+  }
+}
+
+/**
  * Stage one workspace package from the root build output.
  *
  * The root build is the only build input, so a missing `lib/` entry fails here
@@ -885,6 +919,7 @@ export async function stageWorkspacePlugin(plugin: PluginDefinition, stagingDire
     assertStagedArtifacts(plugin, plugin.directory, 'root build')
     const source = await readJson<PluginManifest>(join(plugin.directory, 'package.json'))
     await writeJson(join(temporary, 'package.json'), await stagedWorkspaceManifest(source))
+    await linkWorkspaceRuntimeDependencies(plugin, source, temporary)
     for (const entry of plugin.stage) {
       const path = join(plugin.directory, entry)
       if (!existsSync(path)) fail(`${plugin.name} is missing its staged entry ${entry} in ${plugin.directory}`)

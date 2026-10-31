@@ -667,9 +667,13 @@ describe('workspace plugin staging', () => {
       await mkdir(join(source, 'lib'), { recursive: true })
       await writeFile(join(source, 'lib', 'index.js'), 'export const plugin = true\n')
       await writeFile(join(source, 'cordis.patch.yml'), '- insert: []\n')
+      await mkdir(join(source, 'node_modules', '@deepseek-ai', 'schemastery'), { recursive: true })
+      await writeFile(join(source, 'node_modules', '@deepseek-ai', 'schemastery', 'package.json'),
+        '{"name":"@deepseek-ai/schemastery","version":"3.18.5"}\n')
       await writeFile(join(source, 'package.json'), `${JSON.stringify({
         name: '@deepseek-ai/dsh-llm-cc-pool',
         version: '0.2.1-rc.2',
+        dependencies: { '@deepseek-ai/schemastery': 'workspace:~' },
         peerDependencies: { '@deepseek-ai/dsh-llm': 'workspace:*' },
         dsh: { bundle: { patch: './cordis.patch.yml' } },
       }, undefined, 2)}\n`)
@@ -680,6 +684,10 @@ describe('workspace plugin staging', () => {
 
       expect(await readFile(join(staging, 'lib', 'index.js'), 'utf8')).toBe('export const plugin = true\n')
       expect(await readFile(join(staging, 'cordis.patch.yml'), 'utf8')).toBe('- insert: []\n')
+      const stagedDependency = JSON.parse(await readFile(
+        join(staging, 'node_modules', '@deepseek-ai', 'schemastery', 'package.json'), 'utf8',
+      )) as PluginManifest
+      expect(stagedDependency.name).toBe('@deepseek-ai/schemastery')
       const staged = JSON.parse(await readFile(join(staging, 'package.json'), 'utf8')) as PluginManifest
       expect(staged.peerDependencies).toEqual({ '@deepseek-ai/dsh-llm': '0.2.1-rc.2' })
     } finally {
