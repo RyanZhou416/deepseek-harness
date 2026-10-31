@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
+import { Profiler } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { allowAllAccess, makeTranslate, RemoteError, sessionSnapshot } from '@deepseek-ai/dsh-client-test-runtime'
+import {
+  allowAllAccess, bindSnapshotSelector, makeTranslate, RemoteError, sessionSnapshot,
+} from '@deepseek-ai/dsh-client-test-runtime'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type {
   SessionListState, SessionSummary, SessionSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SubagentAddress, SubagentCatalogEntry } from '@deepseek-ai/dsh-subagent/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
+import type { SessionStatus, SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import {
   SubagentCatalogAction, SubagentHeaderLineage,
   type SubagentCatalogActionProps, type SubagentHeaderLineageProps,
@@ -78,7 +82,12 @@ function props(
     phase: 'ready',
     projectionsBySession: Object.fromEntries(Object.entries(catalogs).map(([id, catalog]) => [id, {
       state: catalog.state, error: catalog.error,
-      values: { subagentCatalog: catalog.entries.map(({ activity: _activity, createdAt, ...entry }) => ({ ...entry, createdAt: createdAt ?? 1 })) },
+      values: {
+        subagentCatalog: catalog.entries.map(({ activity: _activity, createdAt, ...entry }) => ({
+          ...entry,
+          createdAt: createdAt ?? 1,
+        })),
+      },
     }])) ,
   } satisfies SessionListState
   function useSessions<T>(select: (snapshot: SessionListState) => T): T {
@@ -1223,6 +1232,237 @@ describe('SubagentHeaderLineage', () => {
     expect(current.getAttribute('aria-current')).toBe('true')
     expect(within(current).getByText('indexer').className).toContain('currentLabel')
     expect(screen.queryByRole('treeitem', { name: /reviewer/ })).toBeNull()
+  })
+})
+
+/**
+ * Regression guards for the large-catalog render path. These assertions target
+ * observable frame costs: a scroll that commits the whole dropdown, a clock
+ * that re-renders inactive rows, or a memo that stops matching after an
+ * unrelated projection record is rebuilt.
+ */
+describe('catalog dropdown rendering cost', () => {
+  function status(running: boolean): SessionStatus {
+    return { running, completionUnread: false, pendingInteraction: undefined }
+  }
+
+  function openPinned(): HTMLElement {
+    const trigger = screen.getByRole('button', { name: /个子智能体/ })
+    fireEvent.click(trigger)
+    return screen.getByRole('tree').parentElement as HTMLElement
+  }
+
+  it('ignores scrolling inside its own list and repositions only when the page moves', () => {
+    render(<HeaderCatalog {...props(catalog())} />)
+    const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
+    const bounds = vi.spyOn(trigger, 'getBoundingClientRect')
+      .mockReturnValue({ bottom: 40, left: 50 } as DOMRect)
+    const menu = openPinned()
+    expect(menu.style.top).toBe('45px')
+    expect(menu.style.left).toBe('50px')
+
+    const tree = screen.getByRole('tree')
+    bounds.mockReturnValue({ bottom: 90, left: 100 } as DOMRect)
+    fireEvent.scroll(tree)
+    expect(menu.style.top).toBe('45px')
+    expect(menu.style.left).toBe('50px')
+
+    fireEvent.scroll(document)
+    expect(menu.style.top).toBe('95px')
+    expect(menu.style.left).toBe('100px')
+  })
+
+  it('does not re-render successive scrolls that keep the same viewport edge', () => {
+    const commits = vi.fn()
+    const input = props(catalog())
+    const translate = vi.fn(input.t)
+    render(
+      <Profiler id="catalog" onRender={commits}>
+        <HeaderCatalog {...input} t={translate} />
+      </Profiler>,
+    )
+    const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
+    vi.spyOn(trigger, 'getBoundingClientRect')
+      .mockReturnValue({ bottom: 40, left: 50 } as DOMRect)
+    const menu = openPinned()
+    // Let any work queued by an earlier case settle before measuring.
+    act(() => {})
+    fireEvent.scroll(document)
+    commits.mockClear()
+    translate.mockClear()
+
+    fireEvent.scroll(document)
+
+    expect(commits).not.toHaveBeenCalled()
+    expect(translate).not.toHaveBeenCalled()
+    expect(menu.style.top).toBe('45px')
+    expect(menu.style.left).toBe('50px')
+  })
+
+  it('leaves mounted rows and the trigger untouched by an unrelated session status', () => {
+    const commits = vi.fn()
+    const statuses = createSnapshotStore<SessionStatusSnapshot>(new Map())
+    render(
+      <Profiler id="catalog" onRender={commits}>
+        <HeaderCatalog {...props(catalog())} useSessionStatus={bindSnapshotSelector(statuses)} />
+      </Profiler>,
+    )
+    openPinned()
+    commits.mockClear()
+
+    act(() => {
+      statuses.set(new Map([['unrelated' as SessionId, status(true)]]))
+    })
+    expect(commits).not.toHaveBeenCalled()
+    expect(screen.getByRole('treeitem', { name: /worker.*正在运行/ })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /reviewer.*当前未运行/ })).toBeTruthy()
+  })
+
+  it('updates a row from its own status while the activity count stays unchanged', () => {
+    const statuses = createSnapshotStore<SessionStatusSnapshot>(new Map())
+    render(<HeaderCatalog {...props(catalog())} useSessionStatus={bindSnapshotSelector(statuses)} />)
+    openPinned()
+
+    act(() => {
+      statuses.set(new Map<SessionId, SessionStatus>([
+        [CHILD, status(false)],
+        ['child-2' as SessionId, status(true)],
+      ]))
+    })
+
+    expect(screen.getByRole('treeitem', { name: /worker.*当前未运行/ })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /reviewer.*正在运行/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '1 个子智能体，正在运行' })).toBeTruthy()
+  })
+
+  it('keeps mounted rows out of an unrelated projection record rebuild', () => {
+    const input = props(catalog(), { [CHILD]: catalog({ entries: [] }) })
+    const initial = input.useSessions(value => value)
+    let state: SessionListState = initial
+    const current: SubagentHeaderLineageProps = {
+      ...input,
+      useSessions: <T,>(select: (snapshot: SessionListState) => T): T => select(state),
+    }
+    const translate = vi.fn(input.t)
+    const view = render(<HeaderCatalog {...current} t={translate} />)
+    openPinned()
+    translate.mockClear()
+
+    state = {
+      ...state,
+      projectionsBySession: {
+        ...state.projectionsBySession,
+        ['unrelated' as SessionId]: { state: 'ready', error: null, values: {} },
+      },
+    }
+    view.rerender(<HeaderCatalog {...current} t={translate} />)
+
+    const rowCopy = translate.mock.calls
+      .map(([key]) => key)
+      .filter(key => /^(?:mode|activity|tokens|duration)\./.test(key))
+    expect(rowCopy).toEqual([])
+    expect(screen.getAllByRole('treeitem')).toHaveLength(2)
+  })
+
+  it('reaches both ends of a large catalog from the keyboard', async () => {
+    const count = 300
+    const entries = Array.from({ length: count }, (_, index) => ({
+      id: `child-${index}` as SessionId,
+      mode: 'continuable' as const,
+      label: `worker-${index}`,
+      activity: 'inactive' as const,
+      createdAt: index,
+    }))
+    render(<HeaderCatalog {...props(catalog({ entries }))} />)
+    const trigger = screen.getByRole('button', { name: new RegExp(`${count} 个子智能体`) })
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+    await Promise.resolve()
+
+    expect(screen.getAllByRole('treeitem')).toHaveLength(count)
+    const first = document.activeElement as HTMLElement
+    expect(first.getAttribute('aria-posinset')).toBe('1')
+    expect(first.getAttribute('aria-setsize')).toBe(String(count))
+    expect(first.getAttribute('aria-label')).toContain(`worker-${count - 1}`)
+
+    fireEvent.keyDown(first, { key: 'End' })
+    const last = document.activeElement as HTMLElement
+    expect(last.getAttribute('aria-posinset')).toBe(String(count))
+    expect(last.getAttribute('aria-setsize')).toBe(String(count))
+    expect(last.getAttribute('aria-label')).toContain('worker-0')
+
+    fireEvent.keyDown(last, { key: 'Home' })
+    expect(document.activeElement).toBe(first)
+    fireEvent.keyDown(first, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(last)
+    fireEvent.keyDown(last, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(first)
+  })
+
+  it('ticks only the running row and leaves the inactive row out of the clock', async () => {
+    const now = 2_000_000_000_000
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const inactive = 'child-2' as SessionId
+    const summaries: Record<SessionId, SessionSummary> = {
+      [CHILD]: {
+        ...summary(CHILD, now), parentId: PARENT, origin: 'subagent', running: true,
+        projectionValues: {
+          subagentTiming: { settledMs: 0, active: { since: now - 5_000, through: now } },
+        },
+      },
+      [inactive]: {
+        ...summary(inactive, now), parentId: PARENT, origin: 'subagent', running: false,
+        projectionValues: {
+          subagentTiming: {
+            settledMs: 3_723_000,
+            active: { since: now - 7_000, through: now - 3_000 },
+          },
+          tokenUsage: {
+            uncachedInputTokens: 123,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        },
+      },
+    }
+    const input = props(catalog({
+      entries: [
+        { id: CHILD, mode: 'continuable', label: 'worker', activity: 'running', createdAt: 2 },
+        { id: inactive, mode: 'one-shot', label: 'reviewer', activity: 'inactive', createdAt: 1 },
+      ],
+    }), {}, summaries)
+    const translate = vi.fn(input.t)
+    render(<HeaderCatalog {...input} t={translate} />)
+    openPinned()
+    translate.mockClear()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000) })
+
+    expect(screen.getByRole('treeitem', { name: /worker.*6秒/ })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /reviewer.*123 tok/ })).toBeTruthy()
+    const tokenCopy = translate.mock.calls
+      .map(([key]) => key)
+      .filter(key => key.startsWith('tokens.'))
+    // The running row carries no usage, so a token formatter call after the
+    // tick could only come from re-rendering the inactive row.
+    expect(tokenCopy).toEqual([])
+    const durationCopy = translate.mock.calls
+      .map(([key]) => key)
+      .filter(key => key.startsWith('duration.'))
+    expect(durationCopy.length).toBeGreaterThan(0)
+  })
+
+  it('portals a row action tooltip outside the contained catalog row', () => {
+    render(<HeaderCatalog {...props(catalog())} />)
+    openPinned()
+    const aside = within(screen.getByRole('treeitem', { name: /worker/ }))
+      .getByRole('button', { name: '在侧边栏打开 worker' })
+    fireEvent.mouseEnter(aside)
+
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip.parentElement).toBe(document.body)
+    expect(screen.getByRole('tree').contains(tooltip)).toBe(false)
   })
 })
 

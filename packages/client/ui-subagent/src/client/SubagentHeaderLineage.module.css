@@ -131,6 +131,13 @@
 .node {
   position: relative;
   min-width: 0;
+  /* Large catalogs keep every row mounted for keyboard navigation and page
+     find, while off-screen rows skip style, layout, and paint. The intrinsic
+     size preserves the scroll range before a row is measured. Tooltip bubbles
+     inside a row portal to the body because this containment would otherwise
+     become their containing block. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
 }
 .menuBody > .node {
   margin-left: -2px;
