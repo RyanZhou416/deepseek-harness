@@ -203,6 +203,19 @@ export interface Config {
   readonly websocketHeartbeatIntervalMs?: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails with `gateway/uplink-overflow`. @default 262144 */
   readonly streamInboxBytes?: number
+  /** Downlink compression policy; disabled by default, matching ws's plain framing. */
+  readonly streamCompression?: {
+    /** Offer `permessage-deflate` on the mux socket. @default false */
+    readonly enabled?: boolean
+    /** Smallest serialized frame in bytes the server compresses. @default 1024 */
+    readonly threshold?: number
+    /** zlib deflate level from 0 (store) through 9. @default 1 */
+    readonly level?: number
+    /** Concurrent zlib operations allowed before ws sends a frame uncompressed. @default 10 */
+    readonly concurrencyLimit?: number
+    /** Release the per-message zlib context after each frame instead of retaining it. @default false */
+    readonly serverNoContextTakeover?: boolean
+  }
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-gateway -->
@@ -245,6 +258,14 @@ export interface Config {
   readonly listWorkSliceMs?: number
   /** Projection keys the catalog omits before rendering its hint values. */
   readonly listProjectionExcludeKeys?: string[]
+  /**
+   * Serialized UTF-8 bytes of records one history page may carry before it
+   * stops extending backwards at a message boundary. The budget overrides the
+   * caller's message and Turn minima and always keeps the newest message group;
+   * `0` disables the cap and keeps the message/Turn limits alone. It bounds one
+   * frame's client-side decode and parse cost, not a whole Session.
+   */
+  readonly historyPageMaxBytes?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-session-controller -->
@@ -1578,7 +1599,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-host-frontend-static`
 
 - `inject`: `webServer` · `connection`
-- `source`: [`packages/host/frontend-static/src/index.ts:30`](../packages/host/frontend-static/src/index.ts)
+- `source`: [`packages/host/frontend-static/src/index.ts:38`](../packages/host/frontend-static/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the dist anchor. */
@@ -1936,7 +1957,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:415`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:419`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2097,7 +2118,11 @@ export interface PiAiProviderProfile {
    * reordered `stable` sections, then the session-specific remainder — and
    * applies the pinned top-level field order, the `updates` thinking display,
    * and the cache-beta removals while keeping `eager_input_streaming`, with no
-   * `cache_control` of its own. A helper class (`compaction`, `auxiliary`)
+   * `cache_control` of its own. The cache-beta removal covers both the request's
+   * `betas` list and a deployment `anthropic-beta` header, which pi-ai would
+   * otherwise send unchanged and from which it derives the list: non-cache betas
+   * stay, and a header with no remaining beta is removed rather than sent empty.
+   * A helper class (`compaction`, `auxiliary`)
    * keeps the caller's system, layout `none`, and no markers; a main or
    * subagent request that cannot state a real boundary, or that names no class
    * at all, is served as the current non-wire-parity request instead of a

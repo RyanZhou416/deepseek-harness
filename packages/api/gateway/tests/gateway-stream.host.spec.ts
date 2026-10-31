@@ -416,16 +416,64 @@ describe('Typert Remote streams', () => {
     expect(() => { startup.commit() }).not.toThrow()
   })
 
-  it('validates the WebSocket heartbeat timer range and the stream inbox bound', () => {
-    expect(TypertGatewayService.Config({})).toEqual({ websocketHeartbeatIntervalMs: 2_000, streamInboxBytes: 262_144 })
-    expect(TypertGatewayService.Config({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1 }))
-      .toEqual({ websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1 })
+  it('validates the WebSocket heartbeat timer range, the stream inbox bound, and compression policy', () => {
+    expect(TypertGatewayService.Config({})).toEqual({
+      websocketHeartbeatIntervalMs: 2_000,
+      streamInboxBytes: 262_144,
+      streamCompression: {
+        enabled: false,
+        threshold: 1_024,
+        level: 1,
+        concurrencyLimit: 10,
+        serverNoContextTakeover: false,
+      },
+    })
+    expect(TypertGatewayService.Config({
+      websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS,
+      streamInboxBytes: 1,
+      streamCompression: {
+        enabled: true,
+        threshold: 0,
+        level: 9,
+        concurrencyLimit: 1,
+        serverNoContextTakeover: true,
+      },
+    })).toEqual({
+      websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS,
+      streamInboxBytes: 1,
+      streamCompression: {
+        enabled: true,
+        threshold: 0,
+        level: 9,
+        concurrencyLimit: 1,
+        serverNoContextTakeover: true,
+      },
+    })
+    expect(TypertGatewayService.Config({ streamCompression: { enabled: true } }).streamCompression).toEqual({
+      enabled: true,
+      threshold: 1_024,
+      level: 1,
+      concurrencyLimit: 10,
+      serverNoContextTakeover: false,
+    })
     for (const websocketHeartbeatIntervalMs of [0, 1.5, MAX_TIMER_DELAY_MS + 1]) {
       expect(() => TypertGatewayService.Config({ websocketHeartbeatIntervalMs })).toThrow()
     }
     for (const streamInboxBytes of [0, 1.5]) {
       expect(() => TypertGatewayService.Config({ streamInboxBytes })).toThrow()
     }
+    for (const threshold of [-1, 1.5]) {
+      expect(() => TypertGatewayService.Config({ streamCompression: { threshold } })).toThrow()
+    }
+    for (const level of [-1, 10, 1.5]) {
+      expect(() => TypertGatewayService.Config({ streamCompression: { level } })).toThrow()
+    }
+    for (const concurrencyLimit of [0, 1.5]) {
+      expect(() => TypertGatewayService.Config({ streamCompression: { concurrencyLimit } })).toThrow()
+    }
+    expect(() => TypertGatewayService.Config({
+      streamCompression: { enabled: 'yes' } as never,
+    })).toThrow()
   })
 
   it('opens decoded carrier payloads through the in-process wire adapter', async () => {

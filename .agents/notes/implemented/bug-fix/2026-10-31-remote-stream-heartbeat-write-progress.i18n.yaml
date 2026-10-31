@@ -1,0 +1,22 @@
+# Bilingual-pair consistency record for 2026-10-31-remote-stream-heartbeat-write-progress.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-10-31-remote-stream-heartbeat-write-progress.md
+/agent-note-keep-congested-remote-stream-sockets-alive-by-carrier-write-progress:
+  en: ef9ffa4d08033de8
+  zh: 898fadb4125aed99
+/agent-note-keep-congested-remote-stream-sockets-alive-by-carrier-write-progress/problem:
+  en: 7e215311a36e6b23
+  zh: 987f17e4d31580c4
+/agent-note-keep-congested-remote-stream-sockets-alive-by-carrier-write-progress/decision:
+  en: 7afb228399f733b9
+  zh: ab819adffbfb6ef6
+/agent-note-keep-congested-remote-stream-sockets-alive-by-carrier-write-progress/alternatives-considered:
+  en: 19715c3b99262f7e
+  zh: 4cc2866aba2aefc9
+/agent-note-keep-congested-remote-stream-sockets-alive-by-carrier-write-progress/consequences:
+  en: d6c0f1a3abf33297
+  zh: 2773259999ca7856
+/agent-note-keep-congested-remote-stream-sockets-alive-by-carrier-write-progress/verification:
+  en: 5b9623772a1cd678
+  zh: 67c6b5257d26c781

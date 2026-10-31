@@ -36,7 +36,9 @@ Connection 可用时，Host 入口会在 Connection 共享的 `/api` FetchHandle
 
 支持取消的 Remote 方法会把 `signal: AbortSignal` 声明为最后一个 Host 参数。signal 是 descriptor 元数据，而不是 wire 参数：Connection 将它提供给 Gateway，Gateway 则在已解码的业务参数之后注入它。SRC 识别这个保留的末位参数名，严格生成还要求它具有全局 `AbortSignal` 类型。
 
-流式 Remote 使用 `@Remote({ mode: 'stream' })` 并返回 `Iterable` 或 `AsyncIterable`。`ctx.typertGateway.stream()` 执行与一元调用相同的 endpoint、参数、lookup 和取消校验，再返回可取消的业务项 iterable。Client 插件激活时打开 Gateway 自有的 `/api/remote.mux` WebSocket，并让它在空闲时保持连接。Connection 拥有重试调度；每次 retry 前，它要求 mux 取消候选或活动 socket，并且只做一次全新的物理连接尝试。Host 按配置的 `websocketHeartbeatIntervalMs` 间隔（默认 2 秒）发送 Ping 控制帧，浏览器在 WebSocket 协议层自动回复 Pong，使空闲网络中间层持续看到流量，而不新增 Remote 流帧。Pong、收到的任意帧，或曾在已满的本机发送缓冲区中等待后完成的下行写入，都视为对端活动；连续两个 Ping 间隔没有活动的 socket 会被终止，因此 Pong 被数据阻塞在拥塞链路上时连接仍会保持。可独立取消的逻辑流共享这条连接；进程内 Connection 载体直接提供等价的流，不打开该 WebSocket。
+流式 Remote 使用 `@Remote({ mode: 'stream' })` 并返回 `Iterable` 或 `AsyncIterable`。`ctx.typertGateway.stream()` 执行与一元调用相同的 endpoint、参数、lookup 和取消校验，再返回可取消的业务项 iterable。Client 插件激活时打开 Gateway 自有的 `/api/remote.mux` WebSocket，并让它在空闲时保持连接。Connection 拥有重试调度；每次 retry 前，它要求 mux 取消候选或活动 socket，并且只做一次全新的物理连接尝试。Host 按配置的 `websocketHeartbeatIntervalMs` 间隔（默认 2 秒）发送 Ping 控制帧，浏览器在 WebSocket 协议层自动回复 Pong，使空闲网络中间层持续看到流量，而不新增 Remote 流帧。Pong、收到的任意帧、曾在已满的本机发送缓冲区中等待后完成的下行写入，以及载体写出进度，都视为对端活动：每个 Ping tick 还会采样升级 socket 的 `bytesWritten`、`writableLength` 与 ws 的 `bufferedAmount`，因此当连接在上一 tick 仍有下行字节待写、且此后写出的字节多于自身两字节的 Ping 帧时，即使浏览器在逐段接收大帧、收完整个帧之前无法回复 Pong，该连接仍会保持。连续两个 Ping 间隔没有活动的 socket 仍会被终止，因此停止读取的对端或停滞不前的帧会被发现。可独立取消的逻辑流共享这条连接；进程内 Connection 载体直接提供等价的流，不打开该 WebSocket。
+
+`streamCompression` 选择该 socket 上可选的 `permessage-deflate` 协商。它默认关闭，保持 ws 的纯文本帧。启用后，服务端使用配置的 zlib `level` 压缩达到或超过 `threshold` 字节的下行消息，`concurrencyLimit` 限制并发的 zlib 操作数量，超过后 ws 回退为不压缩帧；`serverNoContextTakeover` 在每帧后释放 zlib 上下文，而不是为连接保留。未提供该扩展的 Client 仍收到纯文本帧。协商也允许浏览器压缩其较小的上行帧。压缩会增加 Host 的 deflate CPU 和 Client 的 inflate CPU 与解压字符串，因此不会降低客户端的 JSON 解析成本；其收益在远程链路的带宽，在回环上则是 CPU 交换而非明确收益。由于 ws 在 `send()` 返回后异步压缩，压缩帧的字节到达对端前 `bufferedAmount` 可能仍为零；因此心跳还会依据载体 socket 自身的写出计数判断进行中的下行，压缩字节在 zlib 完成后经由该计数前进。
 
 启动器提供 `ctx.appReady` 时，Gateway 仅在应用成功启动后注册 WebSocket 升级路由。此前的连接尝试仍属于载体故障，由 Connection 的重试策略处理，因此重启中的 Host 不会在控制器仍在初始化时接受流。卸载会取消尚未触发的就绪订阅，并关闭已注册的载体。不提供 `appReady` 的嵌入式 Host 会立即注册，并自行负责启动顺序；进程内调用不变。
 
@@ -90,8 +92,8 @@ Client waterfall 的 Context 解析保持同步。解析器可以返回借用的
 - `$stream()` 监督载体替换，但不推断回放语义；各领域自行拥有恢复 cursor 或替换 baseline 的校验，以及正常结束的分类。Connection generation 会重开内部 `$events` 流；单向通知不会重放，仍处于 pending 的 scoped waterfall 则沿用同一个 event id 重放。
 - lookup 解析器按 key 配置；当前无法让单个 Remote 参数或 endpoint 在同一 `agent`/`session` key 下选择 live-only 策略。
 - 被转发的事件到达 `$on` 时不做业务载荷投影或脱敏。普通通知在重连后不重放；Agent-scoped waterfall 只投影选择 Client Context 所需的顶层 Agent 身份，并自行携带 pending 生命周期。
-- `websocketHeartbeatIntervalMs` 同时是 Ping 周期和活动截止时间。对端连续两个周期没有活动时，Host 会终止连接；如果部署的事件循环或网络可能停顿超过该间隔，必须调大此配置。
-- 排队写入完成只说明 TCP 对端确认了数据。经过带缓冲的反向代理时，该对端是代理，因此持续下行期间 Client 消失，要等代理不再接收数据后才会被检测到。
+- `websocketHeartbeatIntervalMs` 同时是 Ping 周期和活动截止时间。仍在经由载体排出的下行帧也算活动，因此慢链路不需要调大该间隔；对端连续两个周期没有活动时 Host 会终止连接，而事件循环可能停顿超过该间隔的部署必须调大此配置。
+- 排队写入完成与载体写出进度都只说明 TCP 对端确认了数据。经过带缓冲的反向代理时，该对端是代理，因此持续下行期间 Client 消失，要等代理不再接收数据后才会被检测到。
 - Gateway 通过 `invocation.uplinkWindow` 提供每条 WebSocket 流的 inbox 容量与 JSON 封装开销；没有编码帧 inbox 限额的载体省略该字段。领域协议可以公布该窗口并通过确认约束在途字节数。Gateway 本身不发放额度：Client 发送快于方法读取，或发给从未取用 uplink 的方法时，其流以 `gateway/uplink-overflow` 失败；上行项不会跨载体代际重放，需要恢复上行的领域在重开的请求里自带确认游标。
 
 

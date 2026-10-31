@@ -158,11 +158,33 @@ export interface Config {
   readonly websocketHeartbeatIntervalMs?: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails with `gateway/uplink-overflow`. @default 262144 */
   readonly streamInboxBytes?: number
+  /** Downlink compression policy; disabled by default, matching ws's plain framing. */
+  readonly streamCompression?: {
+    /** Offer `permessage-deflate` on the mux socket. @default false */
+    readonly enabled?: boolean
+    /** Smallest serialized frame in bytes the server compresses. @default 1024 */
+    readonly threshold?: number
+    /** zlib deflate level from 0 (store) through 9. @default 1 */
+    readonly level?: number
+    /** Concurrent zlib operations allowed before ws sends a frame uncompressed. @default 10 */
+    readonly concurrencyLimit?: number
+    /** Release the per-message zlib context after each frame instead of retaining it. @default false */
+    readonly serverNoContextTakeover?: boolean
+  }
+}
+
+interface ResolvedCompression {
+  readonly enabled: boolean
+  readonly threshold: number
+  readonly level: number
+  readonly concurrencyLimit: number
+  readonly serverNoContextTakeover: boolean
 }
 
 interface ResolvedConfig extends Config {
   readonly websocketHeartbeatIntervalMs: number
   readonly streamInboxBytes: number
+  readonly streamCompression: ResolvedCompression
 }
 
 /**
@@ -212,6 +234,13 @@ export class TypertGatewayService extends Service implements TypertGateway {
     websocketHeartbeatIntervalMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS)
       .default(DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS),
     streamInboxBytes: z.number().step(1).min(1).default(DEFAULT_STREAM_INBOX_BYTES),
+    streamCompression: z.object({
+      enabled: z.boolean().default(false),
+      threshold: z.natural().default(1024),
+      level: z.number().step(1).min(0).max(9).default(1),
+      concurrencyLimit: z.natural().min(1).default(10),
+      serverNoContextTakeover: z.boolean().default(false),
+    }),
   })
 
   /** Carrier adapter shared by the WebSocket mux and local Host transports. */
@@ -254,6 +283,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
           this.wireStream.failure,
           resolved.websocketHeartbeatIntervalMs,
           resolved.streamInboxBytes,
+          resolved.streamCompression,
         )
         const releases = new Set<Promise<void>>()
         webCtx.effect(function* () {

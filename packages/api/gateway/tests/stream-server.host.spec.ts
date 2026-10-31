@@ -1,11 +1,14 @@
 import { once } from 'node:events'
 import { createServer, type Server } from 'node:http'
+import type { Socket } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import { remoteErrorOf, type PeerId, type PeerScope } from '@deepseek-ai/dsh-typert-protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import {
+  PING_CONTROL_FRAME_BYTES,
   RemoteStreamMuxServer,
+  type RemoteStreamCompression,
   type RemoteStreamFailureMapper,
   type RemoteStreamOpener,
 } from '../src/stream-server.ts'
@@ -347,6 +350,167 @@ describe('Remote stream mux server carrier lifecycle', () => {
   })
 })
 
+describe('Remote stream mux server heartbeat carrier progress', () => {
+  /** Long enough that the fixture installs its controlled counters before the first tick. */
+  const heartbeatMs = 100
+  const idle: RemoteStreamOpener = async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal)
+  const compressed: RemoteStreamCompression = {
+    enabled: true,
+    threshold: 1_024,
+    level: 1,
+    concurrencyLimit: 4,
+    serverNoContextTakeover: true,
+  }
+
+  it('keeps a congested connection while the carrier drains a queued downlink frame', async () => {
+    const entry = await startMux(idle, heartbeatMs)
+    const client = await connect(entry.url, false)
+    const serverSocket = acceptedSocket(entry.mux)
+    serverSocket.removeAllListeners('pong')
+    const terminated = vi.spyOn(serverSocket, 'terminate')
+    let written = 0
+    const restore = stubCarrierWrites(
+      serverSocket,
+      () => { written += 64 * 1_024; return written },
+      () => 64 * 1_024,
+    )
+    try {
+      await pings(client, 4)
+      expect(terminated).not.toHaveBeenCalled()
+    } finally {
+      restore()
+    }
+  })
+
+  it('terminates a connection whose queued downlink stops reaching the carrier', async () => {
+    const entry = await startMux(idle, heartbeatMs)
+    const client = await connect(entry.url, false)
+    const serverSocket = acceptedSocket(entry.mux)
+    serverSocket.removeAllListeners('pong')
+    const terminated = vi.spyOn(serverSocket, 'terminate')
+    const restore = stubCarrierWrites(serverSocket, () => 4_096, () => 64 * 1_024)
+    try {
+      await pings(client, 1)
+      await vi.waitFor(() => { expect(terminated).toHaveBeenCalledOnce() })
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not count the Ping frame this server writes as downlink progress', async () => {
+    const entry = await startMux(idle, heartbeatMs)
+    const client = await connect(entry.url, false)
+    const serverSocket = acceptedSocket(entry.mux)
+    serverSocket.removeAllListeners('pong')
+    const terminated = vi.spyOn(serverSocket, 'terminate')
+    let written = 0
+    const restore = stubCarrierWrites(
+      serverSocket,
+      () => { written += PING_CONTROL_FRAME_BYTES; return written },
+      () => 1,
+    )
+    try {
+      await pings(client, 1)
+      await vi.waitFor(() => { expect(terminated).toHaveBeenCalledOnce() })
+    } finally {
+      restore()
+    }
+  })
+
+  it('clears the miss count when the peer answers with Pong', async () => {
+    const entry = await startMux(idle, heartbeatMs)
+    const client = await connect(entry.url)
+    const serverSocket = acceptedSocket(entry.mux)
+    const terminated = vi.spyOn(serverSocket, 'terminate')
+    const restore = stubCarrierWrites(serverSocket, () => 4_096, () => 0)
+    try {
+      await pings(client, 4)
+      expect(terminated).not.toHaveBeenCalled()
+    } finally {
+      restore()
+    }
+  })
+
+  it('keeps a compressed connection while the carrier drains its queued frame', async () => {
+    const entry = await startMux(idle, heartbeatMs, 262_144, undefined, compressed)
+    const client = await connect(entry.url)
+    const serverSocket = acceptedSocket(entry.mux)
+    expect(serverSocket.extensions).toContain('permessage-deflate')
+    serverSocket.removeAllListeners('pong')
+    // ws reports zero while zlib still compresses, so only the carrier counters show the queued bytes.
+    Object.defineProperty(serverSocket, 'bufferedAmount', { configurable: true, value: 0 })
+    const terminated = vi.spyOn(serverSocket, 'terminate')
+    let written = 0
+    const restore = stubCarrierWrites(
+      serverSocket,
+      () => { written += 64 * 1_024; return written },
+      () => 64 * 1_024,
+    )
+    try {
+      await pings(client, 4)
+      expect(terminated).not.toHaveBeenCalled()
+    } finally {
+      restore()
+      Reflect.deleteProperty(serverSocket, 'bufferedAmount')
+    }
+  })
+})
+
+describe('Remote stream mux server downlink compression', () => {
+  const enabled = (overrides: Partial<RemoteStreamCompression> = {}): RemoteStreamCompression => ({
+    ...PLAIN_STREAM_COMPRESSION,
+    enabled: true,
+    concurrencyLimit: 4,
+    serverNoContextTakeover: true,
+    ...overrides,
+  })
+
+  it('leaves permessage-deflate unnegotiated by default and delivers the frame', async () => {
+    const payload = 'x'.repeat(4_096)
+    const entry = await startMux(async () => oneItem(payload))
+    const client = await connect(entry.url)
+    const frames = collectFrames(client)
+    expect(acceptedSocket(entry.mux).extensions).toBe('')
+    client.send(openFrame('plain'))
+    await vi.waitFor(() => { expect(frames.at(-1)).toEqual({ type: 'end', streamId: 'plain' }) })
+    expect(frames[0]).toEqual({ type: 'item', streamId: 'plain', value: payload })
+    client.close()
+    await once(client, 'close')
+  })
+
+  it('negotiates permessage-deflate when enabled and round-trips a large frame', async () => {
+    const payload = 'y'.repeat(20_000)
+    const entry = await startMux(async () => oneItem(payload), 2_000, 262_144, undefined, enabled())
+    const client = await connect(entry.url)
+    const frames = collectFrames(client)
+    expect(acceptedSocket(entry.mux).extensions).toContain('permessage-deflate')
+    client.send(openFrame('compressed'))
+    await vi.waitFor(() => { expect(frames.at(-1)).toEqual({ type: 'end', streamId: 'compressed' }) })
+    expect(frames[0]).toEqual({ type: 'item', streamId: 'compressed', value: payload })
+    client.close()
+    await once(client, 'close')
+  })
+
+  it('keeps the extension unnegotiated for a client that does not offer it', async () => {
+    const payload = 'z'.repeat(4_096)
+    const entry = await startMux(async () => oneItem(payload), 2_000, 262_144, undefined, enabled())
+    const client = new WebSocket(entry.url, { perMessageDeflate: false })
+    await once(client, 'open')
+    const frames = collectFrames(client)
+    expect(acceptedSocket(entry.mux).extensions).toBe('')
+    client.send(openFrame('plain-client'))
+    await vi.waitFor(() => { expect(frames.at(-1)).toEqual({ type: 'end', streamId: 'plain-client' }) })
+    expect(frames[0]).toEqual({ type: 'item', streamId: 'plain-client', value: payload })
+    client.close()
+    await once(client, 'close')
+  })
+
+  it('compresses only frames at or above the configured threshold', async () => {
+    expect(await downlinkFirstFrameByte(enabled({ threshold: 1_024 }), 'small'.repeat(8))).toBe(0x81)
+    expect(await downlinkFirstFrameByte(enabled({ threshold: 1_024 }), 'large'.repeat(1_024))).toBe(0xc1)
+  })
+})
+
 describe('Remote stream mux server Peer binding', () => {
   it('closes an upgrade at once when the admitted Peer scope is already disposed', async () => {
     const peer = await fixturePeer()
@@ -585,14 +749,24 @@ const mapFailure: RemoteStreamFailureMapper = (error) => {
   }
 }
 
+/** Upstream ws framing: no negotiated extension and no compression. */
+const PLAIN_STREAM_COMPRESSION: RemoteStreamCompression = {
+  enabled: false,
+  threshold: 1024,
+  level: 1,
+  concurrencyLimit: 10,
+  serverNoContextTakeover: false,
+}
+
 async function startMux(
   open: RemoteStreamOpener,
   heartbeatIntervalMs = 2_000,
   streamInboxBytes = 262_144,
   peer?: PeerScope,
+  compression: RemoteStreamCompression = PLAIN_STREAM_COMPRESSION,
 ): Promise<RunningMux> {
   const admitted = peer ?? await fixturePeer()
-  const mux = new RemoteStreamMuxServer(open, mapFailure, heartbeatIntervalMs, streamInboxBytes)
+  const mux = new RemoteStreamMuxServer(open, mapFailure, heartbeatIntervalMs, streamInboxBytes, compression)
   const http = createServer()
   http.on('upgrade', (request, socket, head) => { mux.handleUpgrade(request, socket, head, admitted) })
   await new Promise<void>((resolve, reject) => {
@@ -637,6 +811,35 @@ function acceptedSocket(mux: RemoteStreamMuxServer): WebSocket {
   return socket
 }
 
+/**
+ * The net.Socket the HTTP upgrade transferred to ws. Tests replace its write
+ * counters; production reads the same properties from the socket it received.
+ */
+function carrierSocket(serverSocket: WebSocket): Socket {
+  const carrier = (serverSocket as WebSocket & { _socket?: Socket })._socket
+  if (carrier === undefined) throw new Error('fixture server socket has no carrier')
+  return carrier
+}
+
+/**
+ * Replace the accepted carrier's write counters with test-controlled values and
+ * return their disposer. `bytesWritten` counts up as the heartbeat samples it,
+ * the way a congested carrier accepts bytes one interval at a time.
+ */
+function stubCarrierWrites(
+  serverSocket: WebSocket,
+  bytesWritten: () => number,
+  writableLength: () => number,
+): () => void {
+  const carrier = carrierSocket(serverSocket)
+  Object.defineProperty(carrier, 'bytesWritten', { configurable: true, get: bytesWritten })
+  Object.defineProperty(carrier, 'writableLength', { configurable: true, get: writableLength })
+  return () => {
+    Reflect.deleteProperty(carrier, 'bytesWritten')
+    Reflect.deleteProperty(carrier, 'writableLength')
+  }
+}
+
 function collectFrames(client: WebSocket): Record<string, unknown>[] {
   const frames: Record<string, unknown>[] = []
   client.on('message', (data) => {
@@ -676,6 +879,37 @@ function endFrame(streamId: string): string {
 
 async function *echoUplink(uplink: AsyncIterable<unknown>): AsyncIterable<unknown> {
   for await (const value of uplink) yield value
+}
+
+async function *oneItem(value: string): AsyncIterable<string> {
+  yield value
+}
+
+/**
+ * First byte of the first downlink WebSocket frame: `0xc1` when the server
+ * compressed it (FIN, RSV1, text opcode), `0x81` when it did not.
+ *
+ * The raw client socket carries server-to-client bytes; the `ws` Receiver
+ * consumes the same chunks through its own listener.
+ */
+async function downlinkFirstFrameByte(
+  compression: RemoteStreamCompression,
+  payload: string,
+): Promise<number> {
+  const entry = await startMux(async () => oneItem(payload), 2_000, 262_144, undefined, compression)
+  const client = await connect(entry.url)
+  const chunks: Buffer[] = []
+  const raw = (client as WebSocket & { _socket?: Socket })._socket
+  if (raw === undefined) throw new Error('fixture client socket has no carrier')
+  raw.on('data', (chunk: Buffer) => { chunks.push(chunk) })
+  const frames = collectFrames(client)
+  client.send(openFrame('frame'))
+  await vi.waitFor(() => { expect(frames).toHaveLength(2) })
+  client.close()
+  await once(client, 'close')
+  const first = chunks[0]?.[0]
+  if (first === undefined) throw new Error('fixture server wrote no downlink bytes')
+  return first
 }
 
 /** Yield an item every few milliseconds until `stop` settles. */
