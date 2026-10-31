@@ -118,15 +118,29 @@ function betasOf(request: CapturedRequest): string[] {
 }
 
 /**
+ * A capability reply carrying the exact triple and the A-off HIPAA cache
+ * downgrade, which the default one-hour non-parity wire needs.
+ * @returns the HTTP reply the capability probe parses.
+ */
+function capabilityReply(): Response {
+  return new Response(JSON.stringify({
+    protocol: 2,
+    ccWireParity: 1,
+    buildId: 'pool-build-1',
+    aOffHipaaCache: 'downgrade',
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
+}
+
+/**
  * Send the probe through a fresh mount and return the captured request.
  *
- * The fetch stand-in is installed before mount because a route configured for
- * wire parity probes the capability endpoint at load; the captured model request
- * is the first request that is not that probe.
+ * The fetch stand-in is installed before mount because a one-hour route probes
+ * the capability endpoint at load; the captured model request is the first
+ * request that is not that probe.
  * @param config - loader configuration for the pool plugin.
  * @param options - request fields overriding the default probe.
  * @param respond - produces the response for one recorded request; defaults to
- *   the minimal success SSE.
+ *   the capability answer for the probe URL and the minimal success SSE.
  * @returns the request the pool route built.
  */
 async function probe(
@@ -135,7 +149,9 @@ async function probe(
   respond?: (request: CapturedRequest) => Response,
 ): Promise<CapturedRequest> {
   vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
-  const capture = capturePoolFetch(respond)
+  const capture = capturePoolFetch(respond ?? (request => request.url === CAPABILITIES_URL
+    ? capabilityReply()
+    : anthropicSuccessResponse()))
   vi.stubGlobal('fetch', capture.fetch)
   const ctx = await mount(config)
   await assemble(ctx, { ...PROBE, ...options })
@@ -144,15 +160,6 @@ async function probe(
   await ctx.fiber.dispose()
   context = undefined
   return call
-}
-
-/**
- * Whether one captured request declares the wire parity member headers.
- * @param request - the captured provider request.
- * @returns whether its member header set is present.
- */
-function declaresWireParity(request: CapturedRequest): boolean {
-  return request.headers.has('x-cc-request-class')
 }
 
 /** An assistant turn whose content is plain text, so a request carries an assistant block. */
@@ -201,7 +208,9 @@ describe('pool prompt-cache policy', () => {
 
   it('keeps a helper request at the default five-minute lifetime without the extended beta', async () => {
     vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
-    const capture = capturePoolFetch()
+    const capture = capturePoolFetch(request => request.url === CAPABILITIES_URL
+      ? capabilityReply()
+      : anthropicSuccessResponse())
     vi.stubGlobal('fetch', capture.fetch)
     const ctx = await mount()
 
@@ -212,8 +221,9 @@ describe('pool prompt-cache policy', () => {
     await assemble(ctx, { ...PROBE, requestClass: 'compaction' })
     await assemble(ctx, { ...PROBE, purpose: 'session-title' })
 
-    expect(capture.calls).toHaveLength(4)
-    const [main, subagent, compaction, auxiliary] = capture.calls
+    const requests = capture.calls.filter(request => request.url !== CAPABILITIES_URL)
+    expect(requests).toHaveLength(4)
+    const [main, subagent, compaction, auxiliary] = requests
     for (const request of [main, subagent]) {
       if (request === undefined) throw new Error('the pool route sent no main or subagent request')
       expect(markersOf(request.body)).toEqual([
@@ -304,6 +314,10 @@ describe('pool prompt-cache policy', () => {
   it('leaves another provider route at its own placement and betas', async () => {
     vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
     vi.stubEnv('OTHER_GATEWAY_KEY', 'other-key')
+    const capture = capturePoolFetch(request => request.url === CAPABILITIES_URL
+      ? capabilityReply()
+      : anthropicSuccessResponse())
+    vi.stubGlobal('fetch', capture.fetch)
     const ctx = new Context()
     context = ctx
     await ctx.plugin(LlmRuntime)
@@ -324,26 +338,25 @@ describe('pool prompt-cache policy', () => {
         },
       },
     })
-    const capture = capturePoolFetch()
-    vi.stubGlobal('fetch', capture.fetch)
 
     await assemble(ctx, PROBE)
     await assemble(ctx, { ...PROBE, model: 'other-model' }, 'other-gateway')
 
-    expect(capture.calls).toHaveLength(2)
-    expect(capture.calls[0]?.url.startsWith('https://ccpool.tiancegames.com')).toBe(true)
-    expect(capture.calls[1]?.url.startsWith('https://other.example')).toBe(true)
-    expect(markersOf(capture.calls[0]?.body ?? {})).toEqual([
+    const requests = capture.calls.filter(request => request.url !== CAPABILITIES_URL)
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.url.startsWith('https://ccpool.tiancegames.com')).toBe(true)
+    expect(requests[1]?.url.startsWith('https://other.example')).toBe(true)
+    expect(markersOf(requests[0]?.body ?? {})).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
-    expect(markersOf(capture.calls[1]?.body ?? {})).toEqual([
+    expect(markersOf(requests[1]?.body ?? {})).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
       ['.system[0].cache_control', { type: 'ephemeral' }],
       ['.tools[1].cache_control', { type: 'ephemeral' }],
     ])
-    const other = capture.calls[1]
+    const other = requests[1]
     if (other === undefined) throw new Error('the second route sent no request')
     // The other route keeps pi-ai's construction order and gains no metadata
     // placeholder.
@@ -354,7 +367,7 @@ describe('pool prompt-cache policy', () => {
     expect(betasOf(other)).toEqual([])
     // The pool route's beta, marker policy, and field order reached only the pool
     // route.
-    const pool = capture.calls[0]
+    const pool = requests[0]
     if (pool === undefined) throw new Error('the pool route sent no request')
     expect(Object.keys(pool.body).at(-1)).toBe('stream')
     expect(JSON.stringify(pool.body)).toContain(IDENTITY)
@@ -431,21 +444,22 @@ describe('pool prompt-cache policy', () => {
     expect(ctx.llm.listProviders()).toEqual([])
   })
 
-  it('keeps the three-marker bytes when the wire parity probe answers no proof', async () => {
-    const baseline = await probe()
-    const unproven = await probe({ ccWireParity: true }, {}, (request) => {
-      if (request.url !== CAPABILITIES_URL) return anthropicSuccessResponse()
+  it('refuses the A-off one-hour wire when the capability reply binds no build identity', async () => {
+    vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+    const capture = capturePoolFetch(request => request.url === CAPABILITIES_URL
       // The endpoint answered with the pair, but no build identity binds it.
-      return new Response(JSON.stringify({ protocol: 2, ccWireParity: 1 }), { status: 200 })
-    })
+      ? new Response(JSON.stringify({ protocol: 2, ccWireParity: 1 }), { status: 200 })
+      : anthropicSuccessResponse())
+    vi.stubGlobal('fetch', capture.fetch)
+    const ctx = await mount({ ccWireParity: true })
 
-    // A route that asked for the wire and did not get proof for a build is
-    // byte-identical to a route that never asked: the probe cannot alter the
-    // wire-parity-off request.
-    expect(declaresWireParity(unproven)).toBe(false)
-    expect(unproven.body).toEqual(baseline.body)
-    expect(markersOf(unproven.body)).toEqual(markersOf(baseline.body))
-    expect(markersOf(unproven.body)).toHaveLength(3)
-    expect(betasOf(unproven)).toEqual([EXTENDED_CACHE_TTL_BETA])
+    // Without the build that would bind either capability, the route has neither
+    // the proof nor the A-off cache permission, so it sends no one-hour marker.
+    const result = await assemble(ctx, PROBE)
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+    })
+    expect(capture.calls.filter(request => request.url !== CAPABILITIES_URL)).toHaveLength(0)
   })
 })

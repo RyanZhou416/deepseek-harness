@@ -13,9 +13,24 @@ import LlmRuntime from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-settings'
 import { afterEach, expect, it, vi } from 'vitest'
 import { profileComposition } from '../../../settings/settings/tests/profile-composition.ts'
+import { CAPABILITIES_URL } from '../src/discovery.ts'
 import * as CcPool from '../src/index.ts'
 import { BASE_URL, PROVIDER } from '../src/pool.ts'
-import { assemble, capturePoolFetch, user } from './harness.ts'
+import { anthropicSuccessResponse, assemble, capturePoolFetch, user } from './harness.ts'
+
+/**
+ * A capability reply carrying the exact triple and the A-off HIPAA cache
+ * downgrade the one-hour non-parity wire needs.
+ * @returns the HTTP reply the capability probe parses.
+ */
+function capabilityReply(): Response {
+  return new Response(JSON.stringify({
+    protocol: 2,
+    ccWireParity: 1,
+    buildId: 'pool-build-1',
+    aOffHipaaCache: 'downgrade',
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
+}
 
 let context: Context | undefined
 let root: string | undefined
@@ -91,6 +106,7 @@ it('installs the fixed route, catalogue, and durable diagnostics through a real 
     '  config:',
     '    requestLog:',
     `      path: ${JSON.stringify(join(home, 'requests.jsonl'))}`,
+    '    cacheTtl: none',
   ])
 
   expect(ctx.llm.listProviders()).toEqual([{ id: PROVIDER, name: 'CC 订阅池' }])
@@ -126,6 +142,7 @@ it('reads the pool model list through the installed profile without writing the 
     '  config:',
     '    requestLog:',
     `      path: ${JSON.stringify(join(home, 'requests.jsonl'))}`,
+    '    cacheTtl: none',
   ])
   const before = await readFile(patchPath, 'utf8')
   const capture = capturePoolFetch(() => new Response(JSON.stringify({
@@ -155,6 +172,7 @@ it('installs a configured catalogue through a real profile and serves it', async
     '  config:',
     '    requestLog:',
     '      enabled: false',
+    '    cacheTtl: none',
     '    models:',
     '      - id: claude-test-model',
     '        name: Test Model',
@@ -190,6 +208,12 @@ it('installs a configured catalogue through a real profile and serves it', async
 
 it('enables the three-marker one-hour layout by default through a real profile', async () => {
   vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+  // The load capability probe answers from the same stand-in because the
+  // default one-hour policy needs the pool's A-off HIPAA cache permission.
+  const capture = capturePoolFetch(request => request.url === CAPABILITIES_URL
+    ? capabilityReply()
+    : anthropicSuccessResponse())
+  vi.stubGlobal('fetch', capture.fetch)
   const { ctx } = await loadComposition(() => [
     '- id: llm',
     "  name: 'test-llm-service'",
@@ -199,8 +223,6 @@ it('enables the three-marker one-hour layout by default through a real profile',
     '    requestLog:',
     '      enabled: false',
   ])
-  const capture = capturePoolFetch()
-  vi.stubGlobal('fetch', capture.fetch)
   await assemble(ctx, {
     model: 'claude-sonnet-5-5',
     system: 'You are the composed pool assistant.',
@@ -208,7 +230,7 @@ it('enables the three-marker one-hour layout by default through a real profile',
     messages: [user('composed cache lifetime')],
   })
 
-  const call = capture.calls[0]
+  const call = capture.calls.find(request => request.url !== CAPABILITIES_URL)
   if (call === undefined) throw new Error('the pool route sent no request')
   const body = call.body
   // The identity block opens the system array and both system blocks carry a
@@ -244,6 +266,7 @@ it('refuses an invalid catalogue write instead of persisting it', async () => {
     '  config:',
     '    requestLog:',
     '      enabled: false',
+    '    cacheTtl: none',
   ])
   const duplicate = { id: 'duplicate', name: 'Duplicate', contextWindow: 200_000, maxTokens: 1_024, defaultReasoning: 'low' }
 
@@ -272,6 +295,7 @@ it('persists a catalogue written through the settings service and serves it live
     '  config:',
     '    requestLog:',
     '      enabled: false',
+    '    cacheTtl: none',
   ])
   expect(await ctx.llm.listModels(PROVIDER)).toHaveLength(4)
   expect(await readFile(patchPath, 'utf8')).not.toContain('claude-settings-model')

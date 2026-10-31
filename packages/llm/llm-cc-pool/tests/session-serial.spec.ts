@@ -27,7 +27,9 @@ afterEach(async () => {
 })
 
 /**
- * Mount the real LLM service and the plugin under test.
+ * Mount the real LLM service and the plugin under test. The caching-disabled
+ * lifetime keeps this suite off the capability probe, which session ordering
+ * does not exercise.
  * @param config - loader configuration for the plugin.
  * @returns the isolated context.
  */
@@ -35,7 +37,7 @@ async function mount(config: Record<string, unknown> = {}): Promise<Context> {
   const ctx = new Context()
   context = ctx
   await ctx.plugin(LlmRuntime)
-  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ...config })
+  await ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: 'none', ...config })
   return ctx
 }
 
@@ -56,7 +58,7 @@ async function mountWithAdapter(config: Record<string, unknown> = {}): Promise<{
     captured = adapter
     return register(providers, adapter)
   }
-  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ...config })
+  await ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: 'none', ...config })
   if (captured === undefined) throw new Error('the plugin registered no adapter')
   return { ctx, adapter: captured }
 }
@@ -85,9 +87,11 @@ interface MemberCall {
 /** Answers one member request by its zero-based call index. */
 type Responder = (call: number, sessionId: string | undefined) => Response | Promise<Response>
 
-/** The request body fields this suite reads. */
+/** The request body fields this suite reads; content is a string or block array. */
 interface MemberBody {
-  readonly messages?: readonly { readonly content?: readonly { readonly text?: string }[] }[]
+  readonly messages?: readonly {
+    readonly content?: string | readonly { readonly text?: string }[]
+  }[]
 }
 
 /**
@@ -113,7 +117,9 @@ function memberFetch(respond: Responder): {
         : JSON.parse(raw) as MemberBody
       const sessionId = headers.get('x-claude-code-session-id') ?? undefined
       const requestId = headers.get('x-client-request-id') ?? undefined
-      calls.push({ sessionId, requestId, text: body.messages?.[0]?.content?.[0]?.text ?? '' })
+      const content = body.messages?.[0]?.content
+      const text = typeof content === 'string' ? content : content?.[0]?.text ?? ''
+      calls.push({ sessionId, requestId, text })
       return respond(calls.length - 1, sessionId)
     },
   }

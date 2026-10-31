@@ -1659,8 +1659,10 @@ covers both the parity request and the unchanged non-parity request.
 `llm-cc-pool` only adds the profile field and the capability
 probe. The probe is a member HTTP request at profile load, on a replaced member
 credential, and after a failed attempt's backoff; it is not a model/account
-request and it requires the pool's build identity. A successful proof is not
-polled on a schedule. A failed load probe — including a rejected member
+request and it requires the pool's build identity. The same reply may also
+carry `aOffHipaaCache: "downgrade"`, and the route refuses a one-hour
+non-parity main or subagent dispatch without it (see the A-off HIPAA cache
+section below). A successful proof is not polled on a schedule. A failed load probe — including a rejected member
 credential lookup — retries with bounded backoff (2 s doubling to 60 s) and logs
 the attempt and next delay at warning level, so one failure does not leave the
 process permanently on the default wire. The first routed request awaits the
@@ -1767,6 +1769,54 @@ absent overage is not overage, and HIPAA suppresses scope/extended/diagnosis and
 forces five minutes because the 1h marker and its beta are one form. The default
 three-marker/no-scope wire remains the shipped
 wire while `ccWireParity` is false or the endpoint has not proved the capability.
+
+## CC pool A-off HIPAA cache downgrade (fork)
+
+**Behavior.** The pool's `GET /v1/capabilities` reply may carry
+`aOffHipaaCache: "downgrade"` beside `{protocol: 2, ccWireParity: 1, buildId}`.
+`llm-cc-pool` reads it as one capability answer scoped to that endpoint and pool
+build: `probePoolCapabilities` returns `{proof, aOffHipaaCache}` or nothing, only
+the exact lower-case token grants the field, and a missing or malformed value
+leaves it unavailable without withdrawing the wire-parity proof beside it. The
+route probes when `ccWireParity` is true or its cache policy writes a one-hour
+main/subagent marker, so the default one-hour route probes even with wire parity
+off; a caching-disabled route that does not request the wire sends no probe.
+
+On the non-parity wire the adapter admits a main, subagent, or unclassified
+dispatch only while the current answer advertises the downgrade; otherwise it
+throws `LlmError` code `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` with
+`retryDisposition: "forbid"` before any provider request. It never sends the
+one-hour marker and never substitutes the five-minute lifetime. A helper
+(`compaction`, `auxiliary`) keeps the API's default five minutes under `cc3` and
+is exempt; `cacheTtl: none` sends no marker and needs no permission.
+`llm-pi-ai` exports `isHelperRequest` so the gate reuses the adapter's class
+mapping instead of restating it. A proved parity route is unchanged: the worker
+owns its cache plan, and an A-on request or its cc3 fallback is not gated. A
+probe generation clears the answer before asking, an answer replaces both
+facts, a replaced `CC_POOL_API_KEY` reopens the question, and a new build
+replaces it with the new answer; a marked `503` withdraws only the wire proof
+and keeps the A-off permission because the refusal says nothing about the
+build's cache handling. Probe answers log the permission at info when advertised
+and at warning when absent; the typed refusal is the visible failure a
+deployment sees.
+
+**Preservation rule.** Keep the one probe answer as the sole source of both
+facts; do not add a config field, a per-request heuristic, or a silent fallback
+lifetime. Keep the token comparison exact and case-sensitive, keep the A-off
+grant unavailable without the exact triple, and keep an absent or malformed
+field from failing the A-on proof. Keep the A-off refusal before provider
+dispatch, and keep `cacheTtl: none` and the cc3 helper lifetime outside it. Keep
+the capability cleared with the proof on credential change and probe restart,
+and keep the marked-503 behavior (wire withdrawn, cache permission retained). Do
+not let `cc3` or any other provider route read the capability.
+
+**Focused verification.** `pnpm exec vitest run packages/llm/llm-cc-pool
+packages/llm/llm-pi-ai` covers the exact-token parse, missing and malformed
+values, the unproved reply, the A-off one-hour dispatch with and without the
+field, the helper exemption, the typed refusal with no provider request, the
+credential reset, the unchanged A-on wire and fallback, the marked-503 fallback,
+and the existing probe triple. `pnpm run typecheck` and oxlint cover the export
+and contracts.
 
 ## CC subscription pool settings page (fork)
 

@@ -49,7 +49,9 @@ afterEach(async () => {
 /**
  * Mount the real LLM service and the plugin under test. The durable sink is
  * disabled by default so a case that does not exercise persistence writes
- * nothing below the ambient harness home.
+ * nothing below the ambient harness home, and the caching-disabled lifetime
+ * keeps this suite's mounts off the capability probe: the prompt-cache policy
+ * and that probe are covered by `cache-ttl.spec.ts` and `pool.spec.ts`.
  * @param config - loader configuration for the plugin.
  * @returns the isolated context.
  */
@@ -57,7 +59,7 @@ async function mount(config: Record<string, unknown> = {}): Promise<Context> {
   const ctx = new Context()
   context = ctx
   await ctx.plugin(LlmRuntime)
-  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ...config })
+  await ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: 'none', ...config })
   return ctx
 }
 
@@ -166,7 +168,7 @@ describe('mac-pool plugin registration', () => {
     const ctx = new Context()
     context = ctx
     await ctx.plugin(LlmRuntime)
-    const fiber = ctx.plugin(CcPool, {})
+    const fiber = ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: 'none' })
     await fiber
     expect(ctx.llm.listProviders()).toHaveLength(1)
     const capture = capturePoolFetch()
@@ -376,7 +378,7 @@ describe('mac-pool wire contract', () => {
     const ctx = new Context()
     context = ctx
     await ctx.plugin(LlmRuntime)
-    const fiber = ctx.plugin(CcPool, config)
+    const fiber = ctx.plugin(CcPool, { cacheTtl: 'none', ...config })
     await fiber
     const capture = capturePoolFetch()
     vi.stubGlobal('fetch', capture.fetch)
@@ -402,7 +404,7 @@ describe('mac-pool wire contract', () => {
     const ctx = new Context()
     context = ctx
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(CcPool, { requestLog: { enabled: true } })
+    await ctx.plugin(CcPool, { requestLog: { enabled: true }, cacheTtl: 'none' })
     const capture = capturePoolFetch()
     vi.stubGlobal('fetch', capture.fetch)
 
@@ -431,7 +433,7 @@ describe('mac-pool wire contract', () => {
     context = ctx
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LocalCredentialProvider, { path: credentialsPath, debounceMs: 10 })
-    await ctx.plugin(CcPool, { requestLog: { enabled: false } })
+    await ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: 'none' })
     const capture = capturePoolFetch()
     vi.stubGlobal('fetch', capture.fetch)
 

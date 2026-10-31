@@ -951,10 +951,13 @@ function ccWireParityRequestClass(options: GenerateOptions): CcWireParityRequest
  * {@link ccWireParityRequestClass}'s, so an explicit `requestClass` outranks
  * `purpose` here too. Every other request — `main`, `subagent`, or one that
  * states no class — reads the route's configured lifetime.
+ * A route consumer that must know which requests keep the API's default cache
+ * lifetime instead of the route's configured one reads this same classification
+ * rather than restating it.
  * @param options - the assembled request.
  * @returns whether the request is a helper.
  */
-function isHelperRequest(options: GenerateOptions): boolean {
+export function isHelperRequest(options: GenerateOptions): boolean {
   const requestClass = ccWireParityRequestClass(options)
   return requestClass === 'compaction' || requestClass === 'auxiliary'
 }

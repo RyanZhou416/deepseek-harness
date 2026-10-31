@@ -37,7 +37,10 @@ afterEach(async () => {
 
 /**
  * Mount the real LLM service and the plugin under test with the durable sink
- * disabled, so a case writes nothing below the ambient harness home.
+ * disabled, so a case writes nothing below the ambient harness home. The
+ * caching-disabled lifetime keeps the mount off the capability probe: these
+ * cases cover the listing read, and the probe's own read has no model listing
+ * to answer.
  * @param config - loader configuration for the plugin.
  * @returns the isolated context.
  */
@@ -45,7 +48,7 @@ async function mount(config: Record<string, unknown> = {}): Promise<Context> {
   const ctx = new Context()
   context = ctx
   await ctx.plugin(LlmRuntime)
-  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ...config })
+  await ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: 'none', ...config })
   return ctx
 }
 
@@ -92,6 +95,7 @@ function capabilityReply(overrides: Record<string, unknown> = {}): Response {
     protocol: 2,
     ccWireParity: 1,
     buildId: 'sha256:pool-build',
+    aOffHipaaCache: 'downgrade',
     ...overrides,
   }), { status: 200, headers: { 'content-type': 'application/json' } })
 }
@@ -242,8 +246,8 @@ describe('pool capability probe', () => {
     vi.stubGlobal('fetch', capture.fetch)
 
     expect(await probePoolCapabilities('pool-member-key')).toEqual({
-      endpoint: CAPABILITIES_URL,
-      buildId: 'sha256:7f3a',
+      proof: { endpoint: CAPABILITIES_URL, buildId: 'sha256:7f3a' },
+      aOffHipaaCache: true,
     })
 
     expect(capture.calls).toHaveLength(1)
@@ -260,7 +264,7 @@ describe('pool capability probe', () => {
     // bound; both edges are accepted, because the pool may publish either.
     for (const buildId of ['a', `sha256:${'0'.repeat(64)}`, 'b'.repeat(128)]) {
       vi.stubGlobal('fetch', capturePoolFetch(() => capabilityReply({ buildId })).fetch)
-      expect(await probePoolCapabilities('pool-member-key')).toMatchObject({ buildId })
+      expect(await probePoolCapabilities('pool-member-key')).toMatchObject({ proof: { buildId } })
     }
 
     const unusable: readonly [label: string, buildId: unknown][] = [
@@ -295,6 +299,51 @@ describe('pool capability probe', () => {
       { protocol: 2, ccWireParity: undefined },
     ]
     for (const overrides of rejected) {
+      vi.stubGlobal('fetch', capturePoolFetch(() => capabilityReply(overrides)).fetch)
+      expect(await probePoolCapabilities('pool-member-key'), JSON.stringify(overrides)).toBeUndefined()
+    }
+  })
+
+  it('reads only the exact A-off HIPAA cache downgrade token as a grant', async () => {
+    vi.stubGlobal('fetch', capturePoolFetch(() => capabilityReply()).fetch)
+    expect(await probePoolCapabilities('pool-member-key')).toMatchObject({ aOffHipaaCache: true })
+
+    // Only the contract's exact lower-case token grants it. Anything else is
+    // absent, including a differently cased or padded spelling, another token,
+    // and a non-string value.
+    const invalid: readonly [label: string, value: unknown][] = [
+      ['missing', undefined],
+      ['empty', ''],
+      ['upper case', 'DOWNGRADE'],
+      ['title case', 'Downgrade'],
+      ['padded', ' downgrade'],
+      ['trailing space', 'downgrade '],
+      ['other token', 'allow'],
+      ['boolean', true],
+      ['number', 1],
+      ['null', null],
+      ['array', ['downgrade']],
+      ['object', { value: 'downgrade' }],
+    ]
+    for (const [label, aOffHipaaCache] of invalid) {
+      vi.stubGlobal('fetch', capturePoolFetch(() => capabilityReply({ aOffHipaaCache })).fetch)
+      expect(await probePoolCapabilities('pool-member-key'), label).toEqual({
+        proof: { endpoint: CAPABILITIES_URL, buildId: 'sha256:pool-build' },
+        aOffHipaaCache: false,
+      })
+    }
+  })
+
+  it('does not bind the A-off HIPAA cache grant to an unproved reply', async () => {
+    // The permission belongs to the endpoint and build the triple binds, so a
+    // reply that cannot state them grants neither fact.
+    const unproved = [
+      { buildId: undefined },
+      { buildId: '' },
+      { protocol: 1 },
+      { ccWireParity: 0 },
+    ]
+    for (const overrides of unproved) {
       vi.stubGlobal('fetch', capturePoolFetch(() => capabilityReply(overrides)).fetch)
       expect(await probePoolCapabilities('pool-member-key'), JSON.stringify(overrides)).toBeUndefined()
     }
@@ -359,14 +408,14 @@ describe('pool capability probe', () => {
     vi.stubGlobal('fetch', capture.fetch)
 
     expect(await probePoolCapabilities('pool-member-key')).toEqual({
-      endpoint: CAPABILITIES_URL,
-      buildId: 'pool-build-a',
+      proof: { endpoint: CAPABILITIES_URL, buildId: 'pool-build-a' },
+      aOffHipaaCache: true,
     })
     // A new probe answers for the build that answered it; the previous build's
     // proof is not reused.
     expect(await probePoolCapabilities('pool-member-key')).toEqual({
-      endpoint: CAPABILITIES_URL,
-      buildId: 'pool-build-b',
+      proof: { endpoint: CAPABILITIES_URL, buildId: 'pool-build-b' },
+      aOffHipaaCache: true,
     })
     expect(capture.calls).toHaveLength(2)
   })
@@ -503,7 +552,7 @@ describe('registered pool discovery', () => {
     context = ctx
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LocalCredentialProvider, { path: credentialsPath, debounceMs: 10 })
-    await ctx.plugin(CcPool, { requestLog: { enabled: false } })
+    await ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: 'none' })
     const capture = capturePoolFetch(() => poolListing([{ id: 'claude-sonnet-5-5' }]))
     vi.stubGlobal('fetch', capture.fetch)
 

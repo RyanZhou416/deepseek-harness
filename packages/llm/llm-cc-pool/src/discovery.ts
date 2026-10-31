@@ -1,6 +1,6 @@
 /**
  * Reading the pool's own model list for an explicit "sync models" action, and
- * asking it whether this member may use the CC wire parity wire.
+ * asking it which capabilities this member endpoint advertises.
  *
  * The route's catalogue is configuration, and nothing here writes it: a
  * listing is candidate metadata an editing surface may offer for adoption. A
@@ -14,12 +14,20 @@
  * listing endpoint is the pool's own registry, reached with the member
  * credential as a bearer token; it is not the Anthropic Messages endpoint and
  * carries none of that protocol's headers. The capability probe uses the same
- * member authentication and answers only with the pool's proof or nothing,
+ * member authentication and answers only with the pool's own facts or nothing,
  * because wire parity is enabled on positive proof and never inferred from an
- * absent answer. That proof is the exact `{protocol: 2, ccWireParity: 1, buildId}` triple
- * for the endpoint and pool build that answered: a reply without the build
- * cannot bind the capability, and a proof is never carried to another endpoint
- * or a different build.
+ * absent answer. That proof is the exact `{protocol: 2, ccWireParity: 1, buildId}`
+ * triple for the endpoint and pool build that answered: a reply without the
+ * build cannot bind the capability, and a proof is never carried to another
+ * endpoint or a different build.
+ *
+ * The same reply may advertise the A-off HIPAA cache downgrade as
+ * `aOffHipaaCache: "downgrade"`. It permits this route's non-parity wire to
+ * send its one-hour prompt-cache markers: the answering pool build states that
+ * it downgrades them for HIPAA traffic. The field is read only from a reply
+ * that also binds the exact triple, because the permission belongs to the same
+ * endpoint and pool build; an absent or differently spelled value is not a
+ * partial grant, and it never weakens the wire-parity proof beside it.
  *
  * @module dsh-llm-cc-pool/discovery
  */
@@ -58,14 +66,22 @@ const CAPABILITY_PROBE_TIMEOUT_MS = 5_000
 const CAPABILITY_BUILD_MAX_CHARACTERS = 128
 
 /**
- * The capability fields wire parity requires, as far as this reader trusts them.
- * `buildId` binds the capability to the pool build that answered; a reply without it
- * proves nothing, because the proof could not be scoped.
+ * The only `aOffHipaaCache` value that advertises the A-off cache downgrade.
+ * The pool contract states one exact lower-case token; any other value is not
+ * a grant, so it is treated as absent.
+ */
+export const A_OFF_HIPAA_CACHE_DOWNGRADE = 'downgrade'
+
+/**
+ * The capability fields this reader trusts, as far as the reply states them.
+ * `buildId` binds both capabilities to the pool build that answered; a reply
+ * without it proves nothing, because neither could be scoped.
  */
 interface PoolCapabilities {
   protocol?: unknown
   ccWireParity?: unknown
   buildId?: unknown
+  aOffHipaaCache?: unknown
 }
 
 /**
@@ -82,6 +98,21 @@ export interface PoolCapabilityProof {
   readonly endpoint: string
   /** The pool build identity that returned this proof. */
   readonly buildId: string
+}
+
+/**
+ * The trusted facts one capability reply states for the endpoint and pool build
+ * that answered, both read from the same reply so they share that scope.
+ */
+export interface PoolCapabilityAnswer {
+  /** The wire-parity proof the reply's exact triple binds to this endpoint and build. */
+  readonly proof: PoolCapabilityProof
+  /**
+   * Whether the answering build advertises `aOffHipaaCache: "downgrade"`.
+   * Present only with {@link proof}: the permission is scoped to the same
+   * endpoint and pool build, so it is never trusted without them.
+   */
+  readonly aOffHipaaCache: boolean
 }
 
 /** One entry of the pool's listing, as far as this reader trusts it. */
@@ -202,45 +233,55 @@ function readBuildId(raw: unknown): string | undefined {
 }
 
 /**
- * Read one parsed capability reply as the proof wire parity requires.
+ * Read one parsed capability reply as the facts this route may use.
  *
  * Only the exact triple the member contract states counts: protocol version 2,
  * `ccWireParity: 1`, and a usable pool `buildId`. Any other value, a missing
- * member, or a non-object reply is not a partial grant.
+ * member, or a non-object reply is not a partial grant and answers nothing.
+ * The A-off HIPAA cache field is read only from such a reply, because it grants
+ * a cache lifetime for the same endpoint and pool build; only its exact
+ * contract value is a grant, and an absent, differently spelled, or
+ * differently typed value leaves it unavailable without invalidating the proof
+ * beside it.
  * @param body - the parsed JSON reply.
- * @param endpoint - the endpoint that returned the reply; the proof is scoped to it.
- * @returns the proof scoped to that endpoint and the answering pool build, or
- *   `undefined` when the reply proves nothing.
+ * @param endpoint - the endpoint that returned the reply; both facts are scoped to it.
+ * @returns the answer scoped to that endpoint and pool build, or `undefined`
+ *   when the reply proves nothing.
  */
-function readCapabilityProof(body: unknown, endpoint: string): PoolCapabilityProof | undefined {
+function readCapabilityAnswer(body: unknown, endpoint: string): PoolCapabilityAnswer | undefined {
   if (body === null || typeof body !== 'object') return undefined
   const capabilities = body as PoolCapabilities
   if (capabilities.protocol !== 2 || capabilities.ccWireParity !== 1) return undefined
   const buildId = readBuildId(capabilities.buildId)
   if (buildId === undefined) return undefined
-  return { endpoint, buildId }
+  return {
+    proof: { endpoint, buildId },
+    aOffHipaaCache: capabilities.aOffHipaaCache === A_OFF_HIPAA_CACHE_DOWNGRADE,
+  }
 }
 
 /**
- * Ask the deployed pool whether this member may use the CC wire parity wire.
+ * Ask the deployed pool which capabilities this member endpoint advertises.
  *
  * A single authenticated read, bounded by {@link CAPABILITY_PROBE_TIMEOUT_MS}.
- * Only a `200` reply carrying `{protocol: 2, ccWireParity: 1, buildId}` answers with
- * a proof; every other outcome — a different status, an unreadable or malformed
- * body, a missing or unusable build identity, an unreachable endpoint, the
- * deadline, or caller cancellation — answers `undefined`, so the caller keeps
- * the route's current wire instead of enabling wire parity on an endpoint that never
- * proved it for a build. The probe is not retried here: it answers once per
- * call, and the caller owns the bounded retry schedule and its triggers.
+ * Only a `200` reply carrying `{protocol: 2, ccWireParity: 1, buildId}` answers
+ * with the endpoint and build it describes; every other outcome — a different
+ * status, an unreadable or malformed body, a missing or unusable build identity,
+ * an unreachable endpoint, the deadline, or caller cancellation — answers
+ * `undefined`, so the caller keeps the route's current wire and A-off cache
+ * decision instead of granting either on an unproved reply. The A-off HIPAA
+ * cache downgrade is part of the same answer and is available only from a reply
+ * that also binds the triple. The probe is not retried here: it answers once
+ * per call, and the caller owns the bounded retry schedule and its triggers.
  * @param apiKey - the resolved `CC_POOL_API_KEY` member credential.
  * @param signal - caller cancellation, for fiber disposal or a superseding probe.
- * @returns the proof for this endpoint and pool build, or `undefined` when the
- *   endpoint proved no wire parity.
+ * @returns the capability answer scoped to this endpoint and pool build, or
+ *   `undefined` when the endpoint proved nothing.
  */
 export async function probePoolCapabilities(
   apiKey: string,
   signal?: AbortSignal,
-): Promise<PoolCapabilityProof | undefined> {
+): Promise<PoolCapabilityAnswer | undefined> {
   const abort = signal === undefined
     ? AbortSignal.timeout(CAPABILITY_PROBE_TIMEOUT_MS)
     : AbortSignal.any([signal, AbortSignal.timeout(CAPABILITY_PROBE_TIMEOUT_MS)])
@@ -275,5 +316,5 @@ export async function probePoolCapabilities(
     // A non-JSON reply is not a capability answer.
     return undefined
   }
-  return readCapabilityProof(body, CAPABILITIES_URL)
+  return readCapabilityAnswer(body, CAPABILITIES_URL)
 }

@@ -400,12 +400,19 @@ const ECHO: ToolSchema = {
 
 /**
  * A capability reply in the pool's exact `{protocol, ccWireParity, buildId}`
- * form.
+ * form, with the A-off HIPAA cache downgrade the contract adds.
  * @param buildId - the pool build identity to report; `undefined` omits it.
+ * @param aOffHipaaCache - the A-off cache field; `'missing'` omits it, and any
+ *   other value is sent verbatim so a case can prove the exact token is required.
  * @returns the HTTP reply the capability probe parses.
  */
-function capabilityReply(buildId?: string): Response {
-  return new Response(JSON.stringify({ protocol: 2, ccWireParity: 1, buildId }), {
+function capabilityReply(buildId?: string, aOffHipaaCache: unknown = 'downgrade'): Response {
+  return new Response(JSON.stringify({
+    protocol: 2,
+    ccWireParity: 1,
+    ...buildId === undefined ? {} : { buildId },
+    ...aOffHipaaCache === 'missing' ? {} : { aOffHipaaCache },
+  }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   })
@@ -683,10 +690,11 @@ describe('CC wire parity capability proof', () => {
     lateAnswer.resolve(capabilityReply('late-build'))
     await new Promise((resolve) => { setTimeout(resolve, 0) })
 
-    await assemble(ctx, WIRE_PARITY_PROBE)
-    const after = modelCalls(capture).at(-1) as CapturedRequest
-    expect(declaresWireParity(after)).toBe(false)
-    expect(JSON.stringify(after.body).match(/"cache_control"/gu)).toHaveLength(3)
+    // The replacement probe proved nothing, so the superseded answer must not
+    // bind either capability; the A-off one-hour wire is refused instead.
+    const result = await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE } })
+    expect(modelCalls(capture)).toHaveLength(0)
     expect(capabilityCalls(capture)).toHaveLength(2)
   })
 
@@ -861,14 +869,15 @@ describe('CC wire parity capability proof', () => {
     const logs: unknown[][] = []
     ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
 
-    // The first request waits for the failed load probe and serves the cc3 wire.
+    // The first request waits for the failed load probe, then fails closed: with
+    // neither a proof nor the A-off cache permission, no request may carry the
+    // one-hour wire-parity-off markers.
     const pending = assemble(ctx, WIRE_PARITY_PROBE)
     await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
     firstProbe.resolve(bareServerError())
-    await pending
-    const first = modelCalls(capture).at(-1) as CapturedRequest
-    expect(declaresWireParity(first)).toBe(false)
-    expectCc3Wire(first)
+    const refused = await pending
+    expect(refused.finish).toMatchObject({ kind: 'error', failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE } })
+    expect(modelCalls(capture)).toHaveLength(0)
     // A failed probe is visible, not debug-only.
     expect(logs.some(args => args.some(arg => String(arg).includes('CC wire parity probe failed')))).toBe(true)
 
@@ -908,18 +917,18 @@ describe('CC wire parity capability proof', () => {
         : anthropicSuccessResponse())
 
       // The probe stays pending past the bounded wait; the first request then
-      // proceeds on the non-parity wire, and the probe keeps running.
+      // fails closed on the unproved A-off wire, and the probe keeps running.
       const pending = assemble(ctx, WIRE_PARITY_PROBE)
       await vi.advanceTimersByTimeAsync(6_000)
-      await pending
-      const first = modelCalls(capture).at(-1) as CapturedRequest
-      expect(declaresWireParity(first)).toBe(false)
-      expectCc3Wire(first)
+      const refused = await pending
+      expect(refused.finish).toMatchObject({ kind: 'error', failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE } })
+      expect(modelCalls(capture)).toHaveLength(0)
 
       // A later request does not pay the deadlined wait again while the probe is
-      // still pending.
-      await assemble(ctx, WIRE_PARITY_PROBE)
-      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(false)
+      // still pending, and is refused the same way.
+      const stillRefused = await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(stillRefused.finish).toMatchObject({ kind: 'error', failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE } })
+      expect(modelCalls(capture)).toHaveLength(0)
 
       answer.resolve(capabilityReply('pool-build-late'))
       await vi.advanceTimersByTimeAsync(0)
@@ -957,16 +966,17 @@ describe('CC wire parity capability proof', () => {
       return probes === 1 ? capabilityReply('pool-build-1') : capabilityReply(undefined)
     })
     await awaitWireParity(ctx, capture)
+    const opened = modelCalls(capture).length
 
     ctx.emit('credentials/reference-updated', credentialRef(API_KEY_REF))
     await vi.waitFor(() => {
       expect(capabilityCalls(capture)).toHaveLength(2)
     }, { timeout: 5_000 })
-    await assemble(ctx, WIRE_PARITY_PROBE)
-    const after = modelCalls(capture).at(-1) as CapturedRequest
-    expect(declaresWireParity(after)).toBe(false)
-    // The fallback is the route's own three-marker bytes, not a partial wire.
-    expect(JSON.stringify(after.body).match(/"cache_control"/gu)).toHaveLength(3)
+    // The stale proof is gone, and the unproved replacement also withholds the
+    // A-off cache permission, so no request reaches the pool.
+    const result = await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE } })
+    expect(modelCalls(capture)).toHaveLength(opened)
     expect(capabilityCalls(capture)).toHaveLength(2)
   })
 
@@ -986,8 +996,11 @@ describe('CC wire parity capability proof', () => {
     expect(capabilityCalls(capture)).toHaveLength(1)
   })
 
-  it('does not probe when wire parity is not requested', async () => {
-    const { ctx, capture } = await mountProbed(() => anthropicSuccessResponse(), { ccWireParity: false })
+  it('does not probe when neither wire parity nor a one-hour A-off marker is needed', async () => {
+    const { ctx, capture } = await mountProbed(
+      () => anthropicSuccessResponse(),
+      { ccWireParity: false, cacheTtl: 'none' },
+    )
     ctx.emit('credentials/reference-updated', credentialRef(API_KEY_REF))
     await new Promise((resolve) => { setTimeout(resolve, 20) })
     expect(capabilityCalls(capture)).toHaveLength(0)
@@ -1043,5 +1056,171 @@ describe('CC wire parity capability proof', () => {
     gate.reject(new Error('credential store closed'))
     await pending
     expect(capabilityCalls(capture)).toHaveLength(0)
+  })
+})
+
+describe('CC pool A-off HIPAA cache capability', () => {
+  it('serves the one-hour non-parity wire when the pool advertises the downgrade', async () => {
+    const answer = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed(
+      request => request.url === CAPABILITIES_URL ? answer.promise : anthropicSuccessResponse(),
+      { ccWireParity: false },
+    )
+    const logs: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
+    answer.resolve(capabilityReply('pool-build-1'))
+
+    const result = await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(result.finish).toEqual({ kind: 'stop' })
+    const calls = modelCalls(capture)
+    expect(calls).toHaveLength(1)
+    // The non-parity wire still carries its three one-hour markers: the pool's
+    // advertised downgrade is what licenses that lifetime for HIPAA traffic.
+    expectCc3Wire(calls[0] as CapturedRequest)
+    expect(capabilityCalls(capture)).toHaveLength(1)
+    expect(logs.some(args => args.some(arg => String(arg)
+      .includes('advertises aOffHipaaCache "downgrade"')))).toBe(true)
+  })
+
+  it('refuses the A-off one-hour wire when the pool omits the downgrade', async () => {
+    const answer = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed(
+      request => request.url === CAPABILITIES_URL ? answer.promise : anthropicSuccessResponse(),
+      { ccWireParity: false },
+    )
+    const logs: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
+    // The exact triple still proves wire parity; only the A-off permission is
+    // absent, so the route must not fall back to a five-minute marker either.
+    answer.resolve(capabilityReply('pool-build-1', 'missing'))
+
+    const result = await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+    })
+    expect(modelCalls(capture)).toHaveLength(0)
+    expect(capabilityCalls(capture)).toHaveLength(1)
+    expect(logs.some(args => args.some(arg => String(arg)
+      .includes('does not advertise aOffHipaaCache "downgrade"')))).toBe(true)
+  })
+
+  it('sends a helper request at the default lifetime without the A-off permission', async () => {
+    const { ctx, capture } = await mountProbed(
+      request => request.url === CAPABILITIES_URL
+        ? capabilityReply('pool-build-1', 'missing')
+        : anthropicSuccessResponse(),
+      { ccWireParity: false },
+    )
+
+    const result = await assemble(ctx, { ...WIRE_PARITY_PROBE, requestClass: 'compaction' })
+    expect(result.finish).toEqual({ kind: 'stop' })
+    const call = modelCalls(capture).at(-1) as CapturedRequest
+    // A helper keeps the API's default five-minute lifetime under cc3, so it
+    // never sends the one-hour marker the pool has not licensed.
+    expect(JSON.stringify(call.body)).toContain('"cache_control"')
+    expect(JSON.stringify(call.body)).not.toContain('"ttl"')
+  })
+
+  it('reopens the A-off permission on a replaced credential', async () => {
+    let probes = 0
+    const { ctx, capture } = await mountProbed((request) => {
+      if (request.url !== CAPABILITIES_URL) return anthropicSuccessResponse()
+      probes += 1
+      return probes === 1 ? capabilityReply('pool-build-1') : capabilityReply('pool-build-2', 'missing')
+    }, { ccWireParity: false })
+
+    // The first answer licenses the A-off one-hour wire.
+    expect((await assemble(ctx, WIRE_PARITY_PROBE)).finish).toEqual({ kind: 'stop' })
+    const opened = modelCalls(capture).length
+    expect(opened).toBe(1)
+
+    // A replaced member credential reopens the question; the replacement build
+    // does not advertise the permission, so the next request is refused.
+    ctx.emit('credentials/reference-updated', credentialRef(API_KEY_REF))
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(2) }, { timeout: 5_000 })
+    const refused = await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(refused.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+    })
+    expect(modelCalls(capture)).toHaveLength(opened)
+  })
+
+  it('keeps the proved A-on wire and its cc3 fallback without the A-off permission', async () => {
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? capabilityReply('pool-build-1', 'missing')
+      : anthropicSuccessResponse())
+    await awaitWireParity(ctx, capture)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+
+    // The proved route keeps its own wire for a request it cannot classify; the
+    // A-off permission governs only the route without the wire.
+    const { requestClass: _requestClass, ...classless } = WIRE_PARITY_PROBE
+    await assemble(ctx, classless)
+    expectCc3Wire(modelCalls(capture).at(-1) as CapturedRequest)
+    expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('reports the A-off consequence when the probe has no member credential', async () => {
+    vi.stubEnv('CC_POOL_API_KEY', '')
+    const ctx = new Context()
+    context = ctx
+    await ctx.plugin(LlmRuntime)
+    const logs: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
+    const capture = capturePoolFetch()
+    vi.stubGlobal('fetch', capture.fetch)
+
+    await ctx.plugin(CcPool, { requestLog: { enabled: false }, ccWireParity: false })
+    await vi.waitFor(() => {
+      expect(logs.some(args => args.some(arg => String(arg).includes('refusing the one-hour A-off wire')))).toBe(true)
+    }, { timeout: 5_000 })
+    expect(capabilityCalls(capture)).toHaveLength(0)
+  })
+
+  it('reports the A-off consequence when the capability probe fails', async () => {
+    const answer = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed(
+      request => request.url === CAPABILITIES_URL ? answer.promise : anthropicSuccessResponse(),
+      { ccWireParity: false },
+    )
+    const logs: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
+    answer.resolve(bareServerError())
+
+    await vi.waitFor(() => {
+      expect(logs.some(args => args.some(arg => String(arg).includes('pool capability probe failed')))).toBe(true)
+    }, { timeout: 5_000 })
+    const result = await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+    })
+    expect(modelCalls(capture)).toHaveLength(0)
+  })
+
+  it('reports the A-off consequence when the initial probe misses the deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const answer = Promise.withResolvers<Response>()
+      const { ctx } = await mountProbed(
+        request => request.url === CAPABILITIES_URL ? answer.promise : anthropicSuccessResponse(),
+        { ccWireParity: false },
+      )
+      const logs: unknown[][] = []
+      ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
+
+      const pending = assemble(ctx, WIRE_PARITY_PROBE)
+      await vi.advanceTimersByTimeAsync(6_000)
+      const result = await pending
+      expect(result.finish).toMatchObject({
+        kind: 'error',
+        failure: { code: CcPool.A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE },
+      })
+      expect(logs.some(args => args.some(arg => String(arg).includes('refusing the one-hour A-off wire')))).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

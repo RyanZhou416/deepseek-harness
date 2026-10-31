@@ -31,13 +31,28 @@
  * a bounded deadline, and a `503` the endpoint marks with
  * `x-cc-wire-parity-unavailable: 1` on a wire-parity-on request drops the proof
  * and schedules another probe after a cooldown instead of leaving the route
- * permanently on the non-parity wire. Wire parity declares its own cache
- * intent, which the profile carries: `cacheTtl: none` — this route's
- * caching-disabled state — makes a main or subagent wire-parity request declare
- * `off`, so the worker writes no marker, no TTL, and no cache beta, and every
- * other lifetime declares `main` for the worker's own cache plan, including the
- * HIPAA-driven five-minute fallback on that wire. All
- * of them reach the wire only through this route's profile;
+ * permanently on the non-parity wire.
+ *
+ * The same probe answers whether the pool build advertises
+ * `aOffHipaaCache: "downgrade"`. On the route's non-parity wire — wire parity
+ * not requested, or requested and not proved — a main or subagent request under
+ * a one-hour policy would send one-hour `cache_control` markers. The pool owns
+ * the HIPAA downgrade for that wire, so the route sends it only when the
+ * answering build advertises the field, and otherwise refuses the dispatch with
+ * `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` before any provider request: it neither
+ * sends the one-hour markers nor silently substitutes five minutes. A helper
+ * request keeps the API's default five-minute lifetime and is unaffected. The
+ * capability is read from the same reply as the proof and shares its lifecycle:
+ * a probe generation clears both, an answer replaces both, and a replaced
+ * credential reopens the question. The wire-parity proof still grants the wire
+ * on its own; an absent or malformed A-off field never weakens it.
+ *
+ * Wire parity declares its own cache intent, which the profile carries:
+ * `cacheTtl: none` — this route's caching-disabled state — makes a main or
+ * subagent wire-parity request declare `off`, so the worker writes no marker, no
+ * TTL, and no cache beta, and every other lifetime declares `main` for the
+ * worker's own cache plan, including the HIPAA-driven five-minute fallback on
+ * that wire. All of them reach the wire only through this route's profile;
  * no other provider's request is touched. The durable request log is opt-in: a
  * request carrying the session identity does not write a file by itself,
  * `requestLog` turns it on, and its default path is the pool's own so the pi-ai
@@ -70,6 +85,7 @@ import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import {
   createPiAiRequestLog,
   defaultRequestLogPath,
+  isHelperRequest,
   PiAiAdapter,
   piAiAuthFrom,
   piAiDiagnosticHooks,
@@ -78,7 +94,7 @@ import type { PiAiAdapterOptions, PiAiRequestDiagnostic, ResolvedPiAiProviderPro
 import { Config } from './config.ts'
 import { DISCOVERY_NAMESPACE, discoverPoolModels, probePoolCapabilities } from './discovery.ts'
 import type { PoolCapabilityProof } from './discovery.ts'
-import { API_KEY_REF, MODEL_INPUT, PROVIDER, resolvePoolCachePolicy, resolvePoolModels, resolvePoolProfiles } from './pool.ts'
+import { API_KEY_REF, BASE_URL, MODEL_INPUT, PROVIDER, resolvePoolCachePolicy, resolvePoolModels, resolvePoolProfiles } from './pool.ts'
 import type { CcPoolCachePolicy, CcPoolModel } from './pool.ts'
 import { SessionSerialGate } from './session-gate.ts'
 
@@ -99,6 +115,15 @@ export type { CcPoolCachePolicy, CcPoolCacheTtl, CcPoolModel, CcPoolReasoningLev
 
 export const name = 'llm-cc-pool'
 export const inject = ['llm']
+
+/**
+ * Stable failure code for a dispatch the route refuses because the pool did not
+ * advertise `aOffHipaaCache: "downgrade"` while the non-parity wire would send
+ * its one-hour prompt-cache markers. The refusal happens before any provider
+ * request, so no prompt reaches the pool under a cache lifetime the answering
+ * build has not licensed.
+ */
+export const A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE = 'POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE'
 
 /**
  * Provider routes whose requests carry the Claude Code session identity: the
@@ -175,11 +200,14 @@ class CcPoolAdapter extends PiAiAdapter {
    *   a request cannot decide the wire before that probe does; it accepts the
    *   request's cancellation so a cancelled first request does not wait for the
    *   probe.
+   * @param admit - refuses a dispatch the route's current capability state does
+   *   not license, before any provider request opens.
    */
   constructor(
     options: PiAiAdapterOptions,
     private readonly catalogue: () => readonly CcPoolModel[],
     private readonly readiness: (signal?: AbortSignal) => Promise<void>,
+    private readonly admit: (options: GenerateOptions) => void,
   ) {
     super(options)
   }
@@ -221,23 +249,36 @@ class CcPoolAdapter extends PiAiAdapter {
   }
 
   /**
-   * Await the load probe before opening one dispatch.
+   * Await the load probe, admit the request, then open one dispatch.
    *
-   * The probe decides whether the route profile carries the wire-parity flag,
-   * and the adapter's snapshot is captured at dispatch preparation. Waiting on
-   * the probe's first outcome — bounded by the caller's deadline — keeps the
-   * first request from deciding the wire before the endpoint answered.
+   * The probe decides whether the route profile carries the wire-parity flag
+   * and whether the A-off HIPAA cache lifetime is available, and the adapter's
+   * snapshot is captured at dispatch preparation. Waiting on the probe's first
+   * outcome — bounded by the caller's deadline — keeps the first request from
+   * deciding either before the endpoint answered. The admission check runs
+   * after that wait and before `open`, so a refused dispatch sends no provider
+   * request.
+   * @param options - the assembled request the admission check reads.
    * @param open - opens the dispatch after the probe's first outcome.
    * @param signal - the request's cancellation; a cancelled request stops waiting.
    * @returns the deferred stream.
    */
-  private async * afterReadiness(open: () => AsyncIterable<StreamChunk>, signal?: AbortSignal): AsyncIterable<StreamChunk> {
+  private async * afterReadiness(
+    options: GenerateOptions,
+    open: () => AsyncIterable<StreamChunk>,
+    signal?: AbortSignal,
+  ): AsyncIterable<StreamChunk> {
     await this.readiness(signal)
+    this.admit(options)
     yield* open()
   }
 
   override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    return this.afterReadiness(() => this.ordered(options, attempt => super.stream(attempt)), options.signal)
+    return this.afterReadiness(
+      options,
+      () => this.ordered(options, attempt => super.stream(attempt)),
+      options.signal,
+    )
   }
 
   /**
@@ -262,7 +303,11 @@ class CcPoolAdapter extends PiAiAdapter {
     const call = await super.prepareCall(provider, model, signal)
     return {
       model: call.model,
-      stream: options => this.ordered(options, attempt => call.stream(attempt)),
+      stream: options => this.afterReadiness(
+        options,
+        () => this.ordered(options, attempt => call.stream(attempt)),
+        options.signal,
+      ),
     }
   }
 
@@ -335,16 +380,21 @@ export function apply(ctx: Context, config: Config): void {
   let lastRaw: readonly CcPoolModel[] | undefined
   let lastBuildId: string | undefined
   let snapshot: PoolSnapshot | undefined
-  // Wire parity is proven only by the member endpoint itself, for the member
+  // Capabilities are proven only by the member endpoint itself, for the member
   // endpoint and pool build that answered, and only for this plugin instance: no
-  // proof exists at load. The stored proof carries that `buildId`, and the route
-  // profiles are resolved for the build it names, so a new probe replaces both
-  // and a profile built for another build is never reused. A load or credential
-  // probe drops the previous proof before it asks. A failed probe is retried with
-  // bounded backoff instead of leaving the route permanently off; a probe that
-  // answers without a build identity cannot produce one, and a superseded probe
-  // never writes its answer.
+  // answer exists at load. The stored proof carries that `buildId`, and the
+  // route profiles are resolved for the build it names, so a new probe replaces
+  // it and a profile built for another build is never reused. A load or
+  // credential probe drops the previous answer before it asks. A failed probe is
+  // retried with bounded backoff instead of leaving the route permanently off; a
+  // probe that answers without a build identity cannot produce one, and a
+  // superseded probe never writes its answer. The A-off HIPAA cache permission
+  // is read from the same answer and replaced with it; a marked wire-parity
+  // refusal withdraws only the wire, because it is evidence about that wire and
+  // not about the build's cache handling.
   let capabilityProof: PoolCapabilityProof | undefined
+  /** Whether the last capability answer advertised the A-off HIPAA cache downgrade. */
+  let aOffHipaaCache = false
   let capabilityProbe: AbortController | undefined
   let probeRetryTimer: ReturnType<typeof setTimeout> | undefined
   let probeFailures = 0
@@ -362,7 +412,16 @@ export function apply(ctx: Context, config: Config): void {
   // Fail loud at load, before the route is registered or any probe is sent: an
   // impossible marker/lifetime combination belongs here, not in a provider
   // rejection at the first request.
-  resolvePoolCachePolicy(cachePolicy)
+  const resolvedCachePolicy = resolvePoolCachePolicy(cachePolicy)
+  // A one-hour policy is the only one whose wire-parity-off path writes a
+  // one-hour marker, so it is the only one that needs the pool's A-off HIPAA
+  // cache permission. Under `cc3` a helper request stays at five minutes and
+  // never needs it.
+  const requiresAOffHipaaCache = resolvedCachePolicy.cacheTtl === '1h'
+  // The capability probe is sent when it must answer either question: the wire
+  // opt-in, or the A-off cache permission the default one-hour policy needs.
+  // A caching-disabled route that does not request wire parity asks nothing.
+  const probesCapabilities = config.ccWireParity || requiresAOffHipaaCache
   /**
    * The stored proof when it may enable the wire parity flag on this route.
    *
@@ -429,69 +488,92 @@ export function apply(ctx: Context, config: Config): void {
   )
 
   /**
-   * Ask the member endpoint whether this route may use the CC wire parity wire format.
+   * Ask the member endpoint which capabilities this route may use.
    *
    * This runs at profile load, when the member credential changes, and after a
-   * failed attempt's backoff. A route that does not request wire parity sends no
-   * probe request at all, and a missing credential is wire-parity off rather
-   * than a route failure: the route keeps its non-parity wire and schedules
-   * another attempt, so a credential stored without an update event is still
-   * picked up. A failed, timed-out, malformed, or build-less answer leaves no
-   * proof and schedules another attempt with bounded backoff, so one failed
-   * probe cannot leave the process permanently off. The failure is logged at
-   * warning level with the attempt number and the next delay; a proof logs the
-   * answering build identity at info level. Both carry no credential.
+   * failed attempt's backoff. It asks whenever the route requests wire parity or
+   * a one-hour policy needs the pool's A-off HIPAA cache permission; a
+   * caching-disabled route that does not request the wire asks nothing. A
+   * missing credential is a route that proves nothing rather than a route
+   * failure: it keeps its current wire and schedules another attempt, so a
+   * credential stored without an update event is still picked up. A failed,
+   * timed-out, malformed, or build-less answer leaves no capability and
+   * schedules another attempt with bounded backoff, so one failed probe cannot
+   * leave the process permanently off. The failure is logged at warning level
+   * with the attempt number and the next delay; a proof logs the answering
+   * build identity at info level, and the A-off cache permission logs at info
+   * when advertised and at warning when absent. None carries a credential.
    *
-   * Each probe supersedes the previous one and drops its proof before asking, so
-   * a stale positive proof never outlives the endpoint or pool build it described.
+   * Each probe supersedes the previous one and drops its answer before asking, so
+   * a stale proof or A-off permission never outlives the endpoint, pool build,
+   * or member credential it described.
    */
   const startProbe = (): void => {
-    if (!config.ccWireParity) return
+    if (!probesCapabilities) return
     clearProbeRetry()
     capabilityProbe?.abort()
     const controller = new AbortController()
     capabilityProbe = controller
     capabilityProof = undefined
+    aOffHipaaCache = false
     void (async () => {
       let apiKey: string
       try {
         apiKey = await resolvePoolApiKey(ctx, PROVIDER)
       } catch {
-        // A missing member credential cannot prove wire parity; the route keeps its
-        // current wire instead of failing to load. A superseded or disposed probe
-        // must not log, clear a newer proof, or schedule its own retry.
+        // A missing member credential proves nothing; the route keeps its current
+        // wire instead of failing to load. A superseded or disposed probe must not
+        // log, clear a newer answer, or schedule its own retry.
         if (controller.signal.aborted) return
         capabilityProbe = undefined
         markInitialProbeSettled()
         probeFailures += 1
         const delay = nextProbeDelay()
         ctx.logger.warn(
-          `llm-cc-pool: member credential unavailable for the CC wire parity probe (attempt ${probeFailures});`
-          + ` serving the non-parity wire; retrying in ${delay}ms`,
+          `llm-cc-pool: member credential unavailable for the capability probe (attempt ${probeFailures});`
+          + ` ${config.ccWireParity ? 'serving the non-parity wire' : 'refusing the one-hour A-off wire'};`
+          + ` retrying in ${delay}ms`,
         )
         scheduleProbe(delay)
         return
       }
-      const proof = await probePoolCapabilities(apiKey, controller.signal)
+      const answer = await probePoolCapabilities(apiKey, controller.signal)
       // A superseded probe and a disposed plugin both abort this controller, so
-      // an answer that arrives after either never writes a proof.
+      // an answer that arrives after either never writes a capability.
       if (controller.signal.aborted) return
       capabilityProbe = undefined
-      if (proof !== undefined) {
-        capabilityProof = proof
+      if (answer !== undefined) {
+        capabilityProof = answer.proof
+        aOffHipaaCache = answer.aOffHipaaCache
         probeFailures = 0
         markInitialProbeSettled()
-        ctx.logger.info(
-          `llm-cc-pool: CC wire parity proved for endpoint build "${proof.buildId}"; serving the parity wire`,
-        )
+        if (config.ccWireParity) {
+          ctx.logger.info(
+            `llm-cc-pool: CC wire parity proved for endpoint build "${answer.proof.buildId}"; serving the parity wire`,
+          )
+        }
+        if (requiresAOffHipaaCache) {
+          if (answer.aOffHipaaCache) {
+            ctx.logger.info(
+              `llm-cc-pool: pool build "${answer.proof.buildId}" advertises aOffHipaaCache "downgrade";`
+              + ' the A-off wire may send its one-hour prompt-cache markers',
+            )
+          } else {
+            ctx.logger.warn(
+              `llm-cc-pool: pool build "${answer.proof.buildId}" does not advertise aOffHipaaCache "downgrade";`
+              + ' refusing the A-off wire\'s one-hour prompt-cache markers until it does',
+            )
+          }
+        }
         return
       }
       probeFailures += 1
       const delay = nextProbeDelay()
       markInitialProbeSettled()
       ctx.logger.warn(
-        `llm-cc-pool: CC wire parity probe failed (attempt ${probeFailures});`
-        + ` serving the non-parity wire; retrying in ${delay}ms`,
+        `llm-cc-pool: ${config.ccWireParity ? 'CC wire parity probe' : 'pool capability probe'} failed (attempt ${probeFailures});`
+        + ` ${config.ccWireParity ? 'serving the non-parity wire' : 'refusing the one-hour A-off wire'};`
+        + ` retrying in ${delay}ms`,
       )
       scheduleProbe(delay)
     })()
@@ -499,7 +581,7 @@ export function apply(ctx: Context, config: Config): void {
 
   /**
    * Schedule one probe generation after `delayMs`. Callers only reach this while
-   * the route requests wire parity, and disposal clears a pending timer.
+   * the route probes capabilities, and disposal clears a pending timer.
    * @param delayMs - bounded wait before the next attempt.
    */
   const scheduleProbe = (delayMs: number): void => {
@@ -511,11 +593,11 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * Reopen the capability question now, dropping the current proof and any
+   * Reopen the capability question now, dropping the current answer and any
    * pending retry. A replaced member credential resets the failure count because
    * the new credential may be the fact the previous attempts lacked.
    */
-  const refreshWireParity = (): void => {
+  const refreshCapabilities = (): void => {
     probeFailures = 0
     startProbe()
   }
@@ -524,15 +606,21 @@ export function apply(ctx: Context, config: Config): void {
    * Wait for the load probe's first outcome under a bounded deadline.
    *
    * The first routed request calls this before preparing its snapshot. A probe
-   * that answers proves the wire or leaves it off; a probe that stalls past the
-   * deadline leaves the request on the safe non-parity wire while the retry
+   * that answers grants or withholds the wire and the A-off cache permission; a
+   * probe that stalls past the deadline leaves the request on the safe
+   * non-parity wire and the A-off cache permission unavailable while the retry
    * schedule keeps asking. The request's own cancellation ends the wait without
    * marking the deadline expired, so a cancelled first request never extends the
    * next request's wait.
    * @param signal - the request's cancellation.
    */
   const awaitInitialProbe = async (signal?: AbortSignal): Promise<void> => {
-    if (isInitialProbeSettled() || initialProbeWaitExpired) return
+    // Read the live cancellation state: the signal can fire during an await, so
+    // a check made once before the wait is not the answer after it.
+    const isAborted = (): boolean => signal?.aborted === true
+    // A request cancelled before this call must not wait for an abort event that
+    // has already fired.
+    if (isInitialProbeSettled() || initialProbeWaitExpired || isAborted()) return
     // A request cancelled before preparation never reaches the adapter: the LLM
     // seam throws the abort before dispatch. An abort while waiting resolves
     // through the listener below.
@@ -552,23 +640,25 @@ export function apply(ctx: Context, config: Config): void {
     }
     // Cancellation ends the wait without expiring the deadline, so a later
     // request still gets its own bounded wait.
-    if (signal?.aborted) return
+    if (isAborted()) return
     if (!isInitialProbeSettled()) {
       // One bounded wait per process: a probe that outlived it keeps retrying in
-      // the background, and later requests serve the current non-parity wire
+      // the background, and later requests use the current capability state
       // without paying the same wait again.
       initialProbeWaitExpired = true
       ctx.logger.warn(
-        'llm-cc-pool: the initial CC wire parity probe did not answer within'
-        + ` ${WIRE_PARITY_READY_TIMEOUT_MS}ms; serving the non-parity wire while it keeps retrying`,
+        'llm-cc-pool: the initial pool capability probe did not answer within'
+        + ` ${WIRE_PARITY_READY_TIMEOUT_MS}ms;`
+        + ` ${config.ccWireParity ? 'serving the non-parity wire' : 'refusing the one-hour A-off wire'}`
+        + ' while it keeps retrying',
       )
     }
   }
 
-  // A positive proof belongs to the member credential that asked for it, so a
-  // replaced CC_POOL_API_KEY reopens the question instead of inheriting it.
+  // A positive capability belongs to the member credential that asked for it, so
+  // a replaced CC_POOL_API_KEY reopens the question instead of inheriting it.
   ctx.on('credentials/reference-updated', (ref) => {
-    if (ref === credentialRef(API_KEY_REF)) refreshWireParity()
+    if (ref === credentialRef(API_KEY_REF)) refreshCapabilities()
   })
   ctx.effect(() => () => {
     clearProbeRetry()
@@ -631,15 +721,51 @@ export function apply(ctx: Context, config: Config): void {
   const observeWireParityFailure = (event: PiAiRequestDiagnostic): void => {
     diagnostics.onRequestDiagnostic?.(event)
     if (event.kind === 'response' && event.status === 503 && event.wireParityUnavailable === true && wireParity()) {
+      // Withdraw only the wire: the marked refusal says the selected worker does
+      // not serve the parity wire, which is no statement about the pool build's
+      // A-off cache handling, and the next request needs that permission on the
+      // non-parity wire.
       capabilityProof = undefined
       ctx.logger.warn(
         'llm-cc-pool: pool refused CC wire parity with 503 on a wire-parity-on request;'
         + ' dropping the proof and serving the non-parity wire until the endpoint proves it again',
       )
       // The proof was on, so no probe generation and no retry timer can be
-      // pending: every probe start clears the proof. Ask again after the cooldown.
+      // pending: every probe start clears the state. Ask again after the cooldown.
       scheduleProbe(WIRE_PARITY_REFUSAL_COOLDOWN_MS)
     }
+  }
+
+  /**
+   * Refuse a dispatch the current capability state does not license.
+   *
+   * On the non-parity wire — wire parity not requested or not proved — a main,
+   * subagent, or unclassified request under a one-hour policy sends one-hour
+   * `cache_control` markers, and only a pool build that advertises
+   * `aOffHipaaCache: "downgrade"` accepts that lifetime for HIPAA traffic. The
+   * route therefore refuses before opening a provider request when that
+   * permission is absent, instead of sending the marker the pool has not
+   * licensed or silently substituting five minutes. A helper request keeps the
+   * API's default five-minute lifetime under `cc3` and needs no permission; a
+   * route whose policy sends no one-hour marker needs none either. On the
+   * proved parity wire the worker owns the cache plan, so the unchanged A-on
+   * path applies.
+   * @param options - the assembled request about to open.
+   * @throws {LlmError} code `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` when the A-off
+   *   wire would send one-hour markers without the pool's permission.
+   */
+  const admitAOffHipaaCache = (options: GenerateOptions): void => {
+    if (resolvedCachePolicy.cacheTtl !== '1h') return
+    if (resolvedCachePolicy.cacheMarkerPolicy === 'cc3' && isHelperRequest(options)) return
+    if (wireParity()) return
+    if (aOffHipaaCache) return
+    throw new LlmError(
+      'llm-cc-pool: refusing the request because the non-parity wire would send one-hour prompt-cache markers and'
+      + ` the pool at ${BASE_URL} did not advertise aOffHipaaCache: "downgrade" from /v1/capabilities;`
+      + ' install a pool build that advertises it, or set cacheTtl: none to disable prompt caching',
+      A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE,
+      { retryDisposition: 'forbid' },
+    )
   }
 
   const options: PiAiAdapterOptions = {
@@ -656,7 +782,7 @@ export function apply(ctx: Context, config: Config): void {
     ...diagnostics,
     onRequestDiagnostic: observeWireParityFailure,
   }
-  const adapter = new CcPoolAdapter(options, () => current().models, awaitInitialProbe)
+  const adapter = new CcPoolAdapter(options, () => current().models, awaitInitialProbe, admitAOffHipaaCache)
   ctx.llm.registerAdapter([PROVIDER], adapter)
   // Requests the session queue still holds cannot be served once the route is
   // gone; settling them as aborted keeps a disposed fiber from leaving them
@@ -674,10 +800,10 @@ export function apply(ctx: Context, config: Config): void {
     return discoverPoolModels(apiKey, signal)
   })
 
-  // The route loads on its current wire and switches only after the member
-  // endpoint proves wire parity. A disabled route records no pending
-  // first-request wait; an enabled one starts its probe now, and the first
+  // The route loads on its current wire and cache behaviour, then adopts the
+  // member endpoint's answer. A route that needs no capability answer records no
+  // pending first-request wait; one that probes starts now, and the first
   // request awaits that probe's first outcome under a bounded deadline.
-  if (config.ccWireParity) refreshWireParity()
+  if (probesCapabilities) refreshCapabilities()
   else markInitialProbeSettled()
 }

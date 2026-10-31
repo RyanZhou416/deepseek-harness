@@ -1772,7 +1772,7 @@ export interface Config {
 
 - `inject`: `llm`
 - `refs`: [`PiAiCacheMarkerPolicy`](../packages/llm/llm-pi-ai/src/index.ts) · [`PiAiRequestLogProfile`](../packages/llm/llm-pi-ai/src/index.ts) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-cc-pool/src/config.ts:48`](../packages/llm/llm-cc-pool/src/config.ts)
+- `source`: [`packages/llm/llm-cc-pool/src/config.ts:51`](../packages/llm/llm-cc-pool/src/config.ts)
 
 ```ts config-catalog
 /** Loader configuration for the mac-pool route. */
@@ -1860,7 +1860,12 @@ export interface Config {
    * intent `main`, the worker's own cache plan. The wire-parity body itself
    * carries no marker in either case, so wire parity does not constrain which
    * policy the route may configure. The default `false` keeps the current wire
-   * exactly and sends no probe request.
+   * exactly. It does not disable the capability probe: a one-hour policy needs
+   * the pool build's `aOffHipaaCache: "downgrade"` permission for the non-parity
+   * wire, so the same probe asks for both facts and a reply without that
+   * permission refuses the one-hour A-off request before it reaches the pool.
+   * Only a caching-disabled (`cacheTtl: none`) route that also leaves this
+   * `false` sends no probe.
    */
   ccWireParity: boolean
   /**
@@ -1957,7 +1962,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:419`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:432`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2092,9 +2097,14 @@ export interface PiAiProviderProfile {
    * Prompt-cache marker placement this route's adapter performs on an Anthropic
    * Messages request. Omission keeps pi-ai's placement from
    * {@link cacheRetention}. `cc3` places the Claude Code 2.1.288 layout — the
-   * client's identity system block, the harness system block, and the last
-   * cacheable user content block — and discards every other marker on the route.
-   * A main or subagent request marks each slot with
+   * client's identity system block, the caller's filtered prompt block, and the
+   * last cacheable user content block — and discards every other marker on the
+   * route.
+   * The harness-describing sections (`harness:source`, `app:web-surface`) are
+   * never forwarded, and `harness:identity` is replaced by the pinned line, on
+   * every request class that states a matching section assembly; the caller's
+   * other sections are kept in assembly order. A main or subagent request marks
+   * each slot with
    * `{type: "ephemeral", ttl: "1h"}`; a helper request (`compaction`,
    * `auxiliary`) keeps the API's default five-minute lifetime with
    * `{type: "ephemeral"}` and no extended beta. It marks no tool declaration and
@@ -2117,13 +2127,21 @@ export interface PiAiProviderProfile {
    * request's `systemSections` — the pinned interactive identity line, the
    * reordered `stable` sections, then the session-specific remainder — and
    * applies the pinned top-level field order, the `updates` thinking display,
-   * and the cache-beta removals while keeping `eager_input_streaming`, with no
+   * and the cache-beta removals while keeping a transport's
+   * `eager_input_streaming` flag — a model that withholds that per-tool field
+   * also has pi-ai's derived fine-grained tool-streaming beta removed, because
+   * the pinned client declares neither — with no
    * `cache_control` of its own. The cache-beta removal covers both the request's
    * `betas` list and a deployment `anthropic-beta` header, which pi-ai would
    * otherwise send unchanged and from which it derives the list: non-cache betas
    * stay, and a header with no remaining beta is removed rather than sent empty.
    * A helper class (`compaction`, `auxiliary`)
-   * keeps the caller's system, layout `none`, and no markers; a main or
+   * keeps the caller's non-harness system, layout `none`, and no markers, so it
+   * under-emits the subscription helper form (billing, identity, three five-minute
+   * markers) that the worker's frame does not admit. A helper that states no
+   * matching section assembly drops the exact DSH identity, source, and
+   * Web-surface paragraphs by their owned texts, leaving every other caller
+   * paragraph untouched; a main or
    * subagent request that cannot state a real boundary, or that names no class
    * at all, is served as the current non-wire-parity request instead of a
    * partial wire-parity body. The three header names are adapter-owned on every

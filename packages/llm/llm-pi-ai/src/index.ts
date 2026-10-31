@@ -78,7 +78,7 @@ import { providerDefaultsOf } from './provider-data.ts'
 import { RequestDiagnosticLog } from './request-log.ts'
 import { piAiDiagnosticHooks } from './reuse.ts'
 
-export { PiAiAdapter } from './adapter.ts'
+export { isHelperRequest, PiAiAdapter } from './adapter.ts'
 export type {
   PiAiAdapterOptions,
   PiAiRequestDiagnostic,

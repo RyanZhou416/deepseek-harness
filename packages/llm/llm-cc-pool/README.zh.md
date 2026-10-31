@@ -9,7 +9,7 @@ kind: "package-bundle"
 
 ## 概述
 
-`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：提供一条 Anthropic Messages 路由，其端点、凭据与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它。其默认提示缓存策略是 CC 2.1.288 的三标记布局：main 与 subagent 请求带显式一小时存活期、identity 块与 extended beta，helper 请求保持 API 默认的五分钟存活期。可选的 `ccWireParity` 请求在成员端点证明该能力后才改用 parity 请求体与 header。插件不注册可配置 provider 目录项，因此只有经校验的配置才能加入模型。
+`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：提供一条 Anthropic Messages 路由，其端点、凭据与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它。其默认提示缓存策略是 CC 2.1.288 的三标记布局：main 与 subagent 请求带显式一小时存活期、identity 块与 extended beta，helper 请求保持 API 默认的五分钟存活期。可选的 `ccWireParity` 请求在成员端点证明该能力后才改用 parity 请求体与 header。一小时的非 parity 路由还需要作出回答的池构建公布 `aOffHipaaCache: "downgrade"` 许可：没有它时，插件以 `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` 拒绝 main 或 subagent 请求，既不发送一小时标记，也不静默改用五分钟。插件不注册可配置 provider 目录项，因此只有经校验的配置才能加入模型。
 
 ## 目录
 
@@ -75,7 +75,9 @@ kind: "package-bundle"
 
 ### CC wire parity
 
-`ccWireParity` 为本路由请求 CC wire parity 线路，默认 `false`。该请求是偏好而不是授权：标志关闭时插件不发送任何探测；即使打开，路由也只在成员端点用本路由的成员凭据回答 `GET https://ccpool.tiancegames.com/v1/capabilities` 并返回 `{protocol: 2, ccWireParity: 1, buildId}` 之后，才在 profile 上公布该标志。只有携带该精确三元组的 `200` 才能证明能力；`buildId` 是池构建自身的稳定身份（`MacPoolBuildId`），未打包构建不报告它，因而证明不了任何东西。被拒绝、畸形、超时或不可达的回答都会让路由留在其配置的非 parity 线路上，并以有界退避安排重试；缺少成员凭据同样保持关闭，而不是让装载失败，并以同样方式重试。通用 pi-ai resolver 会拒绝任何没有容量证明的 profile 上的 `ccWireParity`，且该证明的 endpoint 必须与该路由同源；只有本插件会提供这样的证明——取自它对上述端点的探测——因此手写 profile 无法启用该线路。
+`ccWireParity` 为本路由请求 CC wire parity 线路，默认 `false`。该请求是偏好而不是授权：即使打开，路由也只在成员端点用本路由的成员凭据回答 `GET https://ccpool.tiancegames.com/v1/capabilities` 并返回 `{protocol: 2, ccWireParity: 1, buildId}` 之后，才在 profile 上公布该标志。只有携带该精确三元组的 `200` 才能证明能力；`buildId` 是池构建自身的稳定身份（`MacPoolBuildId`），未打包构建不报告它，因而证明不了任何东西。被拒绝、畸形、超时或不可达的回答都会让路由留在其配置的非 parity 线路上，并以有界退避安排重试；缺少成员凭据同样保持关闭，而不是让装载失败，并以同样方式重试。通用 pi-ai resolver 会拒绝任何没有容量证明的 profile 上的 `ccWireParity`，且该证明的 endpoint 必须与该路由同源；只有本插件会提供这样的证明——取自它对上述端点的探测——因此手写 profile 无法启用该线路。
+
+同一次探测还回答池构建是否公布 `aOffHipaaCache: "downgrade"`。一小时的非 parity 路由只有在出现该字段时才属于池的 HIPAA 缓存降级：有它时，main 或 subagent 请求保留三个一小时标记；没有它时，插件在任何 provider 请求之前以 `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` 拒绝派发，既不发送一小时标记，也不发送五分钟标记。helper 请求保持 API 默认的五分钟存活期，无需许可；关闭缓存（`cacheTtl: none`）的路由不发送一小时标记。只有精确的小写 token 才算许可，且只有绑定三元组的回答才能携带它，因此缺失或畸形值都不是部分授权，也不会削弱旁边的 wire parity 证明。即使 `ccWireParity` 为 `false`，插件也会探测该许可；只有同时关闭缓存的路由才不发送探测。该许可与证明共享生命周期：每次探测生成都会清除它，回答会替换它，成员凭据被替换或池构建更新都会重新提问。带标记的 `503` 只撤销线路，因为它是关于线路而非该构建缓存处理的证据。探测回答在许可存在时以 info 级别记录，在缺失时以 warning 级别记录。
 
 正面证明只属于作出回答的端点与池构建。插件在 profile 装载时、`CC_POOL_API_KEY` 被替换时、失败探测的有界退避之后，以及带标记拒绝的冷却之后再次询问；成功证明绝不轮询。它没有定时重连：新构建上的池重启在其中一个触发器运行之前不会被重新探测，因此路由可能继续为上一个构建证明过的线路服务。池标记为 `x-cc-wire-parity-unavailable: 1` 的 `503` 是对能力的反证：插件丢弃证明，当前请求立即改用其配置的非 parity 线路，并在 30 秒冷却后安排下一次探测，而不是让路由永久关闭。该标记本身也禁止自动重发——即使响应体没有 pool code、`origin` 或重试事实——因此被拒绝的 wire parity 请求绝不会以默认线路重试。失败的装载探测或凭据查询以有界退避重试（2 秒起翻倍至 60 秒），并以 warning 级别记录尝试次数与下次延迟；首个路由请求在 6 秒上限内等待初始探测，若仍未回答则以非 parity 线路继续，同时重试时间表继续运行；取消该请求会结束等待，而不会把截止期标记为已过期。成功证明与失败转换会以 info/warning 级别记录回答的 build id，不记录任何凭据。
 
@@ -117,7 +119,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 <a id="understand-the-implementation"></a>
 ## 理解实现
 
-本包是 named Cordis function plugin（`name`、`inject`、`Config`、`apply`），没有 default export。`apply` 用 `dsh-llm-pi-ai` 的通用 profile resolver 解析生效目录，因此畸形的目录会在插件装载时失败而不是等到首个请求，然后把它注册到 `ctx.llm`。在解析之前它会校验缓存策略的跨字段约束，同一检查也跑在设置写入的 waterfall 上，因此不可能的存活期/beta 组合会在写入处被拒绝。该 profile 把配置的 `cacheTtl` 作为 pi-ai 的 `cacheRetention` 档位、把 `extendedCacheBeta` 作为 profile 的 beta 声明、把 `cacheMarkerPolicy` 作为 profile 的三标记策略携带，因此策略无需本插件改写任何请求体即可到达请求（`cc3` 的 identity 块与标记改写由 `dsh-llm-pi-ai` 的同一个 `onPayload` 钩子完成）。它不声明任何 compat 开关，因为放置归策略所有且不标记工具声明。解析出的目录与 profile 按原始 `models` 值与当前线路证明做记忆化，未变化的配置保持同一快照，而设置写入或新的探测结果产出下一个快照。能力探测在装载时、成员凭据被替换时、失败尝试的有界退避之后，以及带标记拒绝的冷却之后运行，并只对覆盖本端点与构建的证明在 profile 上公布 `ccWireParity` 标志；同一证明也是通用 resolver 接受该标志的前提，因此标志与证据一起到达 profile。首个路由请求在有界上限内等待初始探测，因此不会在探测决定线路之前捕获 profile。下一个请求与模型列表无需重启即可看到新快照。
+本包是 named Cordis function plugin（`name`、`inject`、`Config`、`apply`），没有 default export。`apply` 用 `dsh-llm-pi-ai` 的通用 profile resolver 解析生效目录，因此畸形的目录会在插件装载时失败而不是等到首个请求，然后把它注册到 `ctx.llm`。在解析之前它会校验缓存策略的跨字段约束，同一检查也跑在设置写入的 waterfall 上，因此不可能的存活期/beta 组合会在写入处被拒绝。该 profile 把配置的 `cacheTtl` 作为 pi-ai 的 `cacheRetention` 档位、把 `extendedCacheBeta` 作为 profile 的 beta 声明、把 `cacheMarkerPolicy` 作为 profile 的三标记策略携带，因此策略无需本插件改写任何请求体即可到达请求（`cc3` 的 identity 块与标记改写由 `dsh-llm-pi-ai` 的同一个 `onPayload` 钩子完成）。它不声明任何 compat 开关，因为放置归策略所有且不标记工具声明。解析出的目录与 profile 按原始 `models` 值与当前线路证明做记忆化，未变化的配置保持同一快照，而设置写入或新的探测结果产出下一个快照。能力探测在路由请求 wire parity、或一小时策略需要池的 A-off HIPAA 缓存许可时运行，并在成员凭据被替换时、失败尝试的有界退避之后以及带标记拒绝的冷却之后再次运行。它只对覆盖本端点与构建的证明在 profile 上公布 `ccWireParity` 标志；同一证明也是通用 resolver 接受该标志的前提，因此标志与证据一起到达 profile。同一个回答还会记下 A-off 许可，而适配器在许可缺失时会在打开派发之前拒绝非 parity 的一小时 main 或 subagent 请求。首个路由请求在有界上限内等待初始探测，因此不会在探测就两者作出决定之前捕获 profile 或派发。下一个请求与模型列表无需重启即可看到新快照。
 
 适配器是 `dsh-llm-pi-ai` 的 `PiAiAdapter`，覆盖两个方法：`listModels` 直接回答生效目录，而不先解析凭据；`stream`/`prepareCall` 把每次派发送入按会话串行门。通用适配器的 HTTP/SSE 传输、上下文转换、流投影、pool-error 分类与 replay 处理都被复用而非复制。插件自身贡献路由事实、目录、固定重试策略、会话 header、会话排序、能力探测、日志与持久化 sink。
 
@@ -146,7 +148,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 #### KV Cache effect
 
-固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。默认的 `cc3` 策略加入 identity 块，对 main 或 subagent 请求用显式一小时存活期、对 helper 请求用 API 默认的五分钟存活期标记 identity 块、调用方过滤后的提示块与最后一个用户内容块，写入 pinned 客户端的字段顺序，并只在采用一小时存活期时声明 extended beta。`cacheTtl` 与 `extendedCacheBeta` 仍是本路由的字段，但策略要求一小时且声明 beta 的组合，并由策略掌管标记集合与字段顺序，因此布局不会在请求之间变化，任何工具声明也都不带标记，任何 cc3 或 parity 请求都不声明不启用的 eager 流式字段及其派生 beta。一旦证明 `ccWireParity`，parity 请求体反而完全不携带 `cache_control`：它把 prompt 拆成 identity 行、重排后的静态 section 与会话专属余下部分，由 worker 按声明的意图写入缓存计划——`main`，或关闭缓存路由的 `off`——因此该线路的前缀布局与标记放置属于池的 worker，而不属于本路由。
+固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。默认的 `cc3` 策略加入 identity 块，对 main 或 subagent 请求用显式一小时存活期、对 helper 请求用 API 默认的五分钟存活期标记 identity 块、调用方过滤后的提示块与最后一个用户内容块，写入 pinned 客户端的字段顺序，并只在采用一小时存活期时声明 extended beta。`cacheTtl` 与 `extendedCacheBeta` 仍是本路由的字段，但策略要求一小时且声明 beta 的组合，并由策略掌管标记集合与字段顺序，因此布局不会在请求之间变化，任何工具声明也都不带标记，任何 cc3 或 parity 请求都不声明不启用的 eager 流式字段及其派生 beta。一旦证明 `ccWireParity`，parity 请求体反而完全不携带 `cache_control`：它把 prompt 拆成 identity 行、重排后的静态 section 与会话专属余下部分，由 worker 按声明的意图写入缓存计划——`main`，或关闭缓存路由的 `off`——因此该线路的前缀布局与标记放置属于池的 worker，而不属于本路由。在非 parity 线路上，只有当作出回答的池构建公布 `aOffHipaaCache: "downgrade"` 时才发送一小时存活期；没有它时派发会在 provider 调用前被拒绝，因此本路由绝不会在未获许可的存活期下创建一小时缓存条目。
 
 ## 已知限制与后续工作
 
@@ -160,6 +162,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 - **图片模态是声明而非探测**——每个目录条目都会得到 `text` 与 `image`；拒绝图片的池端点会在轮次中途以 provider 拒绝的形式浮现。
 - **缓存布局是三个真实的 CC 标记，而不是 CC 的完整 planner**——未启用 `ccWireParity` 时，路由转发客户端 identity 块，并按 pinned 客户端的顶层字段顺序标记 identity 块、调用方过滤后的提示块与最后一个用户内容块。它不复制客户端的 `markerIndices`、fork point、compact 断点规划、其静态/动态 prompt 切分，也不复制其前一条消息断点，不放置任何工具标记，也不声明不启用的 eager 工具流式字段及其派生 beta。可选线路只在成员端点证明能力后的请求上加入该切分与 parity header；无论哪条线路，改写都会用 pinned identity 行替换 `harness:identity` 区段，并丢弃 `harness:source` 与 `app:web-surface` 区段。没有匹配 section 装配的 `cc3` 请求仍会按自身拥有的文本精确删除这些 DSH 段落，在预置 pinned 行之前移除与之相等的调用方段落，其他调用方文本保持逐字节不变。适配器无法分类的请求，或没有真实静态/动态分界的主/子智能体请求，会回退到该路由的普通 wire（配置 `cc3` 时即三标记请求体）；`cacheTtl: none` 时该普通 wire 就是 pi-ai 自己的请求体，没有 identity 块、没有 pinned 字段顺序，也没有 `metadata` 占位符。缺少必需的一小时/beta 组合的策略会在装载时被拒绝，而不是静默回退；`cacheTtl: none` 则解析为合法的关闭缓存策略，不写标记，也不声明 extended beta。
 - **线路按池构建证明**——一次证明只覆盖一个成员端点与一个池 `buildId`；插件在 profile 装载、`CC_POOL_API_KEY` 被替换、失败探测的有界退避之后，以及带标记拒绝的冷却之后再次询问。因此，若新构建上的池重启后探测仍然成功，路由不会在其中一个触发器运行前重新探测，而会继续为上一个构建证明过的线路服务；带标记的 `503` 会丢弃证明并安排新的探测。
+- **一小时的非 parity 路由需要池构建的 A-off HIPAA 缓存许可**——`aOffHipaaCache: "downgrade"` 是池对「在非 parity 线路上把一小时标记按 HIPAA 降级」的声明。在作出回答的构建公布它之前，默认一小时策略下的 main 或 subagent 请求会以 `POOL_A_OFF_HIPAA_CACHE_UNAVAILABLE` 被拒绝，且不会打开任何 provider 请求；路由不会静默选择五分钟。要关闭本路由的提示缓存可设置 `cacheTtl: none`，或安装公布该字段的池构建。缺失或畸形的字段绝不会削弱 wire parity 证明，因此已证明的 parity 路由没有它仍照常工作。
 - **base bundle 不包含本包**——只有链接了该 bundle 的 profile 才存在该路由。fork 的 `build.cmd` 会为 web profile 完成链接，但未经过该构建的 profile 没有 `cc-pool` 路由。仍声明 `llm-pi-ai` `cc-pool` provider 的 profile 必须移除它，否则两个适配器都会占用 `cc-pool`，插件装载失败。
 - **同会话排序仅限单个 Host 进程**——队列属于一个插件实例，因此另一个 DSH 进程或其它 CC 客户端使用同一池会话时并不受协调。有界重试只能吸收稍晚释放的租约；若该会话仍在别处活跃，调用方会看到 `POOL_SESSION_BUSY`。
 - **池把 `cc_pool_session_busy` 标为终止，但本路由仍会重试**——池把该拒绝报告为终止停止，而本路由会有意重试最多八次、跨度 1.8 s；每次重试都携带新的 `x-client-request-id`，因此池记下新的账本条目而不是重放。其它终止码原样返回。
@@ -169,4 +172,4 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 - 路由事实、部署未配置的容量或档位集合都随插件版本发布。本包拥有这些值，因此任何 profile 编辑都无法偏离已部署的池；部署自己的模型集属于配置，而不是版本事实。
 - 会话忙碌重试计划属于池行为事实，而不是部署可调项：租约在流结束后很快释放，固定的 100-250 ms 步进限定等待时间，既不拖慢正常请求，也不让卡住的会话挂住整轮。这里只重试 `POOL_SESSION_BUSY`；全局槽位限制与 provider 限速仍归 `dsh-llm-retry` 处理。
-- 插件的 `Config` 有六个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl`、`extendedCacheBeta` 与 `cacheMarkerPolicy` 是本路由的提示缓存策略，`ccWireParity` 是可选的 CC wire parity 请求。缓存默认值就是三标记一小时策略（`cacheTtl: 1h`、`extendedCacheBeta: true`、`cacheMarkerPolicy: cc3`），`none` 存活期解析为无标记、无 extended beta，并去掉 cc3 布局（identity 块、pinned 字段顺序、`metadata` 占位符），helper 请求保持 API 默认的五分钟存活期，不可能的组合会在装载时被拒绝，`ccWireParity` 默认 `false`。这些字段都不接受档位映射、任意 compat 开关、重试计划、探测间隔或凭据字面量。
+- 插件的 `Config` 有六个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl`、`extendedCacheBeta` 与 `cacheMarkerPolicy` 是本路由的提示缓存策略，`ccWireParity` 是可选的 CC wire parity 请求。缓存默认值就是三标记一小时策略（`cacheTtl: 1h`、`extendedCacheBeta: true`、`cacheMarkerPolicy: cc3`），`none` 存活期解析为无标记、无 extended beta，并去掉 cc3 布局（identity 块、pinned 字段顺序、`metadata` 占位符），helper 请求保持 API 默认的五分钟存活期，不可能的组合会在装载时被拒绝，`ccWireParity` 默认 `false`。A-off HIPAA 缓存许可不是配置字段：只有已部署的池构建能公布它，由回答 wire parity 的同一次探测报告。这些字段都不接受档位映射、任意 compat 开关、重试计划、探测间隔或凭据字面量。
