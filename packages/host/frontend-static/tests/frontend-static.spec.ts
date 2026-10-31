@@ -3,7 +3,8 @@
  * vendored Loader mounts the webserver and frontend-static rows, and every
  * assertion observes the served HTTP surface — asset serving, explicit index
  * entry points with index taps, 404 misses, traversal rejection, 405 on non-
- * GET/HEAD, and seat release on fiber disposal (HMR safety).
+ * GET/HEAD, cache headers for hashed assets, the rendered index, and
+ * revalidated files, and seat release on fiber disposal (HMR safety).
  */
 
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -39,6 +40,10 @@ async function loadComposition(): Promise<Context> {
   await writeFile(join(dist, 'app.js'), 'export {}')
   await writeFile(join(dist, 'blob.bin'), 'BLOB')
   await writeFile(join(dist, 'manifest.webmanifest'), '{}')
+  await mkdir(join(dist, 'assets', 'fonts'), { recursive: true })
+  await writeFile(join(dist, 'assets', 'index-abc12345.js'), 'export {}')
+  await writeFile(join(dist, 'assets', 'plain.js'), 'export {}')
+  await writeFile(join(dist, 'assets', 'fonts', 'Montserrat-OFL.txt'), 'OFL')
   await mkdir(join(dist, 'empty'))
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
@@ -98,6 +103,22 @@ async function request(
   }
 }
 
+/** GET one path against the running server; returns the status, cache headers, and the body. */
+async function cacheHeaders(
+  port: number | undefined,
+  path: string,
+  init?: RequestInit,
+): Promise<{ status: number; cacheControl: string | null; etag: string | null; body: string }> {
+  if (port === undefined) throw new Error('frontend-static test: the listener has not bound a port')
+  const response = await fetch(`http://127.0.0.1:${String(port)}${path}`, init)
+  return {
+    status: response.status,
+    cacheControl: response.headers.get('cache-control'),
+    etag: response.headers.get('etag'),
+    body: await response.text(),
+  }
+}
+
 describe('real Loader composition', () => {
   it('serves explicit index entries and files while preserving HTTP error semantics', { timeout: 60_000 }, async () => {
     const loaded = await loadComposition()
@@ -138,8 +159,40 @@ describe('real Loader composition', () => {
       type: 'text/javascript; charset=utf-8',
       body: '',
     })
+    // A hashless file revalidates; rewriting it changes the validator, so the
+    // rebuilt bytes are served instead of a stale 304.
+    const appBefore = await cacheHeaders(port, '/app.js')
+    expect(appBefore).toMatchObject({ status: 200, cacheControl: 'no-cache' })
     await writeFile(join(root!, 'dist', 'app.js'), 'export const rebuilt = true')
     expect(await request(port, '/app.js')).toMatchObject({ status: 200, body: 'export const rebuilt = true' })
+    const appAfter = await cacheHeaders(port, '/app.js')
+    expect(appAfter.etag).not.toBe(appBefore.etag)
+    expect(await cacheHeaders(port, '/app.js', { headers: { 'if-none-match': appBefore.etag! } }))
+      .toMatchObject({ status: 200, body: 'export const rebuilt = true' })
+    expect(await cacheHeaders(port, '/app.js', { headers: { 'if-none-match': appAfter.etag! } }))
+      .toEqual({ status: 304, cacheControl: 'no-cache', etag: appAfter.etag, body: '' })
+
+    // Cache policy follows the URL identity: content-hashed build output under
+    // assets/ is immutable, while a hand-named asset and the PWA manifest keep
+    // revalidating.
+    expect(await cacheHeaders(port, '/assets/index-abc12345.js')).toMatchObject({
+      status: 200,
+      cacheControl: 'public, max-age=31536000, immutable',
+    })
+    expect(await cacheHeaders(port, '/assets/plain.js')).toMatchObject({ status: 200, cacheControl: 'no-cache' })
+    expect(await cacheHeaders(port, '/assets/fonts/Montserrat-OFL.txt')).toMatchObject({
+      status: 200,
+      cacheControl: 'no-cache',
+    })
+    const manifest = await cacheHeaders(port, '/manifest.webmanifest')
+    expect(manifest).toMatchObject({ status: 200, cacheControl: 'no-cache' })
+    expect(manifest.etag).toMatch(/^"[0-9a-f]+-[0-9a-f]+"$/)
+    expect(await cacheHeaders(port, '/manifest.webmanifest', { headers: { 'if-none-match': manifest.etag! } }))
+      .toEqual({ status: 304, cacheControl: 'no-cache', etag: manifest.etag, body: '' })
+    expect(await cacheHeaders(port, '/manifest.webmanifest', { headers: { 'if-none-match': `W/${manifest.etag!}` } }))
+      .toMatchObject({ status: 304 })
+    expect(await cacheHeaders(port, '/manifest.webmanifest', { headers: { 'if-none-match': '"stale"' } }))
+      .toMatchObject({ status: 200 })
 
     // Unknown extension ships as octet-stream.
     expect(await request(port, '/blob.bin')).toMatchObject({ status: 200, type: 'application/octet-stream', body: 'BLOB' })
@@ -165,6 +218,11 @@ describe('real Loader composition', () => {
       expect(base).toBeLessThan(got.body.indexOf('<link rel="preload" as="script" href="plugins/boot.js">'))
       expect(base).toBeLessThan(got.body.indexOf('<script>window.__T__=1</script>'))
     }
+    // The rendered index carries the process token: it is never stored and
+    // never answers 304, even when the client sends a validator.
+    const index = await cacheHeaders(port, '/', authenticated({ headers: { 'if-none-match': '"stale"' } }))
+    expect(index).toMatchObject({ status: 200, cacheControl: 'no-store', etag: null })
+    expect(index.body).toContain('__T__')
     offRows()
     expect(await request(port, '/', authenticated({ method: 'HEAD' }))).toEqual({
       status: 200,

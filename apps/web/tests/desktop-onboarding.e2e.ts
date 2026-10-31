@@ -125,13 +125,14 @@ describe.skipIf(MODE === 'record')('web e2e: App-only desktop onboarding', () =>
     await expect.poll(() => page.locator('[data-desktop-onboarding]').getAttribute('aria-busy')).toBe('false')
     const hasIllustration = name.startsWith('welcome') || name.startsWith('credit')
     if (hasIllustration) {
-      const decoded = await page.locator('[class*="illustration"] > img').evaluateAll(async elements =>
+      // Each step's screenshots arrive from their own lazy artwork chunk, so
+      // wait for both theme variants to decode before asserting geometry.
+      await expect.poll(async () => page.locator('[class*="illustration"] > img').evaluateAll(async elements =>
         Promise.all(elements.map(async (element) => {
           const image = element as HTMLImageElement
           await image.decode()
           return image.naturalWidth > 0 && image.naturalHeight > 0
-        })))
-      expect(decoded).toEqual([true, true])
+        })))).toEqual([true, true])
     }
     const aria = await captureStableAria(page, '[data-desktop-onboarding]', scaffold.workspaceCwd)
     await mkdir(EXPECTED, { recursive: true })

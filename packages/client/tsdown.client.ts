@@ -7,7 +7,11 @@
  * and injects a tagged style at factory execution, while `x.css?inline`
  * exports compiled text for a plugin-owned lifecycle effect. The virtual
  * loaders register each real stylesheet as a watch dependency. SVG, PNG, and
- * WebP imports become watched base64 data URLs inside the bundle.
+ * WebP imports become watched base64 data URLs inside the bundle; a package
+ * that imports them from a lazily imported module gets one `client.<module>.js`
+ * chunk instead, which the client module system fetches on demand. The browser
+ * factory and its chunks are minified, with legal comments retained, so the
+ * artifact the browser downloads carries no development formatting.
  * Non-experimental client outputs reject experimental module and stylesheet
  * inputs, including origins recorded by chained source maps.
  */
@@ -221,7 +225,11 @@ interface ClientBundleOptions {
   readonly companions?: readonly UserConfig[]
   /** Overrides for the package's primary Node-side library config. */
   readonly lib?: UserConfig
-  /** Optional legal or attribution text selected by emitted client filename. */
+  /**
+   * Optional legal or attribution text selected by emitted client filename.
+   * It is inserted after minification, so ordinary comment text survives in
+   * the published artifact.
+   */
   readonly clientBanner?: (fileName: string) => string | undefined
 }
 
@@ -519,6 +527,20 @@ function clientConfig(
     // Plugin code is fetched outside Vite's module graph, so its own bundle
     // must carry the TS/TSX mapping consumed by browser profiling tools.
     sourcemap: true,
+    // Vite minifies only the shell; these artifacts travel as written, so the
+    // browser would otherwise download comments and development formatting on
+    // every plugin load. The registration banner, intro and footer are part of
+    // the minified program, so its bindings stay consistent. Identifier
+    // mangling stays off: oxc does not honor `mangle.reserved` for function
+    // parameters, so renaming would also rename the loader's `require`
+    // parameter and hide `require.async(...)`/`require(...)` from the
+    // built-artifact checks that read the published text. Legal comments stay
+    // inline: third-party notices embedded by a package's source must remain
+    // readable in the artifact.
+    minify: {
+      mangle: false,
+      codegen: { legalComments: 'inline' },
+    },
     clean: false,
     deps: {
       neverBundle: isRequested,
@@ -660,11 +682,14 @@ function clientConfig(
         isolation.sourcePath(source, mapPath)
         return browserSourcePath(source, mapPath)
       },
-      banner: (chunk) => {
-        const registration = `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, ${chunk.isEntry ? '' : `chunk: ${JSON.stringify(chunk.fileName)}, `}factory: (require) => {`
-        const prefix = clientBanner?.(chunk.fileName)
-        return prefix === undefined ? registration : `${prefix}\n${registration}`
-      },
+      // The registration is prepended before renderChunk, so the banner, intro,
+      // factory body and footer are minified as one program and share one
+      // consistent scope.
+      banner: chunk => `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, ${chunk.isEntry ? '' : `chunk: ${JSON.stringify(chunk.fileName)}, `}factory: (require) => {`,
+      // Attribution text is inserted after minification, which drops ordinary
+      // comments; a package's notices must stay readable in the published
+      // artifact and carry no executable meaning where they land.
+      postBanner: chunk => clientBanner?.(chunk.fileName) ?? '',
       footer: 'return module.exports; } });',
       intro: 'var module = { exports: {} }; var exports = module.exports;',
     },
