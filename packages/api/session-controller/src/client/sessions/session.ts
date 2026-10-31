@@ -445,7 +445,7 @@ export class Session implements SessionFace {
     this.options.onExactProjectionsRequested?.(this)
   }
 
-  /** Prepend one Turn-aligned page: at least 50 messages and two Turn starts, capped at 500 messages. */
+  /** Prepend one Turn-aligned page: at least 50 messages and two Turn starts, capped at 500 messages or the Host's byte budget. */
   async loadOlder(): Promise<void> {
     if (this.openState !== 'open' || !this.hasMore || this.loadingOlder) return
     const events = this.events

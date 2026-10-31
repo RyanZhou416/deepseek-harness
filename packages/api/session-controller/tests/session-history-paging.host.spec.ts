@@ -11,8 +11,9 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, {
+  interruptedTurnClosers,
   SESSION_FORMAT_VERSION,
   SessionId,
 } from '@deepseek-ai/dsh-session'
@@ -22,7 +23,13 @@ import { logPath } from '@deepseek-ai/dsh-session-persistence-jsonl/src/format.t
 import { windowIndexPath } from '@deepseek-ai/dsh-session-persistence-jsonl/src/window-index.ts'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { SessionHistoryController } from '../src/history.ts'
-import type { SessionFollowFrame, SessionFollowRequest, SessionPage, SessionPageRequest } from '../src/types.ts'
+import type {
+  SessionFollowFrame,
+  SessionFollowRequest,
+  SessionHistoryRecord,
+  SessionPage,
+  SessionPageRequest,
+} from '../src/types.ts'
 import { installSessionReadTestServices } from './test-remote.ts'
 
 const STORED = SessionId('history-paging-stored')
@@ -33,12 +40,13 @@ function header(id: SessionId): SessionHeader {
 }
 
 /** Append Turns of append-origin messages to a live Session. */
-function appendConversation(session: Session, turns = 3): SessionEvent[] {
+function appendConversation(session: Session, turns = 3, padding = 0): SessionEvent[] {
+  const filler = 'x'.repeat(padding)
   const events: SessionEvent[] = []
   for (let turn = 1; turn <= turns; turn += 1) {
     events.push(session.append('turn/start', { turn }))
     events.push(session.append('user/message', createUserMessage({
-      content: [{ type: 'text', text: `question ${turn}` }],
+      content: [{ type: 'text', text: `question ${turn}${filler}` }],
       source: { kind: 'user' },
     }), { surfaceOp: 'append' }))
     events.push(session.append('step/start', { turn, step: 1 }))
@@ -47,7 +55,7 @@ function appendConversation(session: Session, turns = 3): SessionEvent[] {
       step: 1,
       message: createMessage({
         role: 'assistant',
-        content: [{ type: 'text', text: `answer ${turn}` }],
+        content: [{ type: 'text', text: `answer ${turn}${filler}` }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       }),
       stream: [{ type: 'text-chunks', time0: 1, index: 0, dt: [], texts: [`answer ${turn}`] }],
@@ -55,6 +63,41 @@ function appendConversation(session: Session, turns = 3): SessionEvent[] {
     events.push(session.append('step/end', { turn, step: 1 }))
     events.push(session.append('turn/end', { turn, reason: { kind: 'completed' } }))
   }
+  return events
+}
+
+/**
+ * Append one Turn whose writer stopped mid-step, with its `turn/start` far above
+ * the tail. Filler Steps keep the stored log's latest Turn boundary far from the
+ * cut without adding counted messages or surface events.
+ */
+function appendOpenTurn(session: Session, turn: number, fillerSteps = 200): SessionEvent[] {
+  const events: SessionEvent[] = []
+  events.push(session.append('turn/start', { turn }))
+  events.push(session.append('step/start', { turn, step: 1 }))
+  events.push(session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: `question ${turn}` }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' }))
+  events.push(session.append('step/end', { turn, step: 1 }))
+  for (let step = 2; step <= fillerSteps; step += 1) {
+    events.push(session.append('step/start', { turn, step }))
+    events.push(session.append('step/end', { turn, step }))
+  }
+  events.push(session.append('step/start', { turn, step: fillerSteps + 1 }))
+  events.push(session.append('assistant/message', {
+    turn,
+    step: fillerSteps + 1,
+    message: createMessage({
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: ToolCallId('open-call'), name: 'bash', arguments: '{}' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    }),
+    stream: [],
+  }, { surfaceOp: 'append' }))
+  events.push(session.append('tool/call', {
+    turn, step: fillerSteps + 1, callId: ToolCallId('open-call'), name: 'bash', arguments: '{}',
+  }))
   return events
 }
 
@@ -73,6 +116,10 @@ interface BackendOptions {
   readonly batchSize?: number
   /** Stored conversation length in Turns (six events each). */
   readonly turns?: number
+  /** Pad every message text with this many ASCII bytes, making one event large. */
+  readonly padding?: number
+  /** End the stored log inside a Turn whose start sits far from the tail. */
+  readonly openTurn?: boolean
   /** Store a fork-inherited generation, which the backend refuses to window. */
   readonly seeded?: boolean
   /** Leave the real few-KB artifact size so the small-source bypass applies. */
@@ -110,7 +157,7 @@ async function realBackend(options: BackendOptions = {}): Promise<RealBackend> {
   // A live Session supplies valid durable rows; the stored generation below is
   // a distinct Session so history must take the window path for it.
   const source = ctx.sessions.create(LIVE, { meta: { cwd: '/workspace' } })
-  const sourceEvents = appendConversation(source, options.turns)
+  const sourceEvents = appendConversation(source, options.turns, options.padding)
   // Prepare, not create: the seeded fork must not be live when history reads it.
   const fork = options.seeded === true
     ? ctx.sessions.prepare(STORED, {
@@ -119,7 +166,8 @@ async function realBackend(options: BackendOptions = {}): Promise<RealBackend> {
       inheritedEventCount: source.seq,
     })
     : undefined
-  const events = fork?.snapshotEvents() ?? sourceEvents
+  const openTurnEvents = options.openTurn === true ? appendOpenTurn(source, (options.turns ?? 3) + 1) : []
+  const events = fork?.snapshotEvents() ?? [...sourceEvents, ...openTurnEvents]
   const handle = await ctx.sessionPersistence.create(fork?.header ?? header(STORED), fork === undefined
     ? {}
     : { inheritedEventCount: source.seq })
@@ -426,6 +474,268 @@ describe('Session history paging through the real JSONL generation index', () =>
     })
     expect(pageSeqs(page)).toEqual([13, 14, 15, 16, 17])
     expect(observe).not.toHaveBeenCalled()
+  })
+})
+
+describe('Session history page byte budget', () => {
+  /** Serialized bytes of the page records, the unit the byte budget counts. */
+  function serializedBytes(records: readonly SessionHistoryRecord[]): number {
+    return records.reduce((total, record) => total + Buffer.byteLength(JSON.stringify(record), 'utf8'), 0)
+  }
+
+  /** Serialized bytes of one durable event in a page record. */
+  function eventBytes(event: SessionEvent): number {
+    return Buffer.byteLength(JSON.stringify({ type: 'event', event }), 'utf8')
+  }
+
+  /** Serialized bytes of the durable events from `seq` through the end of the fixture log. */
+  function bytesFrom(events: readonly SessionEvent[], seq: number): number {
+    return events
+      .filter(event => event.seq >= seq)
+      .reduce((total, event) => total + eventBytes(event), 0)
+  }
+
+  /** A history controller over the same backend with one configured page budget. */
+  function budgetedHistory(backend: RealBackend, maxPageBytes: number): SessionHistoryController {
+    return new SessionHistoryController(
+      backend.ctx,
+      (observation) => { observation[Symbol.dispose]() },
+      undefined,
+      maxPageBytes,
+    )
+  }
+
+  // The fixture's last turn: turn/start 12, user 13, step/start 14, assistant 15, step/end 16, turn/end 17.
+  const LAST_USER = 13
+  const LAST_ASSISTANT = 15
+
+  it('stops a live page at the oldest message group that fits the budget', async () => {
+    const backend = await realBackend()
+    const budget = bytesFrom(backend.events, LAST_USER)
+    const history = budgetedHistory(backend, budget)
+    const tail = backend.events.length - 1
+
+    const page = await loadPage(history, {
+      throughSeq: tail,
+      beforeSeq: tail + 1,
+      maxMessages: 500,
+      turnWindow: { minMessages: 50, minTurns: 2 },
+    }, LIVE)
+
+    expect(pageSeqs(page)).toEqual([13, 14, 15, 16, 17])
+    expect(serializedBytes(page.records)).toBeLessThanOrEqual(budget)
+    expect(page.hasMore).toBe(true)
+    // The page tail stays the caller's cut.
+    expect(page.records.at(-1)?.event.seq).toBe(tail)
+  })
+
+  it('drops one older message group when one byte less would exceed the budget', async () => {
+    const backend = await realBackend()
+    const budget = bytesFrom(backend.events, LAST_USER) - 1
+    const history = budgetedHistory(backend, budget)
+    const tail = backend.events.length - 1
+
+    const page = await loadPage(history, { throughSeq: tail, beforeSeq: tail + 1, maxMessages: 500 }, LIVE)
+
+    // The budget overrides the uncapped message window and keeps the newest group.
+    expect(pageSeqs(page)).toEqual([15, 16, 17])
+    expect(page.records[0]?.event.seq).toBe(LAST_ASSISTANT)
+    expect(serializedBytes(page.records)).toBeLessThanOrEqual(budget)
+    expect(page.hasMore).toBe(true)
+  })
+
+  it('keeps the newest oversized message so a page always makes progress', async () => {
+    const backend = await realBackend()
+    const history = budgetedHistory(backend, 1)
+    const tail = backend.events.length - 1
+
+    const page = await loadPage(history, { throughSeq: tail, beforeSeq: tail + 1, maxMessages: 500 }, LIVE)
+
+    expect(pageSeqs(page)).toEqual([15, 16, 17])
+    // Best effort: the one retained message group alone exceeds the budget.
+    expect(serializedBytes(page.records)).toBeGreaterThan(1)
+    expect(page.hasMore).toBe(true)
+    expect(page.records.at(-1)?.event.seq).toBe(tail)
+  })
+
+  it('applies the budget to the stored-window page path', async () => {
+    const backend = await realBackend()
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+    const budget = bytesFrom(backend.events, LAST_USER)
+    const history = budgetedHistory(backend, budget)
+    const tail = backend.events.length - 1
+
+    const page = await loadPage(history, { throughSeq: tail, beforeSeq: tail + 1, maxMessages: 500 })
+
+    expect(readWindow).toHaveBeenCalledOnce()
+    expect(pageSeqs(page)).toEqual([13, 14, 15, 16, 17])
+    expect(serializedBytes(page.records)).toBeLessThanOrEqual(budget)
+    expect(page.hasMore).toBe(true)
+  })
+
+  it('applies the budget to live and stored follow openings', async () => {
+    const backend = await realBackend()
+    const observe = vi.spyOn(backend.ctx.sessionQuery, 'observeSession')
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+    const budget = bytesFrom(backend.events, LAST_USER)
+    const history = budgetedHistory(backend, budget)
+    const tail = backend.events.length - 1
+
+    const live = await openSnapshot(history, { maxMessages: 500 }, LIVE)
+    expect(observe).toHaveBeenCalled()
+    expect(readWindow).not.toHaveBeenCalled()
+    expect(live.records.map(record => record.event.seq)).toEqual([13, 14, 15, 16, 17])
+    expect(serializedBytes(live.records)).toBeLessThanOrEqual(budget)
+    expect(live.cursor).toBe(tail)
+    expect(live.hasMore).toBe(true)
+
+    observe.mockClear()
+    const stored = await openSnapshot(history, { maxMessages: 500 })
+    expect(observe).not.toHaveBeenCalled()
+    expect(readWindow).toHaveBeenCalledOnce()
+    expect(stored.records).toEqual(live.records)
+    expect(stored.cursor).toBe(live.cursor)
+    expect(stored.hasMore).toBe(live.hasMore)
+  })
+
+  it('keeps a page whose whole content fits a finite budget and leaves the uncapped default untouched', async () => {
+    const backend = await realBackend()
+    const tail = backend.events.length - 1
+    const request = { throughSeq: tail, beforeSeq: tail + 1, maxMessages: 500 }
+
+    const capped = await loadPage(budgetedHistory(backend, 1_000_000), request, LIVE)
+    const uncapped = await loadPage(backend.history, request, LIVE)
+
+    // A page that fits is not shortened to its oldest message group.
+    expect(pageSeqs(capped)).toEqual(backend.events.map(event => event.seq))
+    expect(capped.hasMore).toBe(false)
+    expect(uncapped).toEqual(capped)
+  })
+
+  it('decodes the first window bound when the trailing records exhaust the budget', async () => {
+    // Fifty Turns of 4 KiB messages: 256 events carry far more than 64 KiB, so
+    // the budget, not the 500-message alignment, decides the page.
+    const backend = await realBackend({ turns: 50, padding: 4_096 })
+    expect(backend.events.length).toBe(300)
+    const budget = 64 * 1024
+    const history = budgetedHistory(backend, budget)
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+    const tail = backend.events.length - 1
+    const request = { throughSeq: tail, beforeSeq: tail + 1, maxMessages: 500 }
+
+    const page = await loadPage(history, request)
+
+    // One read of the first bound; the alignment bound is never decoded.
+    expect(readWindow).toHaveBeenCalledOnce()
+    expect(readWindow.mock.calls[0]?.[1]).toMatchObject({ beforeSeq: tail + 1, maxEvents: 256 })
+    expect(page.records.at(-1)?.event.seq).toBe(tail)
+    expect(page.records[0]?.event.seq).toBeGreaterThan(tail - 256)
+    expect(page.hasMore).toBe(true)
+    expect(page.records.length).toBeLessThan(256)
+    expect(serializedBytes(page.records)).toBeLessThanOrEqual(budget)
+
+    // The complete read trims the same tail to the same page.
+    expect(page).toEqual(await loadPage(history, request, LIVE))
+
+    readWindow.mockClear()
+    const frame = await openSnapshot(history, { maxMessages: 500 })
+    const live = await openSnapshot(history, { maxMessages: 500 }, LIVE)
+    expect(readWindow).toHaveBeenCalledOnce()
+    expect(readWindow.mock.calls[0]?.[1]).toMatchObject({ maxEvents: 256 })
+    expect(frame.cursor).toBe(tail)
+    expect(frame.records).toEqual(live.records)
+    expect(frame.hasMore).toBe(live.hasMore)
+  })
+
+  it('grows a backwards window until the message alignment resolves', async () => {
+    const backend = await realBackend({ turns: 350, batchSize: 300 })
+    expect(backend.events.length).toBe(2_100)
+    const history = budgetedHistory(backend, 4 * 1024 * 1024)
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+    const tail = backend.events.length - 1
+    const request = { throughSeq: tail, beforeSeq: tail + 1, maxMessages: 500 }
+
+    const page = await loadPage(history, request)
+
+    // The first two windows hold fewer than 500 counted messages; the third is
+    // the alignment bound, and its page fits the byte budget untouched.
+    expect(readWindow.mock.calls.map(([, read]) => read?.maxEvents)).toEqual([256, 1_024, 2_000])
+    expect(page.records.at(-1)?.event.seq).toBe(tail)
+    expect(page.hasMore).toBe(true)
+    expect(serializedBytes(page.records)).toBeLessThanOrEqual(4 * 1024 * 1024)
+    expect(page).toEqual(await loadPage(history, request, LIVE))
+  })
+
+  it('grows a follow opening until the message alignment resolves', async () => {
+    const backend = await realBackend({ turns: 350, batchSize: 300 })
+    const history = budgetedHistory(backend, 4 * 1024 * 1024)
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+
+    const frame = await openSnapshot(history, { maxMessages: 500 })
+    const live = await openSnapshot(history, { maxMessages: 500 }, LIVE)
+
+    expect(readWindow.mock.calls.map(([, read]) => read?.maxEvents)).toEqual([256, 1_024, 2_000])
+    expect(frame.cursor).toBe(backend.events.length - 1)
+    expect(frame.records).toEqual(live.records)
+    expect(frame.cursor).toBe(live.cursor)
+    expect(frame.hasMore).toBe(live.hasMore)
+  })
+
+  it('serves a stored generation that fits the window from one first-bound read', async () => {
+    const backend = await realBackend()
+    const history = budgetedHistory(backend, 2 * 1024 * 1024)
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+    const tail = backend.events.length - 1
+    const request = { throughSeq: tail, beforeSeq: tail + 1, maxMessages: 500 }
+
+    const page = await loadPage(history, request)
+
+    // The window reaches seq 0 before the alignment bound, so one read starts
+    // and ends the page and reports no older history.
+    expect(readWindow).toHaveBeenCalledOnce()
+    expect(readWindow.mock.calls[0]?.[1]).toMatchObject({ maxEvents: 256 })
+    expect(page.records[0]?.event.seq).toBe(0)
+    expect(page.hasMore).toBe(false)
+    expect(page).toEqual(await loadPage(history, request, LIVE))
+  })
+
+  it('keeps synthetic closers when the window grows to the final Turn boundary', async () => {
+    // The stored log ends inside Turn 4, whose `turn/start` sits more than 256
+    // events above the tail. The first-bound window already resolves the
+    // one-message page, but it cannot see that boundary, so its closer decision
+    // would omit the recovered tool result, Step end, and Turn end.
+    const backend = await realBackend({ openTurn: true })
+    const expected = [...backend.events, ...interruptedTurnClosers(backend.events)]
+    const history = budgetedHistory(backend, 2 * 1024 * 1024)
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+
+    const frame = await openSnapshot(history, { maxMessages: 1 })
+
+    expect(readWindow.mock.calls.map(([, read]) => read?.maxEvents)).toEqual([256, 1_024])
+    expect(frame.records.map(record => record.event.type))
+      .toEqual(['assistant/message', 'tool/call', 'tool/result', 'step/end', 'turn/end'])
+    expect(frame.cursor).toBe(expected.at(-1)?.seq)
+    expect(frame.hasMore).toBe(true)
+
+    // The complete observation balances the same Turn into the same transcript.
+    readWindow.mockResolvedValue(undefined)
+    const complete = await openSnapshot(history, { maxMessages: 1 })
+    expect(frame.records).toEqual(complete.records)
+    expect(frame.cursor).toBe(complete.cursor)
+    expect(frame.hasMore).toBe(complete.hasMore)
+  })
+
+  it('requests the alignment bound once when the byte budget is disabled', async () => {
+    const backend = await realBackend()
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+    const tail = backend.events.length - 1
+
+    const page = await loadPage(backend.history, { throughSeq: tail, beforeSeq: tail + 1, maxMessages: 500 })
+    const frame = await openSnapshot(backend.history, { maxMessages: 500 })
+
+    expect(readWindow.mock.calls.map(([, read]) => read?.maxEvents)).toEqual([2_000, 2_000])
+    expect(page.records.at(-1)?.event.seq).toBe(tail)
+    expect(frame.cursor).toBe(tail)
   })
 })
 

@@ -48,6 +48,22 @@ const SESSION_WINDOW_MAX_EVENTS = 10_000
 /** Smallest event budget one message-aligned page requests beyond its tail alignment span. */
 const SESSION_WINDOW_MIN_EVENTS = 2_000
 /**
+ * First event count one stored window read requests when a serialized byte
+ * budget is configured.
+ *
+ * That budget trims a page near the caller's cut, so requesting the complete
+ * alignment bound first decodes rows the page cannot carry. 256 keeps the first
+ * decode to about an eighth of that bound while a typical 500-message opening
+ * still resolves inside the growth sequence. It is not derived from the budget:
+ * the budget bounds the bytes a page may carry, not the rows message/Turn
+ * alignment needs, and a derived row count would shrink toward one event at the
+ * small budgets the paging tests configure. The value is an implementation
+ * constant because it changes only read granularity, never the served page.
+ */
+const SESSION_WINDOW_FIRST_EVENTS = 256
+/** Factor by which a budgeted window read grows while its page is undecided. */
+const SESSION_WINDOW_GROWTH = 4
+/**
  * Stored artifact size below which a complete observation is cheaper than a
  * cold window index build.
  *
@@ -74,11 +90,14 @@ export class SessionHistoryController {
    * @param ctx - Host context carrying Session query and projection services.
    * @param promote - starts ordinary Session activation after snapshot delivery.
    * @param retain - keeps an addressed Agent resident through opening delivery.
+   * @param maxPageBytes - serialized UTF-8 byte budget for one page's records;
+   *   `0` disables the cap and keeps the configured message/Turn limits alone.
    */
   constructor(
     private readonly ctx: Context,
     private readonly promote: (observation: SessionObservation) => void,
     private readonly retain: (sessionId: SessionId) => () => void = () => () => {},
+    private readonly maxPageBytes = 0,
   ) {
     ctx.on('agent/assistant-stream', ({ agent, frame }) => {
       let stream = this.assistantStreams.get(agent.session.id)
@@ -141,6 +160,7 @@ export class SessionHistoryController {
       request.maxMessages ?? DEFAULT_MAX_MESSAGES,
       throughSeq,
       request.turnWindow,
+      this.maxPageBytes,
     )
     const records = pageRecords(page.events)
     return {
@@ -159,8 +179,10 @@ export class SessionHistoryController {
    * by the caller — are never decoded. A window whose tail does not reach that
    * anchor falls back: an opening balances an interrupted Turn with synthetic
    * closers that the stored window does not contain, so only the complete log
-   * can serve a cut above the stored window cursor. Returns undefined when the
-   * complete source must answer.
+   * can serve a cut above the stored window cursor. A configured byte budget
+   * grows the requested row bound from {@link SESSION_WINDOW_FIRST_EVENTS} until
+   * the page is decided, so a budget-trimmed page does not decode the alignment
+   * bound. Returns undefined when the complete source must answer.
    * @param sessionId - non-live Session addressed by the request.
    * @param request - validated page request.
    * @param throughSeq - inclusive cut derived from the request.
@@ -177,35 +199,39 @@ export class SessionHistoryController {
   ): Promise<SessionPage | undefined> {
     const older = throughSeq >= 0
     const end = Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1)
-    const read = await this.readStoredWindow(sessionId, older
-      ? {
-        // The page cut is the window end: the read decodes exactly the page's
-        // own span instead of every stored row between the cut and the cursor.
-        beforeSeq: end,
-        signal,
-        maxEvents: windowEventBound(request),
-      }
-      : { signal, maxEvents: 1 })
-    if (read === undefined) return undefined
-    this.validateWindow(request.address, read.window, read.projections)
-    // A negative cut ends before every event, so the validated page is empty.
-    if (!older) return { records: [], hasMore: false }
-    // A positive cut needs the stored row immediately below it; a cut at seq 0
-    // is the real empty page. Anything else needs the complete log, including a
-    // cut the complete observation's closers pushed above the stored cursor.
-    if (end > 0 && read.window.events.at(-1)?.seq !== end - 1) return undefined
-    const page = paginateSlice(
-      read.window.events,
-      SessionLogOffset(read.window.events[0]?.seq ?? read.window.cursor + 1),
-      SessionLogOffset(end),
-      request.maxMessages ?? DEFAULT_MAX_MESSAGES,
-      request.turnWindow,
-    )
-    if (page === undefined) return undefined
-    return {
-      records: pageRecords(page.events),
-      hasMore: page.hasMore,
+    if (!older) {
+      const read = await this.readStoredWindow(sessionId, { signal, maxEvents: 1 })
+      if (read === undefined) return undefined
+      this.validateWindow(request.address, read.window, read.projections)
+      // A negative cut ends before every event, so the validated page is empty.
+      return { records: [], hasMore: false }
     }
+    for (const maxEvents of windowReadBounds(request, this.maxPageBytes)) {
+      signal.throwIfAborted()
+      // The page cut is the window end: the read decodes exactly the page's own
+      // span instead of every stored row between the cut and the cursor.
+      const read = await this.readStoredWindow(sessionId, { beforeSeq: end, signal, maxEvents })
+      if (read === undefined) return undefined
+      this.validateWindow(request.address, read.window, read.projections)
+      // A positive cut needs the stored row immediately below it; a cut at seq 0
+      // is the real empty page. Anything else needs the complete log, including a
+      // cut the complete observation's closers pushed above the stored cursor.
+      if (end > 0 && read.window.events.at(-1)?.seq !== end - 1) return undefined
+      const page = paginateSlice(
+        read.window.events,
+        SessionLogOffset(read.window.events[0]?.seq ?? read.window.cursor + 1),
+        SessionLogOffset(end),
+        request.maxMessages ?? DEFAULT_MAX_MESSAGES,
+        request.turnWindow,
+        this.maxPageBytes,
+      )
+      if (page === undefined) continue
+      return {
+        records: pageRecords(page.events),
+        hasMore: page.hasMore,
+      }
+    }
+    return undefined
   }
 
   /**
@@ -429,7 +455,8 @@ export class SessionHistoryController {
     const events = source.events
     signal.throwIfAborted()
     const cursor = source.cursor
-    const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES, cursor, request.turnWindow)
+    const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES, cursor, request.turnWindow,
+      this.maxPageBytes)
     const assistantStream = request.assistantStream === true
       ? this.assistantStreams.get(addressId(request.address))?.snapshot() ?? { revision: 0 }
       : undefined
@@ -465,7 +492,9 @@ export class SessionHistoryController {
    * would clear the client's cached values. Only parent Session addresses use
    * this path; subagent addresses stay on the complete observation because the
    * `subagent` projection is part of address validation. No prepared historical
-   * Session is materialized here.
+   * Session is materialized here. A configured byte budget grows the requested
+   * row bound from {@link SESSION_WINDOW_FIRST_EVENTS} until the page is decided
+   * and the window still shows the log's final Turn boundary.
    * @param sessionId - non-live parent Session addressed by the request.
    * @param request - follow request and caller history limits.
    * @param signal - stream cancellation.
@@ -478,44 +507,54 @@ export class SessionHistoryController {
     signal: AbortSignal,
     ordinal: () => number,
   ): Promise<FollowOpening | undefined> {
-    const read = await this.readStoredWindow(sessionId, {
-      signal,
-      maxEvents: windowEventBound(request),
-    })
-    if (read === undefined) return undefined
-    signal.throwIfAborted()
-    this.validateWindow(request.address, read.window, read.projections)
-    // The complete observation balances an interrupted final turn with in-memory
-    // closers; a tail window must present the same transcript shape.
-    const events = [...read.window.events, ...interruptedTurnClosers(read.window.events)]
-    const cursor = SessionSeq(events.at(-1)?.seq ?? -1)
-    const page = paginateSlice(
-      events,
-      SessionLogOffset(events[0]?.seq ?? cursor + 1),
-      SessionLogOffset(cursor + 1),
-      request.maxMessages ?? DEFAULT_MAX_MESSAGES,
-      request.turnWindow,
-    )
-    if (page === undefined) return undefined
-    const assistantStream = request.assistantStream === true
-      ? this.assistantStreams.get(sessionId)?.snapshot() ?? { revision: 0 }
-      : undefined
-    // The accumulator snapshot and this watermark are synchronous. Frames
-    // through the cut are represented or superseded by that baseline.
-    const assistantStreamOrdinalCut = ordinal()
-    return {
-      frame: {
-        type: 'snapshot',
-        header: wireHeader(read.window.header),
+    const bounds = windowReadBounds(request, this.maxPageBytes)
+    for (const [index, maxEvents] of bounds.entries()) {
+      signal.throwIfAborted()
+      const read = await this.readStoredWindow(sessionId, { signal, maxEvents })
+      if (read === undefined) return undefined
+      this.validateWindow(request.address, read.window, read.projections)
+      const windowEvents = read.window.events
+      const windowBase = SessionLogOffset(windowEvents[0]?.seq ?? read.window.cursor + 1)
+      // A window that omits the log's final Turn boundary cannot tell an
+      // interrupted Turn from one whose start lies below it, so its synthetic
+      // closers would differ from the complete observation. Grow until the
+      // boundary is inside the window, and keep the bounded window's answer at
+      // the last bound.
+      if (index < bounds.length - 1 && !tailTurnSettled(windowEvents, windowBase)) continue
+      // The complete observation balances an interrupted final turn with in-memory
+      // closers; a tail window must present the same transcript shape.
+      const events = [...windowEvents, ...interruptedTurnClosers(windowEvents)]
+      const cursor = SessionSeq(events.at(-1)?.seq ?? -1)
+      const page = paginateSlice(
+        events,
+        windowBase,
+        SessionLogOffset(cursor + 1),
+        request.maxMessages ?? DEFAULT_MAX_MESSAGES,
+        request.turnWindow,
+        this.maxPageBytes,
+      )
+      if (page === undefined) continue
+      const assistantStream = request.assistantStream === true
+        ? this.assistantStreams.get(sessionId)?.snapshot() ?? { revision: 0 }
+        : undefined
+      // The accumulator snapshot and this watermark are synchronous. Frames
+      // through the cut are represented or superseded by that baseline.
+      const assistantStreamOrdinalCut = ordinal()
+      return {
+        frame: {
+          type: 'snapshot',
+          header: wireHeader(read.window.header),
+          cursor,
+          records: pageRecords(page.events),
+          hasMore: page.hasMore,
+          ...read.projections === undefined ? {} : { projections: projectionBlock(read.projections) },
+          ...assistantStream === undefined ? {} : { assistantStream },
+        },
         cursor,
-        records: pageRecords(page.events),
-        hasMore: page.hasMore,
-        ...read.projections === undefined ? {} : { projections: projectionBlock(read.projections) },
-        ...assistantStream === undefined ? {} : { assistantStream },
-      },
-      cursor,
-      assistantStreamOrdinalCut,
+        assistantStreamOrdinalCut,
+      }
     }
+    return undefined
   }
 
   private async sourceFor(
@@ -673,9 +712,10 @@ function paginate(
   maxMessages: number,
   throughSeq: SessionSeqCursor,
   turnWindow?: SessionPageRequest['turnWindow'],
+  maxBytes = 0,
 ): { readonly events: SessionEvent[]; readonly hasMore: boolean } {
   const end = SessionLogOffset(Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1))
-  const page = paginateSlice(events, SessionLogOffset(0), end, maxMessages, turnWindow)
+  const page = paginateSlice(events, SessionLogOffset(0), end, maxMessages, turnWindow, maxBytes)
   /* v8 ignore next 3 -- A complete log starts at seq 0, so its cut never falls below the slice. */
   if (page === undefined) {
     throw new RemoteError('gateway/internal', 'complete session log pagination fell below its start', {})
@@ -685,16 +725,22 @@ function paginate(
 
 /**
  * Cut one message-aligned page from a contiguous event slice that may begin
- * above seq 0.
+ * above seq 0, then shorten it to the configured serialized-byte budget.
  *
  * Returns undefined when the cut or a cited source event falls below the slice,
- * because only the complete log can answer that page. `hasMore` follows the
- * complete-log rule: the page does not start at the log's first event.
+ * because only the complete log can answer that page. One case is decided
+ * without the alignment cut: when the slice's trailing records already exceed
+ * the byte budget, the trim keeps the newest message group that fits, and older
+ * events could only add bytes, so that trimmed start is the one a complete read
+ * would also choose. The page is returned from it instead of asking for a
+ * deeper window. `hasMore` follows the complete-log rule: the page does not
+ * start at the log's first event.
  * @param events - contiguous durable events.
  * @param baseSeq - absolute seq of `events[0]`.
  * @param endSeq - exclusive absolute end of the page.
  * @param maxMessages - message budget that stops the backwards scan.
  * @param turnWindow - optional Turn alignment minima.
+ * @param maxBytes - positive serialized-record byte budget; `0` keeps the message/Turn cut.
  * @returns the page, or undefined when the slice cannot cover its cut.
  */
 function paginateSlice(
@@ -703,6 +749,7 @@ function paginateSlice(
   endSeq: SessionLogOffsetType,
   maxMessages: number,
   turnWindow?: SessionPageRequest['turnWindow'],
+  maxBytes = 0,
 ): { readonly events: SessionEvent[]; readonly hasMore: boolean } | undefined {
   const end = endSeq - baseSeq
   // An empty tail cut at seq 0 is a real page; any other empty slice hides the cut below it.
@@ -737,8 +784,91 @@ function paginateSlice(
       break
     }
   }
-  if (!resolved && baseSeq > 0) return undefined
-  return { events: events.slice(cut - baseSeq, end), hasMore: cut > 0 }
+  if (!resolved && baseSeq > 0) {
+    if (maxBytes <= 0) return undefined
+    const budgetCut = trimToByteBudget(events, baseSeq, 0, end, maxBytes)
+    if (budgetCut === 0) return undefined
+    return { events: events.slice(budgetCut, end), hasMore: baseSeq + budgetCut > 0 }
+  }
+  const start = cut - baseSeq
+  const trimmed = trimToByteBudget(events, baseSeq, start, end, maxBytes)
+  return { events: events.slice(trimmed, end), hasMore: baseSeq + trimmed > 0 }
+}
+
+/**
+ * Shorten one message-aligned page to a serialized UTF-8 byte budget.
+ *
+ * The page keeps its tail — the caller's cut — and only its start moves toward
+ * newer events, always to the group start of a counted message. A page that
+ * already fits is returned unchanged. The budget therefore overrides the
+ * caller's message and Turn minima when the configured cap is smaller than the
+ * page they select; the newest message is kept even when it alone exceeds the
+ * budget so a page always makes progress. A message group whose cited sources
+ * fall below a candidate start makes that start unusable, because the page
+ * would carry a surface event without its source.
+ * @param events - contiguous durable events.
+ * @param baseSeq - absolute seq of `events[0]`.
+ * @param start - relative index of the message-aligned page start.
+ * @param end - relative exclusive end of the page.
+ * @param maxBytes - positive serialized-record budget, or `0` when uncapped.
+ * @returns the relative index of the trimmed page start.
+ */
+function trimToByteBudget(
+  events: readonly SessionEvent[],
+  baseSeq: SessionLogOffsetType,
+  start: number,
+  end: number,
+  maxBytes: number,
+): number {
+  if (maxBytes <= 0 || end <= start) return start
+  const length = end - start
+  const sliceSeq = baseSeq + start
+  /**
+   * Group start of the counted message at each page offset, in page-relative
+   * coordinates: `0` is the page start. A value below `0` cites an event below
+   * the page, so a candidate at or below that message would omit the source;
+   * offsets without a counted message hold positive infinity.
+   */
+  const groupStarts = new Float64Array(length).fill(Number.POSITIVE_INFINITY)
+  for (let offset = 0; offset < length; offset++) {
+    const event = events[start + offset] as SessionEvent
+    if (!MESSAGE_TYPES.has(event.type) || !isAppendSurfaceEvent(event)) continue
+    const sources = event.sourceEventSeqs
+    let groupStart = event.seq
+    if (sources !== undefined) {
+      for (const source of sources) {
+        if (source < groupStart) groupStart = source
+      }
+    }
+    groupStarts[offset] = groupStart - sliceSeq
+  }
+  /** Lowest page-relative group start among messages at or above each offset. */
+  const suffixMin = new Float64Array(length + 1).fill(Number.POSITIVE_INFINITY)
+  for (let offset = length - 1; offset >= 0; offset--) {
+    suffixMin[offset] = Math.min(suffixMin[offset + 1] as number, groupStarts[offset] as number)
+  }
+  const usable = new Uint8Array(length)
+  for (let offset = 0; offset < length; offset++) {
+    const groupStart = groupStarts[offset] as number
+    if (groupStart < 0) continue
+    // Every message at or above this start must cite an event at or above it.
+    if (suffixMin[groupStart] === groupStart) usable[groupStart] = 1
+  }
+  let bytes = 0
+  let newest: number | undefined
+  let best: number | undefined
+  for (let offset = length - 1; offset >= 0; offset--) {
+    bytes += Buffer.byteLength(JSON.stringify(entryFor(events[start + offset] as SessionEvent)), 'utf8')
+    // The untouched page keeps its original start whenever the whole page fits.
+    if (offset === 0) break
+    if (usable[offset] === 0) continue
+    newest ??= offset
+    // Older starts only add bytes, so the first over-budget start ends the scan.
+    if (bytes > maxBytes) break
+    best = offset
+  }
+  if (bytes <= maxBytes) return start
+  return start + (best ?? newest ?? 0)
 }
 
 /**
@@ -758,6 +888,56 @@ function windowEventBound(
     SESSION_WINDOW_MAX_EVENTS,
     Math.max(SESSION_WINDOW_MIN_EVENTS, messages * 4 + turnHeadroom),
   )
+}
+
+/**
+ * Event counts to try for one stored window read.
+ *
+ * Without a serialized byte budget the window requests the alignment bound once,
+ * as it always has. With one, the first request uses
+ * {@link SESSION_WINDOW_FIRST_EVENTS} and each retry multiplies the bound by
+ * {@link SESSION_WINDOW_GROWTH} up to {@link windowEventBound}: the caller stops
+ * at the first bound whose page is decided (alignment resolved, history start
+ * reached, or budget exhausted). Every bound stays within the existing row
+ * bound, so a window that never decides its page still falls back to the
+ * complete read exactly as before.
+ * @param request - caller history limits.
+ * @param maxBytes - configured serialized-record byte budget; `0` requests one bounded read.
+ * @returns the event counts to request, strictly increasing and ending at the alignment bound.
+ */
+function windowReadBounds(
+  request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>,
+  maxBytes: number,
+): readonly number[] {
+  const bound = windowEventBound(request)
+  let limit = maxBytes > 0 ? Math.min(bound, SESSION_WINDOW_FIRST_EVENTS) : bound
+  const bounds = [limit]
+  while (limit < bound) {
+    limit = Math.min(bound, limit * SESSION_WINDOW_GROWTH)
+    bounds.push(limit)
+  }
+  return bounds
+}
+
+/**
+ * Whether one tail window shows the log's final Turn boundary.
+ *
+ * `interruptedTurnClosers` decides from the last `turn/start` or `turn/end` it
+ * observes. A window that reaches any such boundary reaches the log's latest
+ * one, because the window ends at the stored cursor, so its synthetic closers
+ * match the complete observation. A window with no boundary cannot tell an
+ * interrupted Turn from one whose start lies below the window; only a window
+ * that reaches seq 0 is settled without one.
+ * @param events - contiguous stored window events.
+ * @param baseSeq - absolute seq of `events[0]`.
+ * @returns true when the window's closer decision matches the complete log.
+ */
+function tailTurnSettled(events: readonly SessionEvent[], baseSeq: SessionLogOffsetType): boolean {
+  if (baseSeq === 0) return true
+  for (const event of events) {
+    if (event.type === 'turn/start' || event.type === 'turn/end') return true
+  }
+  return false
 }
 
 /** Translate current logical Session metadata to the browser wire. */

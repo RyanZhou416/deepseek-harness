@@ -101,6 +101,7 @@ export interface TestSessionRemoteDefaults {
   readonly cwd: string
   readonly nativeOpen?: boolean
   readonly listProjectionExcludeKeys?: readonly string[]
+  readonly historyPageMaxBytes?: number
   readonly saveDefaultModelSelection?: (selection: AgentModelSelection) => void | Promise<void>
   readonly openPath?: (path: string, signal: AbortSignal) => Promise<void>
   readonly fileApplications?: SessionControllerInternals['fileApplications']
@@ -303,6 +304,7 @@ function installControllers(
       {
         ...defaults.nativeOpen === undefined ? {} : { nativeOpen: defaults.nativeOpen },
         ...defaults.listProjectionExcludeKeys === undefined ? {} : { listProjectionExcludeKeys: [...defaults.listProjectionExcludeKeys] },
+        ...defaults.historyPageMaxBytes === undefined ? {} : { historyPageMaxBytes: defaults.historyPageMaxBytes },
       },
       {
         ...defaults.openPath === undefined ? {} : { openPath: defaults.openPath },

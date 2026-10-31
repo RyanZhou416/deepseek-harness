@@ -103,10 +103,18 @@ export interface Config {
   readonly listWorkSliceMs?: number
   /** Projection keys the catalog omits before rendering its hint values. */
   readonly listProjectionExcludeKeys?: string[]
+  /**
+   * Serialized UTF-8 bytes of records one history page may carry before it
+   * stops extending backwards at a message boundary. The budget overrides the
+   * caller's message and Turn minima and always keeps the newest message group;
+   * `0` disables the cap and keeps the message/Turn limits alone. It bounds one
+   * frame's client-side decode and parse cost, not a whole Session.
+   */
+  readonly historyPageMaxBytes?: number
 }
 
 /** Deployment policy after schema defaults have been applied. */
-type ResolvedConfig = Config & { readonly listWorkSliceMs: number }
+type ResolvedConfig = Config & { readonly listWorkSliceMs: number; readonly historyPageMaxBytes: number }
 
 /** Host integrations replaceable by direct unit tests. */
 export interface SessionControllerInternals {
@@ -142,8 +150,9 @@ export class SessionController extends TypertRemoteService {
   static Config: z<Config, ResolvedConfig> = z.object({
     nativeOpen: z.boolean(),
     idleSessionRetentionMs: z.natural().default(DEFAULT_IDLE_SESSION_RETENTION_MS),
-  listWorkSliceMs: z.natural().min(1).default(16),
-  listProjectionExcludeKeys: z.array(z.string().min(1).pattern(/^(?!sessionListMetadata$)/u).required()).default([]),
+    listWorkSliceMs: z.natural().min(1).default(16),
+    listProjectionExcludeKeys: z.array(z.string().min(1).pattern(/^(?!sessionListMetadata$)/u).required()).default([]),
+    historyPageMaxBytes: z.natural().default(0),
   })
 
   private readonly agents: ApiSessionAgentController
@@ -188,6 +197,7 @@ export class SessionController extends TypertRemoteService {
       ctx,
       (observation) => { this.promote(observation) },
       sessionId => this.agents.retainForFollower(sessionId),
+      resolved.historyPageMaxBytes,
     )
     this.listState = new ApiSessionList(ctx, resolved.listWorkSliceMs, new Set(config.listProjectionExcludeKeys))
     this.fileApplications = internals.fileApplications ?? nativeFileApplications

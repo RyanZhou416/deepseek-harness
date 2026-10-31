@@ -1,0 +1,31 @@
+# Bilingual-pair consistency record for 2026-10-31-first-frame-history-byte-budget.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-31-first-frame-history-byte-budget.md
+/agent-note-bounded-first-frame-session-history-transport:
+  en: 41fc6950bfb362ba
+  zh: 0e051beba5eab9f7
+/agent-note-bounded-first-frame-session-history-transport/problem:
+  en: c3ecc22a22521015
+  zh: bf11305b26782535
+/agent-note-bounded-first-frame-session-history-transport/decision:
+  en: a15c7c13f167e5ac
+  zh: a15c7c13f167e5ac
+/agent-note-bounded-first-frame-session-history-transport/decision/1-a-serialized-byte-budget-for-one-history-page:
+  en: ae994482b9b176d2
+  zh: c7bb3f7b28f75b86
+/agent-note-bounded-first-frame-session-history-transport/decision/2-optional-permessage-deflate-on-the-mux-socket:
+  en: b0b02621c70f0a2d
+  zh: 64b3d58276335a88
+/agent-note-bounded-first-frame-session-history-transport/decision/3-no-wire-or-client-change:
+  en: 13ea75e6dcc2a268
+  zh: 9db43fc1396c9242
+/agent-note-bounded-first-frame-session-history-transport/alternatives-considered:
+  en: 6003319e20183191
+  zh: 36caaba9042f0f27
+/agent-note-bounded-first-frame-session-history-transport/consequences:
+  en: 44542238eb1cd2b4
+  zh: ad788e40de15b161
+/agent-note-bounded-first-frame-session-history-transport/testing:
+  en: cf44b255676452e6
+  zh: a8ca26164e4209c4

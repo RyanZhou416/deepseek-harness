@@ -510,7 +510,10 @@ export interface SessionPageRequest {
   readonly throughSeq: number
   readonly beforeSeq?: number
   readonly maxMessages?: number
-  /** Stop at a Turn start after both minima, unless maxMessages or history exhaustion wins. */
+  /**
+   * Stop at a Turn start after both minima, unless maxMessages, the Host's
+   * configured serialized-byte page budget, or history exhaustion wins first.
+   */
   readonly turnWindow?: {
     /** Minimum append-origin user/assistant messages; must not exceed maxMessages. */
     readonly minMessages: number

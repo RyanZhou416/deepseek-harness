@@ -32,6 +32,14 @@ describe('SessionController facade', () => {
     }
   })
 
+  it('defaults the history page byte budget to uncapped and accepts non-negative integers', () => {
+    expect(SessionController.Config({}).historyPageMaxBytes).toBe(0)
+    expect(SessionController.Config({ historyPageMaxBytes: 2_097_152 }).historyPageMaxBytes).toBe(2_097_152)
+    for (const historyPageMaxBytes of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => SessionController.Config({ historyPageMaxBytes })).toThrow()
+    }
+  })
+
   it('does not require the Tools service', () => {
     expect(SessionController.inject).not.toContain('tools')
   })
