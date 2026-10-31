@@ -1660,17 +1660,19 @@ covers both the parity request and the unchanged non-parity request.
 probe. The probe is a member HTTP request at profile load, on a replaced member
 credential, and after a failed attempt's backoff; it is not a model/account
 request and it requires the pool's build identity. A successful proof is not
-polled on a schedule. A failed load probe retries with bounded
-backoff (2 s doubling to 60 s) and logs the attempt and next delay at warning
-level, so one failure does not leave the process permanently on the default
-wire. The first routed request awaits the initial probe under a 6 s deadline
-and then proceeds on the configured default wire if it has not answered,
-while the retry schedule keeps running. A marked `503` on a request that carries
-the wire drops the proof immediately and schedules another probe after a 30 s
-cooldown, so the refusal is not a permanent fallback; a probe already in flight
-is the fresher question and the cooldown bounds probe traffic. Proven and
-failed probe transitions are logged at info/warning with the build id but no
-credential. Routes without the wire and other providers keep their current
+polled on a schedule. A failed load probe — including a rejected member
+credential lookup — retries with bounded backoff (2 s doubling to 60 s) and logs
+the attempt and next delay at warning level, so one failure does not leave the
+process permanently on the default wire. The first routed request awaits the
+initial probe under a 6 s deadline and then proceeds on the configured default
+wire if it has not answered, while the retry schedule keeps running; cancelling
+that request ends the wait instead of marking the deadline expired. A marked
+`503` on a request that carries the wire drops the proof immediately and
+schedules another probe after a 30 s cooldown, so the refusal is not a permanent
+fallback; the proof is on, so no probe generation or retry timer can be pending,
+and the cooldown bounds probe traffic. Proven and failed probe transitions are
+logged at info/warning with the build id but no credential. Routes without the
+wire and other providers keep their current
 bytes. The request log records the attempt's route, model, endpoint, status and
 pool request id; it never carries the body, the headers, or the section plan.
 

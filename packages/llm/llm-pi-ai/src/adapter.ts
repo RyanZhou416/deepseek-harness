@@ -604,21 +604,18 @@ function withClaudeCodeFieldOrder(payload: Record<string, unknown>): Record<stri
  * DSH-owned harness paragraphs by exact text, because the wire never forwards
  * them; every other caller paragraph stays byte-for-byte.
  * @param systemValue - the request's system value: a block array, or text for a transport that sends one.
- * @param harnessTexts - the exact harness paragraphs to drop, when the request
- *   states no matching assembly; absent keeps every caller paragraph.
+ * @param harnessTexts - the exact harness paragraphs to drop.
  * @returns the caller blocks in order, with the identity line and any named
  *   harness paragraph removed.
  */
-function cc3CallerSystem(systemValue: unknown, harnessTexts?: ReadonlySet<string>): unknown[] {
+function cc3CallerSystem(systemValue: unknown, harnessTexts: ReadonlySet<string>): unknown[] {
   /* v8 ignore next 3 -- pi-ai serializes `system` as a block array; the string form is handled for a transport that sends one */
   const systemBlocks = typeof systemValue === 'string'
     ? systemValue.length === 0 ? [] : [{ type: 'text', text: systemValue }]
     : arrayOf(systemValue)
   const caller = (systemBlocks ?? []).filter(block => !isIdentityBlock(block))
   const withoutDuplicateIdentity = withoutHarnessParagraphBlocks(caller, CC3_IDENTITY_PARAGRAPHS)
-  return harnessTexts === undefined
-    ? withoutDuplicateIdentity
-    : withoutHarnessParagraphBlocks(withoutDuplicateIdentity, harnessTexts)
+  return withoutHarnessParagraphBlocks(withoutDuplicateIdentity, harnessTexts)
 }
 
 /**
@@ -645,18 +642,18 @@ function cc3CallerSystem(systemValue: unknown, harnessTexts?: ReadonlySet<string
  * {@link withClaudeCodeFieldOrder}.
  * @param payload - the Anthropic Messages request fields pi-ai built.
  * @param lifetime - the marker lifetime this request's class declares.
+ * @param harnessTexts - the exact DSH harness paragraphs a sectionless request
+ *   drops; a request that states its filtered assembly passes the empty set.
  * @param systemText - the caller's filtered prompt sections, when the request
  *   states a matching assembly; absent keeps the caller system the transport
  *   built.
- * @param harnessTexts - the exact DSH harness paragraphs a sectionless request
- *   drops; absent keeps every caller paragraph.
  * @returns the fields with the policy's identity block and markers in place.
  */
 function withCc3Markers(
   payload: Record<string, unknown>,
   lifetime: Cc3MarkerLifetime,
+  harnessTexts: ReadonlySet<string>,
   systemText?: string,
-  harnessTexts?: ReadonlySet<string>,
 ): Record<string, unknown> {
   const toolBlocks = arrayOf(payload['tools'])
   const messageBlocks = arrayOf(payload['messages'])
@@ -1273,7 +1270,7 @@ function withCcWireParityBody(
  * @param cc3SystemText - the filtered caller prompt sections a `cc3` request
  *   sends, absent when it states no matching assembly.
  * @param harnessTexts - the exact DSH harness paragraphs a sectionless request
- *   drops; absent keeps every caller paragraph.
+ *   drops; absent when the request states its filtered assembly.
  * @param withholdsEagerToolStreaming - whether this model sets
  *   `supportsEagerToolInputStreaming: false`, which makes pi-ai derive a beta
  *   the pinned wire does not declare; see {@link withoutToolStreamingBeta}.
@@ -1296,7 +1293,10 @@ function withAnthropicPayloadPolicy(
     return next
   }
   const cc3 = profile.cacheMarkerPolicy === 'cc3'
-  let next = cc3 ? withCc3Markers(payload, helper ? '5m' : '1h', cc3SystemText, harnessTexts) : payload
+  // A matching assembly carries its filtered section text, so the fallback set is
+  // unused; a sectionless request always supplies its owned harness texts.
+  const harnessTextsForCc3 = harnessTexts ?? NO_HARNESS_TEXTS
+  let next = cc3 ? withCc3Markers(payload, helper ? '5m' : '1h', harnessTextsForCc3, cc3SystemText) : payload
   // The extended beta permits the one-hour lifetime the `cc3` policy writes; a
   // helper keeps the API's default and declares no beta for it.
   if (profile.extendedCacheBeta === true && !(cc3 && helper)) next = withExtendedCacheBeta(next)

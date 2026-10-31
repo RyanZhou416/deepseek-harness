@@ -1,7 +1,16 @@
 /** The mac-pool provider facts and catalogue resolved through the generic pi-ai resolver. */
 
 import { Context } from '@deepseek-ai/cordis'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { CredentialProvider, credentialRef } from '@deepseek-ai/dsh-credentials'
+import type {
+  CredentialInfo,
+  CredentialKey,
+  CredentialRecord,
+  CredentialRecordEntry,
+  CredentialRecordInfo,
+  CredentialRef,
+  ResolvedCredential,
+} from '@deepseek-ai/dsh-credentials'
 import LlmRuntime, { createSystemMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import {
@@ -481,6 +490,83 @@ async function mountProbed(
 }
 
 /**
+ * A credentials provider whose next `resolve` is controlled by the test, so a
+ * credential lookup can be held open, rejected, or satisfied after mount.
+ */
+class DeferredCredentials extends CredentialProvider {
+  /** The promise the next `resolve` call returns. */
+  next: Promise<ResolvedCredential | undefined> = Promise.resolve(undefined)
+
+  override resolve(_ref: CredentialRef): Promise<ResolvedCredential | undefined> {
+    return this.next
+  }
+
+  override describe(_ref: CredentialRef): Promise<CredentialInfo> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override set(_ref: CredentialRef, _value: string): Promise<void> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override unset(_ref: CredentialRef): Promise<void> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override readRecord(_key: CredentialKey): Promise<CredentialRecord | undefined> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override describeRecord(_key: CredentialKey): Promise<CredentialRecordInfo> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override listRecords(): Promise<readonly CredentialRecordEntry[]> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override modifyRecord(
+    _key: CredentialKey,
+    _mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>,
+  ): Promise<CredentialRecord | undefined> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  override deleteRecord(_key: CredentialKey): Promise<void> {
+    return Promise.reject(new Error('not used'))
+  }
+}
+
+/**
+ * Mount the LLM runtime, a test-controlled credentials provider, and the pool
+ * route with wire parity requested, so the load probe waits on the provider.
+ * @param next - the credential lookup the load probe starts with.
+ * @returns the context, the fetch capture, and the mounted credentials provider.
+ */
+async function mountDeferredCredentials(
+  next?: Promise<ResolvedCredential | undefined>,
+): Promise<{
+  ctx: Context
+  capture: PoolFetchCapture
+  credentials: DeferredCredentials
+}> {
+  vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+  const capture = capturePoolFetch(request => request.url === CAPABILITIES_URL
+    ? capabilityReply('pool-build-1')
+    : anthropicSuccessResponse())
+  vi.stubGlobal('fetch', capture.fetch)
+  const ctx = new Context()
+  context = ctx
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(DeferredCredentials)
+  const credentials = ctx.get('credentials')
+  if (!(credentials instanceof DeferredCredentials)) throw new Error('the test credentials provider did not mount')
+  if (next !== undefined) credentials.next = next
+  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ccWireParity: true })
+  return { ctx, capture, credentials }
+}
+
+/**
  * Wait until the route declares the wire parity member headers.
  *
  * The load probe is a fire-and-forget request, so its proof lands at an
@@ -800,8 +886,11 @@ describe('CC wire parity capability proof', () => {
       : anthropicSuccessResponse())
     await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
 
-    // The first request cannot prepare a snapshot before the probe answers.
-    const pending = assemble(ctx, WIRE_PARITY_PROBE)
+    // The first request cannot prepare a snapshot before the probe answers. It
+    // also carries a live cancellation signal, so the readiness wait takes the
+    // cancellable path.
+    const controller = new AbortController()
+    const pending = assemble(ctx, { ...WIRE_PARITY_PROBE, signal: controller.signal })
     await new Promise((resolve) => { setTimeout(resolve, 20) })
     expect(modelCalls(capture)).toHaveLength(0)
 
@@ -826,6 +915,11 @@ describe('CC wire parity capability proof', () => {
       const first = modelCalls(capture).at(-1) as CapturedRequest
       expect(declaresWireParity(first)).toBe(false)
       expectCc3Wire(first)
+
+      // A later request does not pay the deadlined wait again while the probe is
+      // still pending.
+      await assemble(ctx, WIRE_PARITY_PROBE)
+      expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(false)
 
       answer.resolve(capabilityReply('pool-build-late'))
       await vi.advanceTimersByTimeAsync(0)
@@ -874,5 +968,80 @@ describe('CC wire parity capability proof', () => {
     // The fallback is the route's own three-marker bytes, not a partial wire.
     expect(JSON.stringify(after.body).match(/"cache_control"/gu)).toHaveLength(3)
     expect(capabilityCalls(capture)).toHaveLength(2)
+  })
+
+  it('stops waiting for the load probe when the request cancels', async () => {
+    const answer = Promise.withResolvers<Response>()
+    const { ctx, capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+      ? answer.promise
+      : anthropicSuccessResponse())
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) })
+
+    const controller = new AbortController()
+    const pending = assemble(ctx, { ...WIRE_PARITY_PROBE, signal: controller.signal })
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+    controller.abort()
+    const result = await pending
+    expect(result.finish.kind).toBe('aborted')
+    expect(capabilityCalls(capture)).toHaveLength(1)
+  })
+
+  it('does not probe when wire parity is not requested', async () => {
+    const { ctx, capture } = await mountProbed(() => anthropicSuccessResponse(), { ccWireParity: false })
+    ctx.emit('credentials/reference-updated', credentialRef(API_KEY_REF))
+    await new Promise((resolve) => { setTimeout(resolve, 20) })
+    expect(capabilityCalls(capture)).toHaveLength(0)
+  })
+
+  it('retries a rejected credential lookup and turns the wire on after it resolves', async () => {
+    const gate = Promise.withResolvers<ResolvedCredential | undefined>()
+    const { ctx, capture, credentials } = await mountDeferredCredentials(gate.promise)
+    const logs: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message.args) } })
+
+    const pending = assemble(ctx, WIRE_PARITY_PROBE)
+    gate.reject(new Error('credential store closed'))
+    await pending
+    expect(logs.some(args => args.some(arg => String(arg).includes('member credential unavailable')))).toBe(true)
+
+    // The bounded retry asks again; a stored credential proves the wire.
+    credentials.next = Promise.resolve({ value: 'key', source: 'test' })
+    await vi.waitFor(() => { expect(capabilityCalls(capture)).toHaveLength(1) }, { timeout: 10_000 })
+    await assemble(ctx, WIRE_PARITY_PROBE)
+    expect(declaresWireParity(modelCalls(capture).at(-1) as CapturedRequest)).toBe(true)
+  })
+
+  it('caps the failed-probe backoff and keeps trying', async () => {
+    vi.useFakeTimers()
+    try {
+      const { capture } = await mountProbed(request => request.url === CAPABILITIES_URL
+        ? bareServerError()
+        : anthropicSuccessResponse())
+      await vi.advanceTimersByTimeAsync(0)
+      expect(capabilityCalls(capture)).toHaveLength(1)
+
+      // 2 s, 4 s, 8 s, 16 s, 32 s, then the 60 s ceiling twice.
+      let expected = 1
+      for (const delay of [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000]) {
+        await vi.advanceTimersByTimeAsync(delay)
+        expected += 1
+        expect(capabilityCalls(capture)).toHaveLength(expected)
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('wakes a request waiting on the load probe when the fiber disposes', async () => {
+    const gate = Promise.withResolvers<ResolvedCredential | undefined>()
+    const { ctx, capture } = await mountDeferredCredentials(gate.promise)
+    const pending = assemble(ctx, WIRE_PARITY_PROBE)
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+
+    await ctx.fiber.dispose()
+    context = undefined
+    gate.reject(new Error('credential store closed'))
+    await pending
+    expect(capabilityCalls(capture)).toHaveLength(0)
   })
 })

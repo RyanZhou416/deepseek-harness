@@ -1461,6 +1461,57 @@ describe('sectionless harness-text fallback', () => {
     expect(JSON.stringify(body)).not.toContain(legacyWeb)
   })
 
+  it('applies the sectionless fallback to a parity-capable main request that cannot state a boundary', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        apiKeyEnv: 'CACHE_POLICY_KEY',
+        ccWireParity: true,
+        cacheMarkerPolicy: 'cc3',
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    // The route proved the wire, but this main request states no section
+    // assembly, so it falls back to the cc3 body and still filters the harness
+    // paragraphs.
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'parity-main',
+      requestClass: 'main',
+      messages: [createSystemMessage(`${DSH_HARNESS_PROMPT}\n\nCaller state.`), userText('hello')],
+    })
+
+    const headers = server.headers[0] ?? {}
+    const body = server.requests[0] as Record<string, unknown>
+    expect(headers['x-cc-request-class']).toBeUndefined()
+    expect(headers['x-cc-system-layout']).toBeUndefined()
+    expect(headers['x-cc-cache-intent']).toBeUndefined()
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: 'Caller state.', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ])
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expect(JSON.stringify(body)).not.toContain(DSH_IDENTITY_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_SOURCE_TEXT)
+    expect(JSON.stringify(body)).not.toContain(DSH_WEB_SURFACE_TEXT)
+  })
+
   it('drops the DSH paragraphs from a parity helper that states no sections', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const server = await mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }])
