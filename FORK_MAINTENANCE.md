@@ -1509,7 +1509,8 @@ invalidates the positive probe before rolling back the pool. A positive probe is
 cached only for the same endpoint and pool build: DSH re-probes at profile load,
 on a replaced `CC_POOL_API_KEY`, after a failed probe's bounded backoff, and
 after a marked refusal's cooldown, so a pool restart at a new build is not
-probed until one of those triggers runs. A successful proof is not polled.
+probed until one of those triggers runs. A successful proof is not polled. A
+one-hour A-off route revalidates its grant on the 60 s lease schedule while mounted.
 
 **Member contract.** Three headers, all present or all absent:
 `x-cc-request-class` (`main|compaction|auxiliary|subagent`; `workflow`
@@ -1662,7 +1663,8 @@ credential, and after a failed attempt's backoff; it is not a model/account
 request and it requires the pool's build identity. The same reply may also
 carry `aOffHipaaCache: "downgrade"`, and the route refuses a one-hour
 non-parity main or subagent dispatch without it (see the A-off HIPAA cache
-section below). A successful proof is not polled on a schedule. A failed load probe — including a rejected member
+section below). A successful proof is not polled on a schedule. A one-hour
+A-off route revalidates its grant every 60 s while mounted. A failed load probe — including a rejected member
 credential lookup — retries with bounded backoff (2 s doubling to 60 s) and logs
 the attempt and next delay at warning level, so one failure does not leave the
 process permanently on the default wire. The first routed request awaits the
