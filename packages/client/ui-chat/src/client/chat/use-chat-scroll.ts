@@ -95,8 +95,12 @@ export function useChatScroll(input: ChatScrollInput): ChatScrollState {
       navigation.cancel()
       if (current.deferCompletedTurns && reading.followInputFold()) return
       reading.followTail()
+      // Rows appended above this landing mounted while the old floor was visible;
+      // resolve the deferred ones the landing brought into view. Only row growth
+      // rechecks, so streaming deltas never re-measure the gate.
+      if (previous !== null && current.order.length > previous.order.length) viewport.recheckDeferred()
     } else navigation.reconcile()
-  }, [reading, navigation])
+  }, [reading, navigation, viewport])
 
   useLayoutEffect(() => {
     const disconnectViewport = viewport.connect({
@@ -170,7 +174,9 @@ export function useChatScroll(input: ChatScrollInput): ChatScrollState {
     cancelPendingFollow()
     navigation.cancel()
     reading.followTail()
-  }, [navigation, reading, cancelPendingFollow])
+    // The jump can bring blocks into view that were never deferred-resolved.
+    viewport.recheckDeferred()
+  }, [navigation, reading, cancelPendingFollow, viewport])
 
   return {
     listRef, columnRef, ...state, busyTurn, motion: viewport.motion,

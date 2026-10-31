@@ -16,6 +16,7 @@ import type { ReactNode } from 'react'
 import clsx from 'clsx'
 import { IncrementalMarkdownParser } from './incremental.ts'
 import { parseGfm, parseGfmWithMath } from './parse.ts'
+import { useDeferredMarkdown } from './useDeferredMarkdown.ts'
 import {
   collectReferenceTargets, createReferenceTargets, renderBlocks, renderFootnoteSection,
   wrapBlockChildren,
@@ -165,6 +166,8 @@ class StreamingRenderer {
  * modified clicks retain native behavior. `variant="compact"` uses secondary
  * text sizing, uniform bold headings, and tight block spacing; the default
  * `body` variant uses the full document typography.
+ * `deferOffscreen` keeps a settled block as searchable plain text until it
+ * approaches the viewport, then parses it. A streaming block never defers.
  * The provider's `openFile` enables local Markdown links in settled messages,
  * including `#L24` and `#L24-L30` destinations (ranges open at their first line).
  * @returns A GFM document with TeX math rendered through KaTeX; raw HTML and
@@ -172,7 +175,7 @@ class StreamingRenderer {
  * absolute HTTP(S) images render directly.
  */
 export const MarkdownText = memo(function MarkdownText({
-  text, streaming = false, labels, fileMentions, pathImages, variant = 'body',
+  text, streaming = false, labels, fileMentions, pathImages, variant = 'body', deferOffscreen = false,
 }: {
   text: string
   streaming?: boolean
@@ -180,12 +183,18 @@ export const MarkdownText = memo(function MarkdownText({
   fileMentions?: MarkdownFileMentions | undefined
   pathImages?: MarkdownPathImages | undefined
   variant?: 'body' | 'compact'
+  deferOffscreen?: boolean
 }) {
   const streamRef = useRef<StreamingRenderer | null>(null)
   const streamLabelsRef = useRef<MarkdownLabels>(labels)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const deferred = useDeferredMarkdown(rootRef, deferOffscreen && !streaming)
   const children = useMemo(() => {
     if (!streaming) {
       streamRef.current = null
+      // The lightweight form keeps the authored text selectable and findable;
+      // skipping the parse is the whole point, so nothing below runs yet.
+      if (deferred) return null
       return renderSettled(text, labels, fileMentions, pathImages)
     }
     if (streamRef.current === null || streamLabelsRef.current !== labels) {
@@ -193,7 +202,10 @@ export const MarkdownText = memo(function MarkdownText({
       streamLabelsRef.current = labels
     }
     return streamRef.current.render(text)
-  }, [text, streaming, labels, fileMentions, pathImages])
-  return <div className={clsx(css.markdown, variant === 'compact' && css.compact)}
-    data-markdown-variant={variant === 'compact' ? variant : undefined}>{children}</div>
+  }, [deferred, text, streaming, labels, fileMentions, pathImages])
+  return <div ref={rootRef} className={clsx(css.markdown, variant === 'compact' && css.compact)}
+    data-markdown-variant={variant === 'compact' ? variant : undefined}
+    data-deferred={deferred || undefined}>
+    {deferred ? <div className={css.deferred}>{text}</div> : children}
+  </div>
 })

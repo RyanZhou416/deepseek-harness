@@ -38,10 +38,28 @@ describe('AssistantMarkdown reasoning blocks', () => {
     const view = render(<AssistantMarkdown {...props} renderSlot={extension} blocks={blocks} streaming={streaming} />)
     expect(view.getAllByRole('button')).toHaveLength(1)
     expect(view.container.querySelectorAll('[data-variant="think"]')).toHaveLength(1)
+    // Collapsed reasoning owns no body: its Markdown parses only on expansion.
+    expect(calls).not.toHaveBeenCalled()
     fireEvent.click(view.getByRole('button'))
     expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { text, running: false })
     expect(view.getByText('Visible reasoning').closest('strong')).not.toBeNull()
     expect(blocks.map(block => block.text)).toEqual(texts)
+  })
+
+  it.each([false, true])('parses reasoning body Markdown only after expansion (streaming=%s)', (streaming) => {
+    const calls = vi.fn()
+    const text = '**Thought**\n\nCollapsed body'
+    const extension: AssistantMarkdownProps['renderSlot'] = (key, owner) => {
+      calls(key, owner)
+      return null
+    }
+    const view = render(<AssistantMarkdown {...props} renderSlot={extension}
+      blocks={[{ kind: 'reasoning', text }]} streaming={streaming} />)
+    expect(calls).not.toHaveBeenCalled()
+    fireEvent.click(view.getByRole('button'))
+    expect(calls).toHaveBeenCalledTimes(1)
+    expect(calls.mock.calls[0]?.[0]).toBe('conversation.chat.reasoning.body')
+    expect(calls.mock.calls[0]?.[1]).toEqual({ text, running: streaming })
   })
 
   it.each([false, true])('waits for non-whitespace reasoning when streaming=%s', (streaming) => {

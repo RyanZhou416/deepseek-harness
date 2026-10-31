@@ -9,6 +9,14 @@
   color: var(--dsw-alias-label-primary);
 }
 
+/* Searchable plain-text stand-in for a settled block that has not reached the
+   viewport yet. It keeps the container's typography and the authored line
+   breaks, so find-in-page, selection, and copy see the source, and its line
+   boxes are a close height estimate for the parsed document. */
+.deferred {
+  white-space: pre-wrap;
+}
+
 .markdown strong {
   font-weight: 600;
 }

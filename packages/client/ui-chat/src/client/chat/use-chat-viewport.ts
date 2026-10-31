@@ -1,5 +1,6 @@
 /** Turn-aware DOM scrolling and geometry, without history-loading or follow policy. */
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { recheckDeferredMarkdown } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatScrollPosition } from '../contract/slots.ts'
 import type { ChatSnapshot } from '../contract/snapshot.ts'
 import { createFlowMotion, type InputFoldBox, type InputFoldDriver } from './flow-motion.ts'
@@ -409,6 +410,15 @@ export class ChatViewport {
   resetBelow(): void {
     this.setSpacer(0)
     this.invalidate()
+  }
+
+  /**
+   * Resolve viewport-deferred Markdown that an imperative landing brought into
+   * view. The write produces no observer delivery until a later task, so the
+   * visible blocks would otherwise paint as plain text for one frame.
+   */
+  recheckDeferred(): void {
+    recheckDeferredMarkdown()
   }
 
   /**

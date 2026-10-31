@@ -52,6 +52,14 @@ export interface AssistantMarkdownProps extends
   t: ChatViewSlotProps['t']
 }
 
+/**
+ * Settled prose at or above this many characters may stay plain until it nears
+ * the viewport: roughly two screens of body text, where a parse costs well under
+ * a millisecond, so deferring a shorter block would trade its Markdown semantics
+ * for no perceivable time.
+ */
+const MIN_DEFERRED_CHARS = 4_096
+
 /** Renders non-blank reasoning blocks as independent disclosures alongside the response. */
 export const AssistantMarkdown = memo(function AssistantMarkdown({
   blocks, streaming, interrupted, loadImage, groupPart, useDisclosure,
@@ -88,6 +96,7 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
             labels={labels}
             fileMentions={mentions}
             pathImages={pathImages}
+            deferOffscreen={block.text.length >= MIN_DEFERRED_CHARS}
           />,
         )
         break

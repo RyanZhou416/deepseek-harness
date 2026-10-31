@@ -119,7 +119,11 @@ export class ChatReading {
   /** Restore the Session's semantic position, or follow the tail when none is saved. */
   restore(): void {
     const saved = this.store.read()
-    if (saved === null) { this.followTail(); return }
+    if (saved === null) {
+      this.followTail()
+      this.viewport.recheckDeferred()
+      return
+    }
     const landing = this.viewport.restore(saved)
     if (landing === null) return
     this.cancelPending()
@@ -130,6 +134,7 @@ export class ChatReading {
       if (position !== null) this.store.save(position)
     }
     this.refreshActiveTurn()
+    this.viewport.recheckDeferred()
   }
 
   /**
@@ -140,6 +145,7 @@ export class ChatReading {
     this.cancelPending()
     const following = this.follow.nearBottom(landing.metrics)
     this.commit(landing, following, landing.turn ?? (following ? this.viewport.latestTurn : this.state.activeTurn))
+    this.viewport.recheckDeferred()
   }
 
   /**
