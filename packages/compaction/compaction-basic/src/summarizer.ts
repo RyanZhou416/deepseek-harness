@@ -5,10 +5,12 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { assembleContextFor } from '@deepseek-ai/dsh-agent'
+import { renderPromptSections } from '@deepseek-ai/dsh-system-prompt'
 import { contentHasImage, BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type {
-  ContentBlock, FinishReason, GenerateOptions, Message, RequestMessage, TokenUsage, ToolSchema,
+  ContentBlock, FinishReason, GenerateOptions, Message, RequestMessage, SystemPromptSection, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
@@ -107,9 +109,45 @@ export type SummaryResult = {
 )
 
 /**
+ * The current assembled prompt sections for one helper replay, when this
+ * composition exposes the system-prompt service.
+ *
+ * The summarizer replays the committed system message, so section identity is
+ * useful only while the current assembly still joins to that same text; the
+ * adapter checks that equality and otherwise forwards the committed system
+ * unchanged. Losing the service or a failed re-assembly therefore costs only
+ * the section identity, never the helper call, so it falls back to none.
+ * @param ctx - context that may expose the system-prompt service.
+ * @param agent - agent whose current prompt assembly is read.
+ * @param signal - cancellation for the assembly.
+ * @returns the rendered sections, or undefined when none can be stated.
+ */
+async function summarizationSections(
+  ctx: Context,
+  agent: Agent,
+  signal?: AbortSignal,
+): Promise<readonly SystemPromptSection[] | undefined> {
+  const systemPrompt = ctx.get('systemPrompt')
+  if (systemPrompt === undefined) return undefined
+  try {
+    const sections = renderPromptSections(await systemPrompt.assemble(assembleContextFor(agent, signal)))
+    return sections.length === 0 ? undefined : sections
+  } catch {
+    // A failed re-assembly only loses section identity; the committed prompt
+    // remains a valid helper replay, so the call proceeds without sections.
+    return undefined
+  }
+}
+
+/**
  * Run the default cache-reusing `ctx.llm.stream()` summarization call: replay
  * the conversation prefix, then append the compaction instruction as the final
  * user message so the provider's warm prefix cache is reused.
+ *
+ * The request also carries the current assembled prompt sections, so a route
+ * that reproduces the pinned Claude Code wire can drop the harness-describing
+ * sections from the replayed prompt. The adapter applies that filter only when
+ * the sections still join to the replay's own leading system text.
  * @param ctx - context providing the LLM service.
  * @param config - resolved backend configuration.
  * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
@@ -149,12 +187,14 @@ export async function summarizeWithLlm(
       content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
     }),
   ]
+  const systemSections = await summarizationSections(ctx, agent, signal)
   const options: GenerateOptions = {
     provider: target.provider,
     model: target.model,
     messages,
     toolHistory: agent.session.toolHistory(),
     ...input.tools === undefined ? {} : { tools: [...input.tools] },
+    ...systemSections === undefined ? {} : { systemSections },
     maxTokens: config.maxTokens,
     sessionId: agent.session.id,
     purpose: 'compaction',

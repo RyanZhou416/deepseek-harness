@@ -7,7 +7,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createAssistantMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createAssistantMessage, createSystemMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
@@ -1128,5 +1128,91 @@ describe('prompt-section filtering on the cc3 wire and parity helpers', () => {
     // field instead of sending an empty system array.
     expect(body['system']).toBeUndefined()
     expect(markersOf(body)).toEqual([])
+  })
+
+  it('filters a real compaction-shaped cc3 request that replays its system as a message', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cache-cc3': {
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          apiKeyEnv: 'CACHE_POLICY_KEY',
+          extendedCacheBeta: true,
+          cacheMarkerPolicy: 'cc3',
+          models: [{ id: 'model' }],
+        },
+      },
+    })
+
+    // Compaction replays the committed system prompt as the leading history
+    // message instead of `GenerateOptions.system`; the sections must still drive
+    // the filter.
+    const prompt = HARNESS_SECTIONS.map(section => section.text).join('\n\n')
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'cache-cc3',
+      purpose: 'compaction',
+      messages: [createSystemMessage(prompt), userText('compact this')],
+      systemSections: HARNESS_SECTIONS,
+    })
+
+    const body = server.requests[0] as Record<string, unknown>
+    expect(body['system']).toEqual([
+      { type: 'text', text: IDENTITY, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: CALLER_PROMPT, cache_control: { type: 'ephemeral' } },
+    ])
+    expect(JSON.stringify(body)).not.toContain('"ttl"')
+    expectNoHarnessPrompt(body)
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
+      ['.system[0].cache_control', { type: 'ephemeral' }],
+      ['.system[1].cache_control', { type: 'ephemeral' }],
+    ])
+    expect(betasOf(server.headers[0] ?? {})).toEqual([])
+  })
+
+  it('filters a real compaction-shaped parity helper and keeps its conservative form', async () => {
+    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(LlmRuntime)
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: server.url,
+        apiKeyEnv: 'CACHE_POLICY_KEY',
+        ccWireParity: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([['parity-main', { endpoint: `${server.url}/v1/capabilities`, buildId: 'test-build' }]]))
+    ctx.llm.registerAdapter(['parity-main'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
+
+    const prompt = HARNESS_SECTIONS.map(section => section.text).join('\n\n')
+    await assemble(ctx, {
+      model: 'model',
+      provider: 'parity-main',
+      purpose: 'compaction',
+      messages: [createSystemMessage(prompt), userText('compact this')],
+      systemSections: HARNESS_SECTIONS,
+    })
+
+    const headers = server.headers[0] ?? {}
+    const body = server.requests[0] as Record<string, unknown>
+    expect(headers['x-cc-request-class']).toBe('compaction')
+    expect(headers['x-cc-system-layout']).toBe('none')
+    expect(headers['x-cc-cache-intent']).toBe('helper')
+    expect(body['system']).toEqual([{ type: 'text', text: CALLER_PROMPT }])
+    expect(markersOf(body)).toEqual([])
+    expectNoHarnessPrompt(body)
   })
 })

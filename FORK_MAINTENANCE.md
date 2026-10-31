@@ -269,7 +269,7 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 订阅插件的 Claude 聊天请求全部经 `@tormentalabs/claude-code-wire-compat`(fork 固定版本 `0.7.2-dsh16`,GPL-3.0-or-later,源码位于 `fork-plugins/claude-code-wire-compat`,随 fork 维护且不再依赖 releases tgz)按 pinned `CLAUDE_CODE_2_1_288_PROFILE`(CLI 2.1.288 / SDK 0.128.0)构建:billing 指纹块与 identity system 块、beta 组合、`metadata.user_id` 关联三元组、cache breakpoint 与完整头部计划均由构建器拥有,不得再手写 `anthropic-beta`/`x-app`/缓存标记。保留 `cacheControl` 四开关并带 `ttl: '1h'`(真实客户端出厂值),thinking 的 `display: 'summarized'`、effort 与 `output_config` 同发;构建器按 pinned 目录校验两者。不发 `accept` 头(真实客户端不发)。
 
-身份:`sessionId` 取 harness 会话 id(缺失时在 `stream()` 最前以固定 `CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED` 拒绝,不再铸造随机 UUID),`deviceId`/`accountUuid` 存于 `ClaudeSession`(登录时铸造/发现,刷新保留,旧会话首用懒回填;回填失败以 `INVALID_REQUEST` 明确失败,不发送伪造三元组);`deviceId` 保持 64 位十六进制格式，由账号键与本机 OS 标识的哈希确定性派生；这是 DSH 的设备绑定策略，不冒称 CC 的随机配置根策略。上一请求 id 从持久化的 session 日志中选取,而不是来自进程内表:由 retained assistant 消息的 trusted metadata 指明同一账号引用、wire 会话与 span epoch,其响应 `request-id` 才进入下一请求 billing 块的 `cc_prev_req`;池在同一会话内切换账号绝不会把另一账号的 request-id 链进来,缺失或空的 request-id 向前寻找合格记录，选中的非空 id 若非法则省略而不回溯。`cc_prompt_id` 由(会话, 轮次)确定性派生(`claudePromptId`):同一会话同一轮次必得同一 id、请求字节也相同,另一会话或下一轮则不同 —— 它是**模型可见**的值,DSH 的"模型可见⟺已记录"要求它可重建,随机 UUID 无法重建。该轮的工具续步复用同一 id;probe/标题辅助请求的抑制未建模。响应 `request-id` 头另记入该助手消息的回放信封(`response.requestId`),与 `cc_prev_req` 链路互为可核对的两侧。每个账号段的 wire 会话 id 都是私有 span 文档中的持久事实;harness 会话 id 是选取键,从不出现在 wire 上;切回原账号时由日志与 span 文档重新选出原 id 与原链。构建器 `INPUT_TOO_LARGE` 经 `oversizeWireError` 映射回已记录的图片 offload 错误,精确 32 MB 检查保留在 `assertClaudeRequestBytes`;其余构建器拒绝码经 `mapClaudeWireError` 映射为带 wire 码与解释的 `INVALID_REQUEST`(`INVALID_EFFORT`/`INVALID_THINKING`/`UNSUPPORTED_CAPABILITY`/`CRYPTO_UNAVAILABLE`/`INVALID_IDENTITY`/`INVALID_UNICODE`,其余走默认),不得以通用 transport 失败示人。中途 system 消息在支持的模型上以 system 角色消息携带 `clear_at` 随历史就位;仅当模型不支持 system 角色消息时才回退为 user 角色 `<system-reminder>`,DSH 侧 `systemPromptUpdate: 'in-history'` 分辨率不变。usage 使用协议配置的 transport user-agent，models/bootstrap 和 Files 使用 plain `claude-code/2.1.288`；不运行本地 `claude --version` 探测。装配请求时补齐缺失的 `tool_result`:请求内没有任何结果应答的 `tool_use` 才按真实客户端原位合成 `is_error: true` 的 `[Tool result missing due to internal error]`(结果已在请求别处出现则不合成,只改装配请求、不改历史,与 `tool-pairing.ts` 对其它 wire 的全局配对一致);Files API 上传缓存按(规范账号, 内容 sha256)分键并限 256 条,登录/登出随该账号缓存一起清除,池切换绝不复用其它账号的 file id;Claude/Codex/Grok 的 code 与 refresh 授予请求一律 `redirect: 'error'`,不得跟随重定向把 code 或 refresh token 重放到另一来源。聚焦验证:`test/claude-wire.spec.ts`、更新后的 `test/translate.spec.ts` 与 `test/models.spec.ts`(全部注入 fetch、零凭据),授予重定向与上传缓存另见 `test/codex.spec.ts`、`test/grok.spec.ts`。已随 `0.9.4-dsh021rc2.1` 构建;部署走 profile link:停 Host 后运行 `build.cmd`(或直接 `pnpm exec tsx scripts/fork-plugins-build.ts`),脚本把源码 staging 到 `.build/fork-plugins/subscriptions` 并以 `link:` 安装,不触碰 `DSH_HOME\plugins\subscriptions` 凭据目录,随后重启 Host。回滚:停 Host,把源码检出切回上一个提交,重新运行同一 staging 命令并重启;不重装旧 tgz,也不再使用 `fork-plugins/deploy-subscriptions-web.ps1` 的 tarball 路径。
+身份:`sessionId` 取 harness 会话 id(缺失时在 `stream()` 最前以固定 `CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED` 拒绝,不再铸造随机 UUID),`deviceId`/`accountUuid` 存于 `ClaudeSession`(登录时铸造/发现,刷新保留,旧会话首用懒回填;回填失败以 `INVALID_REQUEST` 明确失败,不发送伪造三元组);`deviceId` 保持 64 位十六进制格式，由账号键与本机 OS 标识的哈希确定性派生；这是 DSH 的设备绑定策略，不冒称 CC 的随机配置根策略。上一请求 id 从持久化的 session 日志中选取,而不是来自进程内表:由 retained assistant 消息的 trusted metadata 指明同一账号引用、wire 会话与 span epoch,其响应 `request-id` 才进入下一请求 billing 块的 `cc_prev_req`;池在同一会话内切换账号绝不会把另一账号的 request-id 链进来,缺失或空的 request-id 向前寻找合格记录，选中的非空 id 若非法则省略而不回溯。`cc_prompt_id` 由(会话, 轮次)确定性派生(`claudePromptId`):同一会话同一轮次必得同一 id、请求字节也相同,另一会话或下一轮则不同 —— 它是**模型可见**的值,DSH 的"模型可见⟺已记录"要求它可重建,随机 UUID 无法重建。该轮的工具续步复用同一 id;probe/标题辅助请求的抑制未建模。桌面呈现是交互式的:构建器输入不声明 `invocation`,identity 行因此是交互 CLI 行,与 `claude-desktop` entrypoint、UA 与 billing segment 一致;runtime 对钉为 `node`/`v22.19.0`,Bun child 原样透传,不得用宿主运行时改写。billing 块还携带 `cc_turn_origin=human` 与同一 `promptTurn` 锚点的 `cc_prompt_index`/`cc_turn_index`(工具续步重复该对,下一提示两者各加一;无 user prompt 时省略)。响应 `request-id` 头另记入该助手消息的回放信封(`response.requestId`),与 `cc_prev_req` 链路互为可核对的两侧。每个账号段的 wire 会话 id 都是私有 span 文档中的持久事实;harness 会话 id 是选取键,从不出现在 wire 上;切回原账号时由日志与 span 文档重新选出原 id 与原链。构建器 `INPUT_TOO_LARGE` 经 `oversizeWireError` 映射回已记录的图片 offload 错误,精确 32 MB 检查保留在 `assertClaudeRequestBytes`;其余构建器拒绝码经 `mapClaudeWireError` 映射为带 wire 码与解释的 `INVALID_REQUEST`(`INVALID_EFFORT`/`INVALID_THINKING`/`UNSUPPORTED_CAPABILITY`/`CRYPTO_UNAVAILABLE`/`INVALID_IDENTITY`/`INVALID_UNICODE`,其余走默认),不得以通用 transport 失败示人。中途 system 消息在支持的模型上以 system 角色消息携带 `clear_at` 随历史就位;仅当模型不支持 system 角色消息时才回退为 user 角色 `<system-reminder>`,DSH 侧 `systemPromptUpdate: 'in-history'` 分辨率不变。usage 使用协议配置的 transport user-agent，models/bootstrap 和 Files 使用 plain `claude-code/2.1.288`；不运行本地 `claude --version` 探测。装配请求时补齐缺失的 `tool_result`:请求内没有任何结果应答的 `tool_use` 才按真实客户端原位合成 `is_error: true` 的 `[Tool result missing due to internal error]`(结果已在请求别处出现则不合成,只改装配请求、不改历史,与 `tool-pairing.ts` 对其它 wire 的全局配对一致);Files API 上传缓存按(规范账号, 内容 sha256)分键并限 256 条,登录/登出随该账号缓存一起清除,池切换绝不复用其它账号的 file id;Claude/Codex/Grok 的 code 与 refresh 授予请求一律 `redirect: 'error'`,不得跟随重定向把 code 或 refresh token 重放到另一来源。聚焦验证:`test/claude-wire.spec.ts`、更新后的 `test/translate.spec.ts` 与 `test/models.spec.ts`(全部注入 fetch、零凭据),授予重定向与上传缓存另见 `test/codex.spec.ts`、`test/grok.spec.ts`。已随 `0.9.4-dsh021rc2.1` 构建;部署走 profile link:停 Host 后运行 `build.cmd`(或直接 `pnpm exec tsx scripts/fork-plugins-build.ts`),脚本把源码 staging 到 `.build/fork-plugins/subscriptions` 并以 `link:` 安装,不触碰 `DSH_HOME\plugins\subscriptions` 凭据目录,随后重启 Host。回滚:停 Host,把源码检出切回上一个提交,重新运行同一 staging 命令并重启;不重装旧 tgz,也不再使用 `fork-plugins/deploy-subscriptions-web.ps1` 的 tarball 路径。
 
 ### Prepared-request recording before the Claude POST
 
@@ -1391,14 +1391,17 @@ canonical position instead of a duplicate after `stream`. Other Anthropic pi-ai
 routes keep pi-ai's construction order, their explicitly configured retention,
 and their betas.
 
-**Preservation rule.** Keep the three markers on the identity block, the harness
-system block, and the last user block, keep the pinned field order and the
-`metadata` placeholder, and keep the loud cross-field validation: do not weaken
-them into a request-time failure or a silent fallback, do not restore the
-previous-message marker, a tool marker, or a
-`toolCacheBreakpoint`/`supportsCacheControlOnTools` switch. Keep the helper
-lifetime: a helper request's markers carry no `ttl` and declare no extended beta,
-and the route-level `cacheTtl` must not turn a helper into a one-hour request.
+**Preservation rule.** Keep the three markers on the identity block, the
+caller's filtered prompt block, and the last user block, keep the pinned field
+order and the `metadata` placeholder, and keep the loud cross-field validation:
+do not weaken them into a request-time failure or a silent fallback, do not
+restore the previous-message marker, a tool marker, or a
+`toolCacheBreakpoint`/`supportsCacheControlOnTools` switch. Keep the default
+wire's section filter: `harness:source` and `app:web-surface` are never
+forwarded and `harness:identity` is replaced by the pinned line; the caller's
+other sections stay in assembly order. Keep the helper lifetime: a helper
+request's markers carry no `ttl` and declare no extended beta, and the
+route-level `cacheTtl` must not turn a helper into a one-hour request.
 Keep the policy route-scoped: no default outside `llm-cc-pool`, no identity
 block, field order, or default marker policy outside the `cc3` opt-in, no beta
 from the retention tier, no `scope` field, no scope beta, and no change to
@@ -1418,10 +1421,13 @@ The opt-in wire parity section below replaces the body only on a request the
 member endpoint proved the capability for.
 
 **Focused verification.**
-`pnpm exec vitest run packages/llm/llm-cc-pool packages/llm/llm-pi-ai/tests/cache-policy.spec.ts`
-covers the default three-marker body with a marked identity block and harness
-system block, the helper request's five-minute markers with no `ttl` and no beta
+`pnpm exec vitest run packages/llm/llm-cc-pool packages/llm/llm-pi-ai packages/compaction/compaction-basic`
+covers the default three-marker body with a marked identity block and caller
+prompt block, the helper request's five-minute markers with no `ttl` and no beta
 beside a main and subagent request's one-hour markers with the extended beta,
+the dropped `harness:source`/`app:web-surface` sections and replaced
+`harness:identity` on the cc3 wire and on parity helpers, the compaction
+request's attached `systemSections`,
 the unmarked assistant turn before the last user block, the
 single-message and no-system-prompt requests, the pinned top-level field order,
 the empty `metadata` placeholder in its canonical slot, the absence of a tool
@@ -1461,17 +1467,20 @@ is not a design input; a rejection removes a token or fails, never adds one.
 
 **Scope.** The wire covers `main` and `subagent` with a real static/dynamic
 boundary, and helpers (compaction/auxiliary) only in the conservative form: no
-billing, no identity insertion, no markers. A main/subagent request with no
+billing, no identity insertion, no markers, which under-emits the subscription
+helper's billing + identity + three five-minute markers because the worker
+helper frame does not admit them. A main/subagent request with no
 boundary, an empty static/dynamic run, an in-history prompt mismatch, an
 unclassified one-shot or no-system is served the default non-parity
 body/headers for that request, not a 400. Custom base URL, gateway,
 non-firstParty and experimental off keep the route on that default wire and
 claim no parity. HIPAA tainted/unknown and prompt caching disabled
-(`enablePromptCaching=false`) stay on the wire. HIPAA suppresses scope, extended
-beta and cache-diagnosis but does not force 5m; body TTL follows the `loe`
-decision. Caching disabled means no markers. The default wire would retain
-cc3's one-hour, beta-declaring main-request markers and is wrong for these
-states. The rejected `disabled` token is a
+(`enablePromptCaching=false`) stay on the wire. HIPAA tainted/unknown suppresses
+scope, extended beta and cache-diagnosis and forces the five-minute body
+lifetime, because a `ttl:"1h"` marker and the extended beta are one wire form;
+a HIPAA-clear state keeps the `loe` decision. Caching disabled means no
+markers. The default wire would retain cc3's one-hour, beta-declaring
+main-request markers and is wrong for these states. The rejected `disabled` token is a
 header/intent value, not the "caching disabled" deployment state; they are
 distinct. `workflow`, agent-type and the `disabled` token are outside the wire.
 
@@ -1533,8 +1542,12 @@ or `DEFAULT_CLAUDE_IDENTITY_LINE`; the wire has its own builder. Final pool-side
 system is `[billing, identity, static, dynamic]`: the worker inserts the
 existing billing block at `system[0]` with its existing bytes before computing
 indices; DSH does not send billing. In-history mismatch, empty static/dynamic,
-no-system or unknown class is served the default wire. Helpers send the existing
-member system with no identity/billing, layout none, no markers. DSH sends no
+no-system or unknown class is served the default wire, which applies the same
+section filter (drop `harness:source`/`app:web-surface`, replace
+`harness:identity`). Helpers send the caller's non-harness system with no
+identity/billing, layout none, no markers; when a helper request states matching
+sections the filter runs, and a helper that states none keeps its replayed system
+unchanged. DSH sends no
 `cache_control`; the worker strips member markers and writes identity unmarked,
 static/dynamic/last-user with one TTL decision. Static scope only when the body
 scope gate (`Tse` + boundary/static) holds; 5m static is
@@ -1553,8 +1566,9 @@ an optional explicit config, and no force-5m/env/settings/frontmatter override.
 only for non-subscriber/non-allowlisted/true overage/force-5m. HIPAA is
 tainted/clear/unknown/not-applicable: clear is a fresh accepted document with no
 hipaa taint, not `settled`; not-applicable is pro/max policy-read-ineligible;
-scope/extended/diagnosis only for clear/not-applicable, but body TTL still
-follows `loe`. Fix the policy-limits URL to
+scope/extended/diagnosis only for clear/not-applicable; a tainted or unknown
+state also forces the five-minute body lifetime, so the worker never writes a
+`ttl` its header cannot license. Fix the policy-limits URL to
 `/api/claude_code/policy_limits` everywhere.
 
 **Beta/thinking.** Keep every non-cache plan identifier. Keep scope site 9 only
@@ -1565,9 +1579,12 @@ and body `betas`; never append a member token. Thread a typed worker cache plan
 into the sealed engine via a new `cacheTtl` input; this needs a `vendor/engine`
 patch and re-seal. DSH writes `thinking.display:"updates"` on a request that
 enables thinking; the worker probe keeps `{type,budget_tokens}` and drops only
-`display`, so site 16 fires; the forwarded body keeps `updates`. Keep
-`eager_input_streaming` on every tool: fine-grained tool streaming is a stated
-requirement, and its compat flag must not be flipped off. Remove the cache betas the
+`display`, so site 16 fires; the forwarded body keeps `updates`. Withhold
+`eager_input_streaming`: the pinned carve leaves the first-party
+fine-grained-streaming field off by default and the subscription route omits it,
+so `llm-cc-pool` sets `supportsEagerToolInputStreaming:false`, and the adapter
+removes the `fine-grained-tool-streaming-2025-05-14` beta pi-ai derives from
+that compat on the cc3 and parity wires. Remove the cache betas the
 worker plans from `payload.betas` and drop the member when none remain, instead
 of sending an empty `anthropic-beta`. `rejectedBeta` is v2-only with the three
 wire-parity cache identifiers, set only for an upstream 400 naming a forwarded
@@ -1611,7 +1628,13 @@ to main. In `withAnthropicPayloadPolicy`, the parity branch uses
 `options.systemSections`, builds `[identity, static, dynamic]`, strips every
 `cache_control`, applies the field order/metadata/thinking/eager/beta rules, and
 adds no markers; if sections or class are absent, the request is served the
-default wire. The three `x-cc-*` headers are added in the adapter's existing
+default wire. A `cc3` request (and a parity fallback) uses the same section
+filter: drop `harness:source`/`app:web-surface`, replace `harness:identity`,
+keep other caller sections; a helper that states matching sections forwards the
+filtered caller text, layout `none`, no markers. `compaction-basic` supplies
+those sections from the current assembly because it replays the committed system
+message; a helper without sections keeps its replayed system unchanged. The
+three `x-cc-*` headers are added in the adapter's existing
 per-request header construction; they are adapter-owned on every route, a
 profile that spells one is refused at resolution, and the request construction
 also strips it. That construction also removes the worker-planned cache betas
@@ -1712,13 +1735,14 @@ failures, expected SSE); manifest commands `regenerate-source-manifest.py`,
 review at `development/CC-WIRE-PARITY-corpus/SECURITY-REVIEW.md`, gated by
 `test -s` and a checklist. No install until all pass.
 
-**Explicit exclusions.** Helpers under-emit billing/identity versus the carve
-title/compaction; evict/keepalive/message-threads/context-hint are omitted;
+**Explicit exclusions.** Helpers under-emit billing, identity, and the three
+five-minute markers versus the carve title/compaction; evict/keepalive/message-threads/context-hint are omitted;
 `workflow`, agent-type and the `disabled` token are outside the wire; prompt
 caching disabled still carries the wire but emits no markers; no live capture.
 `XNe` is used as the fallback, 1h is the default for a subscriber main request,
-absent overage is not overage, and HIPAA suppresses scope/extended/diagnosis
-without forcing 5m. The default three-marker/no-scope wire remains the shipped
+absent overage is not overage, and HIPAA suppresses scope/extended/diagnosis and
+forces five minutes because the 1h marker and its beta are one form. The default
+three-marker/no-scope wire remains the shipped
 wire while `ccWireParity` is false or the endpoint has not proved the capability.
 
 ## CC subscription pool settings page (fork)
