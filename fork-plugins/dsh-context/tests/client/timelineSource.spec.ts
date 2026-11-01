@@ -11,7 +11,7 @@ import {
   useTimelineSource,
 } from '../../src/client/timelineSource'
 import type { ContextTimeline, ContextTimelineDetail } from '../../src/shared/types'
-import { mount, text, until } from './helpers/kit'
+import { click, flush, mount, query, text, until } from './helpers/kit'
 
 afterEach(() => {
   resetTimelineDetailStores()
@@ -88,6 +88,10 @@ describe('detailOf', () => {
     assert.equal(withSpans?.spans?.length, 1, 'junk span entries drop')
     assert.equal(detailOf(detail(1))?.fileOps, undefined)
     assert.equal(detailOf(detail(1))?.spans, undefined)
+    assert.equal(detailOf(detail(1))?.partial, undefined, 'a complete payload carries no cut')
+    assert.deepEqual(detailOf(detail(1, { partial: { fromSeq: 7 } }))?.partial, { fromSeq: 7 })
+    assert.equal(detailOf(detail(1, { partial: { fromSeq: 'x' } }))?.partial, undefined, 'a malformed cut drops alone')
+    assert.equal(detailOf(detail(1, { partial: 5 }))?.partial, undefined)
   })
 
   test('the slim head rides through sanitized; a malformed head drops alone', () => {
@@ -143,6 +147,22 @@ describe('makeDetailFetcher', () => {
     assert.equal(d?.rev, 4)
     assert.equal(seen.url, 'api/dsh-context/detail')
     assert.deepEqual(seen.body, { sessionId: 's1' })
+  })
+
+  test('a full fetcher asks for the whole-log fold and forwards the caller signal', async () => {
+    const seen: { body?: unknown; signal?: unknown } = {}
+    vi.stubGlobal('fetch', async (_url: unknown, init: { body: string; signal?: unknown }) => {
+      seen.body = JSON.parse(String(init.body))
+      seen.signal = init.signal
+      return { ok: true, status: 200, json: async () => ({ ok: true, value: detail(4, { partial: undefined }) }) }
+    })
+    const controller = new AbortController()
+    const d = await makeDetailFetcher('s1', true)!(controller.signal)
+    assert.equal(d?.rev, 4)
+    assert.deepEqual(seen.body, { sessionId: 's1', full: true })
+    assert.equal(seen.signal, controller.signal, 'the fetch carries the caller cancellation')
+    const plain = await makeDetailFetcher('s1')!()
+    assert.equal(plain?.rev, 4, 'a plain fetcher omits the flag and the signal')
   })
 })
 
@@ -599,7 +619,8 @@ function SourceProbe(props: { sessionId: string; value?: unknown; useProjection?
     h('span', { 'data-k': 'ops' }, String(data?.fileOps?.length ?? 'x')),
     h('span', { 'data-k': 'spans' }, String(data?.spans?.length ?? 'x')),
     h('span', { 'data-k': 'model' }, data?.model ?? 'x'),
-    h('button', { 'data-k': 'retry', onClick: source.retryDetail }, 'retry'))
+    h('button', { 'data-k': 'retry', onClick: source.retryDetail }, 'retry'),
+    h('button', { 'data-k': 'full', onClick: source.loadFullDetail }, 'full'))
 }
 
 function probeRead(container: HTMLElement, key: string): string {
@@ -1044,5 +1065,123 @@ describe('DetailStore — catch-up and store-map edges', () => {
     assert.equal(detailStoreOf('returned'), current)
     for (const off of offs) off()
     resetTimelineDetailStores()
+  })
+})
+
+describe('the bounded-tail upgrade', () => {
+  const tail = (): Promise<ContextTimelineDetail> => Promise.resolve(detail(2, { partial: { fromSeq: 5 } }))
+
+  test('loadFull replaces the bounded payload and clears the cut', async () => {
+    let fullCalls = 0
+    const store = new DetailStore(tail, 0, false, async () => { fullCalls++; return detail(2) })
+    store.request(2)
+    await until(() => store.getSnapshot().partial, 'the tail payload never landed')
+    assert.equal(store.getSnapshot().fullPending, false)
+    store.loadFull()
+    await until(() => !store.getSnapshot().partial, 'the full payload never replaced the tail')
+    assert.equal(fullCalls, 1)
+    assert.equal(store.getSnapshot().fullPending, false)
+    assert.equal(store.getSnapshot().fullFailed, false)
+  })
+
+  test('an upgrade in flight reports fullPending and ignores repeated clicks', async () => {
+    let release!: (value: ContextTimelineDetail | null) => void
+    const store = new DetailStore(tail, 0, false, () => new Promise((resolve) => { release = resolve }))
+    store.request(2)
+    await until(() => store.getSnapshot().partial, 'the tail payload never landed')
+    store.loadFull()
+    store.loadFull()
+    assert.equal(store.getSnapshot().fullPending, true)
+    release(detail(2))
+    await until(() => !store.getSnapshot().fullPending, 'the upgrade never settled')
+    assert.equal(store.getSnapshot().partial, false)
+    assert.equal(store.getSnapshot().detail?.rev, 2)
+  })
+
+  test('an absent, failed, or unsupported upgrade keeps the tail payload and flags a failure', async () => {
+    const absent = new DetailStore(tail, 0, false, async () => null)
+    absent.request(2)
+    await until(() => absent.getSnapshot().partial, 'the tail payload never landed')
+    absent.loadFull()
+    await until(() => absent.getSnapshot().fullFailed, 'the absent upgrade never surfaced')
+    assert.equal(absent.getSnapshot().partial, true, 'the tail payload stays readable')
+    assert.equal(absent.getSnapshot().fullPending, false)
+
+    const throwing = new DetailStore(tail, 0, false, async () => { throw new Error('offline') })
+    throwing.request(2)
+    await until(() => throwing.getSnapshot().partial, 'the tail payload never landed')
+    throwing.loadFull()
+    await until(() => throwing.getSnapshot().fullFailed, 'the failed upgrade never surfaced')
+    assert.equal(throwing.getSnapshot().partial, true)
+
+    const unsupported = new DetailStore(tail, 0)
+    unsupported.request(2)
+    await until(() => unsupported.getSnapshot().partial, 'the tail payload never landed')
+    unsupported.loadFull()
+    assert.equal(unsupported.getSnapshot().fullPending, false, 'no full fetcher leaves the store untouched')
+    assert.equal(unsupported.getSnapshot().fullFailed, false)
+    assert.equal(unsupported.getSnapshot().partial, true)
+  })
+
+  test('an aborted upgrade never reports a failure, and a reset ledger drops the response', async () => {
+    const aborted = new DetailStore(tail, 0, false, signal => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+    }))
+    aborted.request(2)
+    await until(() => aborted.getSnapshot().partial, 'the tail payload never landed')
+    const off = aborted.subscribe(() => {})
+    aborted.loadFull()
+    await until(() => aborted.getSnapshot().fullPending, 'the upgrade never started')
+    off()
+    await until(() => !aborted.getSnapshot().fullPending, 'the parked store never settled the upgrade')
+    assert.equal(aborted.getSnapshot().fullFailed, false, 'a cancelled upgrade is not a failure')
+
+    let release!: (value: ContextTimelineDetail | null) => void
+    const late = new DetailStore(tail, 0, false, () => new Promise((resolve) => { release = resolve }))
+    late.request(2)
+    await until(() => late.getSnapshot().partial, 'the tail payload never landed')
+    late.loadFull()
+    await until(() => late.getSnapshot().fullPending, 'the upgrade never started')
+    late.release()
+    release(detail(2))
+    await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(late.getSnapshot().detail, null, 'a response from the dropped generation never lands')
+    assert.equal(late.getSnapshot().fullPending, false)
+  })
+
+  test('a tail response never downgrades the full payload it re-reads', async () => {
+    let calls = 0
+    const store = new DetailStore(
+      async () => { calls++; return calls === 1 ? detail(2) : detail(2, { partial: { fromSeq: 5 } }) },
+      0,
+      false,
+      async () => detail(2),
+    )
+    store.subscribe(() => {})
+    store.request(2)
+    await until(() => store.getSnapshot().detail?.rev === 2 && !store.getSnapshot().partial, 'the full payload never landed')
+    store.request(3)
+    await until(() => calls >= 2, 'the tail read never started')
+    await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(store.getSnapshot().partial, false, 'the older-revision tail read cannot replace the full payload')
+  })
+})
+
+describe('useTimelineSource — the bounded-tail upgrade', () => {
+  test('a legacy projection exposes an inert full-history action', async () => {
+    const m = await mount(h(SourceProbe, { sessionId: 'legacy', value: slimHead(1, { detailRev: undefined }) }))
+    assert.equal(probeRead(m.container, 'state'), 'legacy')
+    await click(query(m.container, '[data-k="full"]'))
+    await flush()
+    assert.equal(probeRead(m.container, 'state'), 'legacy', 'a legacy projection has no channel to upgrade')
+    await m.unmount()
+  })
+
+  test('a bounded payload exposes the upgrade action and the view reports it', async () => {
+    vi.stubGlobal('fetch', async () => ({ ok: true, json: async () => ({ ok: true, value: detail(1, { partial: { fromSeq: 2 } }) }) }))
+    const m = await mount(h(SourceProbe, { sessionId: 'upgrade', value: slimHead(1) }))
+    await until(() => probeRead(m.container, 'state') === 'ready', 'the bounded payload never landed')
+    assert.equal(probeRead(m.container, 'steps'), '1')
+    await m.unmount()
   })
 })

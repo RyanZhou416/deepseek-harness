@@ -6,7 +6,7 @@ import type { ContextTimeline } from '../../../src/shared/types'
 import { DICT_EN } from '../../../src/client/i18n'
 import { TestClientCtx } from '../helpers/harness'
 import { click, flush, mount, query, queryAll, text, until } from '../helpers/kit'
-import { makeView, projectionsFor, richTimeline, T0, timeline } from './contextViewHarness'
+import { buttonByText, makeView, projectionsFor, richTimeline, T0, timeline } from './contextViewHarness'
 
 describe('ContextView — the split generation (slim head + detail channel)', () => {
   function slimHead(over: Record<string, unknown> = {}): ContextTimeline {
@@ -201,6 +201,69 @@ describe('ContextView — the op-log generation (fileOps on the detail payload)'
     assert.ok(text(m.container).includes('a.ts'), 'both served ops row')
     assert.ok(text(m.container).includes('+3'), 'the edit delta shows')
     assert.ok(!text(m.container).includes('No file reads'), 'not the empty state')
+    await m.unmount()
+  })
+})
+
+describe('ContextView — a bounded-tail payload', () => {
+  function head(): ContextTimeline {
+    return timeline({
+      model: 'deepseek-v4-flash',
+      provider: 'deepseek',
+      contextWindow: 128000,
+      detailRev: 3,
+      counts: { turns: 1, steps: 1, injects: 0, compactions: 0, prunes: 0 },
+    })
+  }
+
+  function payload(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      rev: 3,
+      requests: [{ seq: 2, turn: 1, step: 1, time: T0, system: 1, tools: 2, user: 3, inject: 0, assistant: 4, tool: 5, total: 15 }],
+      events: [],
+      nodes: [],
+      droppedNodes: 0,
+      archive: [],
+      ...over,
+    }
+  }
+
+  test('the unloaded-history note appears, a failed upgrade keeps it, and a retry replaces it', async () => {
+    const bodies: Record<string, unknown>[] = []
+    let fullAttempts = 0
+    let releaseFull: (() => void) | undefined
+    vi.stubGlobal('fetch', async (_url: string, init?: { body?: string }) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+      bodies.push(body)
+      if (body.full === true) {
+        fullAttempts++
+        if (fullAttempts === 1) throw new Error('offline')
+        await new Promise<void>((resolve) => { releaseFull = resolve })
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: payload() }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, value: payload({ partial: { fromSeq: 2 } }) }) }
+    })
+    const ctx = new TestClientCtx()
+    const View = makeView(ctx)
+    const m = await mount(h(View, { sessionId: 'sv-partial', useProjection: projectionsFor(head()) }))
+
+    await until(() => text(m.container).includes(DICT_EN['detail.partial']), 'the unloaded note never rendered')
+    assert.equal(queryAll(m.container, '.lc-partial-note').length, 1, 'one note above the cards')
+    await until(() => queryAll(m.container, '.lc-bar').length === 1, 'the bounded collection never landed')
+
+    await click(buttonByText(m.container, DICT_EN['detail.loadFull']))
+    await flush()
+    await until(() => text(m.container).includes(DICT_EN['detail.loadFullFailed']), 'the failed upgrade never surfaced')
+    assert.ok(text(m.container).includes(DICT_EN['detail.partial']), 'the bounded payload stays visible after a failure')
+
+    await click(buttonByText(m.container, DICT_EN['detail.loadFull']))
+    await flush()
+    await until(() => text(m.container).includes(DICT_EN['detail.loadingFull']), 'the in-flight upgrade never surfaced')
+    releaseFull?.()
+    await flush()
+    await until(() => !text(m.container).includes(DICT_EN['detail.partial']), 'the full payload never replaced the tail')
+    assert.equal(queryAll(m.container, '.lc-partial-note').length, 0, 'the note clears with the full payload')
+    assert.equal(bodies.filter(body => body.full === true).length, 2, 'the retry asks for the whole-log fold again')
     await m.unmount()
   })
 })

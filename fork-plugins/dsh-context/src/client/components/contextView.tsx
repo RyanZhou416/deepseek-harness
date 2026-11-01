@@ -772,6 +772,22 @@ export function makeContextView(
     return (
       <div className="lc-root" ref={rootRef}>
 
+        {source.partial ? (
+          <div className="lc-partial-note">
+            <span className="lc-partial-note-text">{t('detail.partial')}</span>
+            {source.fullPending
+              ? <span className="lc-partial-note-state">{t('detail.loadingFull')}</span>
+              : (
+                <button type="button" className="lc-br-retry hover:brightness-[1.15]" onClick={source.loadFullDetail}>
+                  {t('detail.loadFull')}
+                </button>
+              )}
+            {source.fullFailed && !source.fullPending
+              ? <span className="lc-partial-note-state">{t('detail.loadFullFailed')}</span>
+              : null}
+          </div>
+        ) : null}
+
         {inSidebar ? null : (
           <div className="lc-cols lc-head">
             <StatsContext counts={counts} humanInputs={data.humanInputs} answers={data.answers} toolCalls={data.toolCalls}

@@ -86,3 +86,7 @@ body:not([data-ds-dark-theme]) .lc-stat { box-shadow: var(--lc-shadow-tile); }
 [data-conversation-scroll][data-lc-surface] > [data-composer-seat]:not(:has([data-approval-key], [data-question-key], [data-plan-review-key])) { display: none; }
 [data-conversation-scroll][data-lc-surface] ~ [data-width-handle],
 [data-conversation-scroll][data-lc-modal] ~ [data-width-handle] { display: none; }
+
+.lc-partial-note { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; padding: 8px 12px; border: var(--lc-line-fine, 0.5px solid currentColor); border-radius: 8px; background: var(--lc-subpanel-bg, transparent); color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.lc-partial-note-text { flex: 1 1 200px; min-width: 0; }
+.lc-partial-note-state { color: var(--dsw-alias-label-tertiary); }

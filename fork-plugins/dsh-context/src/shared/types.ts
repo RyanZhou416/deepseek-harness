@@ -212,6 +212,11 @@ export interface ContextTimelineDetail {
   commandsFloor?: number
   commandStats?: CommandStats
   spans?: TimingSpan[]
+  /**
+   * Set when the detail covers only a bounded tail window of the durable log; `fromSeq` is the
+   * first durable event the payload covers, so earlier history is not loaded.
+   */
+  partial?: { fromSeq: number }
 }
 
 export type CommandStatus = 'running' | 'completed' | 'failed' | 'killed'
