@@ -130,7 +130,7 @@ export interface Config {
   coldLogMemoRetentionMs?: number
   /**
    * Maximum directory, header, and stat reads in flight across all concurrent
-   * listings of this backend (`list()`, the root encoding check, and historical
+   * listings of this backend (`list()`/`listHeaders()` and historical
    * fingerprints). Defaults to 3.
    */
   listConcurrency?: number
@@ -273,6 +273,28 @@ function scanKeyOf(options: SessionPersistenceListOptions | undefined): string {
   return `${options?.excludeSubagentSessions === true ? 'ordinary' : 'all'}:${ids}`
 }
 
+/**
+ * Highest canonical generation encoded with `compression` inside one Session
+ * directory.
+ * @param entries - that directory's directory entries.
+ * @param dir - the absolute Session directory the entries belong to.
+ * @param compression - the physical encoding to match.
+ * @returns the absolute generation path, or `undefined` when none matches.
+ */
+function highestGenerationIn(
+  entries: readonly Dirent[],
+  dir: string,
+  compression: JsonlCompression,
+): string | undefined {
+  let latest: { readonly path: string; readonly version: number } | undefined
+  for (const entry of entries) {
+    const version = parseGenerationLogFilename(entry.name, compression)
+    if (version === undefined) continue
+    if (latest === undefined || version > latest.version) latest = { path: join(dir, entry.name), version }
+  }
+  return latest?.path
+}
+
 /** Build the stat-derived best-effort change token shared by full and lightweight reads. */
 function fileRevision(identity: JsonlPhysicalIdentity): PersistenceRevision {
   return SessionPersistenceRevision([
@@ -373,11 +395,10 @@ class JsonlSessionPersistence extends SessionPersistence {
   private compression: JsonlCompression
   /**
    * Bounds directory, header, and stat I/O across every concurrent listing of
-   * this backend (`list()`, the root encoding check, historical fingerprints).
-   * Queued tasks of a cancelled listing run and reject at their signal check.
+   * this backend (`list()`/`listHeaders()`, historical fingerprints). Queued
+   * tasks of a cancelled listing run and reject at their signal check.
    */
   private readonly listLimit: LimitFunction
-  private rootEncodingCheck: Promise<void> | undefined
   private readonly generationFormat: Omit<JsonlGenerationFormatAdapter, 'createRestore'>
   /**
    * Bounded LRU of parsed, validated stored logs keyed by session id and
@@ -423,7 +444,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     // Resolve once so later process.cwd() changes cannot split one backend across roots.
     this.root = resolve(config.root)
-    this.catalog = new SessionCatalog(this.root, message => this.ctx.logger.warn(message))
+    this.catalog = new SessionCatalog(this.root, (message) => { this.ctx.logger.warn(message) })
     this.compression = config.compression ?? DEFAULT_COMPRESSION
     this.listLimit = pLimit(config.listConcurrency ?? DEFAULT_LIST_CONCURRENCY)
     this.generationFormat = {
@@ -473,7 +494,6 @@ class JsonlSessionPersistence extends SessionPersistence {
     // line encoder enforces at materialization.
     toHeaderLine(snapshot, options?.inheritedEventCount)
     const inheritedEventCount = SessionLogOffset(options?.inheritedEventCount ?? 0)
-    await this.ensureRootEncoding()
     options?.signal?.throwIfAborted()
     if (this.tracker.hasPending(snapshot.id) || await this.findLog(snapshot.id, options?.signal) !== undefined) {
       throw new SessionAlreadyExistsError(snapshot.id)
@@ -495,8 +515,6 @@ class JsonlSessionPersistence extends SessionPersistence {
    * @returns the open handle.
    */
   async open(id: SessionId, access: SessionAccess, options?: SessionPersistenceOpenOptions): Promise<SessionHandle> {
-    options?.signal?.throwIfAborted()
-    await this.ensureRootEncoding()
     options?.signal?.throwIfAborted()
     const pending = this.tracker.pendingOf(id)
     if (access === 'read') {
@@ -593,8 +611,6 @@ class JsonlSessionPersistence extends SessionPersistence {
     id: SessionId,
     options?: SessionPersistenceStatOptions,
   ): Promise<SessionPersistenceSnapshot | undefined> {
-    options?.signal?.throwIfAborted()
-    await this.ensureRootEncoding()
     options?.signal?.throwIfAborted()
     const pending = this.tracker.pendingOf(id)
     if (pending !== undefined) {
@@ -744,8 +760,6 @@ class JsonlSessionPersistence extends SessionPersistence {
     const beforeSeq = request?.beforeSeq
     if (beforeSeq !== undefined
       && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 0 || Object.is(beforeSeq, -0))) return undefined
-    await this.ensureRootEncoding()
-    signal?.throwIfAborted()
     const path = await this.resolveCurrentLog(id, signal)
     if (path === undefined) return undefined
     const maxEvents = windowEventLimit(request?.maxEvents)
@@ -1209,8 +1223,6 @@ class JsonlSessionPersistence extends SessionPersistence {
    * @returns the current artifact path, or `undefined` while only a historical generation exists.
    */
   async resolveCurrentLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined> {
-    await this.ensureRootEncoding()
-    signal?.throwIfAborted()
     const selected = await this.findLog(id, signal)
     if (selected === undefined) return undefined
     if (selected.sourceVersion === SESSION_FORMAT_VERSION) return selected.sourcePath
@@ -1236,7 +1248,6 @@ class JsonlSessionPersistence extends SessionPersistence {
     inheritedEventCount: SessionLogOffsetType,
   ): Promise<void> {
     this.forgetStoredLog(header.id)
-    await this.ensureRootEncoding()
     if (isMaterialized) {
       await this.appendLines(header, events)
     } else {
@@ -1252,7 +1263,6 @@ class JsonlSessionPersistence extends SessionPersistence {
    */
   async persistHeader(header: SessionHeader, inheritedEventCount: SessionLogOffsetType): Promise<void> {
     this.forgetStoredLog(header.id)
-    await this.ensureRootEncoding()
     await this.materialize(header, inheritedEventCount, [])
     this.tracker.materialized(header.id)
   }
@@ -1397,7 +1407,15 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
   }
 
-  /** Enumerate selected physical generations without interpreting their headers or bodies. */
+  /**
+   * Enumerate selected physical generations without interpreting their headers or bodies.
+   *
+   * Every visited Session directory is also the root encoding check: a
+   * directory holding the other physical encoding rejects in
+   * `resolveGenerationInDirectory`, so a complete traversal fails a mixed root
+   * without a separate whole-root pre-pass. A traversal that skips directories
+   * proves only the directories it visits.
+   */
   private async listGenerations(signal?: AbortSignal, skipSegments?: ReadonlySet<string>): Promise<ResolvedJsonlGeneration[]> {
     const selected = await this.mapSessionDirectories((dir) => {
       signal?.throwIfAborted()
@@ -1473,12 +1491,8 @@ class JsonlSessionPersistence extends SessionPersistence {
     excludeSubagentSessions = false,
     key = scanKeyOf(undefined),
   ): Promise<readonly ScannedArtifact[]> {
-    if (skipSegments === undefined && !excludeSubagentSessions) {
-      // The unexcluded listing is the only one that must prove the root encoding
-      // before selecting artifacts; an excluded scan validates per directory.
-      await this.ensureRootEncoding()
-      signal?.throwIfAborted()
-    }
+    // A caller cancelled before the scan starts must not claim the shared slot.
+    signal?.throwIfAborted()
     const shared = this.scans.get(key)
     if (shared !== undefined) return waitWithAbort(shared, signal)
     const scan = this.scanArtifacts(skipSegments, excludeSubagentSessions)
@@ -1954,7 +1968,10 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
   }
 
-  /** Select the numerically highest canonical generation in one Session directory. */
+  /**
+   * Select the numerically highest canonical generation in one Session
+   * directory, refusing a directory that holds the other physical encoding.
+   */
   private async resolveGenerationInDirectory(
     dir: string,
     signal?: AbortSignal,
@@ -1968,19 +1985,13 @@ class JsonlSessionPersistence extends SessionPersistence {
       throw error
     }
     signal?.throwIfAborted()
+    const opposite = highestGenerationIn(entries, dir, this.oppositeCompression())
+    if (opposite !== undefined) throw this.encodingMismatch(opposite)
     const generations: Array<{ readonly path: string; readonly version: number }> = []
-    const opposite: string[] = []
     for (const entry of entries) {
       const version = parseGenerationLogFilename(entry.name, this.compression)
-      if (version !== undefined) {
-        generations.push({ path: join(dir, entry.name), version })
-        continue
-      }
-      if (parseGenerationLogFilename(entry.name, this.oppositeCompression()) !== undefined) {
-        opposite.push(join(dir, entry.name))
-      }
+      if (version !== undefined) generations.push({ path: join(dir, entry.name), version })
     }
-    if (opposite.length > 0) throw this.encodingMismatch(opposite[0] as string)
     const latest = generations.sort((left, right) => right.version - left.version)[0]
     if (latest === undefined) return undefined
     return {
@@ -2141,19 +2152,6 @@ class JsonlSessionPersistence extends SessionPersistence {
     return dirs
   }
 
-  /** Reject a root that already belongs to the other physical encoding. */
-  private ensureRootEncoding(): Promise<void> {
-    this.rootEncodingCheck ??= this.checkRootEncoding()
-    return this.rootEncodingCheck
-  }
-
-  private async checkRootEncoding(): Promise<void> {
-    await this.mapSessionDirectories(async (dir) => {
-      const incompatible = await this.findOppositeGenerationInDirectory(dir)
-      if (incompatible !== undefined) throw this.encodingMismatch(incompatible)
-    })
-  }
-
   private async rejectLegacyFlatArtifact(
     project: string,
     id: SessionId,
@@ -2183,13 +2181,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       if (isENOENT(error)) return undefined
       throw error
     }
-    const generations: Array<{ readonly name: string; readonly version: number }> = []
-    for (const entry of entries) {
-      const version = parseGenerationLogFilename(entry.name, this.oppositeCompression())
-      if (version !== undefined) generations.push({ name: entry.name, version })
-    }
-    const latest = generations.sort((left, right) => right.version - left.version)[0]
-    return latest === undefined ? undefined : join(dir, latest.name)
+    return highestGenerationIn(entries, dir, this.oppositeCompression())
   }
 
   private oppositeCompression(): JsonlCompression {
