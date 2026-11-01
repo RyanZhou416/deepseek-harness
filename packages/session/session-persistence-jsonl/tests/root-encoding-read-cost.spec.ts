@@ -176,7 +176,7 @@ describe('root encoding read cost', () => {
     const ctx = await mount(fixture.root)
 
     startFence()
-    const window = await ctx.sessionPersistence.readWindow(fixture.target)
+    const window = await ctx.sessionPersistence.readWindow?.(fixture.target)
     fence.enabled = false
 
     expect(window?.events.map(event => Number(event.seq))).toEqual(fixture.events.map(event => Number(event.seq)))
@@ -194,7 +194,7 @@ describe('root encoding read cost', () => {
     let window: Promise<unknown> | undefined
     let listed: Promise<unknown> | undefined
     try {
-      window = ctx.sessionPersistence.readWindow(fixture.target)
+      window = ctx.sessionPersistence.readWindow?.(fixture.target)
       // A whole-root encoding traversal would hold these directories here.
       await Promise.race([heldStarts(3), delay(250)])
       const traversed = fence.readdir.filter(path => fence.held.has(path))
@@ -228,7 +228,7 @@ describe('root encoding read cost', () => {
 
     // A targeted read validates only the directory it accesses; the mixed root
     // is reported by the listing above, not by an unrelated Session's read.
-    const window = await ctx.sessionPersistence.readWindow(fixture.target)
+    const window = await ctx.sessionPersistence.readWindow?.(fixture.target)
     expect(window?.events.map(event => Number(event.seq))).toEqual(fixture.events.map(event => Number(event.seq)))
   })
 })
