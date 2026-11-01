@@ -1767,7 +1767,7 @@ describe('automatic listener and loader composition', () => {
     expect(pressured.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
   })
 
-  it('warns and continues after operational failures, including non-Errors', async () => {
+  it('blocks the turn after an operational pressure failure', async () => {
     const ctx = createContext()
     const warnings: string[] = []
     ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
@@ -1780,7 +1780,7 @@ describe('automatic listener and loader composition', () => {
     compact.error = 'temporary failure'
     const session = conversation(4)
 
-    await expect(preStep(ctx, agent(session, MODEL))).resolves.toEqual({ kind: 'enter', messages: [] })
+    await expect(preStep(ctx, agent(session, MODEL))).rejects.toThrow('temporary failure')
     expect(warnings).toContainEqual(expect.stringContaining('temporary failure'))
     expect(session.snapshotEvents().some(event => event.type === 'compaction/summary')).toBe(false)
   })

@@ -164,12 +164,18 @@ export class BasicCompactionEngine extends CompactionEngine {
           const result = await this.compactIfNeeded(agent, 'pressure', signal)
           if (result !== null) logResult(result, 'step pressure')
         } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
           if (error instanceof TargetPressureConfigError) {
             if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
             this.warnedPressureConfigTargets.add(error.targetKey)
+            ctx.logger.warn(`step compaction skipped: ${message}`)
+            return next()
           }
-          const message = error instanceof Error ? error.message : String(error)
-          ctx.logger.warn(`step compaction failed: ${message}; continuing the turn`)
+          // A pressure-compaction failure is not advisory: continuing the turn
+          // leaves the oversized surface in place and retries the same summary
+          // on the next step. End the turn so the failure is visible instead.
+          ctx.logger.warn(`step compaction failed: ${message}; blocking the turn`)
+          throw error
         }
       }
       return next()
