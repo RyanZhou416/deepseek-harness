@@ -2,6 +2,7 @@ import { workspaceTitleOf } from '@deepseek-ai/dsh-util-workspace-path'
 import { dayKeyOf, endOfDayKey, startOfDayKey } from '../shared/days'
 import { BACKFILL_ROUTE } from './apiRoutes'
 import { billedParts, RING_ORDER } from './categories'
+import { COST_PERIODS } from '../shared/modelPricing'
 import { cacheHitPercent } from './format'
 import { estimateSessionCost, mergeCostUsage } from './cost'
 import type { CostCurrency, ModelBook } from './cost'
@@ -505,7 +506,7 @@ export function usageTotalsOf(usage: SessionCostUsage | null | undefined): Usage
     const models = usage[provider]
     for (const model of Object.keys(models)) {
       const periods = models[model]
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = periods[period]
         if (bucket === undefined) continue
         totals.input += bucket.uncached
@@ -732,7 +733,7 @@ function addCost(target: SessionCostUsage, source: SessionCostUsage, sign: 1 | -
       const periods = asRecord(models[model])
       if (periods === null || Array.isArray(periods)) continue
       const targetPeriods = branch[model] ?? (branch[model] = {})
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = asRecord(periods[period])
         if (bucket === null || Array.isArray(bucket)) continue
         const prev = targetPeriods[period] ?? { uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0 }

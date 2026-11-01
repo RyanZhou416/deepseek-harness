@@ -2,18 +2,19 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import type { ContextEventRecord, ContextTimeline, RequestRecord, SessionCostUsage, SurfaceNode, TimelineCounts } from '../../shared/types'
 import { estimateSessionCost, billedTokensOf, formatCost, formatPriceRate, mergeCostUsage, priceLookupsOf, toCurrency } from '../cost'
 import type { CostCurrency, ModelBook, PriceFace, PriceMiss } from '../cost'
+import { REFERENCE_PRICE_DATE, referenceModelPriceOf } from '../../shared/modelPricing'
 import { sessionsFaceOf, subagentCostFoldOf } from '../agentTree'
 import { useSessionsSnapshot } from '../agentHeads'
 import type { AgentHeads } from '../agentHeads'
 import type { Translate } from '../i18n'
 import { useModelPrices } from '../modelPrices'
 import { nameColorOf } from '../nameColor'
-import { type ClientCtx } from '../services'
+import { asRecord, type ClientCtx } from '../services'
 import { isDeepSeekProvider } from '../../shared/providers'
 import type { ViewKit } from '../viewkit'
 import { IconData } from '../primitives'
 
-interface PriceRow { key: string; face: PriceFace }
+interface PriceRow { key: string; face: PriceFace; reference?: boolean; longContext?: boolean }
 interface PriceMissRow { key: string; provider: string; model: string; miss: PriceMiss }
 
 const BANDS: readonly (readonly [keyof PriceFace['rate'], string])[] = [
@@ -29,8 +30,17 @@ function pricesOf(usage: SessionCostUsage | undefined, book: ModelBook | null): 
   const misses: PriceMissRow[] = []
   for (const lookup of priceLookupsOf(usage, book)) {
     const key = lookup.provider + '/' + lookup.model
-    if (lookup.face !== null) rows.push({ key, face: lookup.face })
-    else misses.push({ key, provider: lookup.provider, model: lookup.model, miss: lookup.miss })
+    if (lookup.face !== null) {
+      const periods = asRecord(asRecord(usage[lookup.provider])?.[lookup.model])
+      rows.push({
+        key,
+        face: lookup.face,
+        ...referenceModelPriceOf(lookup.provider, lookup.model) === undefined ? {} : { reference: true },
+        ...periods !== null && asRecord(periods['long']) !== null ? { longContext: true } : {},
+      })
+    } else {
+      misses.push({ key, provider: lookup.provider, model: lookup.model, miss: lookup.miss })
+    }
   }
   return { rows, misses }
 }
@@ -328,6 +338,7 @@ export function makeStatsContext(
                 </span>
               ))}
               <span className="lc-stat-tip-by">{t('stats.costPriceBy', { p: r.face.pid, m: r.face.mid })}</span>
+              {r.longContext === true ? <span className="lc-stat-tip-band"><i>{t('stats.costLongContext')}</i></span> : null}
             </span>
           ))}
         </span>
@@ -348,10 +359,11 @@ export function makeStatsContext(
       blocks.some(r => r.face.via === 'canonical-maker' || r.face.via === 'family' || r.face.via === 'index')
         ? <span key="inferred">{t('stats.costInferredNote')}</span>
         : null
-    const notes = (deep: boolean): ReactElement[] =>
+    const notes = (deep: boolean, reference: boolean): ReactElement[] =>
       [
         currency === 'cny' ? <span key="cny">{t('stats.costTipCny')}</span> : null,
         deep ? <span key="peak">{t('stats.costTipDeepseek')}</span> : null,
+        reference ? <span key="reference">{t('stats.costReference', { date: REFERENCE_PRICE_DATE })}</span> : null,
       ].filter((el): el is ReactElement => el !== null)
     const tipFor = (state: { rows: PriceRow[]; misses: PriceMissRow[] }, scope: string, deep: boolean): ReactNode => [
       scope,
@@ -359,7 +371,7 @@ export function makeStatsContext(
       pricesBlock(state.rows),
       missesBlock(state.misses),
       inferredNote(state.rows),
-      ...notes(deep),
+      ...notes(deep, state.rows.some(r => r.reference === true)),
       failed ? <span key="unavailable">{t('stats.costUnavailable')}</span> : null,
     ]
     const costTip: ReactNode = tipFor(priceState, t('stats.costTip'), deepseek)

@@ -755,3 +755,22 @@ describe('StatsContext — the real subagent-cost seat (makeSubagentCost)', () =
     }
   })
 })
+
+describe('StatsContext — verified reference prices', () => {
+  test('a subscription route prices from the bundled table and tags its long-context tier', async () => {
+    const m = await mount(h(StatsContext, {
+      counts: NO_COUNTS,
+      files: NO_FILES,
+      tools: [],
+      locale: 'en',
+      cost: { codex: { 'gpt-6-sol': { long: { uncached: 1_000_000, cacheRead: 0, cacheWrite: 0, output: 0 } } } },
+    }))
+    await flush()
+    const costTip = costTipOf(m.container, 'team')
+    assert.ok(costTip.includes('for openai · gpt-6-sol.'), 'the reference face names the vendor it prices from')
+    assert.ok(costTip.includes(DICT_EN['stats.costLongContext']), 'the whole-request long bucket is tagged')
+    assert.ok(costTip.includes('verified on'), 'the reference date is disclosed')
+    assert.ok(costTip.includes('Uncached input $2.00'), 'the row lists the standard rate beside the long-context tag')
+    await m.unmount()
+  })
+})

@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ComponentType } from 'react'
 import type { AttachmentRef } from '../shared/attachment'
 import { estimateSystemTokens } from '../shared/estimate'
+import { COST_PERIODS } from '../shared/modelPricing'
 import { PLUGIN_NAME } from './meta'
 import type { ActivityDay, ContextActivity, ContextBreakdown, ContextHeaders, ContextPressure, ContextTimeline, CostModelUsage, HeaderEpochContent, SystemPromptNode, TimingTotals, TokenUsage, ToolTimingTotals } from '../shared/types'
 
@@ -224,7 +225,7 @@ function costOf(value: unknown): ContextTimeline['cost'] | undefined {
       const periods = asRecord(models[model])
       if (periods === null || Array.isArray(periods)) continue
       const copy: CostModelUsage = {}
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const b = asRecord(periods[period])
         if (b === null || Array.isArray(b)) continue
         copy[period] = {
@@ -592,7 +593,7 @@ function costWellFormed(value: unknown): boolean {
     for (const model in models) {
       const periods = asRecord(models[model])
       if (periods === null || Array.isArray(periods)) return false
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const raw = periods[period]
         if (raw === undefined) continue
         const bucket = asRecord(raw)
@@ -636,7 +637,7 @@ export function costFullyQuantified(value: unknown): boolean {
       if (model === '__proto__') return false
       const periods = asRecord(models[model])
       if (periods === null || Array.isArray(periods)) return false
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = asRecord(periods[period])
         if (bucket === null || Array.isArray(bucket)) continue
         for (const k of ['uncached', 'cacheRead', 'cacheWrite', 'output']) {

@@ -1,5 +1,6 @@
 import type { CostBucketTotals, CostModelUsage, SessionCostUsage, TimingSpan, TimingTotals, ToolTimingTotals } from '../shared/types'
 import { isDeepSeekProvider } from '../shared/providers'
+import { usesLongContextPrice } from '../shared/modelPricing'
 import type { DecodeKind } from './logShapes'
 import type { TimelineState } from './foldState'
 
@@ -41,7 +42,9 @@ export function addBilledUsage(
   time: number,
   usage: BilledUsage,
 ): SessionCostUsage {
-  const period = isDeepSeekProvider(provider) && !isBeijingPeak(time) ? 'off' : 'peak'
+  const period = usesLongContextPrice(provider, model, usage.uncached + usage.cacheRead + usage.cacheWrite)
+    ? 'long'
+    : isDeepSeekProvider(provider) && !isBeijingPeak(time) ? 'off' : 'peak'
   const models = prev?.[provider] ?? {}
   const periods = models[model] ?? {}
   const b = periods[period] ?? { uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
@@ -65,6 +68,7 @@ export function copyCostUsage(cost: SessionCostUsage): SessionCostUsage {
       const modelCopy: CostModelUsage = {}
       if (periods.peak !== undefined) modelCopy.peak = { ...periods.peak }
       if (periods.off !== undefined) modelCopy.off = { ...periods.off }
+      if (periods.long !== undefined) modelCopy.long = { ...periods.long }
       models[model] = modelCopy
     }
     copy[provider] = models

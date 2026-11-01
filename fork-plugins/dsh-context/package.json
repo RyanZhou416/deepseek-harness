@@ -1,6 +1,6 @@
 {
   "name": "dsh-context",
-  "version": "0.78.2",
+  "version": "0.78.2-dsh021rc2.1",
   "description": "A DeepSeek Harness plugin for context insight and management, with context dashboard and context command, for understanding how the context is made of, and how it evolves.",
   "icon": "icon.svg",
   "author": "bowenliang123",
@@ -15,7 +15,7 @@
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "dsh": ">=0.2.0-rc.2 || >=0.2.1-rc.2"
+    "dsh": ">=0.2.1-rc.2 || >=0.2.0-rc.2"
   },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -86,7 +86,7 @@
   ],
   "license": "Apache-2.0",
   "dependencies": {
-    "zod": "^4.6.7"
+    "zod": "4.4.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",

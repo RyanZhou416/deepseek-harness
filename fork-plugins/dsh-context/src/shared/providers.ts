@@ -6,6 +6,7 @@ const MODELS_DEV_PROVIDER_IDS: Record<string, string> = {
   'zai-coding-cn': 'zhipuai',
   'claude': 'anthropic',
   'codex': 'openai',
+  'grok': 'xai',
   'fireworks': 'fireworks-ai',
   'together': 'togetherai',
   'vercel-ai-gateway': 'vercel',

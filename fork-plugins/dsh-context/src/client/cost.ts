@@ -1,5 +1,6 @@
 import type { SessionCostUsage } from '../shared/types'
 import { isDeepSeekProvider, modelsDevProviderOf } from '../shared/providers'
+import { COST_PERIODS, referenceModelPriceOf } from '../shared/modelPricing'
 import { asRecord, numOf, type LocaleService } from './services'
 import {
   bareModelOf,
@@ -31,6 +32,7 @@ export type PriceVia =
   | 'canonical-maker'
   | 'family'
   | 'index'
+  | 'reference'
 
 export type PriceConfidence = 'high' | 'medium' | 'low'
 
@@ -285,7 +287,22 @@ function ambiguous(count: number): PriceResolution {
   return { kind: 'unpriced', miss: { reason: 'ambiguous', candidates: count } }
 }
 
-export function priceResolutionOf(book: ModelBook | null | undefined, provider: string, model: string): PriceResolution {
+export function priceResolutionOf(
+  book: ModelBook | null | undefined,
+  provider: string,
+  model: string,
+  longContext = false,
+): PriceResolution {
+  const reference = referenceModelPriceOf(provider, model)
+  if (reference !== undefined) {
+    if (!longContext) {
+      return priced({ pid: modelsDevProviderOf(provider), mid: model, rate: reference.standard, via: 'reference', confidence: 'high' })
+    }
+    if (reference.longContext !== undefined) {
+      return priced({ pid: modelsDevProviderOf(provider), mid: model, rate: reference.longContext.price, via: 'reference', confidence: 'high' })
+    }
+    return unpriced('model-unknown')
+  }
   if (book === null || book === undefined) return unpriced('book-unavailable')
   const routed = routedBranch(book, provider)
   if (routed !== null) {
@@ -333,13 +350,23 @@ export function priceResolutionOf(book: ModelBook | null | undefined, provider: 
   return unpriced('no-entry')
 }
 
-export function priceFaceOf(book: ModelBook | null | undefined, provider: string, model: string): PriceFace | null {
-  const resolution = priceResolutionOf(book, provider, model)
+export function priceFaceOf(
+  book: ModelBook | null | undefined,
+  provider: string,
+  model: string,
+  longContext = false,
+): PriceFace | null {
+  const resolution = priceResolutionOf(book, provider, model, longContext)
   return resolution.kind === 'priced' ? resolution.face : null
 }
 
-export function priceOf(book: ModelBook | null | undefined, provider: string, model: string): PriceTriple | null {
-  return priceFaceOf(book, provider, model)?.rate ?? null
+export function priceOf(
+  book: ModelBook | null | undefined,
+  provider: string,
+  model: string,
+  longContext = false,
+): PriceTriple | null {
+  return priceFaceOf(book, provider, model, longContext)?.rate ?? null
 }
 
 export function priceLookupsOf(usage: SessionCostUsage | null | undefined, book: ModelBook | null | undefined): PriceLookup[] {
@@ -363,7 +390,7 @@ export function estimateSessionCost(
   book: ModelBook | null | undefined,
   currency: CostCurrency,
 ): number | null {
-  if (usage === null || usage === undefined || book === null || book === undefined) return null
+  if (usage === null || usage === undefined) return null
   let total = 0
   let any = false
   for (const provider of Object.keys(usage)) {
@@ -371,12 +398,13 @@ export function estimateSessionCost(
     if (models === null) continue
     const deepseek = isDeepSeekProvider(provider)
     for (const model of Object.keys(models)) {
-      const rate = priceOf(book, provider, model)
       const periods = asRecord(models[model])
-      if (rate === null || periods === null) continue
-      for (const period of ['peak', 'off'] as const) {
+      if (periods === null) continue
+      for (const period of COST_PERIODS) {
         const bucket = asRecord(periods[period])
         if (bucket === null) continue
+        const rate = priceOf(book, provider, model, period === 'long')
+        if (rate === null) continue
         const price = (numOf(bucket.cacheRead) * rate.hit + numOf(bucket.uncached) * rate.miss
           + numOf(bucket.cacheWrite) * rate.write + numOf(bucket.output) * rate.out) / 1e6
         total += deepseek && period === 'peak' ? price * PEAK_FACTOR : price
@@ -396,7 +424,7 @@ export function billedTokensOf(usage: SessionCostUsage | null | undefined): numb
     for (const model of Object.keys(models)) {
       const periods = asRecord(models[model])
       if (periods === null) continue
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = asRecord(periods[period])
         if (bucket === null) continue
         total += numOf(bucket.uncached) + numOf(bucket.cacheRead) + numOf(bucket.cacheWrite) + numOf(bucket.output)
@@ -417,7 +445,7 @@ function mergeInto(out: SessionCostUsage, usage: SessionCostUsage | null | undef
       const periods = asRecord(models[model])
       if (periods === null || Array.isArray(periods)) continue
       const target = branch[model] ?? (branch[model] = {})
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = asRecord(periods[period])
         if (bucket === null || Array.isArray(bucket)) continue
         const prev = target[period] ?? { uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0 }

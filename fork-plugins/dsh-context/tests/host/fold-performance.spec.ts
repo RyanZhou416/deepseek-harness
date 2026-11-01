@@ -14,6 +14,8 @@ const LEAN_BOUNDS = {
   maxNodes: 400,
   maxArchiveNodes: 100,
   maxFileOps: 100,
+  maxCommands: 400,
+  maxCommandChars: 4096,
 }
 
 function request(seq: number, turn: number, step: number): RequestRecord {
@@ -74,14 +76,15 @@ describe('timeline allocation bounds', () => {
     assert.equal(next.archived.length, 0)
   })
 
-  test('host-only state changes reuse both wire generations while visible changes replace them', () => {
+  test('host-only state changes reuse the wire generation they cannot reach', () => {
     for (const slim of [false, true]) {
       const def = timelineDef(LEAN_BOUNDS, slim)
       const initial = def.init()
       const firstView = def.wire.view(initial)
 
       const pendingCall = def.apply(initial, toolCall(1, { callId: 'c1', name: 'bash' }))
-      assert.equal(def.wire.view(pendingCall), firstView, 'host-only churn keeps the served value')
+      if (slim) assert.equal(def.wire.view(pendingCall), firstView, 'the slim head ignores host-only churn')
+      else assert.notEqual(def.wire.view(pendingCall), firstView, 'the inline view renders the running command it opened')
 
       const visible = def.apply(pendingCall, planMode(2, { active: true }))
       assert.notEqual(def.wire.view(visible), firstView)
@@ -106,6 +109,17 @@ describe('timeline allocation bounds', () => {
     assert.equal(next.events, normalized.events)
   })
 
+
+  test('a restored state without a turn-run count derives one for the clamp', () => {
+    const def = timelineDef({ ...LEAN_BOUNDS, maxKeptTurns: 1 })
+    const restored = createTimelineState()
+    restored.requests = [request(1, 1, 1), request(2, 2, 1), request(3, 2, 1)]
+    restored.turnRuns = undefined
+    const view = def.wire.view(restored) as { requests: RequestRecord[]; counts?: { turns: number } }
+    assert.equal(view.requests.length, 2, 'only the newest turn survives')
+    assert.equal(view.requests[0].turn, 2)
+    assert.equal(restored.requests.length, 3, 'the checkpoint itself keeps every request')
+  })
   test('the first restored-state view enforces lean bounds without mutating the checkpoint', () => {
     const def = timelineDef(LEAN_BOUNDS)
     const state = createTimelineState()

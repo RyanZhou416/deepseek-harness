@@ -5,7 +5,7 @@ import { resolveBounds } from './config'
 import type { WiredProjection } from './projection'
 import type { ContextTimeline } from '../shared/types'
 import { applyTimeline } from './fold'
-import { createTimelineState } from './foldState'
+import { countTurnRuns, createTimelineState, trimState } from './foldState'
 import type { TimelineState } from './foldState'
 import { buildTimelineHead, buildTimelineView } from './foldWire'
 
@@ -167,6 +167,7 @@ const costBucketsSchema = z.object({
 const costModelSchema = z.object({
   peak: costBucketsSchema.optional(),
   off: costBucketsSchema.optional(),
+  long: costBucketsSchema.optional(),
 }).strict()
 
 const costModelsSchema = z.record(z.string(), costModelSchema)
@@ -256,7 +257,9 @@ export const contextTimelineSchema = z.object({
   spans: z.array(timingSpanSchema).optional(),
 }).strict() as unknown as z.ZodType<ContextTimeline>
 
-const timelineStateSchema = z.object({
+export const TIMELINE_STATE_VERSION = 36
+
+export const timelineStateSchema = z.object({
   surface: z.array(surfaceNodeSchema),
   assistantReasoning: z.number().int().nonnegative(),
   assistantAnswerTokens: z.number().int().nonnegative(),
@@ -314,17 +317,64 @@ const timelineStateSchema = z.object({
   pendingCodeOps: z.record(z.string(), z.array(fileOpSchema)).optional(),
 }) as unknown as z.ZodType<TimelineState>
 
+// DeepSeek Harness fork modification: clamp restored states to the deployment bounds and reuse a
+// wire value across host-only state churn. See ../../FORK_MAINTENANCE.md.
 export function createContextTimelineDefinition(config: Config, slim: () => boolean): WiredProjection<'contextTimeline', TimelineState> {
   const bounds = resolveBounds(config)
-  const view = (state: TimelineState): ContextTimeline =>
-    slim() ? buildTimelineHead(state) : buildTimelineView(state, bounds)
+  const overBound = (state: TimelineState): boolean =>
+    state.requests.length > bounds.maxRequestSteps
+    || state.events.length > bounds.maxEvents
+    || state.archived.length > bounds.maxArchiveNodes
+    || state.fileOps.length > bounds.maxFileOps
+    || state.commands.length > bounds.maxCommands
+    || (state.turnRuns ?? countTurnRuns(state.requests)) > bounds.maxKeptTurns
+  const bounded = (state: TimelineState): TimelineState => {
+    if (!overBound(state)) return state
+    const copy: TimelineState = {
+      ...state,
+      requests: [...state.requests],
+      events: [...state.events],
+      archived: [...state.archived],
+      fileOps: [...state.fileOps],
+      spans: [...state.spans],
+    }
+    trimState(copy, bounds)
+    return copy
+  }
+  const HEAD_KEYS = [
+    'surface', 'sums', 'assistantReasoning', 'assistantAnswerTokens', 'assistantCallTokens',
+    'systemTokens', 'systems', 'toolsTokens', 'model', 'provider', 'reasoningEffort', 'contextWindow',
+    'maxOutputTokens', 'requests', 'events', 'cost', 'generatedReasoning', 'generatedAnswerTokens',
+    'generatedCallTokens', 'humanInputs', 'answers', 'lastUser', 'archiveFloor', 'detailRev', 'timing',
+  ] as const satisfies readonly (keyof TimelineState)[]
+  const INLINE_KEYS = [
+    ...HEAD_KEYS, 'archived', 'spans', 'fileOps', 'fileOpsFloor', 'commands', 'commandsFloor', 'commandStats',
+  ] as const satisfies readonly (keyof TimelineState)[]
+  const sameWireInputs = (a: TimelineState, b: TimelineState, head: boolean): boolean => {
+    const keys: readonly (keyof TimelineState)[] = head ? HEAD_KEYS : INLINE_KEYS
+    return keys.every(key => a[key] === b[key])
+  }
+  const headLast: { state?: TimelineState; view?: ContextTimeline } = {}
+  const inlineLast: { state?: TimelineState; view?: ContextTimeline } = {}
+  const view = (state: TimelineState): ContextTimeline => {
+    const head = slim()
+    const last = head ? headLast : inlineLast
+    if (last.state !== undefined && last.state !== state && sameWireInputs(last.state, state, head)) {
+      return last.view as ContextTimeline
+    }
+    const boundedState = bounded(state)
+    const value = head ? buildTimelineHead(boundedState) : buildTimelineView(boundedState, bounds)
+    last.state = state
+    last.view = value
+    return value
+  }
   const definition: WiredProjection<'contextTimeline', TimelineState> = {
     key: 'contextTimeline',
     stateSchema: timelineStateSchema,
     wire: { viewSchema: contextTimelineSchema, view },
     init: () => createTimelineState(),
     apply: (state: TimelineState, event: SessionEvent) => applyTimeline(state, event as Parameters<typeof applyTimeline>[1], bounds),
-    stateVersion: 36,
+    stateVersion: TIMELINE_STATE_VERSION,
   }
   return definition
 }
