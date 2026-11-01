@@ -1,0 +1,34 @@
+# Bilingual-pair consistency record for 2026-10-31-root-encoding-discovery-on-complete-listing.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-31-root-encoding-discovery-on-complete-listing.md
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing:
+  en: 0380d297ad32ca9f
+  zh: 912fc12d03bb5426
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing/problem:
+  en: 151d4426ae6191ac
+  zh: fb0fa550d385eb17
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing/decision:
+  en: a15c7c13f167e5ac
+  zh: 63bcc2ef60c2f344
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing/decision/per-session-operations-validate-the-directory-they-touch:
+  en: b7acb0bad7253f46
+  zh: 59815fae367e17f0
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing/decision/the-complete-scan-is-the-root-wide-check:
+  en: a72cf742aee8dc5b
+  zh: 26284428f12db076
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing/decision/reporting-points:
+  en: f894a0f752c89c8f
+  zh: 9fb1a4c14e4f77b2
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing/alternatives-considered:
+  en: 00a5c02cebe6a413
+  zh: 206d5f54adb66ef6
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing/consequences:
+  en: 82355f71fe7609e8
+  zh: be04764d5e9d83a1
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing/verification:
+  en: d7bee04f18d1c620
+  zh: 1dd8fad7d8df0400
+/agent-note-root-encoding-discovery-belongs-to-the-complete-listing/related:
+  en: fe7eba084eb1d616
+  zh: ad8ef0345b23d567

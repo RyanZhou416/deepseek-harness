@@ -3204,7 +3204,7 @@ export interface Config {
   coldLogMemoRetentionMs?: number
   /**
    * Maximum directory, header, and stat reads in flight across all concurrent
-   * listings of this backend (`list()`, the root encoding check, and historical
+   * listings of this backend (`list()`/`listHeaders()` and historical
    * fingerprints). Defaults to 3.
    */
   listConcurrency?: number
