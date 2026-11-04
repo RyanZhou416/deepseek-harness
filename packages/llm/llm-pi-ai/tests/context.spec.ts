@@ -94,6 +94,31 @@ describe('pi-ai request context conversion', () => {
     expect(JSON.stringify(context)).toContain('request preview 2000x4px')
   })
 
+  it.each([
+    { images: 20, target: { width: 8000, height: 16, maxBytes: 100 } },
+    { images: 21, target: { width: 2000, height: 4, maxBytes: 100 } },
+  ])('uses the request-wide image count for $images distinct images', async ({ images, target }) => {
+    const source = { ...ref, width: 8192, height: 16 }
+    const distinct = Array.from({ length: images }, (_, index) => ({
+      ...source,
+      attachmentId: AttachmentId(`sha256:${String(index).padStart(64, '0')}`),
+    }))
+    const readImageRequest = vi.fn((value: ImageAttachmentRef, target: ImageRequestTarget) =>
+      Promise.resolve({ ...requestImage(value, Uint8Array.of(1)), width: target.width, height: target.height }))
+    const context = await toPiContext(
+      request([user(distinct.map(attachment => ({ type: 'image' as const, attachment })))]),
+      imageContext(projectionStore(readImageRequest), {
+        requestImagePolicy: { maxPixels: 640_000, maxBytes: 100, maxDimension: count => count > 20 ? 2000 : 8000 },
+      }),
+    )
+
+    expect(readImageRequest).toHaveBeenCalledTimes(images)
+    for (const [, actual] of readImageRequest.mock.calls) {
+      expect(actual).toEqual(target)
+    }
+    expect(JSON.stringify(context)).toContain(`request preview ${target.width}x${target.height}px`)
+  })
+
   it('enforces the image count without requiring a byte budget', async () => {
     await expect(toPiContext(request([user(Array.from({ length: 2 }, () => ({ type: 'image' as const, attachment: ref })))]),
       imageContext(attachments, { maxRequestImages: 1 })))

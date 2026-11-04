@@ -155,8 +155,10 @@ async function prepareRequestImages(
     )
   }
   const ordered = [...retained.values()]
+  // Dimension caps are request-wide; a request made entirely of distinct images has
+  // one occurrence per attachment, so per-attachment counts would miss the many-image cap.
   const prepared = await Promise.all(ordered.map(
-    entry => attachments.readImageRequest(entry.ref, requestImageTarget(entry.ref, budget, entry.occurrences), signal),
+    entry => attachments.readImageRequest(entry.ref, requestImageTarget(entry.ref, budget, total), signal),
   ))
   const versions = new Map<AttachmentId, RequestImageAttachment>()
   for (const [index, entry] of ordered.entries()) {
