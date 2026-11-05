@@ -761,6 +761,46 @@ test('the guard enforces the verdicts through the Host registry, and a similar n
   await other.dispose()
 })
 
+test('the live connector file-downloads refusal stops neither Messages nor a Host tool', async () => {
+  const app = await mount({
+    policy: () => Response.json({
+      restrictions: {
+        allow_connector_file_downloads: { allowed: false },
+        require_trusted_devices: { allowed: true },
+      },
+      defaults: { remote_control_at_startup: true },
+    }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
+  // The key is a known registry entry mapped inapplicable: this provider's Messages request and
+  // its Host tools are not a connector file download, so neither is refused.
+  assertWireReached(await app.request('session-a'))
+  assert.equal((await app.execute('session-a', 'host_probe')).isError, false)
+  assert.equal(app.runs('host_probe'), 1)
+  const claude = await app.status()
+  const accounts = claude['accounts'] as { policyLimits?: { state: string; deniedCount?: number; blockers?: unknown } }[]
+  assert.equal(accounts[0]?.policyLimits?.state, 'current')
+  assert.equal(accounts[0]?.policyLimits?.deniedCount, 1, 'the stated refusal is reported as a count')
+  assert.equal(accounts[0]?.policyLimits?.blockers, undefined, 'the known key is not an incomplete-snapshot blocker')
+  // The durable projection keeps the key by name and counts no unknown operation key.
+  const { readFileSync } = await import('node:fs')
+  const persisted = readFileSync(join(process.env.DSH_HOME!, 'plugins', 'subscriptions', 'claude-policy-limits.json'), 'utf8')
+  assert.ok(persisted.includes('"key":"allow_connector_file_downloads"'), 'the registered key keeps its name in the store')
+  assert.ok(persisted.includes('"unknownKeys":0'), 'the registered key is not counted as unknown')
+  await app.dispose()
+
+  // A genuinely unknown key still takes the conservative path under the fixed placeholder.
+  const unknown = await mount({
+    policy: () => Response.json({ restrictions: { allow_connector_file_download: { allowed: false } } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
+  assertRefusal(await unknown.request('session-a'), 'POLICY_LIMITS_UNSUPPORTED')
+  const unknownRefusal = await unknown.executeMessage('session-a', 'host_probe')
+  assert.ok(unknownRefusal?.includes('unsupported_policy_key'), `the refusal names the placeholder: ${String(unknownRefusal)}`)
+  assert.equal(unknown.runs('host_probe'), 0, 'the truly unknown key still refuses the Host tool')
+  await unknown.dispose()
+})
+
 test('a request that names no session is judged and starts no background owner', async () => {
   const app = await mount({
     policy: () => Response.json({ restrictions: {} }),

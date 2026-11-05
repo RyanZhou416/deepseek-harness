@@ -243,8 +243,14 @@ test('the pin parser keeps a present-but-unusable value a refusal, never an abse
 })
 
 test('every registered key is classified, and nothing maps by name', () => {
-  assert.deepEqual([...POLICY_MAPPING_GAPS], [], 'each pinned key has a declared disposition')
-  assert.equal(POLICY_KEYS.length, 34)
+  assert.deepEqual([...POLICY_MAPPING_GAPS], [], 'each registered key has a declared disposition')
+  assert.equal(POLICY_KEYS.length, 35)
+  // The key the live service added after the pinned artifact: this provider has no connector
+  // file-download surface, so its refusal reaches no operation rather than Messages or tools.
+  assert.deepEqual(policyKeyMapping('allow_connector_file_downloads'), {
+    enforcement: 'inapplicable', reason: 'this provider has no connector file-download surface',
+  })
+  assert.equal(Object.hasOwn(policyKeyMapping('allow_connector_file_downloads'), 'operations'), false)
   // The catalogue FETCH this plugin performs. Inference is another operation, and listing
   // already-known local models is not an operation at all.
   assert.deepEqual(policyKeyMapping('allow_model_catalog'), { enforcement: 'enforced', operations: ['provider.catalog_fetch'] })
@@ -805,6 +811,46 @@ test('a restored snapshot keeps its refusals, sends no conditional request and c
   transport.set({ status: 304, body: '' })
   assert.equal((await second.ensure('acct', { force: true })).outcome, 'current')
   assert.ok((transport.calls[2]?.headers['if-none-match'] ?? '').startsWith('"sha256:'), 'the confirmed validator is sent')
+})
+
+test('a restored document that states the connector file-downloads key blocks nothing', async () => {
+  const path = join(stateRoot, 'connector-restore.json')
+  const firstTransport = wire()
+  const first = owner(firstTransport, { persistence: new FileClaudePolicyLimitsState({ path }) }, false)
+  await first.hydrate()
+  first.bind('acct', 's1', TEST_IDENTITY)
+  firstTransport.set({
+    status: 200,
+    body: JSON.stringify({
+      restrictions: {
+        allow_connector_file_downloads: { allowed: false },
+        require_trusted_devices: { allowed: true },
+      },
+      defaults: { remote_control_at_startup: true },
+    }),
+  })
+  assert.equal((await first.ensure('acct', { force: true })).outcome, 'current')
+  assert.deepEqual(first.status('acct')?.blockers, [])
+  assert.equal(first.verdict('acct', 'allow_connector_file_downloads').verdict, 'deny')
+  assert.equal(first.verdict('acct', 'allow_connector_file_downloads').reason, 'explicit_deny')
+  await first.dispose()
+
+  // The projection keeps a registered key by name and counts no unknown operation key, so the
+  // restart neither blocks on it nor has to treat its name as remote text.
+  const stored = readFileSync(path, 'utf8')
+  assert.ok(stored.includes('"key":"allow_connector_file_downloads"'), 'the registered key keeps its name')
+  assert.ok(stored.includes('"unknownKeys":0'), 'the registered key is not an unknown operation key')
+
+  const second = owner(wire(), { persistence: new FileClaudePolicyLimitsState({ path }) }, false)
+  await second.hydrate()
+  assert.deepEqual(second.status('acct')?.blockers, [], 'the restored record blocks nothing')
+  assert.equal(second.status('acct')?.state, 'stale')
+  assert.equal(second.verdict('acct', 'allow_connector_file_downloads').verdict, 'deny', 'the restored refusal holds')
+  assert.deepEqual(
+    second.unsupported('acct').find(entry => entry.key === 'allow_connector_file_downloads'),
+    { key: 'allow_connector_file_downloads', reason: 'inapplicable: this provider has no connector file-download surface' },
+    'the restored key is declared inapplicable rather than enforced',
+  )
 })
 
 test('an incomplete stored projection blocks the account, and the file carries no raw value', async () => {

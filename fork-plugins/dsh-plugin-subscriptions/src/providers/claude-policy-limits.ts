@@ -190,6 +190,10 @@ const POLICY_KEY_MAPPING: Readonly<Record<PolicyKey, PolicyKeyMapping>> = Object
   allow_remote_sessions: { enforcement: 'inapplicable', reason: 'this provider exposes no remote sessions' },
   allow_claude_browser_extension: { enforcement: 'inapplicable', reason: 'no browser extension is driven here' },
   allow_connector_suggest: { enforcement: 'inapplicable', reason: 'this provider suggests no connectors' },
+  // The live service now states this key, but a connector file download is not a surface this
+  // provider has: refusing Messages or Host tools for it would deny capabilities the key does
+  // not reach here.
+  allow_connector_file_downloads: { enforcement: 'inapplicable', reason: 'this provider has no connector file-download surface' },
   allow_auto_mode_sibling_docs: { enforcement: 'inapplicable', reason: 'this provider has no sibling-document surface' },
   allow_previous_conversation_pointer: { enforcement: 'inapplicable', reason: 'the pointer is a conversation-layer meta message appended to a transcript, not the cc_prev_req billing field and not a request header; this provider injects no prompt content and never alters ordinary continuation' },
   allow_mcp_task_worker_wake: { enforcement: 'inapplicable', reason: 'this provider runs no MCP task worker' },

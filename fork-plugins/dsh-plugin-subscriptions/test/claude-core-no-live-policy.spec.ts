@@ -33,12 +33,23 @@ function document(body: Record<string, unknown>) {
   return parsed.document
 }
 
-test('the frozen registry carries the 34 pinned keys with their declared inputs', () => {
-  assert.equal(POLICY_KEYS.length, 34)
+test('the frozen registry carries the 34 pinned keys plus the observed connector key with their declared inputs', () => {
+  assert.equal(POLICY_KEYS.length, 35)
   assert.equal(POLICY_KEY_REGISTRY['allow_projects_tool']?.onCacheMiss, 'hold')
   assert.deepEqual([...POLICY_KEY_REGISTRY['allow_memory_sync']?.hardBlockUnder ?? []], ['hipaa'])
   assert.deepEqual([...POLICY_KEY_REGISTRY['allow_product_feedback']?.deniedUnder ?? []], ['hipaa', 'zdr'])
+  // The one key added after the pinned artifact: the live service populates it, and its
+  // connector-family reading keeps it denied on a cache miss rather than allow.
+  assert.equal(POLICY_KEY_REGISTRY['allow_connector_file_downloads']?.onCacheMiss, 'deny')
+  assert.equal(POLICY_KEY_REGISTRY['allow_connector_file_downloads']?.serverPopulated, true)
   assert.equal(registryCacheMiss('not_a_key'), undefined)
+})
+
+test('a live document that refuses the connector file-downloads key is an explicit refusal, not an unknown key', () => {
+  const parsed = document({ restrictions: { allow_connector_file_downloads: { allowed: false } } })
+  const answer = evaluateLivePolicy('allow_connector_file_downloads', parsed, [], inputs())
+  assert.equal(answer.verdict, 'deny')
+  assert.equal(answer.reason, 'explicit_deny')
 })
 
 test('G1: a key the registry lets through on a cache miss is allowed', () => {

@@ -1,13 +1,19 @@
 /**
- * The frozen policy-key registry: the 34 keys the pinned client registers, with the
+ * The frozen policy-key registry: the 34 keys the pinned client registers plus
+ * `allow_connector_file_downloads`, observed live after that artifact was frozen, with the
  * per-key inputs its no-live-policy verdict reads.
  *
- * Generated from the verified evidence package
+ * The 34 pinned entries are generated from the verified evidence package
  * `phase34/business-followup/policy-limits-implementation/evidence.json` (revision 3,
  * `derived.policyRegistry`, anchored at `chunk-d8h3bh4f.js` [33782,38690)). The fields are
  * the pinned artifact own fields: `onCacheMiss`, `onFailOpenVerdict`, `deniedUnder`,
  * `hardBlockUnder`, `serverPopulated`, `transcriptScan`, plus the requirement id and label
  * the registry states. They are protocol constants, not deployment configuration.
+ *
+ * `allow_connector_file_downloads` is the one entry added by hand: the live service states it
+ * in `restrictions` for a first-party account, while the client's connector file-download
+ * surface has no counterpart here. Its own comment records the evidence and which fields are
+ * the live observation rather than a pinned artifact value.
  */
 
 /** Verdict a key produces when no live policy is loaded. */
@@ -27,7 +33,10 @@ export interface PolicyKeyRegistration {
   readonly serverPopulated: boolean
   /** Whether the key reads the transcript and is refreshed by that scan. */
   readonly transcriptScan: boolean
-  /** Requirement identifier the pinned registry states. */
+  /**
+   * Requirement identifier the pinned registry states, or `observed-live` for a key added
+   * from a live document after the pinned artifact was frozen.
+   */
   readonly requirementId: string
   /** Human label the pinned registry states. */
   readonly label: string
@@ -224,6 +233,22 @@ export const POLICY_KEY_REGISTRY = Object.freeze({
     transcriptScan: false,
     requirementId: "HIPAA-R43",
     label: "Connector suggestions",
+  }),
+  // Not in the 34-key pinned artifact: a live `policy_limits` document states this restriction
+  // for a first-party account, so it must stay a known key rather than reach the unknown-key
+  // refusal path. `serverPopulated` is that live observation; the other fields take the
+  // connector family's conservative reading from `allow_connector_suggest`, and the build has
+  // no connector file-download surface, so its mapping is inapplicable and derives no
+  // operation from them.
+  "allow_connector_file_downloads": Object.freeze({
+    onCacheMiss: "deny",
+    onFailOpenVerdict: 'deny',
+    deniedUnder: Object.freeze(["hipaa"]),
+    hardBlockUnder: Object.freeze([]),
+    serverPopulated: true,
+    transcriptScan: false,
+    requirementId: "observed-live",
+    label: "Connector file downloads",
   }),
   "allow_mcp_task_worker_wake": Object.freeze({
     onCacheMiss: "deny",
