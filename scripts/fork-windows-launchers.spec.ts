@@ -1,11 +1,13 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { constants, tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
+/** run.cmd preloads the priority module through a file URL built from its own directory. */
+const priorityPreload = `file:///${join(repositoryRoot, 'fork-runtime', 'web', 'process-priority.mjs').replaceAll('\\', '/')}`
 const buildLauncher = join(repositoryRoot, 'build.cmd')
 const cleanLauncher = join(repositoryRoot, 'clean.cmd')
 const runLauncher = join(repositoryRoot, 'run.cmd')
@@ -57,7 +59,8 @@ describe('Windows fork launchers', () => {
   it('launches the built CLI directly with the fork patches', () => {
     const source = readFileSync(runLauncher, 'utf8')
     expect(source).toContain('set "DSH_BUILT_ENTRY=%~dp0apps\\cli\\lib\\bin.js"')
-    expect(source).toContain('node --expose-internals "%DSH_BUILT_ENTRY%" web')
+    expect(source).toContain('node --expose-internals --import "%DSH_PRIORITY_PRELOAD%" "%DSH_BUILT_ENTRY%" web')
+    expect(source).toContain('set "DSH_PRIORITY_PRELOAD=%~dp0fork-runtime\\web\\process-priority.mjs"')
     expect(source).toContain('--patch "%~dp0fork-runtime\\diagnostics\\cordis.patch.yml"')
     expect(source).toContain('--patch "%~dp0fork-runtime\\web\\perf.patch.yml"')
     expect(source).toContain('--max-old-space-size=32768')
@@ -68,7 +71,7 @@ describe('Windows fork launchers', () => {
     const fallback = source.indexOf(':source_launch')
     expect(fallback).toBeGreaterThan(-1)
     const section = source.slice(fallback)
-    expect(section).toContain('scripts\\fork-windows-pnpm.cmd" exec node --expose-internals --import tsx/esm "%~dp0apps\\cli\\src\\bin.ts" web')
+    expect(section).toContain('scripts\\fork-windows-pnpm.cmd" exec node --expose-internals --import "%DSH_PRIORITY_PRELOAD%" --import tsx/esm "%~dp0apps\\cli\\src\\bin.ts" web')
     expect(section).toContain('echo Run build.cmd to build the project')
   })
 
@@ -187,7 +190,7 @@ describe('Windows fork launchers', () => {
       'pnpm install --child-concurrency=4 --optimistic-repeat-install=false',
       'pnpm run build',
       `pnpm exec tsx ${join(repositoryRoot, 'scripts', 'fork-plugins-build.ts')}`,
-      `pnpm exec node --expose-internals --import tsx/esm ${join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts')} web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')} --patch ${join(repositoryRoot, 'fork-runtime', 'web', 'perf.patch.yml')}`,
+      `pnpm exec node --expose-internals --import ${priorityPreload} --import tsx/esm ${join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts')} web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')} --patch ${join(repositoryRoot, 'fork-runtime', 'web', 'perf.patch.yml')}`,
     ])
   })
 
@@ -258,5 +261,18 @@ describe('Windows fork launchers', () => {
     expect(result.stdout).toContain(`Installed pnpm ${pnpmVersion} is incomplete`)
     expect(result.stdout).not.toContain('MODULE_NOT_FOUND')
     expect(readFileSync(log, 'utf8')).toContain('npm install --prefix')
+  })
+  it.skipIf(process.platform !== 'win32')('raises the Host above normal priority while its children start at normal', () => {
+    const script = "const os=require('os');const c=require('child_process').spawnSync(process.execPath,['-p','require(\"os\").getPriority()'],{encoding:'utf8'});console.log(os.getPriority(), c.stdout.trim())"
+    const run = (env: Record<string, string>) => spawnSync(process.execPath, ['--import', priorityPreload, '-e', script], {
+      encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', ...env },
+    })
+    const raised = run({})
+    expect(raised.status, raised.stderr).toBe(0)
+    expect(raised.stdout.trim()).toBe(`${String(constants.priority.PRIORITY_ABOVE_NORMAL)} ${String(constants.priority.PRIORITY_NORMAL)}`)
+    expect(run({ DSH_PROCESS_PRIORITY: 'normal' }).stdout.trim().split(' ')[0]).toBe(String(constants.priority.PRIORITY_NORMAL))
+    const invalid = run({ DSH_PROCESS_PRIORITY: 'realtime' })
+    expect(invalid.status).not.toBe(0)
+    expect(invalid.stderr).toContain('DSH_PROCESS_PRIORITY must be one of')
   })
 })
