@@ -46,7 +46,7 @@ cd fork-plugins\dsh-relay
 4. 按中继返回的 frp 版本下载官方 release，校验 SHA-256 后解压 `frpc`，并把配置、共享令牌和 CA 证书写入 `<DSH_HOME>/dsh-relay/run/`。
 5. 用该配置启动 `frpc`；收到 `login to server success` 与 `start proxy success` 视为已连接；异常退出按指数退避重启。
 
-每次连接都会重新铸造 Cookie，因此中继保存的绑定始终落在宿主的 Cookie 有效期之内。
+每次连接都会重新铸造 Cookie；保持连接期间，插件每隔 `cookieRefreshIntervalMs`（默认 12 小时）再登记一次，因此无论 DSH 连续运行多久，中继保存的绑定都落在宿主的 Cookie 有效期之内。刷新失败时隧道保持运行，下一个周期重试；中继返回的隧道参数变化时，插件完整重连。
 
 ## 安全边界
 

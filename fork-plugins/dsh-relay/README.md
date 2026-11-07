@@ -46,7 +46,7 @@ The status area reports **Not configured**, **Downloading frpc**, **Connecting**
 4. Download the frp release the relay names, verify the archive against the pinned SHA-256, extract `frpc`, and write the configuration, shared token, and CA certificate into `<DSH_HOME>/dsh-relay/run/`.
 5. Start `frpc` with that configuration, treat `login to server success` plus `start proxy success` as connected, and restart the process with exponential backoff after an unexpected exit.
 
-Every connection mints a new cookie, so the relay's stored binding stays inside the Host's cookie lifetime.
+Every connection mints a new cookie, and a connected tunnel repeats the registration every `cookieRefreshIntervalMs` (12 hours by default), so the relay's stored binding stays inside the Host's cookie lifetime however long DSH stays up. A failed refresh leaves the tunnel running and is retried at the next interval; a relay that returns different tunnel parameters gets a full reconnect.
 
 ## Security
 

@@ -9,7 +9,7 @@ The plugin is one package with two halves. The host half owns `/api/relay.*`, th
 Behaviors that must survive any refactor:
 
 - **Credential storage.** Domain, username, password, personal client key, and the auto-connect preference live in one `grant` credential record. No secret is written to `cordis.yml`, a profile patch, a log line, an error detail, or an RPC response.
-- **Cookie minting.** A cookie is minted per connection from the signing secret in `client-connection/browser-session`, with the exact authority reported to the relay. The name is `dsh-auth-<base64url(sha256(authority))>` and the payload is the version-1 browser payload `packages/client/connection/src/browser-auth.ts` verifies. The lifetime is the Host's `cookieMaxAgeDays` minus one day, never below one day.
+- **Cookie minting.** A cookie is minted per connection from the signing secret in `client-connection/browser-session`, with the exact authority reported to the relay. The name is `dsh-auth-<base64url(sha256(authority))>` and the payload is the version-1 browser payload `packages/client/connection/src/browser-auth.ts` verifies. The lifetime is the Host's `cookieMaxAgeDays` minus one day, never below one day. A connected tunnel re-registers a newly minted cookie every `cookieRefreshIntervalMs`; a failed refresh never tears down the tunnel, and changed tunnel parameters cause a full reconnect.
 - **Relay protocol.** Every request is one HTTPS `POST` with the personal key as a bearer token and a JSON body at most 16 KiB. Error codes map to typed failures; a relay response is validated before any tunnel value is used.
 - **frpc acquisition.** The archive is downloaded only for the release the relay names, checked against the pinned SHA-256 for `<version>/<platform>-<arch>`, and extracted in-process (zip on Windows, `tar.gz` elsewhere). An unpinned release, a mismatched hash, or a malformed archive is refused.
 - **Run directory.** `<DSH_HOME>/dsh-relay/run/` is owner-only, and every file in it is written owner-only with an exclusive create. The configuration derives only from the returned tunnel.
@@ -34,6 +34,7 @@ Run from `fork-plugins/dsh-relay` with the repository's toolchain:
 ```
 
 - `tests/host/cookie.spec.ts` mints through the real `packages/client/connection/src/browser-auth.ts` verifier.
+- `tests/host/controller.spec.ts` (`relay cookie refresh`) covers periodic re-registration without an frpc restart, refresh failure, changed tunnel parameters, and no refresh after disconnect.
 - `tests/host/protocol.spec.ts` covers success, every protocol error code, timeouts, unreachable servers, and malformed responses against a local fake server.
 - `tests/host/frpc-*.spec.ts` cover configuration rendering, archive extraction, hash refusal, and supervisor restart/teardown behavior with a fake `frpc` fixture.
 - `tests/host/controller.spec.ts` covers the full connect path, download, password change, and generation invalidation.

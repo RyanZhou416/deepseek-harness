@@ -58,6 +58,8 @@ export interface RelayConfig {
   reconnectInitialDelayMs?: number
   /** Upper bound for the growing restart delay. Default: 60000 ms. */
   reconnectMaxDelayMs?: number
+  /** How often a connected tunnel re-signs and re-registers its DSH cookie with the relay. Default: 43200000 ms (12 h). */
+  cookieRefreshIntervalMs?: number
 }
 
 /** Configuration with every default applied. */
@@ -69,6 +71,7 @@ export interface ResolvedRelayConfig {
   readonly connectStartupTimeoutMs: number
   readonly reconnectInitialDelayMs: number
   readonly reconnectMaxDelayMs: number
+  readonly cookieRefreshIntervalMs: number
 }
 
 /** Validated configuration schema. */
@@ -80,6 +83,7 @@ export const Config = z.object({
   connectStartupTimeoutMs: z.natural().min(1).max(MAX_TIMER_MS).default(30_000),
   reconnectInitialDelayMs: z.natural().min(1).max(MAX_TIMER_MS).default(1_000),
   reconnectMaxDelayMs: z.natural().min(1).max(MAX_TIMER_MS).default(60_000),
+  cookieRefreshIntervalMs: z.natural().min(60_000).max(MAX_TIMER_MS).default(43_200_000),
 })
 
 /**

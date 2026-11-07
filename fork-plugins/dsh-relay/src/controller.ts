@@ -72,6 +72,9 @@ export class RelayController {
   private remotePort: number | undefined
   private frpcVersion: string | undefined
   private lastConnectedAt: string | undefined
+  private lastRegisteredAt: string | undefined
+  private tunnelIdentity: string | undefined
+  private refreshTimer: ReturnType<typeof setInterval> | undefined
   private failure: RelayFailure | undefined
   private download: RelayDownload | undefined
   private supervisor: FrpcSupervisor | undefined
@@ -123,6 +126,7 @@ export class RelayController {
       ...this.remotePort === undefined ? {} : { remotePort: this.remotePort },
       ...this.frpcVersion === undefined ? {} : { frpcVersion: this.frpcVersion },
       ...this.lastConnectedAt === undefined ? {} : { lastConnectedAt: this.lastConnectedAt },
+      ...this.lastRegisteredAt === undefined ? {} : { lastRegisteredAt: this.lastRegisteredAt },
       ...this.failure === undefined ? {} : { errorCode: this.failure.code, ...this.failure.detail === undefined ? {} : { errorDetail: this.failure.detail } },
       ...this.failure === undefined || !this.failure.reconnecting ? {} : { reconnecting: true },
       ...this.download === undefined ? {} : { download: this.download },
@@ -178,29 +182,10 @@ export class RelayController {
       if (webServer === undefined) throw relayError('web-server-unavailable', 'the DSH web server is not mounted')
       const port = webServer.port
       if (port === undefined) throw relayError('web-server-unavailable', 'the DSH web server has not bound a TCP port yet')
-      const authority = relayAuthority(port)
-      const secret = await readBrowserSessionSecret(this.deps.credentials)
-      if (generation !== this.generation) return
-      const cookie = mintBrowserCookie(
-        secret,
-        authority,
-        resolveCookieMaxAgeDays(hostCookieMaxAgeDays(this.deps.ctx)),
-        this.now(),
-      )
-      const client = new RelayProtocolClient({
-        baseUrl: relayApiBaseUrl(account.domain),
-        clientKey: account.clientKey,
-        timeoutMs: this.deps.config.requestTimeoutMs,
-        ...this.deps.fetchImpl === undefined ? {} : { fetchImpl: this.deps.fetchImpl },
-      })
-      const result = await client.connect({
-        username: account.username,
-        password: account.password,
-        authority,
-        cookie: cookie.header,
-      }, abort.signal)
+      const result = await this.register(account, port, abort.signal)
       if (generation !== this.generation) return
       this.applyConnect(result, account)
+      this.tunnelIdentity = tunnelIdentity(result)
       const executable = await this.ensureFrpc(result.tunnel.frpVersion, generation, abort.signal)
       if (generation !== this.generation) return
       const runDirectory = relayRunDirectory(this.home())
@@ -211,7 +196,8 @@ export class RelayController {
       })
       if (generation !== this.generation) return
       this.phase = 'connecting'
-      const supervisor = this.supervisorFactory()({        launch: frpcLaunch(executable, files.configPath, files.runDirectory),
+      const supervisor = this.supervisorFactory()({
+        launch: frpcLaunch(executable, files.configPath, files.runDirectory),
         startupTimeoutMs: this.deps.config.connectStartupTimeoutMs,
         initialDelayMs: this.deps.config.reconnectInitialDelayMs,
         maxDelayMs: this.deps.config.reconnectMaxDelayMs,
@@ -225,6 +211,72 @@ export class RelayController {
       if (generation !== this.generation) return
       this.fail(error)
     }
+  }
+
+  /**
+   * Mint a fresh DSH cookie for the local authority and register it with the relay.
+   * @param account - stored account.
+   * @param port - local DSH Web port.
+   * @param signal - aborts the request.
+   * @returns the relay's connect result.
+   */
+  private async register(account: RelayAccount, port: number, signal: AbortSignal): Promise<ConnectResult> {
+    const authority = relayAuthority(port)
+    const secret = await readBrowserSessionSecret(this.deps.credentials)
+    const cookie = mintBrowserCookie(
+      secret,
+      authority,
+      resolveCookieMaxAgeDays(hostCookieMaxAgeDays(this.deps.ctx)),
+      this.now(),
+    )
+    const client = new RelayProtocolClient({
+      baseUrl: relayApiBaseUrl(account.domain),
+      clientKey: account.clientKey,
+      timeoutMs: this.deps.config.requestTimeoutMs,
+      ...this.deps.fetchImpl === undefined ? {} : { fetchImpl: this.deps.fetchImpl },
+    })
+    const result = await client.connect({
+      username: account.username,
+      password: account.password,
+      authority,
+      cookie: cookie.header,
+    }, signal)
+    this.lastRegisteredAt = new Date(this.now()).toISOString()
+    return result
+  }
+
+  /**
+   * Re-register a connected tunnel so the cookie the relay injects never outlives its signature.
+   *
+   * A failure leaves the running tunnel alone; the next interval retries. A relay that
+   * answers with different tunnel parameters gets a full reconnect.
+   * @param generation - connection generation the timer belongs to.
+   */
+  private async refreshRegistration(generation: number): Promise<void> {
+    if (generation !== this.generation || this.phase !== 'connected') return
+    const abort = this.abort
+    if (abort === undefined) return
+    try {
+      const account = await this.requireAccount()
+      const port = (this.deps.ctx.get('webServer') as HostWebServer | undefined)?.port
+      if (port === undefined) throw relayError('web-server-unavailable', 'the DSH web server has no bound TCP port')
+      const result = await this.register(account, port, abort.signal)
+      if (generation !== this.generation) return
+      if (tunnelIdentity(result) !== this.tunnelIdentity) {
+        this.deps.log?.('dsh-relay: the relay changed the tunnel parameters; reconnecting')
+        await this.disconnect()
+        await this.start()
+      }
+    } catch (error) {
+      if (generation !== this.generation) return
+      const failure = asRelayError(error)
+      this.deps.log?.(`dsh-relay: cookie refresh failed: ${failure.code}; the tunnel stays up and the next interval retries`)
+    }
+  }
+
+  private stopRefresh(): void {
+    if (this.refreshTimer !== undefined) clearInterval(this.refreshTimer)
+    this.refreshTimer = undefined
   }
 
   private applyConnect(result: ConnectResult, account: RelayAccount): void {
@@ -280,6 +332,10 @@ export class RelayController {
         this.failure = undefined
         this.download = undefined
         this.lastConnectedAt = new Date(this.now()).toISOString()
+        if (this.refreshTimer === undefined) {
+          this.refreshTimer = setInterval(() => { void this.refreshRegistration(generation) }, this.deps.config.cookieRefreshIntervalMs)
+          this.refreshTimer.unref?.()
+        }
         break
       case 'startup-failed':
         this.fail(relayError('frpc-start-failed', event.detail), true)
@@ -300,6 +356,7 @@ export class RelayController {
    */
   async disconnect(): Promise<void> {
     this.generation += 1
+    this.stopRefresh()
     this.abort?.abort()
     this.abort = undefined
     const supervisor = this.supervisor
@@ -372,6 +429,7 @@ export class RelayController {
     if (this.disposed) return
     this.disposed = true
     this.generation += 1
+    this.stopRefresh()
     this.abort?.abort()
     this.abort = undefined
     const supervisor = this.supervisor
@@ -379,4 +437,14 @@ export class RelayController {
     if (supervisor !== undefined) await supervisor.dispose()
     this.phase = 'disconnected'
   }
+}
+
+/**
+ * Parameters that decide which frps proxy the running frpc owns.
+ * @param result - relay connect result.
+ * @returns a comparable identity string.
+ */
+function tunnelIdentity(result: ConnectResult): string {
+  const { serverAddr, serverPort, websocketPath, user, frpToken, remotePort, frpVersion } = result.tunnel
+  return JSON.stringify([serverAddr, serverPort, websocketPath, user, frpToken, remotePort, frpVersion])
 }

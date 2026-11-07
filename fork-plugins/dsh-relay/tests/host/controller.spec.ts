@@ -57,6 +57,8 @@ interface HarnessOptions {
   frpcPath?: string
   config?: RelayConfig
   fetch?: typeof fetch
+  /** Overrides the validated refresh interval so tests need not wait a minute. */
+  refreshMs?: number
 }
 
 let scratch: string | undefined
@@ -122,14 +124,17 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   const supervisorOptions: FrpcSupervisorOptions[] = []
   const controller = new RelayController({
     ctx: hostContext(options),
-    config: resolveRelayConfig({
-      requestTimeoutMs: 2_000,
-      connectStartupTimeoutMs: 2_000,
-      reconnectInitialDelayMs: 10,
-      reconnectMaxDelayMs: 40,
-      ...options.frpcPath === undefined ? {} : { frpcPath: options.frpcPath },
-      ...options.config,
-    }),
+    config: {
+      ...resolveRelayConfig({
+        requestTimeoutMs: 2_000,
+        connectStartupTimeoutMs: 2_000,
+        reconnectInitialDelayMs: 10,
+        reconnectMaxDelayMs: 40,
+        ...options.frpcPath === undefined ? {} : { frpcPath: options.frpcPath },
+        ...options.config,
+      }),
+      ...options.refreshMs === undefined ? {} : { cookieRefreshIntervalMs: options.refreshMs },
+    },
     store,
     credentials,
     home: () => root,
@@ -305,5 +310,79 @@ describe('relay controller', () => {
     await waitForPhase(controller, 'connected')
     await controller.save({ domain: 'relay.example.com', username: 'ryan', autoConnect: true })
     expect((await controller.status()).phase).toBe('connected')
+  })
+})
+
+describe('relay cookie refresh', () => {
+  it('re-registers a fresh cookie while connected without restarting frpc', async () => {
+    const frpcPath = await writeFakeFrpc()
+    const { controller, requests, supervisorOptions } = await createHarness({ frpcPath, refreshMs: 40 })
+    await controller.start()
+    await waitForPhase(controller, 'connected')
+    const deadline = Date.now() + 4_000
+    while (requests.filter(request => request.url.endsWith('/connect')).length < 3) {
+      if (Date.now() > deadline) throw new Error('no refresh happened')
+      await delay(10)
+    }
+    const cookies = requests.filter(request => request.url.endsWith('/connect'))
+      .map(request => decodeCookieBody((request.body?.dsh as { cookie: string }).cookie).issuedAt)
+    expect(new Set(cookies).size).toBe(cookies.length)
+    expect(supervisorOptions).toHaveLength(1)
+    const status = await controller.status()
+    expect(status.phase).toBe('connected')
+    expect(status.lastRegisteredAt).toBeDefined()
+  })
+
+  it('keeps the tunnel up when a refresh fails', async () => {
+    const frpcPath = await writeFakeFrpc()
+    let calls = 0
+    const { controller, supervisorOptions } = await createHarness({
+      frpcPath,
+      refreshMs: 40,
+      fetch: async () => {
+        calls += 1
+        if (calls === 1) return Response.json({ ok: true, username: 'ryan', created: false, url: BASE_URL, tunnel: TUNNEL })
+        return Response.json({ ok: false, code: 'internal', message: 'down' }, { status: 500 })
+      },
+    })
+    await controller.start()
+    await waitForPhase(controller, 'connected')
+    while (calls < 3) await delay(10)
+    expect((await controller.status()).phase).toBe('connected')
+    expect(supervisorOptions).toHaveLength(1)
+  })
+
+  it('reconnects when the relay returns different tunnel parameters', async () => {
+    const frpcPath = await writeFakeFrpc()
+    let calls = 0
+    const { controller, supervisorOptions } = await createHarness({
+      frpcPath,
+      refreshMs: 40,
+      fetch: async () => {
+        calls += 1
+        const tunnel = calls === 1 ? TUNNEL : { ...TUNNEL, remotePort: 13081 }
+        return Response.json({ ok: true, username: 'ryan', created: false, url: BASE_URL, tunnel })
+      },
+    })
+    await controller.start()
+    await waitForPhase(controller, 'connected')
+    const deadline = Date.now() + 4_000
+    while (supervisorOptions.length < 2) {
+      if (Date.now() > deadline) throw new Error('no reconnect happened')
+      await delay(10)
+    }
+    await waitForPhase(controller, 'connected')
+    expect((await controller.status()).remotePort).toBe(13081)
+  })
+
+  it('stops refreshing after disconnect', async () => {
+    const frpcPath = await writeFakeFrpc()
+    const { controller, requests } = await createHarness({ frpcPath, refreshMs: 40 })
+    await controller.start()
+    await waitForPhase(controller, 'connected')
+    await controller.disconnect()
+    const count = requests.length
+    await delay(150)
+    expect(requests).toHaveLength(count)
   })
 })

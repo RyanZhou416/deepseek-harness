@@ -73,6 +73,8 @@ export interface RelayStatus {
   readonly frpcVersion?: string
   /** Instant of the last successful proxy start, ISO 8601. */
   readonly lastConnectedAt?: string
+  /** Instant the relay last accepted this machine's DSH cookie, ISO 8601. */
+  readonly lastRegisteredAt?: string
   /** Typed failure code while the phase is `failed`. */
   readonly errorCode?: RelayErrorCode
   /** Safe failure context; never a secret. */
