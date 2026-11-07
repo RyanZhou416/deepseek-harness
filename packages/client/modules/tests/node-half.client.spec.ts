@@ -11,7 +11,8 @@ import { Context, FiberState, type Fiber } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { renderIndexInjections, type WebServer, type WebResourceRoute, type WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import * as modulesClient from '../src/client/index.ts'
-import { ClientModuleRegistry, bootInjections, orderByModuleGraph } from '../src/index.ts'
+import { brotliDecompressSync } from 'node:zlib'
+import { ClientModuleRegistry, acceptsBrotli, bootInjections, orderByModuleGraph } from '../src/index.ts'
 import type { ClientModuleLoaderTarget, WebBootEntry, WebBootGraph } from '../src/client/index.ts'
 
 /**
@@ -206,13 +207,13 @@ function construct(packageNames: string[]): ClientModuleRegistry {
 }
 
 /** Invoke the registered plugin resource and capture status, headers, and bytes. */
-async function routeRequest(route: Promise<WebResourceRoute>, url: string, method = 'GET'): Promise<{
+async function routeRequest(route: Promise<WebResourceRoute>, url: string, method = 'GET', headers: Record<string, string> = {}): Promise<{
   status: number
   headers: Record<string, string>
   body: Buffer
 }> {
   const { resource } = await route
-  const response = await resource(new Request(new URL(url, 'http://localhost/'), { method }))
+  const response = await resource(new Request(new URL(url, 'http://localhost/'), { method, headers }))
   return { status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) }
 }
 
@@ -1000,6 +1001,39 @@ describe('client bundle activation', () => {
     }
   })
 
+  it('serves a cached Brotli encoding of revisioned bundles to clients that accept it', async () => {
+    const packageName = '@fixture/brotli'
+    const clientPath = writePackage(packageName)
+    mkdirSync(dirname(clientPath), { recursive: true })
+    writeFileSync(clientPath, `module.exports = ${JSON.stringify('x'.repeat(4096))}\n`)
+    const { service, route } = constructWithRoute([packageName])
+    const batch = service.graph().batches[0]!
+    const plain = await routeRequest(route, batch.url, 'GET', { 'accept-encoding': 'gzip' })
+    expect(plain.headers['content-encoding']).toBeUndefined()
+    expect(plain.headers.vary).toBe('Accept-Encoding')
+    const encoded = await routeRequest(route, batch.url, 'GET', { 'accept-encoding': 'gzip, deflate, br' })
+    expect(encoded.headers['content-encoding']).toBe('br')
+    expect(encoded.body.byteLength).toBeLessThan(plain.body.byteLength / 10)
+    expect(brotliDecompressSync(encoded.body).equals(plain.body)).toBe(true)
+    const again = await routeRequest(route, batch.url, 'GET', { 'accept-encoding': 'br' })
+    expect(again.body.equals(encoded.body)).toBe(true)
+    const head = await routeRequest(route, batch.url, 'HEAD', { 'accept-encoding': 'br' })
+    expect(head.headers['content-encoding']).toBe('br')
+    expect(head.body.byteLength).toBe(0)
+    expect((await routeRequest(route, batch.url, 'GET', { 'accept-encoding': 'br;q=0, gzip' })).headers['content-encoding']).toBeUndefined()
+  })
+
+  it('parses Brotli acceptance from Accept-Encoding', () => {
+    expect(acceptsBrotli(undefined)).toBe(false)
+    expect(acceptsBrotli('gzip, deflate')).toBe(false)
+    expect(acceptsBrotli('gzip, br')).toBe(true)
+    expect(acceptsBrotli('BR;q=0.5')).toBe(true)
+    expect(acceptsBrotli('br;q=0')).toBe(false)
+    expect(acceptsBrotli('*')).toBe(true)
+    expect(acceptsBrotli('*, br;q=0')).toBe(false)
+    expect(acceptsBrotli('*;q=0')).toBe(false)
+  })
+
   it('serves the source map beside a registered client bundle', async () => {
     const packageName = '@fixture/source-map'
     const clientPath = writePackage(packageName)
@@ -1016,6 +1050,7 @@ describe('client bundle activation', () => {
     expect(singleMap.headers).toEqual({
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'public, max-age=31536000, immutable',
+      vary: 'Accept-Encoding',
     })
     expect(JSON.parse(singleMap.body.toString('utf8'))).toMatchObject({
       version: 3,

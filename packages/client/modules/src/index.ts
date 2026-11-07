@@ -34,7 +34,8 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { isDeepStrictEqual } from 'node:util'
+import { isDeepStrictEqual, promisify } from 'node:util'
+import { brotliCompress, constants as zlibConstants } from 'node:zlib'
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
@@ -161,10 +162,56 @@ interface ComboResource {
   bundle: Buffer
 }
 
-/** One lazily materialized immutable response body. */
+/** One lazily materialized immutable response body and its cached Brotli encoding. */
 interface LazyResponse {
   contentType: string
   body: () => Promise<Buffer>
+  brotli: () => Promise<Buffer>
+}
+
+const brotliCompressAsync = promisify(brotliCompress)
+
+/**
+ * Brotli quality for revisioned script and map bodies. Each body is immutable and
+ * encoded once per revision on the libuv pool, so the encoding cost is paid once
+ * per build while every later transfer is about 40% smaller than the Web server's
+ * per-response gzip level 1.
+ */
+const BROTLI_QUALITY = 9
+
+/** Pair one immutable body with its lazily computed Brotli encoding. */
+function lazyResponse(contentType: string, body: () => Promise<Buffer>): LazyResponse {
+  return {
+    contentType,
+    body,
+    brotli: lazyBody(async () => {
+      const bytes = await body()
+      return brotliCompressAsync(bytes, {
+        params: {
+          [zlibConstants.BROTLI_PARAM_QUALITY]: BROTLI_QUALITY,
+          [zlibConstants.BROTLI_PARAM_SIZE_HINT]: bytes.byteLength,
+        },
+      })
+    }),
+  }
+}
+
+/**
+ * Whether an Accept-Encoding value accepts Brotli with a nonzero quality.
+ * @param header - request header value.
+ * @returns true when r (or * without an explicit r) is acceptable.
+ */
+export function acceptsBrotli(header: string | undefined): boolean {
+  if (header === undefined) return false
+  let wildcard = false
+  for (const part of header.split(',')) {
+    const [token = '', ...params] = part.trim().toLowerCase().split(';')
+    const q = params.map(p => p.trim()).find(p => p.startsWith('q='))
+    const accepted = q === undefined || Number(q.slice(2)) > 0
+    if (token.trim() === 'br') return accepted
+    if (token.trim() === '*') wildcard = accepted
+  }
+  return wildcard
 }
 
 /** Fields shared by every generated combo plan. */
@@ -661,6 +708,8 @@ export class ClientModuleRegistry extends Service {
   /** One prior graph generation covers a request racing the HMR recomposition that replaced its URL. */
   private previousBatchResponses = new Map<string, LazyResponse>()
   private flushQueued = false
+  /** Whether a Web carrier serves the bundle route, so encoding startup batches ahead of the first request pays off. */
+  private serving = false
   private composed: WebBootGraph
 
   /**
@@ -705,11 +754,28 @@ export class ClientModuleRegistry extends Service {
         () => webCtx.webServer.register({ kind: 'prefix', path: PLUGIN_ROUTE, resource: request => this.fetchBundle(request) }),
         'client-modules: bundle route',
       )
+      webCtx.effect(() => {
+        this.serving = true
+        this.warmBatchEncodings()
+        return () => { this.serving = false }
+      }, 'client-modules: startup batch encodings')
     }
     ctx.inject(['webServer'], registerWebCarrier)
     ctx.on('webserver/index-inject', (table) => {
       table.push(...bootInjections(this.composed))
     })
+  }
+
+  /**
+   * Encode the current startup batch scripts in the background, so the first
+   * remote browser receives Brotli without waiting for it. A failure is only
+   * logged: the request path encodes again on demand.
+   */
+  private warmBatchEncodings(): void {
+    for (const response of this.batchResponses.values()) {
+      if (!response.contentType.startsWith('text/javascript')) continue
+      response.brotli().catch((error: unknown) => { this.ctx.logger.warn('client-modules: startup batch encoding failed: %o', error) })
+    }
   }
 
   /**
@@ -733,7 +799,9 @@ export class ClientModuleRegistry extends Service {
    * Serve an advertised revisioned bundle, source map, chunk, or package asset
    * without a Web server. Unknown URLs return 404, unsupported methods return
    * 405, and `HEAD` returns the same immutable headers without materializing a
-   * body. Each bundle body is built once on its first `GET`; script
+   * body. Each bundle body is built once on its first `GET`, and its Brotli
+   * encoding once on its first `GET` that accepts `br`; startup batch scripts
+   * are encoded in the background while a Web carrier serves the route. Script
    * construction never reads maps. A package asset is read on every request
    * and answers 304 without a body when `If-None-Match` equals its entity tag;
    * its body holds the file open until the caller consumes or cancels it. A
@@ -743,7 +811,8 @@ export class ClientModuleRegistry extends Service {
    * @returns the exact response also exposed by the optional Web route.
    */
   async fetchBundle(request: Request): Promise<Response> {
-    const resource = await this.bundleResource(request.method, request.url, request.headers.get('if-none-match') ?? undefined)
+    const resource = await this.bundleResource(request.method, request.url, request.headers.get('if-none-match') ?? undefined,
+      acceptsBrotli(request.headers.get('accept-encoding') ?? undefined))
     const body = resource.body === undefined ? null
       : resource.body instanceof Readable ? transforStreamBody(resource.body) : heldBody(resource.body)
     return new Response(body, {
@@ -840,26 +909,18 @@ export class ClientModuleRegistry extends Service {
     for (const artifact of artifacts) {
       // The table is keyed by the absolute route the request arrives on, not by
       // the document-relative reference the graph and descriptors carry.
-      batchResponses.set(artifact.url, this.responses.get(artifact.url) ?? {
-        body: artifact.scriptBody,
-        contentType: 'text/javascript; charset=utf-8',
-      })
-      batchResponses.set(artifact.sourceMapUrl, this.responses.get(artifact.sourceMapUrl) ?? {
-        body: artifact.sourceMapBody,
-        contentType: 'application/json; charset=utf-8',
-      })
+      batchResponses.set(artifact.url, this.responses.get(artifact.url)
+        ?? lazyResponse('text/javascript; charset=utf-8', artifact.scriptBody))
+      batchResponses.set(artifact.sourceMapUrl, this.responses.get(artifact.sourceMapUrl)
+        ?? lazyResponse('application/json; charset=utf-8', artifact.sourceMapBody))
     }
     const responses = new Map(batchResponses)
     for (const record of this.table.values()) {
       const artifact = buildCombo([record], this.readSourceMap, record.entry.rev)
-      responses.set(artifact.url, responses.get(artifact.url) ?? this.responses.get(artifact.url) ?? {
-        body: artifact.scriptBody,
-        contentType: 'text/javascript; charset=utf-8',
-      })
-      responses.set(artifact.sourceMapUrl, responses.get(artifact.sourceMapUrl) ?? this.responses.get(artifact.sourceMapUrl) ?? {
-        body: artifact.sourceMapBody,
-        contentType: 'application/json; charset=utf-8',
-      })
+      responses.set(artifact.url, responses.get(artifact.url) ?? this.responses.get(artifact.url)
+        ?? lazyResponse('text/javascript; charset=utf-8', artifact.scriptBody))
+      responses.set(artifact.sourceMapUrl, responses.get(artifact.sourceMapUrl) ?? this.responses.get(artifact.sourceMapUrl)
+        ?? lazyResponse('application/json; charset=utf-8', artifact.sourceMapBody))
     }
     for (const [resourceUrl, response] of this.responses) {
       if (this.chunkRequest(new URL(resourceUrl, 'http://x')) !== undefined) responses.set(resourceUrl, response)
@@ -867,6 +928,7 @@ export class ClientModuleRegistry extends Service {
     this.previousBatchResponses = this.batchResponses
     this.batchResponses = batchResponses
     this.responses = responses
+    if (this.serving) this.warmBatchEncodings()
     const batches = artifacts.map(artifact => artifact.descriptor)
     return {
       rev: shortHash(JSON.stringify({ entries, batches })),
@@ -1198,15 +1260,11 @@ export class ClientModuleRegistry extends Service {
       fileName,
       bundle: await readFile(clientPath),
     })
-    const response: LazyResponse = sourceMap
-      ? {
-        body: lazyBody(async () => buildComboSourceMap([await resource()], this.readSourceMap, fileName)),
-        contentType: 'application/json; charset=utf-8',
-      }
-      : {
-        body: lazyBody(async () => buildComboScript([await resource()], sourceMapUrl)),
-        contentType: 'text/javascript; charset=utf-8',
-      }
+    const response = sourceMap
+      ? lazyResponse('application/json; charset=utf-8',
+        lazyBody(async () => buildComboSourceMap([await resource()], this.readSourceMap, fileName)))
+      : lazyResponse('text/javascript; charset=utf-8',
+        lazyBody(async () => buildComboScript([await resource()], sourceMapUrl)))
     this.responses.set(resourceUrl, response)
     return response
   }
@@ -1264,7 +1322,7 @@ export class ClientModuleRegistry extends Service {
    * combo or its map, a prior startup generation, or a current-revision
    * package-local chunk, in that order, and otherwise 404.
    */
-  private async bundleResource(method: string | undefined, url: string, ifNoneMatch: string | undefined): Promise<{
+  private async bundleResource(method: string | undefined, url: string, ifNoneMatch: string | undefined, brotli = false): Promise<{
     status: number
     headers?: Record<string, string>
     body?: Buffer | Readable
@@ -1281,11 +1339,14 @@ export class ClientModuleRegistry extends Service {
       ?? this.previousBatchResponses.get(resourceUrl)
       ?? this.chunkResponse(requestUrl)
     if (response !== undefined) {
-      return {
-        status: 200,
-        headers: { 'content-type': response.contentType, 'cache-control': IMMUTABLE_CACHE },
-        ...(method === 'HEAD' ? {} : { body: await response.body() }),
+      const headers: Record<string, string> = {
+        'content-type': response.contentType,
+        'cache-control': IMMUTABLE_CACHE,
+        vary: 'Accept-Encoding',
+        ...(brotli ? { 'content-encoding': 'br' } : {}),
       }
+      if (method === 'HEAD') return { status: 200, headers }
+      return { status: 200, headers, body: await (brotli ? response.brotli() : response.body()) }
     }
     // Anything else under /plugins (including unadvertised combinations and
     // /plugins/events when the HMR row is absent) is an unknown resource.
