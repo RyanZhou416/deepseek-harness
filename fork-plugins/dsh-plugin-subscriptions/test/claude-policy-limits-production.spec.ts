@@ -291,6 +291,9 @@ async function mount(options: {
   settingsAnswer = options.settings ?? (() => Response.json({ uuid: 'settings-1', checksum: 'checksum-1', settings: {} }))
   const { Context } = await import('@deepseek-ai/cordis')
   const ToolRuntime = (await import('@deepseek-ai/dsh-tools')).default
+  // The registry delegates batches to a selected executor, so this composition loads the
+  // native one a real Host mounts.
+  const NativeToolExecutor = await import('@deepseek-ai/dsh-tool-executor-native')
   const { default: SessionStore, SessionId } = await import('@deepseek-ai/dsh-session')
   const SessionRequestRecordProvider = (await import('@deepseek-ai/dsh-llm-request-record')).default
   const { createFakeConnection } = await import('./fake-connection.js')
@@ -303,6 +306,7 @@ async function mount(options: {
   ctx.on('session/flush', () => {})
   ctx.provide('systemPrompt', { tools: () => () => {} })
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   const fake = createFakeConnection()
   ctx.provide('connection', fake.connection)
   let route: { stream: (options: unknown) => AsyncIterable<unknown> } | undefined
@@ -336,13 +340,21 @@ async function mount(options: {
       execute: () => { runs.set(name, (runs.get(name) ?? 0) + 1); return Promise.resolve('ran') },
     })
   }
-  const execute = (sessionId: string, tool: string) => ctx.tools.execute({
-    callId: ToolCallId(`${tool}-${sessionId}-${String(runs.get('calls') ?? 0)}`),
-    name: tool,
-    arguments: {},
-    agent: executionAgent(sessionId),
-    signal: new AbortController().signal,
-  }) as Promise<{ isError: boolean; error?: { message?: string } }>
+  const execute = async (sessionId: string, tool: string) => {
+    const batch = await ctx.tools.execute({
+      calls: [{
+        type: 'tool-call',
+        id: ToolCallId(`${tool}-${sessionId}-${String(runs.get('calls') ?? 0)}`),
+        name: tool,
+        arguments: '{}',
+      }],
+      agent: executionAgent(sessionId),
+      signal: new AbortController().signal,
+    })
+    const result = batch.results[0]?.result
+    assert.ok(result !== undefined, 'the batch settled the probe call')
+    return result
+  }
   return {
     policy,
     org,

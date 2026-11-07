@@ -36,6 +36,20 @@ import type { ClaudeEnginePolicy } from '../claude-engine/request-policy.js'
 import { oversizeWireError } from './claude-images.js'
 import { CLAUDE_PROTOCOL_PROFILE, claudeRoleHeaders } from './claude-protocol.js'
 
+declare module '@deepseek-ai/dsh-llm/types' {
+  /**
+   * Auxiliary request purposes this route classifies. `GenerateOptions.purpose`
+   * is typed by the declarations the compiling program can see, so a route that
+   * consumes a purpose declares the keys it maps. `compaction` and
+   * `session-title` are the two the pinned client's request class and cache
+   * lifetime distinguish.
+   */
+  interface LlmRequestPurposeMap {
+    'compaction': true
+    'session-title': true
+  }
+}
+
 /**
  * Pinned CLI identity this route presents on every subscription endpoint.
  *

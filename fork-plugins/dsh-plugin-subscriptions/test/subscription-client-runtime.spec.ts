@@ -184,6 +184,12 @@ function captureIntervals(): Captured {
  */
 function installDom(JSDOMClass: typeof JSDOM): () => void {
   const { window } = new JSDOMClass('<!doctype html><html><body></body></html>', { url: 'http://localhost/' })
+  // jsdom implements no animation frames outside its visual mode, and that mode runs a 16 ms
+  // interval of its own — a timer this spec's accounting would attribute to the surface under
+  // test. A timeout-backed frame answers the Host's anchored-position scheduling with the same
+  // one-shot, cancellable shape.
+  window.requestAnimationFrame = callback => window.setTimeout(() => { callback(Date.now()) }, 0)
+  window.cancelAnimationFrame = handle => { window.clearTimeout(handle) }
   const names = [
     'window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event', 'MouseEvent',
     'KeyboardEvent', 'MutationObserver', 'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame',

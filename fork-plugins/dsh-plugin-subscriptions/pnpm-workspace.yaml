@@ -1,0 +1,13 @@
+# Settings for this plugin's standalone install. The plugin is not a member of
+# the repository workspace, so it carries its own pnpm settings and lockfile.
+#
+# pnpm 11 refuses an install whose dependencies ship build scripts that the
+# project never reviewed. `tsx` reaches `esbuild`, whose install script selects
+# and verifies the platform binary the transform API loads.
+allowBuilds:
+  esbuild: true
+
+# The Harness cohort is a peer, not something this package may duplicate in its
+# own tree: an auto-installed peer would give the plugin a second copy of a
+# service whose identity is the Host's.
+autoInstallPeers: false

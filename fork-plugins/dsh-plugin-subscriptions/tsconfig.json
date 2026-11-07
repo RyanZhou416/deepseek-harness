@@ -27,6 +27,9 @@
       "@deepseek-ai/dsh-llm": [
         "../../packages/llm/llm/lib/types/index.d.ts"
       ],
+      "@deepseek-ai/dsh-llm/types": [
+        "../../packages/llm/llm/lib/types/types.d.ts"
+      ],
       "@deepseek-ai/dsh-llm-request-record": [
         "../../packages/llm/llm-request-record/lib/types/index.d.ts"
       ],

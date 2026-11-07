@@ -147,6 +147,11 @@ test('a failed status poll and a failed action stay in separate slots', () => {
 /** Install the jsdom globals the components and React reach for. */
 function installDom(JSDOMClass: typeof JSDOM): () => void {
   const { window } = new JSDOMClass('<!doctype html><html><body></body></html>', { url: 'http://localhost/' })
+  // jsdom implements no animation frames outside its visual mode, and that mode runs a 16 ms
+  // interval of its own. A timeout-backed frame answers the Host's anchored-position scheduling
+  // with the same one-shot, cancellable shape and leaves the fixture's timers out of the test.
+  window.requestAnimationFrame = callback => window.setTimeout(() => { callback(Date.now()) }, 0)
+  window.cancelAnimationFrame = handle => { window.clearTimeout(handle) }
   const names = [
     'window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event', 'MouseEvent',
     'KeyboardEvent', 'MutationObserver', 'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame',

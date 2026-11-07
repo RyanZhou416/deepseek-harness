@@ -126,11 +126,15 @@ function call(app: Composition, sessionId: string): Promise<{ isError: boolean }
 async function mount(options: { policyDenies?: () => boolean } = {}): Promise<Composition> {
   const { Context } = await import('@deepseek-ai/cordis')
   const ToolRuntime = (await import('@deepseek-ai/dsh-tools')).default
+  // The registry delegates batches to a selected executor, so this composition loads the
+  // native one a real Host mounts.
+  const NativeToolExecutor = await import('@deepseek-ai/dsh-tool-executor-native')
   const plugin = await import('../src/index.js')
   const ctx = new Context()
   // The registry's only service dependency; the schema wiring is never invoked here.
   ctx.provide('systemPrompt', { tools: () => () => {} })
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   const fake = createFakeConnection()
   ctx.provide('connection', fake.connection)
   let route: { stream: (options: unknown) => AsyncIterable<unknown> } | undefined
@@ -199,13 +203,16 @@ async function mount(options: { policyDenies?: () => boolean } = {}): Promise<Co
       // or settings read and before any request is assembled.
       await assert.rejects((async () => { for await (const chunk of stream) void chunk })())
     },
-    execute: (sessionId, callId) => ctx.tools.execute({
-      callId: ToolCallId(callId),
-      name: 'host_probe',
-      arguments: {},
-      agent: executionAgent(sessionId),
-      signal: new AbortController().signal,
-    }) as Promise<{ isError: boolean }>,
+    execute: async (sessionId, callId) => {
+      const batch = await ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId(callId), name: 'host_probe', arguments: '{}' }],
+        agent: executionAgent(sessionId),
+        signal: new AbortController().signal,
+      })
+      const result = batch.results[0]?.result
+      assert.ok(result !== undefined, 'the batch settled the probe call')
+      return result
+    },
     runs: () => runs,
     streamOtherProvider: async (sessionId) => {
       // The same dispatch the llm service performs for a committed request: the registered

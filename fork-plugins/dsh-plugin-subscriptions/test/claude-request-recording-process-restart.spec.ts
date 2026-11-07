@@ -7,8 +7,8 @@
  * events into the private `DSH_HOME` the launcher owns, and exits.
  *
  * The second process is a separate `dsh --profile headless` run over the SAME private cwd and
- * home, with a test-only patch that mounts one reader fixture and disables the app's startup and
- * runner rows. It mounts no probe, states no task, requests no model and runs no turn: the reader
+ * home, with a test-only patch that mounts one reader fixture and disables the app's runner and
+ * model rows. It mounts no probe, states no task, requests no model and runs no turn: the reader
  * opens the persisted session through the shipped JSONL persistence, derives each record's `seq`
  * the way that reader does, projects it with `reconstructRequestSystem`, compares it with the
  * record the first process persisted, prints one JSON line per record, and exits.
@@ -195,10 +195,12 @@ test('a second OS process reads both prepared records back from the persisted se
       'the two attempts carry different system text',
     )
 
-    // The second process: one reader fixture, no startup, no runner, no task, no model route.
+    // The second process: one reader fixture, no runner, no task, no model route. The
+    // command-line row stays mounted because the Host's `sandbox-policy` row injects the
+    // service it provides; without a task it publishes that service and starts nothing, and
+    // leaving it out would strand every dependent row and print their pending warnings.
     const patch = join(cwd, 'second-process.cordis.yml')
     await writeFile(patch, JSON.stringify([
-      { id: 'headless-startup', disabled: true },
       { id: 'headless-runner', disabled: true },
       { id: 'llm-deepseek', disabled: true },
       { id: 'plugin-package-inventory-deepseek', disabled: true },
