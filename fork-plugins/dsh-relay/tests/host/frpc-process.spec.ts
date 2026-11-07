@@ -1,3 +1,4 @@
+import { constants, getPriority, setPriority } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { FrpcSupervisor, scrubChildEnvironment } from '../../src/frpc-process.ts'
@@ -82,5 +83,18 @@ describe('frpc supervisor', () => {
       SAFE_VALUE: 'ok',
     })
     expect(env).toEqual({ PATH: '/bin', HOME: '/home/me', SAFE_VALUE: 'ok' })
+  })
+
+  it.skipIf(process.platform !== 'win32')('runs frpc at the Host priority', async () => {
+    const before = getPriority()
+    setPriority(constants.priority.PRIORITY_ABOVE_NORMAL)
+    try {
+      const { supervisor, lines } = createSupervisor('priority')
+      supervisor.start()
+      await waitFor(() => lines.some(line => line.startsWith('priority ')), 3_000, 'priority report')
+      expect(lines.find(line => line.startsWith('priority '))).toBe(`priority ${String(constants.priority.PRIORITY_ABOVE_NORMAL)}`)
+    } finally {
+      setPriority(before)
+    }
   })
 })

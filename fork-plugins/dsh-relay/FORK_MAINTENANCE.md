@@ -33,6 +33,7 @@ Run from `fork-plugins/dsh-relay` with the repository's toolchain:
 ..\..\node_modules\.bin\vitest run
 ```
 
+- `tests/host/frpc-process.spec.ts` (`runs frpc at the Host priority`) keeps frpc at the Host's scheduling priority, so a saturated machine does not delay relayed traffic.
 - `tests/host/cookie.spec.ts` mints through the real `packages/client/connection/src/browser-auth.ts` verifier.
 - `tests/host/controller.spec.ts` (`relay cookie refresh`) covers periodic re-registration without an frpc restart, refresh failure, changed tunnel parameters, and no refresh after disconnect.
 - `tests/host/protocol.spec.ts` covers success, every protocol error code, timeouts, unreachable servers, and malformed responses against a local fake server.

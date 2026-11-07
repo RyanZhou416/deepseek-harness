@@ -37,6 +37,16 @@ switch (mode) {
     }, 80)
     keepAlive()
     break
+  case 'priority':
+    // Report the scheduling priority after the supervisor had time to adjust it.
+    setTimeout(async () => {
+      const { getPriority } = await import('node:os')
+      line(`priority ${String(getPriority())}`)
+      line('login to server success')
+      line('start proxy success')
+    }, 200)
+    keepAlive()
+    break
   default:
     line(`unknown fake frpc mode ${mode}`)
     process.exitCode = 2

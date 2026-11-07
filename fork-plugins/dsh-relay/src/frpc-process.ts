@@ -10,6 +10,7 @@
  */
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
+import { getPriority, setPriority } from 'node:os'
 import { relayError } from './errors.ts'
 
 /** Grace period between the terminate signal and a forced kill. */
@@ -210,6 +211,7 @@ export class FrpcSupervisor {
       return
     }
     this.child = child
+    matchHostPriority(child)
     const stdout = child.stdout
     const stderr = child.stderr
     let buffer = ''
@@ -271,4 +273,21 @@ export class FrpcSupervisor {
 export function frpcLaunch(executable: string, configPath: string, runDirectory: string): FrpcLaunch {
   if (executable === '' || configPath === '') throw relayError('frpc-unsupported', 'frpc or its configuration path is empty')
   return { command: executable, args: ['-c', configPath], cwd: runDirectory }
+}
+
+/**
+ * Run frpc at the Host's own scheduling priority. The tunnel is part of the
+ * Host's request path, and a child starts at normal priority even when the Host
+ * runs above it, so without this a machine saturated by normal-priority work
+ * would delay relayed traffic behind that work.
+ * @param child - the frpc process just spawned.
+ */
+function matchHostPriority(child: ChildProcess): void {
+  if (child.pid === undefined) return
+  const host = getPriority()
+  try {
+    setPriority(child.pid, host)
+  } catch {
+    // ESRCH when frpc already exited, EACCES/EPERM when the platform refuses to raise a child: frpc keeps its default priority.
+  }
 }
