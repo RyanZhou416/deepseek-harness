@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { existsSync, lstatSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  assertStagedArtifacts, assertStagedManifest, buildSubscriptionsTransport, buildWireCompat, bunPlatformRuntime,
+  assertStagedArtifacts, assertStagedManifest, buildSubscriptionsTransport, harnessCohort, buildWireCompat, bunPlatformRuntime,
   copyStagedEntries, DEFAULT_HOST_ADDRESS, DEFAULT_HOST_PORT, dependencyPreparationError, ensurePluginDependencies,
   installAndSeedProfile, LAUNCHER_HOME_DIRECTORY,
   lockfileAutoInstallPeers, localDependencyPath, lockedDependencyVersion, lockedUndiciVersion, parseArguments, PLUGINS,
@@ -33,6 +33,9 @@ function plugin(id: PluginDefinition['id']): PluginDefinition {
   return found
 }
 
+/** Harness version the profile installs; the synthetic manifests below pin it. */
+const COHORT = (JSON.parse(readFileSync(join(REPOSITORY_ROOT, 'apps', 'cli', 'package.json'), 'utf8')) as { version: string }).version
+
 const subscriptionsSource = {
   name: 'dsh-plugin-subscriptions',
   version: '0.9.4-dsh021rc2.1',
@@ -54,8 +57,8 @@ const subscriptionsSource = {
   optionalDependencies: { '@cursor/sdk': '1.0.32' },
   peerDependencies: {
     '@deepseek-ai/cordis': '^4.0.5',
-    '@deepseek-ai/dsh-llm': '0.2.1-rc.2',
-    '@deepseek-ai/dsh-llm-request-record': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-llm': COHORT,
+    '@deepseek-ai/dsh-llm-request-record': COHORT,
   },
   peerDependenciesMeta: { '@deepseek-ai/dsh-llm-request-record': { optional: true } },
 } satisfies PluginManifest
@@ -69,7 +72,7 @@ const aetherSource = {
   scripts: { build: 'pwsh -File scripts/run-local.ps1 build' },
   peerDependencies: {
     '@deepseek-ai/cordis': '4.0.5',
-    '@deepseek-ai/dsh-tools': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-tools': COHORT,
   },
 } satisfies PluginManifest
 
@@ -81,7 +84,7 @@ const agentTeamsSource = {
   scripts: { build: 'tsc' },
   peerDependencies: {
     '@deepseek-ai/cordis': '^4.0.2',
-    '@deepseek-ai/dsh-tools': '0.2.1-rc.2',
+    '@deepseek-ai/dsh-tools': COHORT,
   },
 } satisfies PluginManifest
 
@@ -95,7 +98,7 @@ const contextSource = {
   devDependencies: { tsdown: '^0.15.0' },
   peerDependencies: {
     '@deepseek-ai/cordis': '^4.0.5',
-    '@deepseek-ai/dsh-session': '>=0.2.1-rc.2',
+    '@deepseek-ai/dsh-session': `>=${COHORT}`,
   },
 } satisfies PluginManifest
 
@@ -114,10 +117,10 @@ describe('fork plugin staging manifests', () => {
     })
     expect(staged.peerDependencies).toEqual({
       '@deepseek-ai/cordis': '^4.0.5',
-      '@deepseek-ai/dsh-llm': '0.2.1-rc.2',
+      '@deepseek-ai/dsh-llm': COHORT,
     })
     expect(privateDependencySpecs(staged)).toEqual([])
-    expect(() => { assertStagedManifest(staged, 'subscriptions') }).not.toThrow()
+    expect(() => { assertStagedManifest(staged, 'subscriptions', COHORT) }).not.toThrow()
   })
 
   it('keeps the aether-shell harness peers external at the repository cohort', () => {
@@ -126,25 +129,25 @@ describe('fork plugin staging manifests', () => {
     expect(staged.dependencies).toBeUndefined()
     expect(staged.peerDependencies).toEqual({
       '@deepseek-ai/cordis': '4.0.5',
-      '@deepseek-ai/dsh-tools': '0.2.1-rc.2',
+      '@deepseek-ai/dsh-tools': COHORT,
     })
-    expect(() => { assertStagedManifest(staged, 'aether-shell') }).not.toThrow()
+    expect(() => { assertStagedManifest(staged, 'aether-shell', COHORT) }).not.toThrow()
   })
 
   it('keeps the context zod dependency and the agent-teams file list', () => {
     const agentTeams = stagedManifest(agentTeamsSource, 'agent-teams')
     expect(agentTeams.dependencies).toBeUndefined()
     expect(agentTeams.files).toContain('lib')
-    expect(() => { assertStagedManifest(agentTeams, 'agent-teams') }).not.toThrow()
+    expect(() => { assertStagedManifest(agentTeams, 'agent-teams', COHORT) }).not.toThrow()
 
     const context = stagedManifest(contextSource, 'context')
     expect(context.dependencies).toEqual({ zod: '4.4.3' })
     expect(context.files).toContain('locale/*.json')
-    expect(() => { assertStagedManifest(context, 'context') }).not.toThrow()
+    expect(() => { assertStagedManifest(context, 'context', COHORT) }).not.toThrow()
 
     const unexpected = stagedManifest(contextSource, 'context')
     unexpected.dependencies = { zod: '4.4.3', private: 'file:../private.tgz' }
-    expect(() => { assertStagedManifest(unexpected, 'context') }).toThrow(/unexpected runtime dependency/)
+    expect(() => { assertStagedManifest(unexpected, 'context', COHORT) }).toThrow(/unexpected runtime dependency/)
   })
 
   it('rejects a staged manifest that keeps a private artifact or local path', () => {
@@ -153,11 +156,19 @@ describe('fork plugin staging manifests', () => {
     expect(privateDependencySpecs({ optionalDependencies: { '@tormentalabs/claude-code-wire-compat': '^0.7.2' } })).toHaveLength(1)
     expect(privateDependencySpecs({ dependencies: { public: '^1.0.0' } })).toEqual([])
     const withRequestRecord = stagedManifest(subscriptionsSource, 'subscriptions')
-    withRequestRecord.peerDependencies = { ...withRequestRecord.peerDependencies, '@deepseek-ai/dsh-llm-request-record': '0.2.1-rc.2' }
-    expect(() => { assertStagedManifest(withRequestRecord, 'subscriptions') }).toThrow(/type-only/)
+    withRequestRecord.peerDependencies = { ...withRequestRecord.peerDependencies, '@deepseek-ai/dsh-llm-request-record': COHORT }
+    expect(() => { assertStagedManifest(withRequestRecord, 'subscriptions', COHORT) }).toThrow(/type-only/)
     const wrongCohort = stagedManifest(aetherSource, 'aether-shell')
     wrongCohort.peerDependencies = { '@deepseek-ai/dsh-tools': '0.1.7' }
-    expect(() => { assertStagedManifest(wrongCohort, 'aether-shell') }).toThrow(/0\.2\.1-rc\.2/)
+    expect(() => { assertStagedManifest(wrongCohort, 'aether-shell', COHORT) }).toThrow(`must be ${COHORT}`)
+  })
+
+  it('pins the tracked source-built plugins to the Harness version the profile installs', async () => {
+    const cohort = await harnessCohort()
+    for (const [id, directory] of [['subscriptions', 'dsh-plugin-subscriptions'], ['aether-shell', 'dsh-plugin-aether-shell']] as const) {
+      const source = JSON.parse(await readFile(join(REPOSITORY_ROOT, 'fork-plugins', directory, 'package.json'), 'utf8')) as PluginManifest
+      expect(() => { assertStagedManifest(stagedManifest(source, id), id, cohort) }).not.toThrow()
+    }
   })
 })
 

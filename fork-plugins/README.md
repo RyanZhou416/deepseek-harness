@@ -13,7 +13,7 @@ The build targets the current profile format only: it has no legacy-profile dete
 `scripts/fork-plugins-build.ts` uses `--dsh-home`, then `DSH_HOME`, then the platform launcher default — `<checkout parent>\deepseek-harness-data` on Windows and `~/.dsh` on macOS/Linux, expanding a leading `~` — and targets `profiles/web`. It stages each package under the ignored `.build/fork-plugins/<id>/` directory and installs each stage with `dsh plugin --profile web add <absolute staged directory>`, which records a pnpm `link:`. It records a source key, so an unchanged second run neither rebuilds nor reinstalls, and it seeds a fresh profile only after the install succeeds. No Session, attachment, credential, projection-cache, or `.agent-teams` data is read or written.
 
 - Subscriptions compiles `lib/index.js` and `lib/client.js` from source. The staged manifest inlines `@tormentalabs/claude-code-wire-compat` (from the `fork-plugins/claude-code-wire-compat` source, whose `dist/` the build compiles with the repository TypeScript compiler) and `undici`, removes the type-only `@deepseek-ai/dsh-llm-request-record` peer, and declares no runtime dependency. Public optional provider entries (`@cursor/sdk`, `@oven/bun-*`) stay declared; a link install does not install a linked package's optional dependencies, so those providers need the package available separately. The staged package ships no declarations; the source checkout remains the type source.
-- AetherShell compiles `lib/lifecycle.mjs` from source and keeps every `@deepseek-ai/*` peer external at `0.2.1-rc.2`.
+- AetherShell compiles `lib/lifecycle.mjs` from source and keeps every `@deepseek-ai/*` peer external at the Harness cohort (`0.2.2-rc.1`).
 - AgentTeams and Context build in isolated work copies under `.build/fork-plugins/work/`; staging reads their built output there, never a committed `lib/`. Context keeps its `zod` runtime dependency, resolved from the repository install.
 - The workspace `@deepseek-ai/dsh-llm-cc-pool` package is copied from the root build output into `.build/fork-plugins/llm-cc-pool/` and linked as a provider bundle beside the fork plugins.
 
@@ -38,9 +38,9 @@ The script defaults to `~/.dsh` on macOS, stages under `.build/fork-plugins/`, a
 ## Agent Teams
 
 - Source: `fork-plugins/dsh-agent-teams`
-- Current private version: `0.1.24-dsh021rc2.1`
+- Current private version: `0.1.24-dsh022rc1.1`
 - Upstream base: `NanmiCoder/dsh-agent-teams v0.1.24`
-- Profile target: DSH `0.2.1-rc.2`
+- Profile target: DSH `0.2.2-rc.1`
 - Profile install: `link:` to `.build/fork-plugins/agent-teams`
 
 Upstream v0.1.24 adapts member creation, cancellation, and recovery to Harness `0.2.1-rc.2`, and preserves member roles and custom tool restrictions across plugin reloads. The private layer keeps awaited `agent/created` startup, projection refresh for cold member navigation, a typed `agent-teams-host` message source, Captain mailbox recovery, and the bounded unread-mailbox cache without changing the on-disk format.
@@ -81,22 +81,22 @@ Agent Teams durable data belongs to each workspace's `.agent-teams/` directory; 
 ## Context
 
 - Source: `fork-plugins/dsh-context`
-- Current private version: `0.73.0-dsh021rc2.1`
-- Upstream base: `bowenliang123/dsh-context v0.73.0`
+- Current private version: `0.78.2-dsh022rc1.1`
+- Upstream base: `bowenliang123/dsh-context v0.78.2`
 - Profile install: `link:` to `.build/fork-plugins/context`
 
 The private pricing catalog covers GPT-6 Astra/Sol, Claude Opus 5.5/Fable 5.1, and Grok 4.7 through Cursor. Agent totals include standard-speed API-equivalent prices and per-request long-context tiers; projection version 21 refolds existing logs without changing Session data. See [prices and assumptions](dsh-context/docs/model-pricing.md).
 
-This build adopts v0.73.0's `foldState`/`foldMetering`/`foldWire` split, Context Insights, balance display, incremental turn counting, selective tool-argument retention, and on-demand corpus backfill. Maintenance-preserved fork behavior and rollback rules are listed in `fork-plugins/dsh-context/FORK_MAINTENANCE.md`.
+This build adopts v0.78.2's command execution log, Fleet cockpit, and Context Stats ledger on top of the `foldState`/`foldMetering`/`foldWire` split, Context Insights, and on-demand corpus backfill. For a Session that is not running, the detail view reads the projection cache and falls back to a bounded tail window, so opening a Session never decodes its whole log. Maintenance-preserved fork behavior and rollback rules are listed in `fork-plugins/dsh-context/FORK_MAINTENANCE.md`.
 
 The low-overhead deployment values are `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, `maxArchiveNodes: 100`, and `maxFileOps: 100`. Confirm that DSH has stopped before changing a profile. Never read, migrate, or delete Session, attachment, credential, or projection-cache data during a plugin update.
 
 ## Subscriptions
 
 - Source: `fork-plugins/dsh-plugin-subscriptions`
-- Current private version: `0.9.4-dsh021rc2.1`
+- Current private version: `0.9.4-dsh022rc1.1`
 - Upstream base: `V1ki/dsh-plugin-subscriptions v0.9.4`
-- Profile target: DSH `0.2.1-rc.2`
+- Profile target: DSH `0.2.2-rc.1`
 - Profile install: `link:` to `.build/fork-plugins/subscriptions`
 
 The private build keeps upstream multi-account providers, usage UI, Codex search, image/video tools, and credential format. Its 0.2.1 adaptation translates V4 tool-role messages without losing call identity or image results and pins the exact DSH dependency cohort; no Session or credential migration is introduced. Cursor login, usage, and local-SDK limits, ChatGPT reset-credit display, and the ChatGPT pool's 100 percent full mark are private behaviors. Reapply them from `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md` after every upstream import.
@@ -104,9 +104,9 @@ The private build keeps upstream multi-account providers, usage UI, Codex search
 ## AetherShell
 
 - Source: `fork-plugins/dsh-plugin-aether-shell`
-- Current private version: `0.1.0-dsh021rc2.4`
+- Current private version: `0.1.0-dsh022rc1.1`
 - Package: `@ryanzhou416/dsh-plugin-aether-shell v0.1.0`
-- Profile target: DSH `0.2.1-rc.2`
+- Profile target: DSH `0.2.2-rc.1`
 - Profile install: `link:` to `.build/fork-plugins/aether-shell`
 
-The bundle keeps every `@deepseek-ai/*` peer external at `0.2.1-rc.2` and is a pure Host plugin with no client assets. It requires the external AetherShell interpreter — legacy mode targets `12.0.2`, typed mode requires `12.0.2+ryan.2` — and the plugin does not redistribute it. See `fork-plugins/dsh-plugin-aether-shell/FORK_MAINTENANCE.md` for preservation and verification.
+The bundle keeps every `@deepseek-ai/*` peer external at the Harness cohort (`0.2.2-rc.1`) and is a pure Host plugin with no client assets. It requires the external AetherShell interpreter — legacy mode targets `12.0.2`, typed mode requires `12.0.2+ryan.2` — and the plugin does not redistribute it. See `fork-plugins/dsh-plugin-aether-shell/FORK_MAINTENANCE.md` for preservation and verification.

@@ -572,6 +572,16 @@ function cliEntry(): string {
   return entry
 }
 
+/**
+ * Harness version the profile installs, which every source-built plugin peer must pin.
+ * @returns the version of the root CLI package.
+ */
+export async function harnessCohort(): Promise<string> {
+  const cli = await readJson<{ version?: string }>(join(REPOSITORY_ROOT, 'apps', 'cli', 'package.json'))
+  if (cli.version === undefined) fail('apps/cli/package.json has no version')
+  return cli.version
+}
+
 /** Versions of the toolchain and harness cohort that shape the staged output. */
 async function toolchainVersions(): Promise<string> {
   const tsdown = await readJson<{ version?: string }>(join(REPOSITORY_ROOT, 'node_modules', 'tsdown', 'package.json'))
@@ -788,8 +798,9 @@ export function privateDependencySpecs(manifest: PluginManifest): string[] {
  * non-cohort harness peer.
  * @param manifest - staged manifest.
  * @param pluginId - which plugin the manifest belongs to.
+ * @param cohort - Harness version the source-built plugins must pin, from {@link harnessCohort}.
  */
-export function assertStagedManifest(manifest: PluginManifest, pluginId: PluginId): void {
+export function assertStagedManifest(manifest: PluginManifest, pluginId: PluginId, cohort: string): void {
   const allowedDependencies = pluginId === 'context' ? new Set(['zod']) : new Set<string>()
   for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
     if (!allowedDependencies.has(name)) fail(`staged ${pluginId} manifest has an unexpected runtime dependency: ${name}@${range}`)
@@ -807,7 +818,7 @@ export function assertStagedManifest(manifest: PluginManifest, pluginId: PluginI
     // Prebuilt upstream plugins express compatibility as a range that includes
     // the selected cohort; their source manifest is preserved verbatim.
     if (pluginId === 'agent-teams' || pluginId === 'context') continue
-    if (range !== '0.2.1-rc.2') fail(`staged ${pluginId} peer ${name} is ${range}; the staged cohort must stay 0.2.1-rc.2`)
+    if (range !== cohort) fail(`staged ${pluginId} peer ${name} is ${range}; the staged cohort must be ${cohort}`)
   }
 }
 
@@ -1344,7 +1355,7 @@ async function stageSubscriptionsTransport(stagingDirectory: string, runtime: Bu
 export async function writeStagedManifest(plugin: PluginDefinition, stagingDirectory: string): Promise<void> {
   const manifest = await sourceManifest(plugin)
   const staged = stagedManifest(manifest, plugin.id)
-  assertStagedManifest(staged, plugin.id)
+  assertStagedManifest(staged, plugin.id, await harnessCohort())
   await writeJson(join(stagingDirectory, 'package.json'), staged)
 }
 
@@ -1670,7 +1681,7 @@ export async function stagingIsCurrent(
   }
   const staged = await readJson<PluginManifest>(join(stagingDirectory, 'package.json'))
   try {
-    assertStagedManifest(staged, plugin.id)
+    assertStagedManifest(staged, plugin.id, await harnessCohort())
   } catch {
     return false
   }

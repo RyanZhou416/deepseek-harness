@@ -28,13 +28,13 @@
 |---|---|---|
 | Fork remote | `origin = https://github.com/RyanZhou416/deepseek-harness.git` | 唯一常规推送目标 |
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
-| Published fork | `master` after local integration | `dsh-v0.2.1-rc.2` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
-| Current official target | `dsh-v0.2.1-rc.2` on 2026-10-17 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
-| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.24`（main，含 0.2.1 适配）+ 本 fork `0.1.24-dsh021rc2.1` 私有发布通道与有界未读邮箱缓存 |
+| Published fork | `master` after local integration | `dsh-v0.2.2-rc.1` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
+| Current official target | `dsh-v0.2.2-rc.1` on 2026-11-07 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
+| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.24`（main，含 0.2.1 适配）+ 本 fork `0.1.24-dsh022rc1.1` 私有发布通道（0.2.2-rc.1 适配）与有界未读邮箱缓存 |
 | Context subtree | `fork-plugins/dsh-context` | 上游 `v0.78.2` + 本 fork 参照价/长上下文计费、视图期边界裁剪、已存会话 detail 的投影缓存优先读取，以及 0.2.2 投影句柄与摘要外压力按需读取 |
 | Subscriptions subtree | `fork-plugins/dsh-plugin-subscriptions` | 上游 `v0.9.4` + 本 fork RC.1/V4 私有适配与 pinned Claude Code 2.1.288 wire；凭据与 Session 格式不变 |
 
-当前维护的源码兼容基线是 `dsh-v0.2.1-rc.2`（合并分支 `integrate/upstream-0.2.1-rc.2`，合入 `master` 后成为发布基线）。整合采用官方 Agent 创建、handle-based Session persistence、Session format V4、通用 `session.updateQueue`、引用拥有的 Client Session、Plugin Manager、Subagent activation limits、cursorless Assistant frame、Web Terminal、SSH、MCP resources、Browser/Computer Use 和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
+当前维护的源码兼容基线是 `dsh-v0.2.2-rc.1`（合并分支 `merge/dsh-v0.2.2-rc.1`，合入 `master` 后成为发布基线；上一基线 `dsh-v0.2.1-rc.2` 的承接见下文）。整合采用官方 Agent 创建、handle-based Session persistence、Session format V4、通用 `session.updateQueue`、引用拥有的 Client Session、Plugin Manager、Subagent activation limits、cursorless Assistant frame、Web Terminal、SSH、MCP resources、Browser/Computer Use 和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
 
 RC.1 的 `SESSION_FORMAT_VERSION` 为 `4`；只读 open 可以准备受支持的历史 generation，写 open 在验证后发布 v4 successor。第三方插件即使磁盘数据可读，也必须重新构建并在隔离 profile 验证逻辑 API；旧代文件不得原地改写。
 
@@ -535,6 +535,8 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 **Profile 模板。** 上游让 `tool-subagent-control` 一并注册 `list_agents`，不再导出 `/list-agents` 子路径；模板中单独的 `tool-subagent-list-agents` 行已删除，留着会使所在预设失效、新会话无法创建。进程子代理行的 `dshHome: !!js ...` 表达式含 ` : `，必须整体加引号，否则 YAML 把它读成映射，`subagent-dsh-sdk` 拒绝该配置。种子脚本只在新建 profile 时复制模板，已有 profile 升级前须在 Host 停止后对 `profiles\web\cordis.patch.yml` 做同样两处修改。**Focused verification.** 以隔离 `DSH_HOME` 运行 `fork-plugins-build` 并启动 Web，日志无 `did not activate`，新建会话无 `agent-preset/invalid`。
 
+**Fork 插件 cohort。** 三个源码构建插件随这次合并重定到 0.2.2-rc.1：subscriptions  .9.4-dsh022rc1.1、AetherShell  .1.0-dsh022rc1.1、AgentTeams  .1.24-dsh022rc1.1（dsh-context 见其分节）。插件 devDependencies 的 Cordis 与 schemastery 必须和 vendor 版本一致（4.1.0 / 3.19.0）：插件经 tsconfig paths 读取本检出的宿主类型，两份 Cordis 会产生两套 Context，声明合并互不相认。subscriptions 在插件内声明自己发出的 LlmRequestPurposeMap 键（compaction、session-title），并以 ngines.dsh 声明兼容；其 pnpm-workspace.yaml 允许 esbuild 构建脚本。0.2.2 把模型工具批次交给独立执行器插件，插件自建的测试组合必须挂载 @deepseek-ai/dsh-tool-executor-native 并用批量 	ools.execute({ calls })。0.2.2 起模型选择由 Agent 持有：AgentTeams 成员路由只能经创建参数或 gent.model.select() 改变，备用路由在下一步生效，不再在同一步重试；没有 Agent.model 的旧宿主分支保留原行为。**Preservation rule.** 不得为通过类型检查给插件单独加 Cordis 路径映射，不得恢复 gent/request 改路由。**Focused verification.** 各插件目录的 typecheck、build 与测试（subscriptions 1944 项、AetherShell 424 项通过 10 项按解释器门控跳过、AgentTeams pnpm verify）；scripts/fork-plugins-build.spec.ts 确认 staged manifest 的 peer 等于 pps/cli 版本。
+
 **UI 词典。** 上游在 0.2.2 新增了 `de`/`es`/`fr`/`ja`/`pt`/`ru` 等同级语言包；fork 新增的客户端键必须补齐到每一种随包语言，不能只补 `en`/`zh`。本次合并后 `pnpm run verify-client-ui-i18n` 通过（1290 个源码文件使用 locale-owned copy）。
 
 **Focused verification.** 本轮整合跑过：`verify-translation-pairing`（1203 对全部一致）、`verify-config-catalog`、`verify-module-graph`、`verify-doc-graphs`、`verify-tool-catalog`、`verify-cordis-api`、`verify-cordis-inspect-catalog`、`verify-client-catalog`、`verify-persistence-catalog`、`verify-persistence-formats`、`verify-persistence-changes`（66 roots / 21 records）、`verify-cordis-config`（370 个配置）、`verify-no-unknown-casts`、`verify-client-ui-i18n`、`verify-archived-agent-notes`（2781 个冻结产物）。完整构建与测试属于下一阶段。
@@ -577,7 +579,7 @@ AgentTeams 成员是用户指定的例外；核心 `startAgentTeamsMember` symbo
 
 活动面板的取数契约也留在 fork：`/plugins/dsh-agent-teams/state` 无参数时保持全量且带完整详情与收件箱预览（面板行为不变）；`captainSessionId` 或成对的 `teamCaptainSessionId`+`teamId` 只返回所选团队；`detail=1` 再附带团队描述、成员执行提示词、任务描述等重字段，`archived=1` 走归档集合。非法分域参数返回 400，不回退成全量扫描。
 
-**Focused verification.** 在 `fork-plugins/dsh-agent-teams` 运行 `pnpm typecheck`、`pnpm build` 与 `pnpm verify`（覆盖 fallback/member-failure TDD、issue regressions、quality gates、lifecycle、stress、compatibility、doctor、skill、harness contract、capabilities、release metadata）。`release-metadata.test.mjs` 需同时覆盖 `dsh021rc2` 私有通道与 `0.2.1-rc.2` 推荐宿主。
+**Focused verification.** 在 `fork-plugins/dsh-agent-teams` 运行 `pnpm typecheck`、`pnpm build` 与 `pnpm verify`（覆盖 fallback/member-failure TDD、issue regressions、quality gates、lifecycle、stress、compatibility、doctor、skill、harness contract、capabilities、release metadata）。`release-metadata.test.mjs` 需覆盖 `dsh022rc1` 私有通道与 `0.2.2-rc.1` 推荐宿主（同时保留 `0.2.1-rc.2` 旧目标），`doctor` 需报告依赖闭包内每个包只有一个身份。
 ### Subagent and AgentTeams responsiveness
 
 #### Continuable child steer
@@ -671,7 +673,7 @@ Lexical 的 history 在每个窗口内合并连续输入，而窗口从上一次
 
 隔离构建的依赖准备是显式的：复制源文件后在工作副本中执行 `pnpm install --frozen-lockfile --ignore-scripts`，先尝试 `--offline`（`--config.trust-lockfile=true` 跳过离线元数据检查），store 缺少包时再以 `--prefer-offline` 走网络；peer 自动安装设置取自插件 lockfile。依赖或构建失败会打印插件名、工作副本、命令、退出码与末尾错误，并提示删除工作副本重试，不会静默继续。工作副本带 `.fork-plugin-build.json` 与 `.fork-plugin-deps.json` 标记：同一源码 key 且声明输出齐全时直接复用；staging 目录被删除但工作副本仍在时无需重新编译。源码改动会重建整个插件（不做未配置或未验证的 tsc 增量），并且每次从干净副本运行插件自己的 `build`；AgentTeams 的 `clean-build.mjs` 因此只清理隔离副本，不会触碰主检出跟踪的 `lib/`。删除 `.build/fork-plugins/work/` 或 `.build/fork-plugins/<id>/` 后再次运行会从源码重建。
 
-Subscriptions 的 staged 包从源码编译 `lib/index.js` 与 `lib/client.js`：node 半区把 `@tormentalabs/claude-code-wire-compat`（`fork-plugins/claude-code-wire-compat` 源码，staging 前用仓库 TypeScript 现建 `dist/`）和 `undici` 内联进 bundle，staged manifest 删除这两个运行时依赖、全部 dev 依赖以及仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer；`@deepseek-ai/*` peer 保持 `0.2.1-rc.2`。公开的 optional provider 依赖（`@cursor/sdk`、`@oven/bun-*`）保留在 manifest 中；`link:` 安装不会安装被链接包的 optional 依赖，因此 Cursor 仍需 profile 或环境提供。pinned Bun transport 不依赖插件本地安装或构建：staging 用仓库根 TypeScript 编译器从 `src/transport/bun-child.ts`、`src/transport/frames.ts` 生成 `lib/bun-child.js`、`lib/frames.js`，并按插件 lockfile 固定当前平台 `@oven/bun-*` 的版本，把它装进 `.build/fork-plugins/build-deps/`，再把解引用后的真实目录复制到 staged 包；staged 包不链接回 build-deps，删除 build-deps 不影响已 `link:` 的 profile。transport 源改动会改变源码 key 并触发重建，不会发布旧的 child/frames 产物，脚本也不回退到 tgz。AetherShell 从源码编译 `lib/lifecycle.mjs`，保持 `@deepseek-ai/*` peer 外部且为 `0.2.1-rc.2`。Subscriptions 与 AetherShell 的 staged 包都不附带 `.d.ts`；类型来源仍是源码检出；bundle 使用仓库根工具的 tsdown，transport 使用同一仓库 TypeScript 编译器的 transpile-only emit（显式源文件、`--noCheck`），不依赖插件自带的 tsc 构建。AgentTeams 使用自己的 `tsc`/`tsdown` 生成 `lib/index.js`、`lib/client.js` 与 `lib/types/**`，Context 使用自己的 `tsdown` 生成 `lib/index.js`、`lib/client.js` 与 `lib/index.d.ts`；两者的构建工具与类型依赖都来自隔离副本的 plugin-local install。
+Subscriptions 的 staged 包从源码编译 `lib/index.js` 与 `lib/client.js`：node 半区把 `@tormentalabs/claude-code-wire-compat`（`fork-plugins/claude-code-wire-compat` 源码，staging 前用仓库 TypeScript 现建 `dist/`）和 `undici` 内联进 bundle，staged manifest 删除这两个运行时依赖、全部 dev 依赖以及仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer；`@deepseek-ai/*` peer 等于 `apps/cli` 的版本（当前 `0.2.2-rc.1`），`assertStagedManifest` 从该版本读取 cohort。公开的 optional provider 依赖（`@cursor/sdk`、`@oven/bun-*`）保留在 manifest 中；`link:` 安装不会安装被链接包的 optional 依赖，因此 Cursor 仍需 profile 或环境提供。pinned Bun transport 不依赖插件本地安装或构建：staging 用仓库根 TypeScript 编译器从 `src/transport/bun-child.ts`、`src/transport/frames.ts` 生成 `lib/bun-child.js`、`lib/frames.js`，并按插件 lockfile 固定当前平台 `@oven/bun-*` 的版本，把它装进 `.build/fork-plugins/build-deps/`，再把解引用后的真实目录复制到 staged 包；staged 包不链接回 build-deps，删除 build-deps 不影响已 `link:` 的 profile。transport 源改动会改变源码 key 并触发重建，不会发布旧的 child/frames 产物，脚本也不回退到 tgz。AetherShell 从源码编译 `lib/lifecycle.mjs`，保持 `@deepseek-ai/*` peer 外部且等于同一 cohort。Subscriptions 与 AetherShell 的 staged 包都不附带 `.d.ts`；类型来源仍是源码检出；bundle 使用仓库根工具的 tsdown，transport 使用同一仓库 TypeScript 编译器的 transpile-only emit（显式源文件、`--noCheck`），不依赖插件自带的 tsc 构建。AgentTeams 使用自己的 `tsc`/`tsdown` 生成 `lib/index.js`、`lib/client.js` 与 `lib/types/**`，Context 使用自己的 `tsdown` 生成 `lib/index.js`、`lib/client.js` 与 `lib/index.d.ts`；两者的构建工具与类型依赖都来自隔离副本的 plugin-local install。
 
 **Preservation rule.** 保留端口拒绝、源码 key 幂等、`.build/` staging 与本地 `link:` 安装路径；不要改回 tgz 交付或 `pnpm update --latest`。不得把 legacy `providers.cc-pool` 知识重新加入 `build.cmd`、`fork-plugins-build.ts` 或任何构建辅助代码：构建不得检测、拒绝、备份或迁移旧 profile，旧格式只由 `scripts/migrate-legacy-cc-pool-profile.ts` 处理。该迁移脚本必须先用备份、再改写；结构解析 YAML，保持注释、`!!js`、无关行与非目标 `cc-pool` provider 不变；无法精确还原时在写入前失败；成功后写 marker 并提示运行 `build.cmd`。它必须在 profile patch 已干净时照样扫描 home patch 与 `--patch` overlay、先于“无 profile / 无 package.json”跳过处理并备份 `$DSH_HOME/settings.yaml`（没有 profile 可完成时不写 marker），并提供与 `fork-plugins-build.ts` 相同的 `--host`/`--port` 守卫（默认 `127.0.0.1:3080`，含 `--allow-running-host`；Host 用非默认端点启动时必须显式传入，端点无法验证时失败关闭）与启动器一致的默认 home（Windows 仓库父目录、macOS/Linux `~/.dsh`，并展开 `~`）；干净或手改过的 profile 必须能补写 marker 并重新校验 bundle/seed，使中断可恢复。普通根构建（`pnpm run build`）是脚本的前置条件，干净检出顺序为 install → 根构建 → 迁移 → `build.cmd`。所有 profile 迁移完成后可删除该脚本、其 spec 和 marker 支持，构建无需改动。全新 profile 的 seed 仍必须发生在成功安装之后。四个插件都不得把仓库 `lib/` 当作 staging 输入：AgentTeams 与 Context 必须在 `.build/fork-plugins/work/<id>/` 隔离副本中构建，staging 只复制该副本的声明产物；工作副本的删除与重建不得改写主检出或插件目录中被 Git 跟踪的 `lib/`。staged manifest 若再次出现 `file:`、`link:`、tgz、`@tormentalabs` 或 `undici` 运行时依赖，安装必须失败。Subscriptions 的兼容库必须从 `fork-plugins/claude-code-wire-compat` 源码构建：staging 在打 bundle 前用仓库 TypeScript 生成 `dist/`，源码 key 覆盖该包的 `src/`、`package.json` 与 `tsconfig.json`，不得改回读取 `releases/*.tgz` 或复制插件本地预构建产物。Subscriptions staging 必须同时带 `lib/bun-child.js`、`lib/frames.js` 和当前平台的 `@oven/bun-*`，否则 Claude Messages 的 pinned Bun transport 会在启动 bridge 时以 `TRANSPORT` 失败；child/frames 必须由 staging 从 `src/transport` 现建，不能改回复制插件本地 `lib/`，平台 runtime 只能从 `.build/fork-plugins/build-deps/` 中按 lockfile 固定的版本解引用复制，staged 包不得链接回 build-deps。插件本地依赖准备失败必须保留插件名、工作副本、命令与退出信息和修复提示，不能静默跳过或退回提交的预构建产物。
 
@@ -724,14 +726,14 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
 | `dshmarket` | — | Removed | 官方 Plugin Manager 接管安装、配置与运行时启停；profile 不恢复旧 package 或 bundle |
-| `@nanmicoder/dsh-agent-teams` | `0.1.24-dsh021rc2.1` | Installed, enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/agent-teams`；该目录由隔离工作副本从源码构建，源码改动重启 Host 或重新运行 `build.cmd` 后生效，禁止被 npm latest/next 覆盖 |
-| `dsh-plugin-subscriptions` | `0.9.4-dsh021rc2.1` | Installed; Windows Web enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/subscriptions`（源码在 `fork-plugins/dsh-plugin-subscriptions`）；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-18 前的 rc1.32/rc1.33 为上一代制品，仅归档 |
+| `@nanmicoder/dsh-agent-teams` | `0.1.24-dsh022rc1.1` | Installed, enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/agent-teams`；该目录由隔离工作副本从源码构建，源码改动重启 Host 或重新运行 `build.cmd` 后生效，禁止被 npm latest/next 覆盖 |
+| `dsh-plugin-subscriptions` | `0.9.4-dsh022rc1.1` | Installed; Windows Web enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/subscriptions`（源码在 `fork-plugins/dsh-plugin-subscriptions`）；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-18 前的 rc1.32/rc1.33 为上一代制品，仅归档 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
 | `dsh-context` | `0.78.2-dsh022rc1.1` | Installed, enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/context`，并保留 `300/60/100/400/100/100` bounds；该目录由隔离工作副本从源码构建，源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
-| `@ryanzhou416/dsh-plugin-aether-shell` | `0.1.0-dsh021rc2.4` | Installed, enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/aether-shell`；纯 Host 插件，无客户端资源 |
-| `@deepseek-ai/dsh-llm-cc-pool` | `0.2.1-rc.2` | Installed as provider bundle | 从根构建产物复制到 `.build/fork-plugins/llm-cc-pool` 并链接；保留其 `cordis.patch.yml` 插入，不得改回 profile 内联 `providers.cc-pool` |
+| `@ryanzhou416/dsh-plugin-aether-shell` | `0.1.0-dsh022rc1.1` | Installed, enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/aether-shell`；纯 Host 插件，无客户端资源 |
+| `@deepseek-ai/dsh-llm-cc-pool` | `0.2.2-rc.1` | Installed as provider bundle | 从根构建产物复制到 `.build/fork-plugins/llm-cc-pool` 并链接；保留其 `cordis.patch.yml` 插入，不得改回 profile 内联 `providers.cc-pool` |
 
 2026-10-18 起 fork 插件均以 `link:` 安装且不再安装 `file:` tgz。2026-10-19 起四个插件全部由 `build.cmd` 从源码构建到被忽略的 `.build/fork-plugins/<name>` 后链接，workspace 的 `@deepseek-ai/dsh-llm-cc-pool` 也从根构建产物复制到 `.build/fork-plugins/llm-cc-pool` 并作为 provider bundle 链接：Subscriptions 与 AetherShell 直接由 staging 生成 bundle，AgentTeams 与 Context 在 `.build/fork-plugins/work/<id>/` 隔离副本中运行各自的构建脚本（见 [仓库内 fork 插件构建](#repo-integrated-fork-plugin-build)）。profile 不再安装 dshmarket；禁止 wildcard 和未经审计的 `pnpm update --latest`。
 
@@ -741,7 +743,7 @@ Mac 主 checkout 已快进至同一 fork master；当前 Mac 部署路径为 `bu
 
 ### Local AgentTeams package
 
-维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。当前安装为 `0.1.24-dsh021rc2.1` 的 `link:` 依赖，指向 `build.cmd` 从隔离工作副本生成的 `.build/fork-plugins/agent-teams`；`fork-plugins\releases\archive\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`（SHA256 `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`）只作历史归档。该 package 标记为 private，禁止用上游 npm scope 发布；更新须在 Host 停止后重新运行 `build.cmd`。
+维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。当前安装为 `0.1.24-dsh022rc1.1` 的 `link:` 依赖，指向 `build.cmd` 从隔离工作副本生成的 `.build/fork-plugins/agent-teams`；`fork-plugins\releases\archive\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`（SHA256 `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`）只作历史归档。该 package 标记为 private，禁止用上游 npm scope 发布；更新须在 Host 停止后重新运行 `build.cmd`。
 
 Windows 的 `build.cmd` 现在通过 `scripts/fork-plugins-build.ts` 把四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）与 workspace 的 `@deepseek-ai/dsh-llm-cc-pool` provider bundle 全部以本地 `link:` 安装到 `profiles\web`：Subscriptions 和 AetherShell 由 staging 直接编译，AgentTeams 与 Context 复制到 `.build/fork-plugins/work/<id>/` 隔离副本后运行各自的 `build`（Context 构建时从 plugin-local install 解析 `zod` 等开发依赖，staged manifest 保留运行时 `zod`），`llm-cc-pool` 从根构建产物复制。全新 clone 无需手工 tgz，也不读取提交的插件 `lib/`；Host 在 3080 监听时脚本会在修改 profile 前拒绝执行。
 
@@ -752,7 +754,7 @@ fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plug
 1. 保留上游 v0.1.19 的原子 roster/DAG 创建、仅启动 ready member、改名工具成员恢复、repair scope、任务修订、next-step 协调、陈旧消息抑制、attempt 校验、退休成员清理、安全 reassignment 与任务纠正；v0.1.20 只更新上游文档。
 2. RC.1 发行路径使用 awaited `agent/created`、`Session.ownEvents()` 与统一 Host delivery adapter；legacy setup 和旧 Host Queue 形态只保留为回归 fixture，不构成发行兼容声明。
 3. Team 内部队长指令、scheduler assignment、peer delivery 和 mailbox recovery 使用 Host Queue/Steer 规则，来源为 `agent-teams-host`；fork 不再重复维护最近-step 或退休成员策略。
-4. Client 使用 `uiConversation`、`uiWorkspace` 的 projection refresh 与 `[data-composer-input]`；Host capability 层保持 14 个 Captain 工具和 4 个成员工具稳定。package peer、development dependency、完整 DSH override cohort 与 lockfile 固定为 `0.2.1-rc.2`。
+4. Client 使用 `uiConversation`、`uiWorkspace` 的 projection refresh 与 `[data-composer-input]`；Host capability 层保持 14 个 Captain 工具和 4 个成员工具稳定。development dependency、完整 DSH override cohort 与 lockfile 固定为 `0.2.2-rc.1`；peer 范围在 `0.2.2-rc.1` 之外保留 `0.2.1-rc.2` 及更早版本，`compatibility.json` 推荐 `0.2.2-rc.1`。
 5. 普通 captain 不驻留时，成员报告和 team 操作必须先通过 Session Controller 的 `resolveAgent`（兼容旧 Host 时用 `ctx.agents.resume`）恢复**原 `captainSessionId`**；恢复后校验返回 Agent id，不一致即失败。禁止用 `sessionController.create`、caller cwd 或硬编码 `agentPreset: 'standard'` 伪造驻留：`create` 对已开始 turn 的 Session 会 mint 新 id，导致原 captain 永久找不到。Captain Session start 会重投 durable mailbox，成功逐条 ack，失败记录及后缀释放 delivery lease。Lineage 解析遇到不可读的中间 header 时保留已解析前缀但不得缓存为完整 ancestry；否则多级 fork 会在进程生命周期内失去 lead 身份。
 6. Windows directory rename 使用独立的 5 次重试预算；构建清理目标用跨平台 `basename()` 校验。
 7. `readUnreadMailbox()` 使用只保留 pending 消息的 256-entry / 8 MiB 有界 LRU，并以 `dev/ino/size/mtimeNs/ctimeNs` 检测文件替换；lease 每次按当前时间重算，append/claim/release/ack/archive/remove 成功后精确失效。完整历史读取和磁盘 JSONL 字节格式不变。
@@ -772,7 +774,7 @@ AgentTeams 的 `scripts/activity-state.perf.mjs` 使用 27/58 个合成团队、
 
 `.local-plugins-src\...dsh012.2/.3/.4` 只是历史解包产物，不能再当维护源。以后用 `git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git <tag> --squash` 获取精确官方发布，再在 fork 内重放和验证上述行为；不得用 npm install 覆盖 subtree。
 
-本 fork 以 `v0.1.24` 生成 `0.1.24-dsh021rc2.1`。上游拥有 scheduling、next-step delivery、retired-member cleanup、repair scope 与 task correction；fork 保留 RC.1 source/导航适配、冷 Captain mailbox 恢复、有界 unread mailbox projection，以及上述活动状态读取策略。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终以 `link:` 安装源码构建的 staging 副本，而不是打包产物。
+本 fork 以 `v0.1.24` 生成 `0.1.24-dsh022rc1.1`。上游拥有 scheduling、next-step delivery、retired-member cleanup、repair scope 与 task correction；fork 保留 RC.1 source/导航适配、冷 Captain mailbox 恢复、有界 unread mailbox projection，以及上述活动状态读取策略。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终以 `link:` 安装源码构建的 staging 副本，而不是打包产物。
 
 ### Local Context package
 
@@ -790,7 +792,7 @@ Windows Web profile 的 Context 内存修复升级备份位于 `C:\Project\deeps
 
 ### Local Subscriptions package
 
-维护源码位于 [订阅插件](fork-plugins/dsh-plugin-subscriptions/README.zh.md)。2026-10-18 起真实 profile 以 `link:` 指向 `build.cmd` 的 staging 目录 `.build/fork-plugins/subscriptions`（源码在 `fork-plugins/dsh-plugin-subscriptions`，版本 `0.9.4-dsh021rc2.1`）；2026-10-17 的启动 manifest 与 257 个安装文件核对对应上一代 [`.33` 制品](fork-plugins/releases/archive/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz)，其 SHA256 由[同名校验文件](fork-plugins/releases/archive/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz.sha256)固定；[`.32` 制品](fork-plugins/releases/archive/dsh-plugin-subscriptions-0.9.4-dsh017rc1.32.tgz)保留为更早代次。`.32` 修复组织策略的重启恢复，`.33` 修复续接状态 IO 的有界等待。当前安装状态、已验证范围与保留差异由[实现状态](fork-plugins/dsh-plugin-subscriptions/docs/claude-implementation-status.md)拥有；不能从源码版本推断任何运行进程已经更新。
+维护源码位于 [订阅插件](fork-plugins/dsh-plugin-subscriptions/README.zh.md)。2026-10-18 起真实 profile 以 `link:` 指向 `build.cmd` 的 staging 目录 `.build/fork-plugins/subscriptions`（源码在 `fork-plugins/dsh-plugin-subscriptions`，版本 `0.9.4-dsh022rc1.1`）；2026-10-17 的启动 manifest 与 257 个安装文件核对对应上一代 [`.33` 制品](fork-plugins/releases/archive/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz)，其 SHA256 由[同名校验文件](fork-plugins/releases/archive/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz.sha256)固定；[`.32` 制品](fork-plugins/releases/archive/dsh-plugin-subscriptions-0.9.4-dsh017rc1.32.tgz)保留为更早代次。`.32` 修复组织策略的重启恢复，`.33` 修复续接状态 IO 的有界等待。当前安装状态、已验证范围与保留差异由[实现状态](fork-plugins/dsh-plugin-subscriptions/docs/claude-implementation-status.md)拥有；不能从源码版本推断任何运行进程已经更新。
 
 Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`，并把 `continuationStateDeadlineMs` 设为 `10000`、`continuationStateLockTimeoutMs` 设为 `2000`。这两个字段只在本机外置 profile 生效，插件默认是 `5000`/`2000`；解析器仍把 deadline 抬到 lock 输入 + 2000 ms，仅为兼容既有配置，两个值都不再结束等待或拒绝请求（等待只由调用方取消或插件销毁结束），修改后必须重启 Host。 源码在 staging 前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-30 复核的当前源码套件为 1932 项，全部通过（0 失败、0 跳过）；978 项是 2026-10-11 的历史记录。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 
@@ -1040,7 +1042,7 @@ corepack pnpm@10.30.2 verify
 - AgentTeams 的 append/claim/ack 仍会整份重写单个 mailbox JSONL；未读投影缓存已消除不变文件的每秒重读/解析，但超长高频写邮箱仍存在 O(N) 写放大。下一步只能在保持旧 JSONL 可读和归档历史完整的前提下优化。
 - AgentTeams 的进程内 team lock Map 与 scheduler parked-attempt Map 仍有小量键保留；当前有界数据量不构成 P1，但后续应随 team archive/remove 回收。
 - Diagnostics 目前没有自动轮转，长期运行后需按具体文件人工归档。
-- Subscriptions 的当前源码测试套件为 1932 项，全部通过（0 失败、0 跳过）：`pnpm --dir fork-plugins/dsh-plugin-subscriptions test`。插件源码与集成分支的 base 逐字节相同，因此该结果是集成分支的有效证据；整包升级仍按维护说明逐条挑入，不做替换。
+- Subscriptions 的当前源码测试套件为 1944 项，全部通过（0 失败、0 跳过）：`pnpm --dir fork-plugins/dsh-plugin-subscriptions test`。插件源码与集成分支的 base 逐字节相同，因此该结果是集成分支的有效证据；整包升级仍按维护说明逐条挑入，不做替换。
 - `verify-client-domain-graph` is red on this tree **and on a pristine `dsh-v0.2.1-rc.2` tree**: `pnpm exec tsx scripts/verify-client-domain-graph.ts` reports the same 87 violations from the same file→specifier pairs (23 CSS/SVG/WebP asset imports plus 64 TS imports across `ui-sidebar-documentpreview`, `ui-sidebar-browser`, `ui-settings-account`, `ui-plugin-manager`, `ui-workspace`, `ui-conversation`, and `ui-chat`; the `session-actions -> rows` CSS edges are part of that upstream set). This is inherited upstream client-ownership debt, not a fork delta: do not baseline, weaken, or suppress the gate. Clearing it needs the upstream `contract/` refactor; until that lands, report it as a retained red. Reproduce the baseline side with `git archive dsh-v0.2.1-rc.2 packages/client scripts/verify-client-domain-graph.ts | tar -x -C <dir>` and `pnpm exec tsx <dir>/scripts/verify-client-domain-graph.ts`; both trees print the identical 87.
 
 ## Dev Note

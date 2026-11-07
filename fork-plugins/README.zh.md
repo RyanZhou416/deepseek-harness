@@ -13,7 +13,7 @@ Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把四�
 `scripts/fork-plugins-build.ts` 优先使用 `--dsh-home`，其次 `DSH_HOME`，再其次平台启动器默认 home（Windows 为 `<仓库父目录>\deepseek-harness-data`，macOS/Linux 为 `~/.dsh`；开头的 `~` 会展开），目标是 `profiles/web`。它把每个包 staging 到被忽略的 `.build/fork-plugins/<id>/`，再用 `dsh plugin --profile web add <绝对 staging 目录>` 安装，记录为 pnpm `link:`；源码 key 使未变化的第二次运行既不重建也不重装，全新的 profile 在安装成功后才 seed。不会读取或写入任何 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
 
 - Subscriptions 从源码编译 `lib/index.js` 与 `lib/client.js`。staged manifest 内联 `@tormentalabs/claude-code-wire-compat`（来自 `fork-plugins/claude-code-wire-compat` 源码，构建时用仓库 TypeScript 编译器生成其 `dist/`）与 `undici`，删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer，且不声明运行时依赖。公开的 optional provider 条目（`@cursor/sdk`、`@oven/bun-*`）保留声明；link 安装不会安装被链接包的 optional 依赖，因此这些 provider 需要另行提供对应包。staged 包不附带声明文件；源码检出仍是类型来源。
-- AetherShell 从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.1-rc.2`。
+- AetherShell 从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖，版本等于 Harness cohort（`0.2.2-rc.1`）。
 - AgentTeams 与 Context 在 `.build/fork-plugins/work/` 的隔离副本中构建；staging 只读取该副本的构建产物，不读取提交的 `lib/`。Context 保留 `zod` 运行时依赖，由仓库安装解析。
 - workspace 的 `@deepseek-ai/dsh-llm-cc-pool` 包从根构建产物复制到 `.build/fork-plugins/llm-cc-pool/`，并作为 provider bundle 与 fork 插件一起链接。
 
@@ -38,9 +38,9 @@ pnpm exec tsx scripts/fork-plugins-build.ts
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`
-- 当前私有版本：`0.1.24-dsh021rc2.1`
+- 当前私有版本：`0.1.24-dsh022rc1.1`
 - 上游底座：`NanmiCoder/dsh-agent-teams v0.1.24`
-- profile 目标：DSH `0.2.1-rc.2`
+- profile 目标：DSH `0.2.2-rc.1`
 - profile 安装：`link:` 指向 `.build/fork-plugins/agent-teams`
 
 上游 v0.1.24 把成员创建、停止与恢复适配到 Harness `0.2.1-rc.2`，并在插件重载后保留成员角色与自定义工具限制。私有层保留 awaited `agent/created` 启动、用于打开冷成员会话的 projection 刷新、带类型的 `agent-teams-host` 消息来源、Captain 邮箱恢复，以及有界未读邮箱缓存；磁盘格式不变。
@@ -81,22 +81,22 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Context
 
 - 源码：`fork-plugins/dsh-context`
-- 当前私有版本：`0.73.0-dsh021rc2.1`
-- 上游底座：`bowenliang123/dsh-context v0.73.0`
+- 当前私有版本：`0.78.2-dsh022rc1.1`
+- 上游底座：`bowenliang123/dsh-context v0.78.2`
 - profile 安装：`link:` 指向 `.build/fork-plugins/context`
 
 私有价格表覆盖 GPT-6 Astra/Sol、Claude Opus 5.5/Fable 5.1，以及 Cursor 下的 Grok 4.7。Agent 汇总按标准速度的 API 等值价格和单次请求的长上下文阶梯估算；投影版本 21 从已有日志重新折叠，不修改 Session 数据。详见[价格与估算条件](dsh-context/docs/model-pricing.md)。
 
-该构建采用 v0.73.0 的 `foldState`/`foldMetering`/`foldWire` 拆分、Context Insights、余额展示、增量 turn 计数、选择性工具参数保留与按需语料回填。由维护保留的 fork 行为与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
+该构建在 `foldState`/`foldMetering`/`foldWire` 拆分、Context Insights 与按需语料回填之上，采用 v0.78.2 的命令执行日志、Fleet cockpit 与 Context Stats 账本。对未运行的 Session，详情视图读取投影缓存并回退到有界尾窗，打开 Session 时从不解码整份日志。由维护保留的 fork 行为与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
 
 低开销部署值为 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。修改 profile 前必须确认 DSH 已停止；插件更新过程不得读取、迁移或删除 Session、附件、凭据或 projection cache 数据。
 
 ## Subscriptions
 
 - 源码：`fork-plugins/dsh-plugin-subscriptions`
-- 当前私有版本：`0.9.4-dsh021rc2.1`
+- 当前私有版本：`0.9.4-dsh022rc1.1`
 - 上游底座：`V1ki/dsh-plugin-subscriptions v0.9.4`
-- profile 目标：DSH `0.2.1-rc.2`
+- profile 目标：DSH `0.2.2-rc.1`
 - profile 安装：`link:` 指向 `.build/fork-plugins/subscriptions`
 
 该私有构建保留上游多账号 provider、用量 UI、Codex 搜索、图片／视频工具与凭据格式。其 0.2.1 适配转换 V4 工具角色消息，同时保留调用身份和图片结果，并固定精确的 DSH 依赖版本组合；不会迁移 Session 或凭据。Cursor 登录与用量、本地 SDK 的上下文限制、ChatGPT 重置券，以及 ChatGPT 池以 100% 为满，都是私有行为。每次导入上游后，按 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md` 的「Reapply after an upstream import」逐项补回。
@@ -104,9 +104,9 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## AetherShell
 
 - 源码：`fork-plugins/dsh-plugin-aether-shell`
-- 当前私有版本：`0.1.0-dsh021rc2.4`
+- 当前私有版本：`0.1.0-dsh022rc1.1`
 - 包：`@ryanzhou416/dsh-plugin-aether-shell v0.1.0`
-- profile 目标：DSH `0.2.1-rc.2`
+- profile 目标：DSH `0.2.2-rc.1`
 - profile 安装：`link:` 指向 `.build/fork-plugins/aether-shell`
 
-该 bundle 保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.1-rc.2`，且是纯 Host 插件，不含客户端资源。它需要外部 AetherShell 解释器——legacy 模式目标 `12.0.2`，typed 模式要求 `12.0.2+ryan.2`——插件不分发该解释器。保留与验证要求见 `fork-plugins/dsh-plugin-aether-shell/FORK_MAINTENANCE.md`。
+该 bundle 保持所有 `@deepseek-ai/*` peer 为外部依赖，版本等于 Harness cohort（`0.2.2-rc.1`），且是纯 Host 插件，不含客户端资源。它需要外部 AetherShell 解释器——legacy 模式目标 `12.0.2`，typed 模式要求 `12.0.2+ryan.2`——插件不分发该解释器。保留与验证要求见 `fork-plugins/dsh-plugin-aether-shell/FORK_MAINTENANCE.md`。
