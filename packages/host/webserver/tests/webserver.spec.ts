@@ -23,7 +23,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import type { PeerScope } from '@deepseek-ai/dsh-typert-protocol'
 import HttpServer, {
-  bindUrlHost, isLoopbackHost, normalizeBindAddress, renderIndexInjections, type TlsConfig, type WebResource, type WebRoute,
+  acceptsBrotli, bindUrlHost, isLoopbackHost, normalizeBindAddress, renderIndexInjections, type TlsConfig, type WebResource, type WebRoute,
 } from '../src/index.ts'
 import { materializeTlsFixture, type TlsFixture } from './tls-fixture.ts'
 
@@ -1076,5 +1076,18 @@ describe('real Loader composition', () => {
     const fiber = webserverFiber(second)
     expect(fiber?.state).toBe(FiberState.FAILED)
     await expect(fiber?.await()).rejects.toThrow('EADDRINUSE')
+  })
+})
+
+describe('acceptsBrotli', () => {
+  it('follows Accept-Encoding negotiation', () => {
+    const accepts = (value?: string): boolean => acceptsBrotli(new Headers(value === undefined ? {} : { 'accept-encoding': value }))
+    expect(accepts()).toBe(false)
+    expect(accepts('gzip, deflate')).toBe(false)
+    expect(accepts('gzip, deflate, br, zstd')).toBe(true)
+    expect(accepts('br;q=0, gzip')).toBe(false)
+    expect(accepts('*')).toBe(true)
+    expect(accepts('*, br;q=0')).toBe(false)
+    expect(accepts('*;q=0')).toBe(false)
   })
 })

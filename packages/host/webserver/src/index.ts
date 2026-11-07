@@ -189,6 +189,19 @@ function isWildcardAddress(parsed: ipaddr.IPv4 | ipaddr.IPv6): boolean {
  * @param host - bind address from configuration.
  * @returns true for IPv4 any, IPv6 any, and an IPv4-mapped form of IPv4 any.
  */
+/**
+ * Whether a request accepts the Brotli content coding, by the same negotiation
+ * the server's gzip middleware applies (`q=0` refuses, `*` accepts).
+ * Routes that hold a precomputed Brotli encoding of an immutable body use it
+ * to choose that encoding; the response must then carry `Vary: Accept-Encoding`.
+ * @param headers - request headers.
+ * @returns true when `br` is the preferred acceptable coding over identity.
+ */
+export function acceptsBrotli(headers: Headers): boolean {
+  const accept = headers.get('accept-encoding')
+  return new Negotiator({ headers: accept === null ? {} : { 'accept-encoding': accept } }).encoding(['br', 'identity']) === 'br'
+}
+
 export function isWildcardHost(host: string): boolean {
   const parsed = parseIpLiteral(host)
   return parsed !== undefined && isWildcardAddress(parsed)

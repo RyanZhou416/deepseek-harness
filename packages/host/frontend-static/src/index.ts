@@ -17,17 +17,21 @@
  * `assets/` never change for their URL and are immutable for a year; every
  * other file revalidates with an ETag made from its size and modification
  * time, so a rebuilt file cannot be served stale and an unchanged one costs
- * no body.
+ * no body. A content-hashed script, stylesheet, JSON, or SVG file is sent
+ * Brotli-encoded to a request that accepts `br`; each file's encoding is
+ * computed once on the libuv pool and then held for the plugin's lifetime.
  * @module @deepseek-ai/dsh-host-frontend-static
  */
 
 import type { Stats } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
+import { promisify } from 'node:util'
+import { brotliCompress, constants as zlibConstants } from 'node:zlib'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-client-connection'
-import type {} from '@deepseek-ai/dsh-host-webserver'
+import { acceptsBrotli } from '@deepseek-ai/dsh-host-webserver'
 
 /** Stable Cordis plugin name. */
 export const name = 'frontend-static'
@@ -80,6 +84,44 @@ const MIME: Record<string, string> = {
   // the worker inflates the body itself, and a transport-level encoding would
   // leave it inflating an already-decoded archive.
   '.gz': 'application/gzip',
+}
+
+/** Media types whose content-hashed files are worth a cached Brotli encoding. */
+const BROTLI_EXTENSIONS: ReadonlySet<string> = new Set(['.js', '.css', '.json', '.map', '.svg'])
+
+/** Brotli quality for cached asset encodings: paid once per file, then reused by every transfer. */
+const BROTLI_QUALITY = 9
+
+const brotliCompressAsync = promisify(brotliCompress)
+
+/**
+ * Brotli encodings of content-hashed files, keyed by path and entity tag so a
+ * rebuilt file is encoded again. The key set is bounded by the dist contents.
+ */
+class AssetEncodings {
+  private readonly encodings = new Map<string, Promise<Buffer>>()
+
+  /**
+   * Encoded bytes of one file version, computed on the first call.
+   * @param target - absolute file path.
+   * @param etag - entity tag of the version being served.
+   * @returns the Brotli encoding; a failed encoding is forgotten so the next request retries.
+   */
+  brotli(target: string, etag: string): Promise<Buffer> {
+    const key = `${target}\0${etag}`
+    let encoding = this.encodings.get(key)
+    if (encoding === undefined) {
+      encoding = readFile(target).then(bytes => brotliCompressAsync(bytes, {
+        params: {
+          [zlibConstants.BROTLI_PARAM_QUALITY]: BROTLI_QUALITY,
+          [zlibConstants.BROTLI_PARAM_SIZE_HINT]: bytes.byteLength,
+        },
+      }))
+      encoding.catch(() => { this.encodings.delete(key) })
+      this.encodings.set(key, encoding)
+    }
+    return encoding
+  }
 }
 
 const STATIC_MISS_CODES: ReadonlySet<string | undefined> = new Set([
@@ -147,12 +189,14 @@ function bytesBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * headers without a body. The rendered index carries `cache-control: no-store`;
  * content-hashed files under `assets/` are immutable; every other file carries
  * `cache-control: no-cache` and an ETag from its size and modification time, and
- * a request whose `If-None-Match` selects that ETag receives an empty 304.
+ * a request whose `If-None-Match` selects that ETag receives an empty 304. A
+ * Brotli representation carries its own ETag and `Vary: Accept-Encoding`.
  */
 async function serveStatic(
   request: Request, distRoot: string, distIndex: string,
   authorizeIndex: () => Response | undefined,
   renderIndex: (html: string) => string,
+  encodings: AssetEncodings,
 ): Promise<Response> {
   const pathname = decodeURIComponent(new URL(request.url).pathname)
   const target = resolve(normalize(join(distRoot, pathname)))
@@ -160,7 +204,7 @@ async function serveStatic(
   // it. `sep`, not '/': resolve() emits backslash paths on Windows, where a '/'
   // suffix would reject every legitimate subpath as traversal.
   if (target !== distRoot && !target.startsWith(distRoot + sep)) return new Response(null, { status: 403 })
-  let body: string | Uint8Array<ArrayBuffer>
+  let body: string | Uint8Array
   let headers: Record<string, string>
   try {
     if (target === distRoot || target === distIndex) {
@@ -171,15 +215,26 @@ async function serveStatic(
     } else {
       // The validator comes from file identity, so a conditional request is
       // answered without reading the bytes.
-      const cache = {
-        'cache-control': isContentHashedAsset(pathname) ? IMMUTABLE_CACHE_CONTROL : REVALIDATE_CACHE_CONTROL,
-        etag: entityTag(await stat(target)),
+      const hashed = isContentHashedAsset(pathname)
+      const fileTag = entityTag(await stat(target))
+      const encodable = hashed && BROTLI_EXTENSIONS.has(extname(target))
+      const brotli = encodable && acceptsBrotli(request.headers)
+      // Each representation has its own strong validator.
+      const etag = brotli ? `${fileTag.slice(0, -1)}-br"` : fileTag
+      const cache: Record<string, string> = {
+        'cache-control': hashed ? IMMUTABLE_CACHE_CONTROL : REVALIDATE_CACHE_CONTROL,
+        etag,
+        ...encodable ? { vary: 'Accept-Encoding' } : {},
       }
-      if (matchesEntityTag(request.headers.get('if-none-match'), cache.etag)) {
+      if (matchesEntityTag(request.headers.get('if-none-match'), etag)) {
         return new Response(null, { status: 304, headers: cache })
       }
-      body = await readFile(target)
-      headers = { 'content-type': MIME[extname(target)] ?? 'application/octet-stream', ...cache }
+      body = brotli ? await encodings.brotli(target, fileTag) : await readFile(target)
+      headers = {
+        'content-type': MIME[extname(target)] ?? 'application/octet-stream',
+        ...cache,
+        ...brotli ? { 'content-encoding': 'br' } : {},
+      }
     }
   } catch (error) {
     // Only absent or non-file targets are 404; other filesystem failures reach
@@ -215,6 +270,7 @@ export function apply(ctx: Context, config: Config): void {
     })
     return admitted ? undefined : new Response(body, { status, headers })
   }
+  const encodings = new AssetEncodings()
   ctx.effect(() => ctx.webServer.registerFallback({
     resource: (request, peer) => serveStatic(
       request,
@@ -228,6 +284,7 @@ export function apply(ctx: Context, config: Config): void {
       // reference they insert.
       html => ctx.webServer.renderIndex(html, peer ?? ctx.connection.browserPeer)
         .replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="./">`),
+      encodings,
     ),
   }), 'frontend-static: fallback seat')
 }

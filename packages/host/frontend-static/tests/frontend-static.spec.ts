@@ -8,9 +8,11 @@
  */
 
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { get as httpGet } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { brotliDecompressSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -359,5 +361,35 @@ describe('real Loader composition', () => {
     expect(await html.text()).toBe('<body>preview</body>')
     const index = await loaded.webServer.readResource(new Request(`${base}/`), reader)
     expect([index.status, index.headers.get('cache-control'), index.headers.get('etag')]).toEqual([200, 'no-store', null])
+  })
+
+  it('sends content-hashed scripts Brotli-encoded with their own validator', { timeout: 60_000 }, async () => {
+    const loaded = await loadComposition()
+    const port = loaded.webServer.port as number
+    const source = `export const value = ${JSON.stringify('x'.repeat(8192))}\n`
+    await writeFile(join(root!, 'dist', 'assets', 'index-abc12345.js'), source)
+    type RawResponse = { status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }
+    const raw = (path: string, headers: Record<string, string>) => new Promise<RawResponse>((resolveRaw, reject) => {
+      httpGet({ host: '127.0.0.1', port, path, headers }, (response) => {
+        const chunks: Buffer[] = []
+        response.on('data', (chunk: Buffer) => chunks.push(chunk))
+        response.on('end', () => { resolveRaw({ status: response.statusCode ?? 0, headers: response.headers, body: Buffer.concat(chunks) }) })
+      }).on('error', reject)
+    })
+    const encoded = await raw('/assets/index-abc12345.js', { 'accept-encoding': 'gzip, br' })
+    expect(encoded.headers['content-encoding']).toBe('br')
+    expect(encoded.headers.vary).toContain('Accept-Encoding')
+    expect(encoded.headers['cache-control']).toBe('public, max-age=31536000, immutable')
+    expect(brotliDecompressSync(encoded.body).toString('utf8')).toBe(source)
+    const brTag = encoded.headers.etag as string
+    expect(brTag).toMatch(/^"[0-9a-f]+-[0-9a-f]+-br"$/)
+    expect((await raw('/assets/index-abc12345.js', { 'accept-encoding': 'br', 'if-none-match': brTag })).status).toBe(304)
+
+    const identity = await raw('/assets/index-abc12345.js', { 'accept-encoding': 'br;q=0' })
+    expect(identity.headers['content-encoding']).toBeUndefined()
+    expect(identity.body.toString('utf8')).toBe(source)
+    expect(identity.headers.etag).toBe(brTag.replace('-br"', '"'))
+    // Unhashed files keep their per-response handling.
+    expect((await raw('/app.js', { 'accept-encoding': 'br' })).headers['content-encoding']).toBeUndefined()
   })
 })
