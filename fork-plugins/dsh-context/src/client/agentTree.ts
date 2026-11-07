@@ -1,3 +1,4 @@
+import type { AgentHead } from './agentHeads'
 import type { PartsPart } from './categories'
 import type { ContextBreakdown, ContextPressure, ContextTimeline, SessionCostUsage, TokenUsage } from '../shared/types'
 import { mergeCostUsage } from './cost'
@@ -30,6 +31,7 @@ export interface AgentIdentity {
 
 export interface AgentStats {
   head: Headline | null
+  pressureKnown?: boolean
   requests: number
   billed: number | null
   costUsage: SessionCostUsage | null
@@ -164,6 +166,7 @@ export function agentStatsOf(values: Record<string, unknown> | undefined): Agent
   }
   return {
     head,
+    pressureKnown: pressure !== null,
     requests: timeline !== null ? (timeline.counts?.steps ?? timeline.requests.length) : 0,
     billed: billedOf(usage),
     costUsage: timeline?.cost ?? null,
@@ -171,6 +174,15 @@ export function agentStatsOf(values: Record<string, unknown> | undefined): Agent
     identity: agentIdentityOf(values?.subagent),
     ...(timeline !== null && typeof timeline.model === 'string' ? { model: timeline.model } : {}),
     ...(timeline !== null && typeof timeline.reasoningEffort === 'string' ? { reasoningEffort: timeline.reasoningEffort } : {}),
+  }
+}
+
+function fetchedValuesOf(head: unknown): Record<string, unknown> {
+  const values = asRecord(head)
+  return {
+    ...(timelineOf(values?.timeline) === null ? {} : { contextTimeline: values?.timeline }),
+    ...(contextPressureOf(values?.pressure) === null ? {} : { contextPressure: values?.pressure }),
+    ...(contextBreakdownOf(values?.breakdown) === null ? {} : { contextBreakdown: values?.breakdown }),
   }
 }
 
@@ -279,9 +291,9 @@ export function agentForestOf(
     seen.add(id)
     const values = row.projections
     const fetchedHead = fetched !== undefined ? fetched.get(id) : undefined
-    const stats = agentStatsOf(fetchedHead !== undefined && values?.contextTimeline === undefined
-      ? { ...values, contextTimeline: fetchedHead }
-      : values)
+    const stats = agentStatsOf(fetchedHead === undefined
+      ? values
+      : { ...fetchedValuesOf(fetchedHead), ...values })
     const identity = stats.identity
     if (id === currentId && self !== undefined) {
       stats.head = self.head ?? stats.head
@@ -356,7 +368,7 @@ export interface SubagentCostFold {
 export function subagentCostFoldOf(
   snapshot: unknown,
   currentId: string | undefined,
-  landed?: ReadonlyMap<string, ContextTimeline>,
+  landed?: ReadonlyMap<string, AgentHead>,
 ): SubagentCostFold {
   const byId = asRecord(asRecord(snapshot)?.byId)
   if (byId === null || currentId === undefined || currentId === '') return { usage: null, cold: [], count: 0 }
@@ -375,7 +387,7 @@ export function subagentCostFoldOf(
     for (const kid of childrenOf.get(id) ?? []) {
       if (seen.has(kid.id)) continue
       seen.add(kid.id)
-      const head = landed?.get(kid.id)
+      const head = landed?.get(kid.id)?.timeline
       const values = kid.row.projections
       if (values?.contextTimeline === undefined) {
         if (head === undefined) cold.push(kid.id)

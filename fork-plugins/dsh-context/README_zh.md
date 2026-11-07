@@ -220,7 +220,7 @@ dsh plugin --profile web update dsh-context@latest
 ## 注意事项
 
 - **估算值与实际值** — 各类别数值采用 dsh 自身的固定密度启发式算法（与内置 Token 计量器相同）；固定的趋势明细会在旁边显示服务商报告的实际值，而 Token 卡片则将基于约略值估算的组成占比与服务商精确报告的计费总量一并呈现。
-- **兼容性** — 通过同一条由数据形状驱动的代码路径，支持 V4 会话日志格式的 `@deepseek-ai/dsh` **0.2.0-rc.2 及更高版本**（`0.2.0` 与 `0.2.1` 系列，已在各自的 rc.2 版本上验证）。各版本支持情况及验证方式见：[docs/compatibility.md](docs/compatibility.md)。
+- **兼容性** — 通过同一条由数据形状驱动的代码路径，支持 V4 会话日志格式的 `@deepseek-ai/dsh` **0.2.0-rc.2 及更高版本**（`0.2.0`、`0.2.1` 与 `0.2.2` 系列，已分别在 rc.2、rc.2 与 rc.1 版本上验证）。各版本支持情况及验证方式见：[docs/compatibility.md](docs/compatibility.md)。
 - **国际化** — UI 支持英文和简体中文。
 
 ## 喜欢它？

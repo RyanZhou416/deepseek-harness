@@ -8,7 +8,12 @@ function headResponse(model = 'deepseek-v4-flash'): unknown {
     status: 200,
     json: async () => ({
       ok: true,
-      value: { rev: 1, head: { ok: true, current: { system: 1, tools: 2, user: 3, inject: 0, skill: 0, assistant: 4, tool: 0, total: 10 }, model } },
+      value: {
+        rev: 1,
+        head: { ok: true, current: { system: 1, tools: 2, user: 3, inject: 0, skill: 0, assistant: 4, tool: 0, total: 10 }, model },
+        pressure: { projectedTokens: 40, contextWindow: 1000 },
+        breakdown: { systemTokens: 5, toolsTokens: 6, messageTokens: 7 },
+      },
     }),
   }
 }
@@ -16,7 +21,7 @@ function headResponse(model = 'deepseek-v4-flash'): unknown {
 describe('makeHeadFetcher', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
-  test('head-only bodies re-prove the served head; absent, failed, and malformed reads resolve null or reject', async () => {
+  test('head-only bodies re-prove the served head and its pressure views; absent, failed, and malformed reads resolve null or reject', async () => {
     const bodies: unknown[] = []
     vi.stubGlobal('fetch', async (_url: unknown, init: { body: string }) => {
       bodies.push(JSON.parse(init.body))
@@ -24,8 +29,18 @@ describe('makeHeadFetcher', () => {
     })
     const head = await makeHeadFetcher('s1')!()
     assert.deepEqual(bodies, [{ sessionId: 's1', head: true }])
-    assert.equal(head?.model, 'deepseek-v4-flash')
-    assert.equal(head?.current.total, 10)
+    assert.equal(head?.timeline.model, 'deepseek-v4-flash')
+    assert.equal(head?.timeline.current.total, 10)
+    assert.deepEqual(head?.pressure, { projectedTokens: 40, contextWindow: 1000 })
+    assert.deepEqual(head?.breakdown, { systemTokens: 5, toolsTokens: 6, messageTokens: 7 })
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, value: { rev: 1, head: { ok: true }, pressure: 'nope', breakdown: 4 } }),
+    }))
+    const bare = await makeHeadFetcher('s1')!()
+    assert.deepEqual(bare?.pressure, null, 'a malformed pressure never fabricates a figure')
+    assert.deepEqual(bare?.breakdown, null, 'a malformed breakdown never fabricates a figure')
     vi.stubGlobal('fetch', async () => ({ ok: true, status: 200, json: async () => ({ ok: true, value: null }) }))
     assert.equal(await makeHeadFetcher('s1')!(), null)
     assert.equal(makeHeadFetcher(''), undefined)

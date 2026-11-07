@@ -21,6 +21,7 @@ interface CtxSpec {
   sessionPersistence?: unknown
   storageDomain?: unknown
   stateOf?: (session: unknown, key: string) => unknown
+  snapshot?: (session: unknown, keys: unknown) => unknown
 }
 
 function ctxOf(spec: CtxSpec): { ctx: Context; captured: { path?: string; fetch?: RouteFetch }; disposers: (() => void)[] } {
@@ -34,7 +35,10 @@ function ctxOf(spec: CtxSpec): { ctx: Context; captured: { path?: string; fetch?
   if ('storageDomain' in spec) services.set('storageDomain', spec.storageDomain)
   const ctx = {
     get: (name: string) => services.get(name),
-    sessionProjections: { stateOf: spec.stateOf ?? (() => undefined) },
+    sessionProjections: {
+      stateOf: spec.stateOf ?? (() => undefined),
+      ...(spec.snapshot === undefined ? {} : { snapshot: spec.snapshot }),
+    },
     effect(fn: () => unknown, _label?: string) {
       const d = fn()
       if (typeof d === 'function') disposers.push(d as () => void)
@@ -93,6 +97,20 @@ function metadataOf(head: unknown, headerFields: Record<string, unknown> = HEADE
   return {
     header: headerFields,
     ...(head === undefined ? {} : { projections: { asOfSeq: 9, values: { contextTimeline: head } } }),
+  }
+}
+
+function metadataWithPressure(head: unknown): unknown {
+  return {
+    header: HEADER,
+    projections: {
+      asOfSeq: 9,
+      values: {
+        contextTimeline: head,
+        contextPressure: { projectedTokens: 900, contextWindow: 1000 },
+        contextBreakdown: { systemTokens: 10, toolsTokens: 20, messageTokens: 30 },
+      },
+    },
   }
 }
 
@@ -615,6 +633,56 @@ describe('the detail route', () => {
     const freshHead = await call(fresh.captured, { sessionId: 's1', head: true }) as { ok: true; value: { rev: number; head: { model?: unknown } } }
     assert.equal(freshHead.value.rev, 0)
     assert.equal(freshHead.value.head.model, 'deepseek-v4-flash')
+  })
+
+  test('a head read carries the summary-excluded pressure views, live and cold', async () => {
+    const { state } = driveTimeline(EVENTS)
+    const asked: unknown[] = []
+    const live = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      sessions: sessionsWith(okSession()),
+      stateOf: () => {
+        throw new Error('the registry-level read must not run beside a handle reader')
+      },
+      snapshot: (_session, keys) => {
+        asked.push(keys)
+        return {
+          asOfSeq: 2,
+          values: {
+            contextPressure: { projectedTokens: 900, contextWindow: 1000 },
+            contextBreakdown: { systemTokens: 10, toolsTokens: 20, messageTokens: 30 },
+          },
+        }
+      },
+    })
+    watchDetailChannel(live.ctx, BOUNDS, undefined, () => state)
+    const head = await call(live.captured, { sessionId: 's1', head: true }) as {
+      ok: true
+      value: { rev: number; pressure?: unknown; breakdown?: unknown }
+    }
+    assert.equal(head.value.rev, 2)
+    assert.deepEqual(head.value.pressure, { projectedTokens: 900, contextWindow: 1000 })
+    assert.deepEqual(head.value.breakdown, { systemTokens: 10, toolsTokens: 20, messageTokens: 30 })
+    assert.deepEqual(asked, [['contextPressure', 'contextBreakdown']], 'the key-subset read asks for the excluded keys only')
+    const detail = await call(live.captured, { sessionId: 's1' }) as { ok: true; value: { requests: unknown[] } }
+    assert.equal(detail.value.requests.length, 1, 'the handle reader serves the live fold')
+
+    let seenKeys: unknown
+    const cold = coldCtx({
+      observeMetadata: (_id, options) => {
+        seenKeys = (options as { projectionKeys?: unknown }).projectionKeys
+        return Promise.resolve(metadataWithPressure(buildTimelineHead(state)))
+      },
+    })
+    watchDetailChannel(cold.ctx, BOUNDS)
+    const coldHead = await call(cold.captured, { sessionId: 's1', head: true }) as {
+      ok: true
+      value: { pressure?: unknown; breakdown?: unknown }
+    }
+    assert.deepEqual(coldHead.value.pressure, { projectedTokens: 900, contextWindow: 1000 })
+    assert.deepEqual(coldHead.value.breakdown, { systemTokens: 10, toolsTokens: 20, messageTokens: 30 })
+    assert.deepEqual(seenKeys, ['contextTimeline', 'contextPressure', 'contextBreakdown'], 'one stat asks for the excluded keys')
+    assert.deepEqual(cold.counts, { observe: 0, metadata: 1, window: 0 })
   })
 
   test('hostile reads degrade to the failure envelope, never a throw', async () => {

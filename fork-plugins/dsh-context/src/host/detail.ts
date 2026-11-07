@@ -5,6 +5,7 @@ import { type ConnectionHostFace, registerPostRoute } from './connection'
 import { applyTimeline } from './fold'
 import { createTimelineState } from './foldState'
 import { buildTimelineDetail, buildTimelineHead } from './foldWire'
+import { PRESSURE_KEYS, pressureViewsOf, registryReaderOf, type TimelineReader } from './projectionHandle'
 import { TIMELINE_STATE_VERSION, timelineStateSchema } from './timeline'
 import type { ContextTimelineDetail, Snapshot } from '../shared/types'
 import type { TimelineState } from './foldState'
@@ -51,7 +52,7 @@ function headPayloadOfValue(value: Record<string, unknown>): { rev: number; head
 }
 
 export interface DetailChannelGate {
-  readonly live: boolean
+  live: boolean
 }
 
 interface SessionsHostFace {
@@ -95,6 +96,16 @@ function headerOf(metadata: unknown): HeaderFace | undefined {
 function cachedHeadOf(metadata: unknown): Record<string, unknown> | undefined {
   const values = asRecord(asRecord(asRecord(metadata)?.projections)?.values)
   return values === null ? undefined : asRecord(values[CACHE_KEY]) ?? undefined
+}
+
+/** The context-pressure values the same metadata observation serves, when the host has them. */
+function cachedPressureOf(metadata: unknown): { pressure?: unknown; breakdown?: unknown } {
+  const values = asRecord(asRecord(asRecord(metadata)?.projections)?.values)
+  if (values === null) return {}
+  return {
+    ...(values.contextPressure === undefined ? {} : { pressure: values.contextPressure }),
+    ...(values.contextBreakdown === undefined ? {} : { breakdown: values.contextBreakdown }),
+  }
 }
 
 /** The persisted projection state bound to this exact session lifecycle, read with no log I/O. */
@@ -165,14 +176,19 @@ async function foldSlice(
   return state
 }
 
-export function watchDetailChannel(ctx: Context, bounds: FoldBounds, coldReads: ColdReadGate = makeColdReadGate()): DetailChannelGate {
-  const gate = { live: false }
+export function watchDetailChannel(
+  ctx: Context,
+  bounds: FoldBounds,
+  coldReads: ColdReadGate = makeColdReadGate(),
+  timeline: TimelineReader | null = null,
+  gate: DetailChannelGate = { live: false },
+): DetailChannelGate {
+  const readTimeline = timeline ?? registryReaderOf(ctx)
   const payloads = new Map<string, ColdPayload>()
   ctx.inject(['connection', 'sessions'], (c) => {
     const sessions = c.get('sessions') as SessionsHostFace | undefined
     const getSession = typeof sessions?.get === 'function' ? sessions.get.bind(sessions) : undefined
     if (getSession === undefined) return
-    const projections = ctx.sessionProjections
 
     const handler = async (request: Request): Promise<Response> => {
       let sessionId: unknown
@@ -195,9 +211,14 @@ export function watchDetailChannel(ctx: Context, bounds: FoldBounds, coldReads: 
       try {
         const session = getSession(sessionId)
         if (session !== undefined && session !== null) {
-          const state = projections.stateOf(session as never, 'contextTimeline')
+          const state = readTimeline?.(session)
           if (state === undefined) return reply({ ok: true, value: null })
-          return reply({ ok: true, value: headOnly ? headPayloadOf(state) : buildTimelineDetail(state, bounds) })
+          return reply({
+            ok: true,
+            value: headOnly
+              ? { ...headPayloadOf(state), ...pressureViewsOf(ctx, session) }
+              : buildTimelineDetail(state, bounds),
+          })
         }
         const query = ctx.get('sessionQuery') as SessionQueryFace | undefined
         if (query === undefined) return reply({ ok: true, value: null })
@@ -244,7 +265,7 @@ async function serveCold(
   let metadata: unknown
   if (typeof query.observeSessionMetadata === 'function') {
     try {
-      metadata = await query.observeSessionMetadata(sessionId, { signal, projectionKeys: [CACHE_KEY] })
+      metadata = await query.observeSessionMetadata(sessionId, { signal, projectionKeys: [CACHE_KEY, ...PRESSURE_KEYS] })
     } catch {
       if (signal.aborted) return null
       metadata = undefined
@@ -252,7 +273,8 @@ async function serveCold(
   }
   const header = headerOf(metadata)
   const cachedHead = cachedHeadOf(metadata)
-  if (headOnly) return cachedHead === undefined ? null : headPayloadOfValue(cachedHead)
+  const cachedPressure = cachedPressureOf(metadata)
+  if (headOnly) return cachedHead === undefined ? null : { ...headPayloadOfValue(cachedHead), ...cachedPressure }
   if (full) return serveFullDetail(ctx, query, sessionId, bounds, coldReads, payloads, signal)
   if (header !== undefined) {
     const state = checkpointStateOf(ctx, sessionId, header)

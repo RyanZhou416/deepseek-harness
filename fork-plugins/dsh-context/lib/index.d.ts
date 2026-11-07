@@ -1,12 +1,12 @@
 /**
- * dsh-context v0.78.2-dsh021rc2.1
+ * dsh-context v0.78.2-dsh022rc1.1
  * A DeepSeek Harness plugin for context insight and management, with context dashboard and context command, for understanding how the context is made of, and how it evolves.
  * @author bowenliang123
  * @license Apache-2.0
  * @homepage https://github.com/bowenliang123/dsh-context
- * @built 2026-10-31T20:14:07-04:00
- * @commit 55ace8a5fefe (dirty working tree) on perf/round2
- * @commit-date 2026-10-31T19:45:38-04:00
+ * @built 2026-11-07T06:12:41-05:00
+ * @commit b1adc59a8f8b (dirty working tree) on merge/dsh-v0.2.2-rc.1
+ * @commit-date 2026-11-07T05:52:07-05:00
  */
 
 import { z } from "zod";
@@ -505,5 +505,5 @@ export declare const Config: z$1<Schemastery.ObjectS<NoInfer<{
 }>>, "plain">;
 export declare const name = "dsh-context";
 export declare const inject: string[];
-export declare function apply(ctx: Context, config: Config): void;
+export declare function apply(ctx: Context, config: Config): Promise<void>;
 export type { ActivityDay, ActivityState, Category, ContextActivity, ContextEventRecord, ContextHeaders, ContextTimeline, ContextTimelineDetail, HeaderRecord, HeaderTool, HeadersState, PlatformBalance, PlatformBalanceEntry, RequestRecord, SkillInfo, Snapshot, SurfaceNode, TimelineCounts, TimelineLast, TimelineState };

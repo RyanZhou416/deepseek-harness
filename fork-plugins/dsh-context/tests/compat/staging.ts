@@ -47,6 +47,44 @@ export function stageFile(baseline: Baseline, tagPath: string, localName: string
   return file
 }
 
+function fiberStateSource(baseline: Baseline): string | undefined {
+  let source: string
+  try {
+    source = dshShow(baseline.tag, 'vendor/cordis/src/fiber.ts')
+  } catch {
+    return undefined
+  }
+  const body = source.match(/export const enum FiberState \{([\s\S]*?)\n\}/)?.[1]
+  if (body === undefined) return undefined
+  let next = 0
+  const members = body.split(',')
+    .map(part => part.trim())
+    .filter(part => part !== '' && !part.startsWith('//'))
+    .map((part) => {
+      const [name, value] = part.split('=').map(token => token.trim())
+      const numeric = value === undefined ? next : Number(value)
+      next = numeric + 1
+      return `${name}: ${numeric}`
+    })
+  return `export const FiberState = { ${members.join(', ')} } as const\n`
+}
+
+export function stageRegistrySource(baseline: Baseline, tagPath: string, localName: string): string {
+  const text = dshShow(baseline.tag, tagPath)
+  const shim = fiberStateSource(baseline)
+  const match = text.match(/import \{([^}]*)\} from '@deepseek-ai\/cordis'\n/)
+  if (shim === undefined || match === null || !/\bFiberState\b/.test(match[1])) {
+    return stageFile(baseline, tagPath, localName)
+  }
+  const dir = join(STAGE, baseline.id, dirname(localName))
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'fiber-state-shim.ts'), shim)
+  const names = match[1].split(',').map(name => name.trim()).filter(name => name !== '' && name !== 'FiberState')
+  const file = join(STAGE, baseline.id, localName)
+  writeFileSync(file, text.replace(match[0], `import { ${names.join(', ')} } from '@deepseek-ai/cordis'\nimport { FiberState } from './fiber-state-shim.ts'\n`))
+  return file
+}
+
 function stageFileIfPresent(baseline: Baseline, tagPath: string, localName: string): boolean {
   const run = spawnSync('git', ['-C', DSH_REPO, 'cat-file', '-e', `${baseline.tag}:${tagPath}`], { encoding: 'utf8' })
   if (run.status !== 0) return false
@@ -140,7 +178,7 @@ const plugin = await import(${JSON.stringify(pluginUrl)})
 const ctx = new Context()
 const registry = new SessionProjectionRegistry(ctx)
 ctx.sessionProjections = registry
-plugin.apply(ctx, {})
+await plugin.apply(ctx, {})
 const session = { seq: 0, header: { id: 'compat-session', cwd: '/tmp' }, events: [] }
 ctx.emit('session/created', session)
 const ev = (seq, type, data = {}) => ({ seq, time: 1700000000000 + seq * 1000, type, data })
@@ -176,7 +214,7 @@ let developerRestoreMatches = false
 const ctxC = new Context()
 const registryC = new SessionProjectionRegistry(ctxC)
 ctxC.sessionProjections = registryC
-plugin.apply(ctxC, {})
+await plugin.apply(ctxC, {})
 const sessionC = { seq: 0, header: { id: 'registry-change-session', cwd: '/tmp' }, events: [] }
 ctxC.emit('session/created', sessionC)
 const registryLog = [
@@ -234,7 +272,7 @@ registryB.register({
     view: (state) => ({ uncached: state.uncached }),
   },
 })
-plugin.apply(ctxB, {})
+await plugin.apply(ctxB, {})
 const sessionB = { seq: 0, header: { id: 'poison-session', cwd: '/tmp' }, events: [] }
 ctxB.emit('session/created', sessionB)
 const notified = []
@@ -276,7 +314,7 @@ process.stdout.write('DRIVER-JSON ' + JSON.stringify({
 
 export function runDriver(baseline: Baseline): DriverReport {
   ensureHostDeps(baseline)
-  stageFile(baseline, 'packages/session/session-projection/src/index.ts', join('registry', 'index.ts'))
+  stageRegistrySource(baseline, 'packages/session/session-projection/src/index.ts', join('registry', 'index.ts'))
   stageFile(baseline, 'packages/session/session-projection/src/types.ts', join('registry', 'types.ts'))
   stageFile(baseline, 'packages/util/values/src/index.ts', join('dsh', 'index.ts'))
   stageFileIfPresent(baseline, 'packages/util/values/src/partial-json.ts', join('dsh', 'partial-json.ts'))

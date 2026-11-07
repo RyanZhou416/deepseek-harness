@@ -7,10 +7,11 @@ import { watchActivityBackfill } from './backfill'
 import { makeColdReadGate } from './coldRead'
 import { watchCommandPageChannel } from './commandPages'
 import { Config, resolveBounds } from './config'
-import { watchDetailChannel } from './detail'
+import { type DetailChannelGate, watchDetailChannel } from './detail'
 import { createFallbackActivityDefinition, createFallbackHeadersDefinition, createFallbackTimelineDefinition } from './fallback'
 import { watchFleetChannel } from './fleet'
 import { createContextHeadersDefinition } from './headers'
+import { timelineReaderOf } from './projectionHandle'
 import { watchPromptInjection } from './promptInjection'
 import { watchStepIdentity } from './stepIdentity'
 import { watchSkillCatalog } from './skills'
@@ -24,7 +25,7 @@ export const name = 'dsh-context'
 export const inject = ['sessionProjections']
 
 export { Config } from './config'
-export function apply(ctx: Context, config: Config): void {
+export async function apply(ctx: Context, config: Config): Promise<void> {
   const coldReads = makeColdReadGate()
   watchBalanceChannel(ctx)
   watchRecomChannel(ctx)
@@ -33,18 +34,24 @@ export function apply(ctx: Context, config: Config): void {
   watchAttachmentChannel(ctx, coldReads)
   const harnessVersion = detectHarnessVersion(ctx)
   if (harnessVersion !== undefined && !meetsBaseline(harnessVersion)) {
-    ctx.sessionProjections.register(createFallbackTimelineDefinition(harnessVersion) as never)
-    ctx.sessionProjections.register(createFallbackHeadersDefinition() as never)
-    ctx.sessionProjections.register(createFallbackActivityDefinition() as never)
+    await Promise.all([
+      Promise.resolve(ctx.sessionProjections.register(createFallbackTimelineDefinition(harnessVersion) as never)),
+      Promise.resolve(ctx.sessionProjections.register(createFallbackHeadersDefinition() as never)),
+      Promise.resolve(ctx.sessionProjections.register(createFallbackActivityDefinition() as never)),
+    ])
     return
   }
   const attribution = createToolAttribution(ctx)
   watchStepIdentity(ctx)
-  const gate = watchDetailChannel(ctx, resolveBounds(config), coldReads)
-  watchCommandPageChannel(ctx, resolveBounds(config), coldReads)
-  ctx.sessionProjections.register(createContextTimelineDefinition(config, () => gate.live))
-  ctx.sessionProjections.register(createContextHeadersDefinition(name => attribution.ownerOf(name)))
-  ctx.sessionProjections.register(createContextActivityDefinition())
+  const bounds = resolveBounds(config)
+  const gate: DetailChannelGate = { live: false }
+  const [timeline] = await Promise.all([
+    Promise.resolve(ctx.sessionProjections.register(createContextTimelineDefinition(config, () => gate.live))),
+    Promise.resolve(ctx.sessionProjections.register(createContextHeadersDefinition(name => attribution.ownerOf(name)))),
+    Promise.resolve(ctx.sessionProjections.register(createContextActivityDefinition())),
+  ])
+  watchDetailChannel(ctx, bounds, coldReads, await timelineReaderOf(ctx, timeline), gate)
+  watchCommandPageChannel(ctx, bounds, coldReads)
   watchActivityBackfill(ctx, coldReads)
   watchPromptInjection(ctx, config)
 }

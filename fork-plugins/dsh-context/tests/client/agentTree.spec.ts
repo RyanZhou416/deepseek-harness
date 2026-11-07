@@ -23,6 +23,7 @@ import {
   type AgentForest,
 } from '../../src/client/agentTree'
 import { mergeCostUsage } from '../../src/client/cost'
+import type { AgentHead } from '../../src/client/agentHeads'
 import type { ContextTimeline, SessionCostUsage } from '../../src/shared/types'
 
 function timeline(total: number, requests = 0): ContextTimeline {
@@ -123,10 +124,10 @@ describe('agentTurnCompletedOf', () => {
 describe('agentStatsOf', () => {
   test('absent values degrade to empty stats', () => {
     assert.deepEqual(agentStatsOf(undefined), {
-      head: null, requests: 0, billed: null, costUsage: null, durationMs: null, identity: null,
+      head: null, pressureKnown: false, requests: 0, billed: null, costUsage: null, durationMs: null, identity: null,
     })
     assert.deepEqual(agentStatsOf({}), {
-      head: null, requests: 0, billed: null, costUsage: null, durationMs: null, identity: null,
+      head: null, pressureKnown: false, requests: 0, billed: null, costUsage: null, durationMs: null, identity: null,
     })
   })
 
@@ -331,9 +332,9 @@ describe('agentForestOf', () => {
       }),
       warm: row({ parentId: 'root', origin: 'subagent', projectionValues: { contextTimeline: timeline(100, 1) } }),
     }), 'root', undefined, new Map<string, unknown>([
-      ['cold', composed],
-      ['warm', composed],
-      ['ghost', timeline(5)],
+      ['cold', { timeline: composed, pressure: null, breakdown: null }],
+      ['warm', { timeline: composed, pressure: null, breakdown: null }],
+      ['ghost', { timeline: timeline(5), pressure: null, breakdown: null }],
     ]))
     assert.ok(forest !== null)
     const cold = forest.nodes.find(n => n.id === 'cold')
@@ -341,17 +342,32 @@ describe('agentForestOf', () => {
     assert.equal(cold.head.tokens, 500)
     assert.equal(cold.head.pct, 50)
     assert.ok(cold.head.parts.filter(p => p.value > 0).length >= 5, 'composed, not the single occupancy arc')
+    assert.equal(cold.pressureKnown, true, 'the row pressure anchors; the fetched head fills the timeline')
     const warm = forest.nodes.find(n => n.id === 'warm')
     assert.equal(warm?.head?.tokens, 100)
     assert.ok(forest.nodes[0].head === null)
     const solo = agentForestOf(snap({
       s1: row({}),
-    }), 's1', undefined, new Map([['s1', composed]]))
+    }), 's1', undefined, new Map([['s1', { timeline: composed, pressure: { projectedTokens: 500, contextWindow: 1000 }, breakdown: null }]]))
     assert.ok(solo !== null)
     const soloHead = solo.nodes[0].head
     assert.ok(soloHead !== null)
-    assert.equal(soloHead.tokens, 600, 'no pressure anchor: the fold total carries')
-    assert.equal(soloHead.pct, 60)
+    assert.equal(soloHead.tokens, 500, 'the fetched pressure anchors the ring')
+    assert.equal(soloHead.pct, 50)
+    assert.equal(solo.nodes[0].pressureKnown, true, 'the fetched pressure is known')
+  })
+
+  test('a fetched breakdown refines the composition parts', () => {
+    const forest = agentForestOf(snap({
+      s1: row({}),
+    }), 's1', undefined, new Map([['s1', {
+      timeline: timeline(100, 1),
+      pressure: null,
+      breakdown: { systemTokens: 900, toolsTokens: 50, messageTokens: 50 },
+    }]]))
+    assert.ok(forest !== null)
+    const parts = forest.nodes[0].head?.parts ?? []
+    assert.equal(parts.find(p => p.key === 'system')?.value, 900, 'the fetched breakdown replaces the folded split')
   })
 
   test('a hostile fetched head degrades back to the pressure-only ring', () => {
@@ -549,14 +565,14 @@ describe('subagentCostFoldOf', () => {
     assert.equal(fold.usage, null, 'nothing warm or landed yet')
     assert.deepEqual(fold.cold, ['cold', 'bare'])
     assert.equal(fold.count, 2, 'a cold descendant is a subagent too')
-    const landed = new Map<string, ContextTimeline>([['cold', { ...timeline(50), cost: COST_B }]])
+    const landed = new Map<string, AgentHead>([['cold', { timeline: { ...timeline(50), cost: COST_B }, pressure: null, breakdown: null }]])
     assert.deepEqual(subagentCostFoldOf(snap(byId), 'root', landed).usage, COST_B)
     assert.deepEqual(subagentCostFoldOf(snap(byId), 'root', landed).cold, ['bare'])
   })
 
   test('a landed head whose cost is absent leaves the id warm but contributes nothing', () => {
     const byId = { root: costRow(undefined, COST_A), cold: row({ parentId: 'root', origin: 'subagent' }) }
-    const landed = new Map<string, ContextTimeline>([['cold', timeline(50)]])
+    const landed = new Map<string, AgentHead>([['cold', { timeline: timeline(50), pressure: null, breakdown: null }]])
     const fold = subagentCostFoldOf(snap(byId), 'root', landed)
     assert.deepEqual(fold.usage, null)
     assert.deepEqual(fold.cold, [])

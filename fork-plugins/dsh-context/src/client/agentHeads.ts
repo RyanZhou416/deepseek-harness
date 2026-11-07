@@ -1,15 +1,21 @@
 import { useCallback, useSyncExternalStore } from 'react'
-import type { ContextTimeline } from '../shared/types'
+import type { ContextBreakdown, ContextPressure, ContextTimeline } from '../shared/types'
 import type { SessionsFaceLike } from './agentTree'
 import { DETAIL_ROUTE } from './apiRoutes'
 import { lruTouch, lruTrim } from './lru'
-import { asRecord, timelineOf } from './services'
+import { asRecord, contextBreakdownOf, contextPressureOf, timelineOf } from './services'
 
-export interface AgentHeads {
-  headOf(id: string): Promise<ContextTimeline | null>
+export interface AgentHead {
+  timeline: ContextTimeline
+  pressure: ContextPressure | null
+  breakdown: ContextBreakdown | null
 }
 
-export function makeHeadFetcher(sessionId: string): (() => Promise<ContextTimeline | null>) | undefined {
+export interface AgentHeads {
+  headOf(id: string): Promise<AgentHead | null>
+}
+
+export function makeHeadFetcher(sessionId: string): (() => Promise<AgentHead | null>) | undefined {
   if (sessionId === '') return undefined
   return async () => {
     const response = await fetch(DETAIL_ROUTE, {
@@ -21,18 +27,23 @@ export function makeHeadFetcher(sessionId: string): (() => Promise<ContextTimeli
     const r = asRecord(await response.json())
     if (r === null || r.ok !== true) throw new Error('dsh-context: head read failed')
     if (r.value === null) return null
-    const head = timelineOf(asRecord(r.value)?.head)
+    const value = asRecord(r.value)
+    const head = timelineOf(value?.head)
     if (head === null) throw new Error('dsh-context: head read malformed')
-    return head
+    return {
+      timeline: head,
+      pressure: contextPressureOf(value?.pressure),
+      breakdown: contextBreakdownOf(value?.breakdown),
+    }
   }
 }
 
 const HEADS_MAX = 128
 
 export function makeAgentHeads(): AgentHeads {
-  const heads = new Map<string, Promise<ContextTimeline | null>>()
+  const heads = new Map<string, Promise<AgentHead | null>>()
   return {
-    headOf(id: string): Promise<ContextTimeline | null> {
+    headOf(id: string): Promise<AgentHead | null> {
       const cached = heads.get(id)
       if (cached !== undefined) {
         lruTouch(heads, id)

@@ -1,4 +1,4 @@
-export type BaselineId = 'v0.2.0-rc.2' | 'v0.2.1-rc.2'
+export type BaselineId = 'v0.2.0-rc.2' | 'v0.2.1-rc.2' | 'v0.2.2-rc.1'
 
 export interface ClientSeam {
   imageFaceMethod: string
@@ -15,6 +15,7 @@ export interface ClientSeam {
     clientRpcNeedle: string
     registryFile: string
     registryNeedle: string
+    projectionHandle: boolean
   }
   sessionNav: {
     workspaceFile: string
@@ -108,6 +109,7 @@ export interface Baseline {
     registryFile: string
     storeFile: string
     cacheFile: string
+    cacheSpecFile: string
   }
 }
 
@@ -124,7 +126,10 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
   stockIds?: readonly string[]
   extraFoldEvents?: readonly string[]
   platformModules?: readonly string[]
+  registryNeedle?: string
+  projectionHandle?: boolean
 } = {}): Baseline {
+  const lineTwo = id !== 'v0.2.0-rc.2'
   return {
     id,
     tag,
@@ -153,7 +158,8 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
         clientRpcFile: 'packages/client/connection/src/client/rpc.ts',
         clientRpcNeedle: 'call(channel, endpoint, payload',
         registryFile: 'packages/session/session-projection/src/index.ts',
-        registryNeedle: 'stateOf<',
+        registryNeedle: line.registryNeedle ?? 'stateOf<',
+        projectionHandle: line.projectionHandle ?? false,
       },
       sidebar: {
         serviceFile: 'packages/client/ui-sidebar-right/src/client/index.ts',
@@ -190,15 +196,15 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
       subagentAddress: {
         file: 'packages/api/session-controller/src/client/sessions/manager.ts',
         needle: 'subagentAddress',
-        summaryFallback: id === 'v0.2.1-rc.2',
+        summaryFallback: lineTwo,
         summaryNeedle: 'summary?.origin',
       },
       pluginsNav: {
         file: 'packages/client/ui-plugin-manager/src/client/index.ts',
         needle: "'pluginNavigation', {",
-        tabReset: id === 'v0.2.1-rc.2',
+        tabReset: lineTwo,
         tabResetNeedle: 'instance.actions.setTab',
-        tabsSlot: id === 'v0.2.1-rc.2',
+        tabsSlot: lineTwo,
         tabsSlotFile: 'packages/client/ui-plugin-manager/src/client/slot-contract.ts',
         tabsSlotNeedle: "'plugins.tab'",
       },
@@ -267,6 +273,7 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
       registryFile: 'packages/session/session-projection/src/index.ts',
       storeFile: 'packages/core/session/src/index.ts',
       cacheFile: 'packages/session/session-projection-cache/src/index.ts',
+      cacheSpecFile: 'packages/session/session-projection-cache/src/spec.ts',
     },
   }
 }
@@ -278,5 +285,13 @@ export const BASELINES: readonly Baseline[] = [
     stockIds: ['llm-deepseek', 'web-search-deepseek', 'web-deepseek-api'],
     platformModules: [...DEFAULT_PLATFORM_MODULES, 'zod', '@tanstack/react-virtual'],
     extraFoldEvents: ['job/registered', 'job/settled'],
+  }),
+  baseline('v0.2.2-rc.1', 'dsh-v0.2.2-rc.1', '0.2.2-rc.1', {
+    cordis: '4.1.0',
+    stockIds: ['llm-deepseek', 'web-search-deepseek', 'web-deepseek-api'],
+    platformModules: [...DEFAULT_PLATFORM_MODULES, 'zod', '@tanstack/react-virtual'],
+    extraFoldEvents: ['job/registered', 'job/settled'],
+    registryNeedle: 'stateOf(session: Session): S',
+    projectionHandle: true,
   }),
 ]

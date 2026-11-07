@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { AgentHeads } from './agentHeads'
+import type { AgentHead, AgentHeads } from './agentHeads'
 import { useSessionsSnapshot } from './agentHeads'
 import { agentForestOf, sessionTitlesOf, sessionsFaceOf, type AgentForest, type AgentSelfStats } from './agentTree'
 import { FleetDetailCache } from './fleetDetail'
@@ -7,7 +7,7 @@ import { lruTrim } from './lru'
 import { teamOf, type FleetTeam } from './fleetTeam'
 import type { ClientCtx } from './services'
 import { asRecord } from './services'
-import type { ContextTimeline, FleetDetail } from '../shared/types'
+import type { FleetDetail } from '../shared/types'
 
 export interface FleetModel {
   forest: AgentForest | null
@@ -44,7 +44,7 @@ export function useFleetModel(
     face.refreshSubagents(sessionId).catch(() => {})
   }, [face, sessionId])
 
-  const [landed, setLanded] = useState<ReadonlyMap<string, ContextTimeline>>(new Map())
+  const [landed, setLanded] = useState<ReadonlyMap<string, AgentHead>>(new Map())
 
   const forest = useMemo(
     () => agentForestOf(snapshot, sessionId, self, landed),
@@ -53,13 +53,13 @@ export function useFleetModel(
 
   useEffect(() => {
     if (forest === null) return
-    const attach = (pending: Promise<ContextTimeline | null>, id: string): void => {
+    const attach = (pending: Promise<AgentHead | null>, id: string): void => {
       void pending.then((head) => {
         if (head !== null) setLanded(prev => prev.get(id) === head ? prev : new Map(prev).set(id, head))
       }).catch(() => {})
     }
     for (const n of forest.nodes) {
-      if (n.isCurrent || (n.head !== null && n.head.parts.length > 0)) continue
+      if (n.isCurrent || (n.head !== null && n.head.parts.length > 0 && n.pressureKnown === true)) continue
       attach(heads.headOf(n.id), n.id)
     }
   }, [forest, heads])

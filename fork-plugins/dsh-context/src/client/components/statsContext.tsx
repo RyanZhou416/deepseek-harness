@@ -1,11 +1,11 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from 'react'
-import type { ContextEventRecord, ContextTimeline, RequestRecord, SessionCostUsage, SurfaceNode, TimelineCounts } from '../../shared/types'
+import type { ContextEventRecord, RequestRecord, SessionCostUsage, SurfaceNode, TimelineCounts } from '../../shared/types'
 import { estimateSessionCost, billedTokensOf, formatCost, formatPriceRate, mergeCostUsage, priceLookupsOf, toCurrency } from '../cost'
 import type { CostCurrency, ModelBook, PriceFace, PriceMiss } from '../cost'
 import { REFERENCE_PRICE_DATE, referenceModelPriceOf } from '../../shared/modelPricing'
 import { sessionsFaceOf, subagentCostFoldOf } from '../agentTree'
 import { useSessionsSnapshot } from '../agentHeads'
-import type { AgentHeads } from '../agentHeads'
+import type { AgentHead, AgentHeads } from '../agentHeads'
 import type { Translate } from '../i18n'
 import { useModelPrices } from '../modelPrices'
 import { nameColorOf } from '../nameColor'
@@ -73,7 +73,7 @@ export function makeSubagentCost(
   return function useSubagentCost(sessionId: string | undefined): SubagentStats {
     const face = useMemo(() => sessionsFaceOf(ctx), [])
     const snapshot = useSessionsSnapshot(face, 250)
-    const [landed, setLanded] = useState<ReadonlyMap<string, ContextTimeline>>(new Map())
+    const [landed, setLanded] = useState<ReadonlyMap<string, AgentHead>>(new Map())
     const fold = useMemo(
       () => subagentCostFoldOf(snapshot, sessionId, landed),
       [snapshot, sessionId, landed],

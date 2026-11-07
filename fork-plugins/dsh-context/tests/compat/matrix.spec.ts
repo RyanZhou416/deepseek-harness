@@ -131,6 +131,18 @@ describe.skipIf(reasons.length > 0)('compat matrix — real dsh sources per base
       }
     })
 
+    test('host: the stored-checkpoint face the detail read rides keeps its domain and row layout', () => {
+      const fold = baseline.backfillFold
+      for (const [file, needle] of [
+        [fold.cacheSpecFile, "name: 'session_projcache'"],
+        [fold.cacheSpecFile, 'tables: { sessions: domainTable'],
+        [fold.cacheSpecFile, 'rows: z.record(z.string(), checkpointRow)'],
+        [fold.cacheSpecFile, 'identity: checkpointIdentity'],
+      ] as const) {
+        assert.equal(staging.dshHasString(baseline.tag, needle, file), true, `detail checkpoint layout: ${needle}`)
+      }
+    })
+
     for (const slot of staging.SLOT_SEAMS) {
       test(`client: slot "${slot}" exists`, () => {
         assert.equal(staging.dshHasString(baseline.tag, slot, 'packages/client/*/src/**'), true)
@@ -176,11 +188,16 @@ describe.skipIf(reasons.length > 0)('compat matrix — real dsh sources per base
       )
     })
 
-    test('detail channel: the Connection RPC faces and the registry stateOf exist', () => {
+    test('detail channel: the Connection RPC faces and the registry read face exist', () => {
       const dc = baseline.client.detailChannel
       assert.equal(staging.dshHasString(baseline.tag, dc.hostRpcNeedle, dc.hostRpcFile), true, 'host RPC registry face')
       assert.equal(staging.dshHasString(baseline.tag, dc.clientRpcNeedle, dc.clientRpcFile), true, 'browser RPC caller face')
-      assert.equal(staging.dshHasString(baseline.tag, dc.registryNeedle, dc.registryFile), true, 'registry stateOf face')
+      assert.equal(staging.dshHasString(baseline.tag, dc.registryNeedle, dc.registryFile), true, 'registry read face')
+      assert.equal(
+        staging.dshHasString(baseline.tag, 'Promise<ProjectionHandle<S>>', dc.registryFile),
+        dc.projectionHandle,
+        'the awaited registration handle of this generation',
+      )
     })
 
     test('client: the right Sidebar tab seam', () => {
