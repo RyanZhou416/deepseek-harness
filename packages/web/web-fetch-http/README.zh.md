@@ -1,5 +1,5 @@
 ---
-description: "ctx.web 的匿名 HTTP(S) 抓取后端：部署方如何挂载有界 URL 抓取，含同源重定向与仅文本解码。"
+description: "ctx.web 的匿名 HTTP(S) 抓取后端：部署方如何挂载有界的 URL 抓取，含同源重定向与仅文本解码。"
 kind: "package-reference"
 ---
 
@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-有了 `dsh-web-fetch-http`，harness 可以通过 web 服务（`ctx.web`）抓取 HTTP(S) 资源，并在不发送凭据的情况下获得状态码与有界、解码后的内容。需要 URL 校验、仅同源重定向、字节上限与显式产品 `User-Agent` 的有界抓取时选择它。请求经进程的普通 fetch 传输发出，因此进程能到达的任何目标都可抓取，包括 loopback 与私有网络。它把非 2xx 响应作为结果而非错误返回，并拒绝二进制数据与不受支持的内容类型。面向模型的 `web_fetch` 工具位于 `dsh-tool-web`，由它渲染本提供方的正文。
+有了 `dsh-web-fetch-http`，harness 可以通过 web 服务（`ctx.web`）抓取 HTTP(S) 页面，并在不发送凭据的情况下获得状态码与有界、解码后的内容。当组合需要 URL 校验、仅同源重定向、字节和字符上限及显式产品 `User-Agent` 时选择它。它把非 2xx 响应作为结果而非错误返回，并拒绝二进制数据与不受支持的内容类型。它不限制目标地址，因此可以访问 loopback 与内网主机。面向模型的 `web_fetch` 工具位于 `dsh-tool-web`，由它渲染本提供方的正文。
 
 ## 目录
 
@@ -29,11 +29,11 @@ kind: "package-reference"
 
 ### 何时选择
 
-当部署必须以有界输出抓取 HTTP(S) 资源时选择此后端：不发送凭据，重定向无法逃出源站，每个响应都有上限。目标地址不受限制，因此 `web_fetch` 可以到达 loopback、私有网络以及本进程能到达的其他主机；只有当模型可以使用这种可达性时才挂载它。
+当部署必须以有界输出抓取页面时选择此后端：不发送凭据，重定向无法逃出源站，每个响应都有上限。
 
 ### 最小配置
 
-加载 web 服务与本提供方；可配置上限都有安全默认值，并在插件构造时验证，因此无效值会直接报错，而不是构造出上限荒谬的提供方。URL 长度上限固定为 2,048 个字符。
+加载 web 服务与本提供方；可配置上限都有安全默认值，并在插件构造时验证，因此无效值会直接报错，而不是构造出上限荒谬的提供方。URL 安全上限固定为 2,048 个字符。
 
 ```yaml
 - name: '@deepseek-ai/dsh-web'
@@ -52,7 +52,7 @@ kind: "package-reference"
 
 ### 抓取返回什么
 
-成功调用产生 `WebFetchResult`：允许的重定向之后的最终 URL、HTTP 状态码、分类为 `html` 或 `text` 的解码正文，以及 `truncated` 标志。非 2xx 响应是结果而非错误——状态码是被抓取资源状态的一部分；`WebError` 只用于无法获取或表示资源的失败。
+成功调用产生 `WebFetchResult`：允许的重定向之后的最终 URL、HTTP 状态码、分类为 `html` 或 `text` 的解码正文，以及 `truncated` 标志。非 2xx 响应是结果而非错误——状态码是被抓取资源状态的一部分；`WebError` 只用于无法安全获取或表示资源的失败。
 
 ```text
 const page = await ctx.web.fetch({ url: 'https://example.com' })
@@ -61,11 +61,13 @@ const page = await ctx.web.fetch({ url: 'https://example.com' })
 
 ### 传输行为
 
-提供方保持请求匿名且有界：只接受不含内嵌凭据且不超过 2,048 个字符的 `http:` 与 `https:` URL。它通过进程的全局 `fetch` 发送一次 `GET`，并省略凭据，因此路由跟随已配置的 HTTP 代理或系统 TUN 路由。提供方从不解析、分类或过滤目标地址：loopback、私有与 link-local 主机与其他主机同样可达。每次同源重定向都会在下一跳之前重新校验；跨源重定向会失败并要求重新调用。提供方还强制执行字节、字符、跳数和时间上限，拒绝不支持的内容类型，并发送显式产品 `User-Agent`。
+提供方保持请求匿名且有界：只接受不含内嵌凭据且不超过 2,048 个字符的 `http:` 与 `https:` URL。请求经过进程级 dispatcher，因此已安装的代理策略生效，目标地址由系统解析器选择；任何目标地址都被允许。同源重定向会被跟随；跨源重定向会失败并要求重新调用。提供方还强制执行字节、字符、跳数和时间上限，拒绝不支持的内容类型，并发送显式产品 `User-Agent`。
+
+对于以逗号或空白拼接、且含有 UTF-8 标签的畸形 charset 声明（例如 `charset=utf-8,gbk`），提供方严格按 UTF-8 解码。恢复路径拒绝非法 UTF-8，不会尝试其他编码。字节上限在字符内部截断时，恢复路径省略不完整的末尾序列并返回 `truncated: true`；使用恢复路径的完整响应必须通过 EOF 检查。合法的单标签声明仍在遇到非法字节时使用替换字符。
 
 ### 失败与恢复
 
-失败会抛出 `WebError`，其中包含可供程序路由的错误码：`WEB_INVALID_URL`、`WEB_BLOCKED_URL`、`WEB_FETCH_TOO_LARGE`、`WEB_FETCH_TIMEOUT`、`WEB_REDIRECT_BLOCKED`、`WEB_UNSUPPORTED_CONTENT_TYPE`、`WEB_ABORTED` 或 `WEB_PROVIDER_ERROR`。直接调用方可以按错误码路由；面向模型的 `web_fetch` 工具会在自己的错误包装层内把失败文本呈现给模型。
+失败会抛出 `WebError`，其中包含可供程序路由的错误码：`WEB_INVALID_URL`、`WEB_BLOCKED_URL`、`WEB_FETCH_TOO_LARGE`、`WEB_FETCH_TIMEOUT`、`WEB_REDIRECT_BLOCKED`、`WEB_UNSUPPORTED_CONTENT_TYPE`、`WEB_ABORTED` 或 `WEB_PROVIDER_ERROR`。`WEB_UNSUPPORTED_CONTENT_TYPE` 涵盖不支持的媒体类型、不支持的 charset 声明，以及畸形声明恢复过程中遇到的非法 UTF-8。直接调用方可以按错误码路由；面向模型的 `web_fetch` 工具会在自己的错误包装层内把失败文本呈现给模型。
 
 -----
 
@@ -89,12 +91,12 @@ const page = await ctx.web.fetch({ url: 'https://example.com' })
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件入口：配置 schema、上限验证、提供方注册 |
-| [`src/provider.ts`](src/provider.ts) | `HttpFetchProvider`：全局 fetch 传输、重定向跟随、有界读取、charset 解码 |
+| [`src/provider.ts`](src/provider.ts) | `HttpFetchProvider`：传输、重定向跟随、有界读取、charset 解码 |
 | [`src/policy.ts`](src/policy.ts) | URL 校验、同源检查、内容类型分类、charset 解析 |
 
 ### 读取路径
 
-抓取先校验 URL，再通过全局 `fetch` 发送一次带产品 `User-Agent` 且省略凭据的 GET。目标地址不被检查，因此 loopback 与私有主机会经进程自身的网络连接。每次同源重定向都会在下一跳之前重新执行 URL 校验；跨源重定向会失败。最终响应按 `Content-Type` 分类、依声明的 charset 解码，并在字节上限内读取；解码后的文本再截断到字符上限。
+抓取先校验 URL，再发送请求。每次同源重定向都重复 URL 校验；跨源重定向在接收响应字节前失败。最终响应按 `Content-Type` 分类、依声明的 charset 解码（含有 UTF-8 的畸形声明使用严格 UTF-8 恢复），并在字节上限内读取；解码后的文本再截断到字符上限。
 
 </details>
 
@@ -130,9 +132,10 @@ const page = await ctx.web.fetch({ url: 'https://example.com' })
 
 这些限制说明提供方何时不安全或不合适。它们是当前包约束。
 
-- **目标地址不受限制**——提供方不解析、分类或过滤目标地址，因此 `web_fetch` 可以到达本进程能到达的 loopback、私有、link-local 与云 metadata 端点。需要更窄策略的部署必须在本包之外强制执行，例如使用 `tools/pre-execute` 策略或网络层出站规则；提供方不提供地址模式，也不提供允许列表。
+- **可以访问私有目标**——loopback、内网与云元数据地址与其他主机一样会被抓取。需要阻止模型访问这些地址的部署必须添加 `tools/pre-execute` 策略、网络隔离，或不挂载抓取工具。
 - **只解码文本内容**——包括 html/xhtml 与 `text/*` 加 JSON/XML 家族；缺少 `Content-Type` 或任何二进制类型都会抛出 `WEB_UNSUPPORTED_CONTENT_TYPE`，可提取文本的 PDF 解码属于明确的延期工作。
-- **charset 只来自 `Content-Type` 标头**（默认 UTF-8）——HTML `<meta charset>` 声明会被忽略；声明但无法识别的 charset 标签会抛出异常，而非回退。
+- **charset 只来自 `Content-Type` 标头**（默认 UTF-8）——HTML `<meta charset>` 声明会被忽略；不支持且不含 UTF-8 标签的声明会抛出异常。
+- **UTF-8 恢复是一种优先规则，不是编码检测**——同一组字节可能同时是合法的 UTF-8 和其他编码，长响应也不例外。恢复路径在这种情况下选择 UTF-8；不含 UTF-8 标签的畸形声明仍不受支持。
 
 <a id="dev-note"></a>
 ### 开发备注

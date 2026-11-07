@@ -73,6 +73,8 @@ export interface SessionNode {
   /** In the registry-global archive set: shown grayed in place and not openable. */
   archived: boolean
   updatedAt: number
+  /** Session working directory; absent when the Host reports none or an empty path. */
+  cwd?: string
 }
 
 /** Session order selected by the Workspace browser. */
@@ -174,12 +176,12 @@ export function orderByRecency(
 
 /**
  * Reconcile a browser-local manual order with current account membership.
- * New ordinary forks precede their sources without changing saved entries' relative order.
+ * Saved entries retain their relative order; new ordinary members follow them by recency.
  * @param memberIds - authoritative account membership.
  * @param savedOrder - previously saved browser-local order.
  * @param summaries - current Session metadata; unknown new members wait for their summaries.
  * @param rowState - global pin and archive membership; only account members can supplement the order.
- * @returns saved relative positions plus missing members ordered by pin, fork source, recency, and archive status.
+ * @returns saved relative positions plus missing members ordered by pin, recency, and archive status.
  */
 export function reconcileManualOrder(
   memberIds: readonly SessionId[],
@@ -210,58 +212,7 @@ export function reconcileManualOrder(
     if (archived.has(id)) archives.push(id)
     else ordinary.push(id)
   }
-  const result = [...pins, ...ordered, ...ordinary, ...archives]
-  const pending = new Set(ordinary)
-
-  // Index the mutable order once so each post-order fork move is constant-time.
-  interface OrderNode {
-    readonly id: SessionId
-    previous: OrderNode | undefined
-    next: OrderNode | undefined
-  }
-  const nodes = new Map<SessionId, OrderNode>()
-  let head: OrderNode | undefined
-  let tail: OrderNode | undefined
-  for (const id of result) {
-    const node: OrderNode = { id, previous: tail, next: undefined }
-    if (tail === undefined) head = node
-    else tail.next = node
-    tail = node
-    nodes.set(id, node)
-  }
-  const moveBefore = (id: SessionId, parentId: SessionId): void => {
-    const node = nodes.get(id) as OrderNode
-    const parent = nodes.get(parentId) as OrderNode
-    if (node.previous === undefined) head = node.next
-    else node.previous.next = node.next
-    if (node.next === undefined) tail = node.previous
-    else node.next.previous = node.previous
-    node.previous = parent.previous
-    node.next = parent
-    if (parent.previous === undefined) head = node
-    else parent.previous.next = node
-    parent.previous = node
-  }
-  type Placement =
-    | { readonly kind: 'enter'; readonly id: SessionId }
-    | { readonly kind: 'move'; readonly id: SessionId; readonly parentId: SessionId }
-  for (const id of [...ordinary].reverse()) {
-    const stack: Placement[] = [{ kind: 'enter', id }]
-    for (let placement = stack.pop(); placement !== undefined; placement = stack.pop()) {
-      if (placement.kind === 'move') {
-        moveBefore(placement.id, placement.parentId)
-        continue
-      }
-      if (!pending.delete(placement.id)) continue
-      const parentId = summaries[placement.id]?.parentId
-      if (parentId === undefined || parentId === placement.id || !nodes.has(parentId)) continue
-      stack.push({ kind: 'move', id: placement.id, parentId })
-      stack.push({ kind: 'enter', id: parentId })
-    }
-  }
-  const reconciled: SessionId[] = []
-  for (let node = head; node !== undefined; node = node.next) reconciled.push(node.id)
-  return reconciled
+  return [...pins, ...ordered, ...ordinary, ...archives]
 }
 
 /**
@@ -479,6 +430,7 @@ function sessionNode(
     pinned: !archived.has(s.id) && pinned.has(s.id),
     archived: archived.has(s.id),
     updatedAt: s.updatedAt,
+    ...(s.cwd === undefined || s.cwd === '' ? {} : { cwd: s.cwd }),
     ...(pendingInteraction === undefined ? {} : { pendingInteraction }),
   }
 }
@@ -601,7 +553,7 @@ export function deriveFlat(
 }
 
 /**
- * Merge immediate title/Workspace substring matches with ranked Host content
+ * Merge immediate title/Workspace/Session id substring matches with ranked Host content
  * matches. Local rows lead newest-first, content-only rows retain backend
  * order, and duplicate sessions receive the backend snippet in place.
  * @param list - session metadata authority.
@@ -653,6 +605,7 @@ export function deriveSearchResults(
     if (
       sessionTitle(summary).toLowerCase().includes(q)
       || labelOf(summary).toLowerCase().includes(q)
+      || summary.id.toLowerCase().includes(q)
     ) {
       local.push(summary)
     }

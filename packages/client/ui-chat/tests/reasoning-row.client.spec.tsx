@@ -9,7 +9,7 @@ import { zh } from '../src/client/locale.ts'
 import { AssistantMarkdown, type AssistantMarkdownProps } from '../src/client/chat/AssistantMarkdown.tsx'
 import { useDetailedPresentation } from './presentation-fixture.client.ts'
 import type { TranscriptViewMode } from '../src/chat-settings.ts'
-import { derivePresentationPolicy, type CollapseTiming } from '../src/client/presentation-policy.ts'
+import { derivePresentationPolicy, type CollapseTiming, type FoldedReplies } from '../src/client/presentation-policy.ts'
 import { ReasoningRow } from '../src/client/chat/ReasoningRow.tsx'
 import { bindDisclosure, useDisclosure } from '../src/client/chat/use-disclosure.ts'
 import { useSearchableHidden } from '../src/client/chat/searchable-hidden.ts'
@@ -41,8 +41,8 @@ describe('AssistantMarkdown reasoning blocks', () => {
     // Collapsed reasoning owns no body: its Markdown parses only on expansion.
     expect(calls).not.toHaveBeenCalled()
     fireEvent.click(view.getByRole('button'))
-    expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { text, running: false })
-    expect(view.getByText('Visible reasoning').closest('strong')).not.toBeNull()
+    expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { rawText: text, text, running: false })
+    expect(view.getByText('Visible reasoning').tagName).toBe('STRONG')
     expect(blocks.map(block => block.text)).toEqual(texts)
   })
 
@@ -124,7 +124,7 @@ describe('AssistantMarkdown reasoning blocks', () => {
 
   it('keeps non-blank rows and their expanded bodies across modes, excluding them from the response part', () => {
     const mode = createSnapshotStore<TranscriptViewMode>('compact')
-    const usePresentation = bindSnapshotSelector(derivePresentationPolicy(mode, createSnapshotStore<CollapseTiming>('completion')))
+    const usePresentation = bindSnapshotSelector(derivePresentationPolicy(mode, createSnapshotStore<CollapseTiming>('completion'), createSnapshotStore<FoldedReplies>('all')))
     const blocks: AssistantMarkdownProps['blocks'] = [
       { kind: 'reasoning', text: '' },
       { kind: 'reasoning', text: 'Mode thought\n\nMode body' },
@@ -152,7 +152,7 @@ describe('AssistantMarkdown reasoning blocks', () => {
 })
 
 describe('ReasoningRow', () => {
-  it('offers only text and streaming state to the standard Body Slot after expansion', () => {
+  it('offers original and display text after expansion', () => {
     const calls = vi.fn()
     const extension: AssistantMarkdownProps['renderSlot'] = (key, owner, options) => {
       calls(key, owner)
@@ -162,7 +162,7 @@ describe('ReasoningRow', () => {
       usePresentation={useDetailedPresentation} renderSlot={extension} t={t} />)
     expect(calls).not.toHaveBeenCalled()
     fireEvent.click(view.getByRole('button'))
-    expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { text: 'Original thought', running: false })
+    expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { rawText: 'Original thought', text: 'Original thought', running: false })
     expect(view.getAllByText('Original thought')).toHaveLength(1)
     expect(view.getAllByRole('button')).toHaveLength(1)
   })
@@ -194,7 +194,7 @@ describe('ReasoningRow', () => {
     const reset = createSnapshotStore(0)
     const useDisclosure = bindDisclosure(reset)
     const mode = createSnapshotStore<TranscriptViewMode>('standard')
-    const usePresentation = bindSnapshotSelector(derivePresentationPolicy(mode, createSnapshotStore<CollapseTiming>('completion')))
+    const usePresentation = bindSnapshotSelector(derivePresentationPolicy(mode, createSnapshotStore<CollapseTiming>('completion'), createSnapshotStore<FoldedReplies>('all')))
     const view = render(<ReasoningRow renderSlot={renderSlot} useDisclosure={useDisclosure}
       text={'First line\n\nDetailed body'} running={false} usePresentation={usePresentation} t={t} />)
     const root = view.container.querySelector('[data-variant="think"]')!
@@ -222,7 +222,7 @@ describe('ReasoningRow', () => {
 
   it('keeps a running preview enabled in Compact and hides it on settlement without removing it', () => {
     const mode = createSnapshotStore<TranscriptViewMode>('compact')
-    const usePresentation = bindSnapshotSelector(derivePresentationPolicy(mode, createSnapshotStore<CollapseTiming>('completion')))
+    const usePresentation = bindSnapshotSelector(derivePresentationPolicy(mode, createSnapshotStore<CollapseTiming>('completion'), createSnapshotStore<FoldedReplies>('all')))
     const props = { text: 'First line\n', usePresentation, t }
     const view = render(<ReasoningRow renderSlot={renderSlot} useDisclosure={useDisclosure} {...props} running />)
     const summary = view.getByText('First line')

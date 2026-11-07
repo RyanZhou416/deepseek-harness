@@ -3,10 +3,12 @@ import AgentRegistry, { type Agent, type AgentHandle, type AgentStatus } from '@
 import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId, type Session, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiSessionAgentController } from '../src/agent.ts'
-import { SessionHistoryController } from '../src/history.ts'
+import { HistoryController } from '../src/history/controller.ts'
+import { WebController } from '../src/web/controller.ts'
 import SessionController from '../src/index.ts'
 import { installSessionReadTestServices } from './test-remote.ts'
 
@@ -65,6 +67,7 @@ async function harness(
   roots.push(ctx)
   await ctx.plugin(TypertRegistry)
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   if (jobs !== undefined) {
     ctx.provide('jobs', {
@@ -185,6 +188,7 @@ describe('Session Controller idle Agent residency', () => {
     roots.push(ctx)
     await ctx.plugin(TypertRegistry)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(AgentRegistry)
     const controller = new ApiSessionAgentController(ctx, 100)
     const release = controller.retainForFollower(sessionId)
@@ -216,10 +220,11 @@ describe('Session Controller idle Agent residency', () => {
     vi.useFakeTimers()
     const { ctx, controller, agent, disposeHandle } = await harness(100)
     installSessionReadTestServices(ctx)
-    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() },
+    const history = new HistoryController(ctx)
+    const web = new WebController(ctx, history, (observation) => { observation[Symbol.dispose]() }, 0,
       sessionId => controller.retainForFollower(sessionId))
     const abort = new AbortController()
-    const iterator = history.follow({ address: { kind: 'session', sessionId } }, abort.signal)[Symbol.asyncIterator]()
+    const iterator = web.follow({ address: { kind: 'session', sessionId } }, abort.signal)[Symbol.asyncIterator]()
     try {
       await expect(iterator.next()).resolves.toMatchObject({ done: false, value: { type: 'snapshot' } })
       const waiting = iterator.next()

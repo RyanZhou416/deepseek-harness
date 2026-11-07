@@ -20,7 +20,7 @@ import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { SessionHistoryController } from '../src/history.ts'
+import { SessionHistoryController } from './history-test-controller.ts'
 import type { SessionFollowFrame, SessionFollowRequest, SessionPage, SessionPageRequest } from '../src/types.ts'
 import { installSessionReadTestServices, testSessionPersistence } from './test-remote.ts'
 

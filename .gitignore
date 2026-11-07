@@ -76,3 +76,6 @@ report.*.json
 
 # Local hash-bound subscription maintenance payload, backups, and build receipts.
 /fork-runtime/subscriptions-maintenance/
+
+# Generated company-signed CUA release record.
+/packages/experimental/cua-macos/cua-helper.json

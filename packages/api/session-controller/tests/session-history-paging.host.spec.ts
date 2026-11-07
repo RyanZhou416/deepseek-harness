@@ -22,7 +22,7 @@ import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-j
 import { logPath } from '@deepseek-ai/dsh-session-persistence-jsonl/src/format.ts'
 import { windowIndexPath } from '@deepseek-ai/dsh-session-persistence-jsonl/src/window-index.ts'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { SessionHistoryController } from '../src/history.ts'
+import { SessionHistoryController } from './history-test-controller.ts'
 import type {
   SessionFollowFrame,
   SessionFollowRequest,
@@ -385,10 +385,10 @@ describe('Session history paging through the real JSONL generation index', () =>
     const past = backend.events.length + 10
     const request = { throughSeq: past, beforeSeq: past + 1 }
 
-    await expect(loadPage(backend.history, request)).rejects.toThrow(/past cursor/)
+    await expect(loadPage(backend.history, request)).rejects.toThrow(/exceeds/)
 
     readWindow.mockResolvedValue(undefined)
-    await expect(loadPage(backend.history, request)).rejects.toThrow(/past cursor/)
+    await expect(loadPage(backend.history, request)).rejects.toThrow(/exceeds/)
   })
 
   it('keeps the exact gap-repair source path when the request carries no cut', async () => {

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
-import AgentLoop, { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import SessionStore, {
@@ -14,7 +14,7 @@ import SessionStore, {
   SessionLogOffset,
   SessionPreparation,
 } from '@deepseek-ai/dsh-session'
-import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionWindow } from '@deepseek-ai/dsh-session-persistence'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -38,8 +38,8 @@ import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 // These Host-only adapters have no public Node export and are compiled into the benchmark worker.
-import { SessionHistoryController } from '../../packages/api/session-controller/src/history.ts'
-import { installModelSelectionProjection } from '../../packages/api/session-controller/src/model-selection-projection.ts'
+import { HistoryController } from '../../packages/api/session-controller/src/history/controller.ts'
+import { WebController } from '../../packages/api/session-controller/src/web/controller.ts'
 import type {
   OpeningProjectionBlock,
   SessionOpenMeasurement,
@@ -384,11 +384,9 @@ function requireExpectedWindow(
   return window
 }
 
-async function installProjectionSet(ctx: Context, agentLoopOwnsBoundary: boolean): Promise<void> {
+async function installProjectionSet(ctx: Context): Promise<void> {
   // Mirrors projection owners mounted by the base and web-app bundles without timing profile boot.
-  if (!agentLoopOwnsBoundary) ctx.sessionProjections.register(turnBoundaryProjectionDefinition)
-  ctx.sessionProjections.register(agentPresetProjectionDefinition)
-  installModelSelectionProjection(ctx)
+  await ctx.sessionProjections.register(agentPresetProjectionDefinition)
   await ctx.plugin(SessionTitleService, {
     fallbackMaxWords: 5,
     fallbackMaxBytes: 40,
@@ -414,7 +412,7 @@ class SessionBenchmarkHost {
     private readonly ctx: Context,
     private readonly scenario: SessionOpenBenchmarkScenario,
     private readonly root: string,
-    private readonly history: SessionHistoryController | undefined,
+    private readonly history: WebController | undefined,
     private readonly fixtureEvents: number | undefined,
   ) {}
 
@@ -433,9 +431,10 @@ class SessionBenchmarkHost {
     if (agentScenario) await mountAgentLoopTestDependencies(ctx)
     else {
       await ctx.plugin(SessionProjectionRegistry)
+      await ctx.plugin(AgentRegistry)
       await ctx.plugin(SessionStore)
     }
-    await installProjectionSet(ctx, agentScenario)
+    await installProjectionSet(ctx)
     if (cachedFollow) {
       // The cache-warm sample reopens the durable checkpoint written by the
       // previous complete fold, served through the production cache seam.
@@ -444,13 +443,13 @@ class SessionBenchmarkHost {
       await ctx.plugin(StorageDomain, { backend: 'json' })
     }
     await ctx.plugin(JsonlSessionPersistence, { root, compression: 'zstd' })
-    let history: SessionHistoryController | undefined
+    let history: WebController | undefined
     if (scenario === 'first-history' || scenario === 'window-first-follow' || cachedFollow) {
       new BenchmarkSessionQuery(ctx)
       if (cachedFollow) {
         await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 1_000, writeIntervalMs: 60_000 })
       }
-      history = new SessionHistoryController(ctx, (observation) => {
+      history = new WebController(ctx, new HistoryController(ctx), (observation) => {
         // First-history ends at snapshot delivery; Agent-resume owns live activation and retention.
         observation[Symbol.dispose]()
       })

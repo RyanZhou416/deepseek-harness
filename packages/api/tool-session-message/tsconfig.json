@@ -42,6 +42,9 @@
       "path": "../../core/tools"
     },
     {
+      "path": "../../core/tool-executor-ptc"
+    },
+    {
       "path": "../session-controller/tsconfig.host.json"
     },
     {

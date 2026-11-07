@@ -416,45 +416,20 @@ describe('Typert Remote streams', () => {
     expect(() => { startup.commit() }).not.toThrow()
   })
 
-  it('validates the WebSocket heartbeat timer range, the stream inbox bound, and compression policy', () => {
+  it('validates the WebSocket heartbeat timer range, the stream inbox bound, and the compression mode', () => {
     expect(TypertGatewayService.Config({})).toEqual({
       websocketHeartbeatIntervalMs: 2_000,
       streamInboxBytes: 262_144,
-      streamCompression: {
-        enabled: false,
-        threshold: 1_024,
-        level: 1,
-        concurrencyLimit: 10,
-        serverNoContextTakeover: false,
-      },
+      websocketCompression: 'deflate',
     })
     expect(TypertGatewayService.Config({
       websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS,
       streamInboxBytes: 1,
-      streamCompression: {
-        enabled: true,
-        threshold: 0,
-        level: 9,
-        concurrencyLimit: 1,
-        serverNoContextTakeover: true,
-      },
+      websocketCompression: 'none',
     })).toEqual({
       websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS,
       streamInboxBytes: 1,
-      streamCompression: {
-        enabled: true,
-        threshold: 0,
-        level: 9,
-        concurrencyLimit: 1,
-        serverNoContextTakeover: true,
-      },
-    })
-    expect(TypertGatewayService.Config({ streamCompression: { enabled: true } }).streamCompression).toEqual({
-      enabled: true,
-      threshold: 1_024,
-      level: 1,
-      concurrencyLimit: 10,
-      serverNoContextTakeover: false,
+      websocketCompression: 'none',
     })
     for (const websocketHeartbeatIntervalMs of [0, 1.5, MAX_TIMER_DELAY_MS + 1]) {
       expect(() => TypertGatewayService.Config({ websocketHeartbeatIntervalMs })).toThrow()
@@ -462,18 +437,29 @@ describe('Typert Remote streams', () => {
     for (const streamInboxBytes of [0, 1.5]) {
       expect(() => TypertGatewayService.Config({ streamInboxBytes })).toThrow()
     }
-    for (const threshold of [-1, 1.5]) {
-      expect(() => TypertGatewayService.Config({ streamCompression: { threshold } })).toThrow()
+    for (const websocketCompression of ['gzip', 'DEFLATE', '', 1]) {
+      expect(() => TypertGatewayService.Config({ websocketCompression } as never)).toThrow()
     }
-    for (const level of [-1, 10, 1.5]) {
-      expect(() => TypertGatewayService.Config({ streamCompression: { level } })).toThrow()
-    }
-    for (const concurrencyLimit of [0, 1.5]) {
-      expect(() => TypertGatewayService.Config({ streamCompression: { concurrencyLimit } })).toThrow()
-    }
-    expect(() => TypertGatewayService.Config({
-      streamCompression: { enabled: 'yes' } as never,
-    })).toThrow()
+  })
+
+  it('applies the configured compression mode to the Remote stream carrier', async () => {
+    const { ctx } = await setup(true)
+    const negotiating = new WebSocket(`ws://127.0.0.1:${String(ctx.webServer.port)}/api/remote.mux`, {
+      headers: { cookie: browserCookie(ctx) },
+    })
+    await once(negotiating, 'open')
+    expect(negotiating.extensions).toContain('permessage-deflate')
+    negotiating.close()
+    await once(negotiating, 'close')
+
+    const plain = await setup(true, { websocketCompression: 'none' })
+    const unnegotiated = new WebSocket(`ws://127.0.0.1:${String(plain.ctx.webServer.port)}/api/remote.mux`, {
+      headers: { cookie: browserCookie(plain.ctx) },
+    })
+    await once(unnegotiated, 'open')
+    expect(unnegotiated.extensions).toBe('')
+    unnegotiated.close()
+    await once(unnegotiated, 'close')
   })
 
   it('opens decoded carrier payloads through the in-process wire adapter', async () => {

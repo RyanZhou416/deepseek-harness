@@ -5,7 +5,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import { createSessionTestRemote } from './test-remote.ts'
 import type { SessionEditLastMessageRequest, SessionRequestId } from '../src/types.ts'
@@ -27,7 +27,7 @@ async function setup(script: ConstructorParameters<typeof MockAdapter>[0] = [tex
   ctx.llm.registerAdapter(['mock'], adapter)
   ctx.provide('workspaceRegistry', { list: () => [], archivedSessionIds: [] } as never)
   const source = await harness.create(SessionId('edit-source'), { provider: 'mock', model: 'mock' })
-  const remote = createSessionTestRemote(ctx, {
+  const remote = await createSessionTestRemote(ctx, {
     defaultModelSelection: () => ({ provider: 'mock', model: 'mock' }), cwd: '/tmp',
   })
   const edit = (seq: number, text = 'revised question', requestId = 'revision-1'): SessionEditLastMessageRequest => ({
@@ -38,15 +38,14 @@ async function setup(script: ConstructorParameters<typeof MockAdapter>[0] = [tex
 
 describe('editing the latest user message', () => {
 
-  it('rejects revision placement when its input projection is unavailable', async () => {
+  it('rejects revision placement when the projected latest user message is absent', async () => {
     const { ctx, source } = await setup()
     const revised = createUserMessage({ content: [{ type: 'text', text: 'revision' }], source: { kind: 'user', replacesUserMessage: SessionSeq(0) } })
     const dispatch = agentEvents(ctx, source)
-    const unavailable = vi.spyOn(ctx.sessionProjections, 'stateOf').mockReturnValue(undefined)
     try {
       expect(() => { dispatch.waterfall('agent/prepare-input', { messages: [revised] }, () => {}) })
-        .toThrow('requires the userInput projection')
-    } finally { unavailable.mockRestore() }
+        .toThrow('no longer the latest current user message')
+    } finally { /* the registry always holds the userInput unit; absence is the empty projection */ }
   })
 
   it('refuses stale queued revisions and missing draft placement without changing history', async () => {

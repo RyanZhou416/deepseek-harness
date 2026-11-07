@@ -21,6 +21,7 @@ import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, Sess
 import type { Session, SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
+import type { SessionProjectionSummaryExcluded } from '@deepseek-ai/dsh-session-projection/types'
 import SessionProjectionCache, { projectionCacheDomainSpec } from '@deepseek-ai/dsh-session-projection-cache'
 import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import Storage from '@deepseek-ai/dsh-storage'
@@ -43,15 +44,10 @@ afterEach(async () => {
 let nextHarnessSession = 1
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionStateMap {
-    'test/last-user': LastUserState
-    'test/internal-count': number
-    'test/private-prompt': string | null
-    'test/third-party': LastUserState
-  }
   interface SessionProjectionMap {
     'test/last-user': { text: string } | null
     'test/third-party': { text: string } | null
+    'test/summary-excluded': SessionProjectionSummaryExcluded<number>
   }
 }
 
@@ -172,7 +168,7 @@ function seedMessages(session: Session, count: number): void {
   }
 }
 
-const remote = (ctx: Context, listProjectionExcludeKeys?: readonly string[]) => createSessionTestRemote(ctx, {
+const remote = async (ctx: Context, listProjectionExcludeKeys?: readonly string[]) => await createSessionTestRemote(ctx, {
   defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp',
   ...(listProjectionExcludeKeys === undefined ? {} : { listProjectionExcludeKeys }),
 })
@@ -181,8 +177,8 @@ describe('session.history projections block', () => {
   it('keeps the v0 numeric seed cut on the wire while logical headers expose only lineage', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
     await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(AgentRegistry)
     const parent = ctx.sessions.create(SessionId('wire-seed-parent'), { meta: { cwd: '/workspace' } })
     parent.append('turn/start', { turn: 1 })
     parent.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -197,7 +193,7 @@ describe('session.history projections block', () => {
       },
     })
 
-    const snapshot = await opening(remote(ctx), child.id)
+    const snapshot = await opening(await remote(ctx), child.id)
 
     expect(snapshot.header).toEqual({
       version: SESSION_FORMAT_VERSION,
@@ -212,7 +208,7 @@ describe('session.history projections block', () => {
 
   it('tracks pending and used model selections across repeated request headers', async () => {
     const { ctx, session } = await harness(true)
-    remote(ctx)
+    await remote(ctx)
     await new Promise(resolve => setTimeout(resolve, 0))
     const selected = { provider: 'p', model: 'next' }
     session.append('model/selection', selected)
@@ -240,9 +236,9 @@ describe('session.history projections block', () => {
 
   it('serves the unit value on the tail page with asOfSeq = last event seq', async () => {
     const { ctx, session } = await harness(true)
-    ctx.sessionProjections.register(lastUserUnit())
+    await ctx.sessionProjections.register(lastUserUnit())
     seedMessages(session, 3)
-    const snapshot = await opening(remote(ctx), session.id)
+    const snapshot = await opening(await remote(ctx), session.id)
     const { records, projections } = snapshot
     expect(projections.asOfSeq).toBe(session.seq - 1)
     expect(projections.values['test/last-user']).toEqual({ text: 'm2' })
@@ -272,7 +268,7 @@ describe('session.history projections block', () => {
       list: () => Promise.resolve([meta]),
       inspect: () => Promise.resolve({ meta, events, inheritedEventCount: SessionLogOffset(0) }),
     }) as never)
-    const snapshot = await opening(remote(ctx), coldId)
+    const snapshot = await opening(await remote(ctx), coldId)
 
     expect(snapshot.projections.values.inbox).toEqual({
       'next-turn': [message],
@@ -284,7 +280,7 @@ describe('session.history projections block', () => {
 
   it('removes claimed steering from the pending Inbox projection immediately', async () => {
     const { ctx, session, claim } = await harness(true)
-    const proxy = remote(ctx)
+    const proxy = await remote(ctx)
     const message = createUserMessage({
       content: [{ type: 'text', text: 'apply this now' }],
       source: { kind: 'user' },
@@ -324,10 +320,10 @@ describe('session.history projections block', () => {
 
   it('returns a complete current replacement cut on each follow generation', async () => {
     const { ctx, session } = await harness(true)
-    ctx.sessionProjections.register(lastUserUnit())
+    await ctx.sessionProjections.register(lastUserUnit())
     seedMessages(session, 2)
 
-    const snapshot = await opening(remote(ctx), session.id)
+    const snapshot = await opening(await remote(ctx), session.id)
 
     expect(snapshot.records.map(record => record.event.seq)).toEqual([0, 1])
     expect(snapshot.projections.asOfSeq).toBe(1)
@@ -338,9 +334,9 @@ describe('session.history projections block', () => {
 
   it('projects an empty log at cursor -1', async () => {
     const { ctx, session } = await harness(true)
-    ctx.sessionProjections.register(lastUserUnit())
+    await ctx.sessionProjections.register(lastUserUnit())
 
-    const snapshot = await opening(remote(ctx), session.id)
+    const snapshot = await opening(await remote(ctx), session.id)
 
     expect(snapshot.records).toEqual([])
     expect(snapshot.projections.asOfSeq).toBe(-1)
@@ -365,7 +361,7 @@ describe('session.history projections block', () => {
       saveImage(): Promise<never> { return Promise.reject(new Error('unused')) }
       readImage(): Promise<never> { return Promise.reject(new Error('unused')) }
     })
-    const gateway = remote(ctx)
+    const gateway = await remote(ctx)
     await new Promise(resolve => setTimeout(resolve, 0))
     seedMessages(session, 2)
     const snapshot = await opening(gateway, session.id)
@@ -380,7 +376,7 @@ describe('session.history projections block', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
     await expect(next).resolves.toMatchObject({
       done: false,
-      value: { type: 'projection', key: 'sessionListMetadata' },
+      value: { type: 'projection', changes: [{ key: 'sessionListMetadata' }] },
     })
     const extra = iterator.next()
     const quiet = Symbol('quiet')
@@ -392,18 +388,18 @@ describe('session.history projections block', () => {
     await expect(extra).resolves.toEqual({ done: true, value: undefined })
   })
 
-  it('leaves the imageLimits key absent while no attachment service is composed', async () => {
+  it("publishes image limits from the Controller's attachment dependency", async () => {
     const { ctx, session } = await harness(true)
     seedMessages(session, 1)
-    const snapshot = await opening(remote(ctx), session.id)
-    expect('imageLimits' in snapshot.projections.values).toBe(false)
+    const snapshot = await opening(await remote(ctx), session.id)
+    expect(snapshot.projections.values.imageLimits).toEqual(ctx.attachments.imageLimits)
   })
 
   it('never carries the block on loadOlder pages (beforeSeq present)', async () => {
     const { ctx, session } = await harness(true)
-    ctx.sessionProjections.register(lastUserUnit())
+    await ctx.sessionProjections.register(lastUserUnit())
     seedMessages(session, 5)
-    const older = await page(remote(ctx), request({
+    const older = await page(await remote(ctx), request({
       sessionId: session.id, throughSeq: session.seq - 1, beforeSeq: 3, maxMessages: 2,
     }))
     expect(older.ok).toBe(true)
@@ -414,7 +410,7 @@ describe('session.history projections block', () => {
   it('serves no block when the composition has no projection registry', async () => {
     const { ctx, session } = await harness(false)
     seedMessages(session, 2)
-    const response = await page(remote(ctx), request({ sessionId: session.id, throughSeq: session.seq - 1 }))
+    const response = await page(await remote(ctx), request({ sessionId: session.id, throughSeq: session.seq - 1 }))
     expect(response.ok).toBe(true)
     if (!response.ok) throw new Error('unreachable')
     expect('projections' in response.value).toBe(false)
@@ -422,8 +418,8 @@ describe('session.history projections block', () => {
 
   it('never exposes a host-only unit through history, listing, or push frames', async () => {
     const { ctx, session } = await harness(true)
-    ctx.sessionProjections.register(internalCountUnit())
-    const proxy = remote(ctx)
+    await ctx.sessionProjections.register(internalCountUnit())
+    const proxy = await remote(ctx)
     await new Promise(resolve => setTimeout(resolve, 0))
     const abort = new AbortController()
     const iterator = proxy.control(abort.signal)[Symbol.asyncIterator]()
@@ -438,7 +434,7 @@ describe('session.history projections block', () => {
     const changed = await iterator.next()
     expect(changed).toMatchObject({
       done: false,
-      value: { type: 'projection', key: 'sessionListMetadata' },
+      value: { type: 'projection', changes: [{ key: 'sessionListMetadata' }] },
     })
     abort.abort()
     await iterator.return?.()
@@ -453,13 +449,13 @@ describe('session.history projections block', () => {
 
   it('drops a disposed registration from subsequent tail pages (empty block, key absent)', async () => {
     const { ctx, session } = await harness(true)
-    const dispose = ctx.sessionProjections.register(lastUserUnit())
+    const dispose = await ctx.sessionProjections.register(lastUserUnit())
     seedMessages(session, 1)
-    const proxy = remote(ctx)
+    const proxy = await remote(ctx)
     const before = await opening(proxy, session.id)
     expect(before.projections.values['test/last-user']).toEqual({ text: 'm0' })
 
-    dispose()
+    await dispose.dispose()
     const after = await opening(proxy, session.id)
     // The registry stays mounted; only the disposed key leaves while the
     // gateway-owned Session-list unit remains.
@@ -474,8 +470,8 @@ describe('session.history projections block', () => {
   it('removes the gateway-owned Session-list unit when the gateway fiber unloads', async () => {
     const { ctx, session } = await harness(true)
     expect('sessionListMetadata' in ctx.sessionProjections.snapshot(session).values).toBe(false)
-    const fiber = ctx.plugin(Object.assign((gatewayCtx: Context) => {
-      createSessionTestRemote(gatewayCtx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+    const fiber = ctx.plugin(Object.assign(async (gatewayCtx: Context) => {
+      await createSessionTestRemote(gatewayCtx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
     }, { inject: ['sessions', 'agents', 'sessionProjections'] }))
     await fiber.await()
     await vi.waitFor(() => {
@@ -504,7 +500,7 @@ describe('session.list projections column', () => {
       ctx.sessionProjections.register({ ...unit, wire: { ...unit.wire, view: detailView } })
       ctx.sessionProjections.register({ ...lastUserUnit(), key: 'test/third-party' })
       await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
-      const gateway = remote(ctx, ['test/last-user'])
+      const gateway = await remote(ctx, ['test/last-user'])
       const id = SessionId('cold-catalog-exclusions')
       let session: Session | undefined
       const owner = await ctx.plugin(Object.assign((sessionCtx: Context) => {
@@ -558,12 +554,12 @@ describe('session.list projections column', () => {
     const cachedSnapshot = vi.fn(() => ({ asOfSeq: SessionSeq(7), values }))
     ctx.provide('sessionPersistence', testSessionPersistence(ctx, { list: async () => [header] }) as never)
     ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
-    const response = await remote(ctx, ['contextHeaders', 'turnOutline']).list({})
+    const response = await (await remote(ctx, ['contextHeaders', 'turnOutline'])).list({})
     if (!response.ok) throw new Error('listing failed')
     const row = response.value.items.find(item => item.sessionId === id)
     expect(row?.projections?.values).toEqual(values)
     expect(row).toMatchObject({ blank: false, updatedAt: 6 })
-    expect(cachedSnapshot).toHaveBeenCalledWith(expect.objectContaining({ id }), undefined,
+    expect(cachedSnapshot).toHaveBeenCalledWith(expect.objectContaining({ id }), expect.any(Set),
       new Set(['contextHeaders', 'turnOutline']))
   })
 
@@ -575,7 +571,7 @@ describe('session.list projections column', () => {
     }) as never)
     const cachedPredecessorTitle = vi.fn(() => ({ asOfSeq: SessionSeq(1), values: { title: 'Predecessor title' } }))
     ctx.provide('sessionProjectionCache', { cachedSnapshot: () => undefined, cachedPredecessorTitle } as never)
-    const response = await remote(ctx, excluded ? ['title'] : []).list({})
+    const response = await (await remote(ctx, excluded ? ['title'] : [])).list({})
     if (!response.ok) throw new Error('listing failed')
     const row = response.value.items.find(item => item.sessionId === id)
     expect(row?.projections?.values.title).toBe(excluded ? undefined : 'Predecessor title')
@@ -588,7 +584,7 @@ describe('session.list projections column', () => {
     const detailView = vi.fn(unit.wire.view)
     ctx.sessionProjections.register({ ...unit, wire: { ...unit.wire, view: detailView } })
     ctx.sessionProjections.register({ ...lastUserUnit(), key: 'test/third-party' })
-    const gateway = remote(ctx, ['test/last-user'])
+    const gateway = await remote(ctx, ['test/last-user'])
     session.append('turn/start', { turn: 1 })
     seedMessages(session, 1)
     detailView.mockClear()
@@ -613,7 +609,7 @@ describe('session.list projections column', () => {
     const { ctx, session } = await harness(true)
     ctx.sessionProjections.register(lastUserUnit())
     ctx.sessionProjections.register({ ...lastUserUnit(), key: 'test/third-party' })
-    const gateway = remote(ctx, [])
+    const gateway = await remote(ctx, [])
     seedMessages(session, 1)
     const response = await gateway.list({})
     if (!response.ok) throw new Error('listing failed')
@@ -622,10 +618,10 @@ describe('session.list projections column', () => {
     expect(row?.projections?.values['test/third-party']).toEqual({ text: 'm0' })
   })
 
-  it('serves every already-materialized wire value from the live registry without folding', async () => {
+  it('serves every summary wire value from the live registry', async () => {
     const { ctx, session } = await harness(true)
-    ctx.sessionProjections.register(lastUserUnit())
-    const gateway = remote(ctx)
+    await ctx.sessionProjections.register(lastUserUnit())
+    const gateway = await remote(ctx)
     await new Promise(resolve => setTimeout(resolve, 0))
     session.append('turn/start', { turn: 1 })
     seedMessages(session, 1)
@@ -645,8 +641,8 @@ describe('session.list projections column', () => {
     const session = ctx.sessions.create(SessionId('preset-list'), {
       meta: { cwd: '/workspace', agentPreset: 'standard' },
     })
-    ctx.sessionProjections.register(agentPresetProjectionDefinition)
-    const gateway = remote(ctx)
+    await ctx.sessionProjections.register(agentPresetProjectionDefinition)
+    const gateway = await remote(ctx)
     await new Promise(resolve => setTimeout(resolve, 0))
     session.append('agent-preset/selected', { agentPreset: 'minimal' })
 
@@ -656,32 +652,41 @@ describe('session.list projections column', () => {
     expect(row?.projections?.values.agentPreset).toBe('minimal')
   })
 
-  it('omits an unmaterialized live projection instead of folding history for listing', async () => {
+  it('computes every summary key for a live row without computing summary-excluded units', async () => {
     const { ctx, session } = await harness(true)
     seedMessages(session, 1)
-    const unit = lastUserUnit()
-    const apply = vi.fn(unit.apply)
-    ctx.sessionProjections.register({ ...unit, apply })
+    await ctx.sessionProjections.register(lastUserUnit())
+    const excludedApply = vi.fn((state: number) => state + 1)
+    await ctx.sessionProjections.register({
+      key: 'test/summary-excluded',
+      stateSchema: z.number().int().nonnegative(),
+      init: () => 0,
+      apply: excludedApply,
+      wire: { viewSchema: z.number().int().nonnegative(), view: state => state, summary: false },
+      stateVersion: 1,
+    })
 
-    const response = await remote(ctx).list(request({}))
+    const response = await (await remote(ctx)).list(request({}))
     if (!response.ok) throw new Error('unreachable')
     const row = response.value.items.find(item => item.sessionId === session.id)
-    expect(row).toBeDefined()
-    expect('test/last-user' in (row?.projections?.values ?? {})).toBe(false)
-    expect(apply).not.toHaveBeenCalled()
+    expect(row?.projections?.values['test/last-user']).toEqual({ text: 'm0' })
+    expect(row?.projections?.asOfSeq).toBe(session.seq - 1)
+    expect('test/summary-excluded' in (row?.projections?.values ?? {})).toBe(false)
+    expect(excludedApply).not.toHaveBeenCalled()
   })
 
-  it('omits the column entirely when no registry is mounted', async () => {
+  it('carries every registered summary key, which is only its own list metadata when no other unit is registered', async () => {
     const { ctx, session } = await harness(false)
     seedMessages(session, 1)
-    const response = await remote(ctx).list(request({}))
+    const response = await (await remote(ctx)).list(request({}))
     if (!response.ok) throw new Error('unreachable')
     const row = response.value.items.find(item => item.sessionId === session.id)
-    expect(row).toBeDefined()
-    expect(row !== undefined && 'projections' in row).toBe(false)
+    expect(row?.projections?.kind).toBe('sequenced')
+    expect(Object.keys(row?.projections?.values ?? {})).toEqual([...ctx.sessionProjections.summaryKeys()])
+    expect(Object.keys(row?.projections?.values ?? {})).toEqual(['sessionListMetadata'])
   })
 
-  it('serves every available cold projection hint from the cache with zero log loads', async () => {
+  it('serves the summary projection hints from the cache with zero log loads', async () => {
     const { ctx } = await harness(true)
     const coldId = SessionId('session-cold-listing')
     const load = () => { throw new Error('list must not load event logs') }
@@ -690,10 +695,12 @@ describe('session.list projections column', () => {
       inspect: load,
       open: load,
     }) as never)
+    let seenKeys: unknown
     ctx.provide('sessionProjectionCache', {
       // The carrier hands the listed header through as the identity witness.
-      cachedSnapshot: (meta: { id: unknown; createdAt: number }) =>
-        (meta.id === coldId && meta.createdAt === 5
+      cachedSnapshot: (meta: { id: unknown; createdAt: number }, keys: unknown) => {
+        seenKeys = keys
+        return meta.id === coldId && meta.createdAt === 5
           ? {
             asOfSeq: SessionSeq(7),
             values: {
@@ -702,9 +709,10 @@ describe('session.list projections column', () => {
               title: 'Cached title',
             },
           }
-          : undefined),
+          : undefined
+      },
     } as never)
-    const response = await remote(ctx).list(request({}))
+    const response = await (await remote(ctx)).list(request({}))
     if (!response.ok) throw new Error('unreachable')
     const row = response.value.items.find(item => item.sessionId === coldId)
     expect(row?.running).toBe(false)
@@ -717,6 +725,8 @@ describe('session.list projections column', () => {
         title: 'Cached title',
       },
     })
+    // The cold branch passes the registry's own summary set, not a fresh list.
+    expect(seenKeys).toBe(ctx.sessionProjections.summaryKeys())
   })
 
   it('keeps persisted host-only state out of a cold session.list response', async () => {
@@ -727,11 +737,11 @@ describe('session.list projections column', () => {
       await ctx.plugin(StorageJson, { root })
       await ctx.plugin(StorageDomain, { backend: 'json' })
       await ctx.plugin(SessionStore)
-      await ctx.plugin(AgentRegistry)
       await ctx.plugin(SessionProjectionRegistry)
-      ctx.sessionProjections.register(privatePromptUnit())
+      await ctx.plugin(AgentRegistry)
+      await ctx.sessionProjections.register(privatePromptUnit())
       await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
-      const gateway = remote(ctx)
+      const gateway = await remote(ctx)
       await new Promise(resolve => setTimeout(resolve, 0))
 
       const id = SessionId('session-cold-host-state')
@@ -783,9 +793,9 @@ describe('session.list projections column', () => {
       await ctx.plugin(StorageJson, { root })
       await ctx.plugin(StorageDomain, { backend: 'json' })
       await ctx.plugin(SessionStore)
-      await ctx.plugin(AgentRegistry)
       await ctx.plugin(SessionProjectionRegistry)
-      ctx.sessionProjections.register(titleProjectionDefinition)
+      await ctx.plugin(AgentRegistry)
+      await ctx.sessionProjections.register(titleProjectionDefinition)
       await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
       return ctx
     }
@@ -797,7 +807,7 @@ describe('session.list projections column', () => {
     let lastSeq: number | undefined
     let promptTime: number | undefined
     try {
-      remote(first)
+      await remote(first)
       await new Promise(resolve => setTimeout(resolve, 0))
       let child: Session | undefined
       const owner = await first.plugin(Object.assign((sessionCtx: Context) => {
@@ -829,7 +839,7 @@ describe('session.list projections column', () => {
     // record, and nothing opens the log.
     const second = await boot()
     try {
-      const gateway = remote(second)
+      const gateway = await remote(second)
       await new Promise(resolve => setTimeout(resolve, 0))
       const load = () => { throw new Error('a cold fork listing must not load the event log') }
       second.provide('sessionPersistence', testSessionPersistence(second, {
@@ -862,7 +872,7 @@ describe('session.list projections column', () => {
     ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
       list: async () => [{ version: SESSION_FORMAT_VERSION, id: coldId, createdAt: 5, isSeeded: false, cwd: '/tmp' }],
     }) as never)
-    const response = await remote(ctx).list(request({}))
+    const response = await (await remote(ctx)).list(request({}))
     if (!response.ok) throw new Error('unreachable')
     const row = response.value.items.find(item => item.sessionId === coldId)
     expect(row).toBeDefined()
@@ -871,7 +881,7 @@ describe('session.list projections column', () => {
 
   it('a throwing column read degrades that row, never the listing', async () => {
     const { ctx, session } = await harness(true)
-    ctx.sessionProjections.register({
+    await ctx.sessionProjections.register({
       ...lastUserUnit(),
       wire: {
         viewSchema: z.union([z.object({ text: z.string() }), z.null()]),
@@ -879,7 +889,7 @@ describe('session.list projections column', () => {
       },
     })
     seedMessages(session, 1)
-    const response = await remote(ctx).list(request({}))
+    const response = await (await remote(ctx)).list(request({}))
     if (!response.ok) throw new Error('unreachable')
     const row = response.value.items.find(item => item.sessionId === session.id)
     expect(row).toBeDefined()
@@ -902,16 +912,16 @@ describe('Session control projection frames', () => {
     return frames
   }
 
-  it('broadcasts changed view references with the causing seq and skips same-reference applies', async () => {
+  it('broadcasts one frame per event listing changed views in registration order and skips same-reference applies', async () => {
     const { ctx, session } = await harness(true)
-    ctx.sessionProjections.register(lastUserUnit())
-    const proxy = remote(ctx)
-    // The controller's onChanged subscription lives in an inject child whose
+    await ctx.sessionProjections.register(lastUserUnit())
+    const proxy = await remote(ctx)
+    // The controller's onEventChanged subscription lives in an inject child whose
     // fiber activates asynchronously; yield until it lands before appending.
     await new Promise(resolve => setTimeout(resolve, 0))
     const abort = new AbortController()
     const stream = proxy.control(abort.signal)
-    const collected = collect(stream, 5, abort)
+    const collected = collect(stream, 3, abort)
 
     const now = vi.spyOn(Date, 'now').mockReturnValue(100)
     seedMessages(session, 1)
@@ -923,24 +933,56 @@ describe('Session control projection frames', () => {
     now.mockRestore()
 
     const frames = await collected
-    const pushes = frames.filter(
-      (f): f is Extract<SessionControlFrame, { type: 'projection' }> =>
-        f.type === 'projection' && f.key === 'test/last-user',
-    )
+    const pushes = frames.filter((f): f is Extract<SessionControlFrame, { type: 'projection' }> => f.type === 'projection')
     expect(pushes).toEqual([
-      { type: 'projection', sessionId: session.id, key: 'test/last-user', value: { text: 'm0' }, seq: 0 },
-      { type: 'projection', sessionId: session.id, key: 'test/last-user', value: { text: 'm0' }, seq: 2 },
-    ])
-    expect(frames.filter(
-      (f): f is Extract<SessionControlFrame, { type: 'projection' }> =>
-        f.type === 'projection' && f.key === 'sessionListMetadata',
-    )).toEqual([
-      { type: 'projection', sessionId: session.id, key: 'sessionListMetadata', value: { blank: true, lastPromptAt: 100 }, seq: 0 },
-      { type: 'projection', sessionId: session.id, key: 'sessionListMetadata', value: { blank: false, lastPromptAt: 100 }, seq: 1 },
-      { type: 'projection', sessionId: session.id, key: 'sessionListMetadata', value: { blank: false, lastPromptAt: 300 }, seq: 2 },
+      {
+        type: 'projection', sessionId: session.id, seq: 0, changes: [
+          { key: 'test/last-user', val: { text: 'm0' } },
+          { key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 100 } },
+        ],
+      },
+      {
+        type: 'projection', sessionId: session.id, seq: 1, changes: [
+          { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 100 } },
+        ],
+      },
+      {
+        type: 'projection', sessionId: session.id, seq: 2, changes: [
+          { key: 'test/last-user', val: { text: 'm0' } },
+          { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 300 } },
+        ],
+      },
     ])
     // Frame seq aligns with the tail block's asOfSeq vocabulary (higher-seq-wins compatible).
     const tail = await opening(proxy, session.id)
     expect(tail.projections.asOfSeq).toBe(pushes.at(-1)?.seq)
+  })
+
+  it('streams one observeProjections change per event for the observed Session only', async () => {
+    const { ctx, session } = await harness(true)
+    await ctx.sessionProjections.register(lastUserUnit())
+    const proxy = await remote(ctx)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const other = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const abort = new AbortController()
+    const changes = proxy.observeProjections({ sessionId: session.id }, abort.signal)[Symbol.asyncIterator]()
+    expect(await changes.next()).toEqual({ done: false, value: { type: 'ready' } })
+
+    const now = vi.spyOn(Date, 'now').mockReturnValue(100)
+    seedMessages(other, 1)
+    seedMessages(session, 1)
+    now.mockRestore()
+
+    expect(await changes.next()).toEqual({
+      done: false,
+      value: {
+        type: 'projection', seq: 0, changes: [
+          { key: 'test/last-user', val: { text: 'm0' } },
+          { key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 100 } },
+        ],
+      },
+    })
+    abort.abort()
+    expect(await changes.next()).toEqual({ done: true, value: undefined })
   })
 })

@@ -10,6 +10,8 @@ import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-session-query'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session-reference'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
@@ -18,6 +20,7 @@ import type {} from '@deepseek-ai/dsh-session-title'
 import { AUTO_PRESET, CUSTOM_PRESET } from '@deepseek-ai/dsh-permission-presets'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { AgentMessageSource } from '@deepseek-ai/dsh-subagent'
+import type {} from '@deepseek-ai/dsh-tool-executor-ptc/types'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import { deriveSessionMessageStatus } from './status.ts'
@@ -106,6 +109,22 @@ async function resolveTarget(ctx: Context, targetSessionId: SessionId): Promise<
   const resolved = await ctx.sessionController.resolveAgent(targetSessionId)
   if ('error' in resolved) throw resolved.error
   return resolved.agent
+}
+
+/**
+ * Read one attached or persisted Session without activating its Agent.
+ * @param ctx - Host context carrying the Session query service.
+ * @param targetSessionId - durable Session identity.
+ * @param signal - caller cancellation for the leased read.
+ * @returns the Session header and its complete validated event log.
+ */
+async function inspectSession(
+  ctx: Context,
+  targetSessionId: SessionId,
+  signal: AbortSignal,
+): Promise<{ meta: SessionHeader; events: readonly SessionEvent[] }> {
+  using observation = await ctx.sessionQuery.observeSession(targetSessionId, { signal, projectionMode: 'none' })
+  return { meta: observation.header, events: [...observation.events] }
 }
 
 /**
@@ -611,7 +630,7 @@ export function apply(ctx: Context): void {
       const sessionId = SessionId(sessionIdText)
 
       if (args.action === 'status') {
-        const inspection = await ctx.sessionController.inspect(sessionId, exec.signal)
+        const inspection = await inspectSession(ctx, sessionId, exec.signal)
         exec.signal.throwIfAborted()
         const header = inspection.meta
         const archived = new Set(ctx.get('workspaceRegistry')?.archivedSessionIds ?? [])
@@ -635,7 +654,7 @@ export function apply(ctx: Context): void {
       if (messageIdText === undefined || messageIdText.length === 0) {
         throw new TypeError('message_id must not be empty for message_status')
       }
-      const inspection = await ctx.sessionController.inspect(sessionId, exec.signal)
+      const inspection = await inspectSession(ctx, sessionId, exec.signal)
       exec.signal.throwIfAborted()
       const target = ctx.agents.get(sessionId)
       const targetActivity: 'running' | 'idle' | 'offline' = target?.status ?? 'offline'

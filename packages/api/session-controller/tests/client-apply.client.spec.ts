@@ -140,7 +140,7 @@ describe('Session Controller Client apply', () => {
     await vi.waitFor(() => {
       expect(client.ctx.sessions.list.getSnapshot().byId[sessionId]?.title).toBe('Restored after terminal failure')
     })
-    mock.streams.push(CONTROL, { type: 'projection', sessionId, key: 'title', value: 'Live again', seq: 2 })
+    mock.streams.push(CONTROL, { type: 'projection', sessionId, changes: [{ key: 'title', val: 'Live again' }], seq: 2 })
     await vi.waitFor(() => { expect(client.ctx.sessions.list.getSnapshot().byId[sessionId]?.title).toBe('Live again') })
     await client.unload(SELF)
     expect(mock.log.streams(CONTROL).at(-1)?.state).toBe('cancelled')

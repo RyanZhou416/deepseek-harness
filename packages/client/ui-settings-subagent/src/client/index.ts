@@ -23,7 +23,7 @@ import { SubagentLimitsCardController } from './subagent-limits-card-controller.
 import {
   SUBAGENT_MODEL_SELECTION_NS, SubagentModelSelectionCardController,
 } from './subagent-model-selection-card-controller.ts'
-import { en, zh, type SubagentSettingsLocaleKey } from './locales.ts'
+import { en, ja, es, fr, de, ru, pt, zh, type SubagentSettingsLocaleKey } from './locales.ts'
 
 export type { SubagentCardProps } from './SubagentCard.tsx'
 export type { SubagentCardFace } from './subagent-card-controller.ts'
@@ -58,7 +58,7 @@ export const inject = ['slots', 'locale', 'remote', 'remote.session', 'configFor
  */
 export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS)
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-subagent: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en, ja, es, fr, de, ru, pt }), 'ui-settings-subagent: dictionaries')
   const overrideScope = ctx.configForms.get<SubagentLimitsSettings>(SUBAGENT_NS)
   const limits = new SubagentLimitsCardController(overrideScope)
   ctx.effect(() => () => { limits.dispose() }, 'ui-settings-subagent: limits form subscription')

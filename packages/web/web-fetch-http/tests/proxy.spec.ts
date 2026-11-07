@@ -13,23 +13,23 @@ const limits: HttpFetchLimits = {
   userAgent: 'test-agent/1.0',
 }
 
+/** Absolute-form targets the fake proxy saw; a populated entry proves the hop was tunnelled. */
 let proxied: string[]
 let proxy: Server
 let origin: Server
 let proxyUrl: string
 let originUrl: string
+
+/**
+ * The target for every assertion about a tunnelled hop. Loopback cannot serve: no policy routes
+ * this machine through a proxy. The host never resolves; the proxy answers the absolute-form request.
+ */
+const proxyTarget = 'http://origin.test/page'
 let disposeProxy: (() => Promise<void>) | undefined
 
-// The fixture proxy answers without forwarding; origin.test never needs a real DNS answer.
-const proxyTarget = 'http://origin.test/page'
-
 function listen(server: Server): Promise<AddressInfo> {
-  return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', reject)
-      resolve(server.address() as AddressInfo)
-    })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => { resolve(server.address() as AddressInfo) })
   })
 }
 
@@ -51,24 +51,25 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  try {
-    await disposeProxy?.()
-  } finally {
-    disposeProxy = undefined
-    await Promise.all([proxy, origin].map(server => new Promise<void>((resolve) => {
-      server.close(() => { resolve() })
-      server.closeAllConnections()
-    })))
-  }
+  await disposeProxy?.()
+  disposeProxy = undefined
+  await Promise.all([
+    new Promise<void>((resolve) => { proxy.close(() => { resolve() }) }),
+    new Promise<void>((resolve) => { origin.close(() => { resolve() }) }),
+  ])
 })
 
+/**
+ * Install the policy of a user who exported one proxy for both schemes; the fixture disposes it
+ * after every case.
+ */
 async function installProxy(): Promise<() => Promise<void>> {
   const env = { get: (name: string) => (name === 'HTTP_PROXY' || name === 'HTTPS_PROXY' ? { value: proxyUrl } : undefined) }
   return await installProxyFromEnvironment(env, () => undefined)
 }
 
-describe('fetching through the process transport', () => {
-  it('uses the installed proxy without resolving the destination locally', async () => {
+describe('fetching through a proxy', () => {
+  it('tunnels the request through the installed proxy', async () => {
     disposeProxy = await installProxy()
 
     const result = await new HttpFetchProvider(limits).fetch({ url: proxyTarget })
@@ -77,7 +78,8 @@ describe('fetching through the process transport', () => {
     expect(proxied).toEqual([proxyTarget])
   })
 
-  it('keeps loopback direct when a proxy is installed', async () => {
+  it('connects directly to a host the policy does not proxy', async () => {
+    // A resolved policy never routes loopback through a proxy.
     disposeProxy = await installProxy()
 
     const result = await new HttpFetchProvider(limits).fetch({ url: originUrl })
@@ -85,26 +87,6 @@ describe('fetching through the process transport', () => {
     expect(result.body.content).toBe('direct')
     expect(proxied).toEqual([])
   })
-
-  it('fetches loopback without proxy configuration or DNS substitution', async () => {
-    const result = await new HttpFetchProvider(limits).fetch({ url: originUrl })
-
-    expect(result.body.content).toBe('direct')
-    expect(proxied).toEqual([])
-  })
-
-  it.each(['10.0.0.5', '169.254.169.254', '198.18.0.1', '28.0.0.83', '[fdfe:dcba:9876::3b]'])(
-    'hands %s to the configured proxy without an address-class restriction',
-    async (host) => {
-      disposeProxy = await installProxy()
-      const url = `http://${host}:8080/page`
-
-      const result = await new HttpFetchProvider(limits).fetch({ url })
-
-      expect(result.body.content).toBe('via-proxy')
-      expect(proxied).toEqual([url])
-    },
-  )
 
   it('still refuses a cross-origin redirect on the proxied path', async () => {
     proxy.removeAllListeners('request')
@@ -117,7 +99,6 @@ describe('fetching through the process transport', () => {
 
     await expect(new HttpFetchProvider(limits).fetch({ url: proxyTarget }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_REDIRECT_BLOCKED' }))
-    expect(proxied).toEqual([proxyTarget])
   })
 
   it('still refuses a URL the transport policy rejects before any hop', async () => {

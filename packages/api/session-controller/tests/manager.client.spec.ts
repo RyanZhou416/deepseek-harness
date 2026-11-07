@@ -17,7 +17,7 @@ import type {} from '@deepseek-ai/dsh-session-title/client'
 import { SessionManager } from '../src/client/sessions/manager.ts'
 import { ClientSessions } from '../src/client/sessions/service.ts'
 import type { SessionRemotes } from '../src/client/sessions/remotes.ts'
-import type { SessionFollowRequest } from '../src/types.ts'
+import type { SessionFollowRequest, SessionProjectionHints } from '../src/types.ts'
 import { entries, plainTurn } from './event-script.client.ts'
 import { FOLLOW, err, followScript, followSnapshot, sessionWorld } from './remote/session.client.ts'
 
@@ -58,7 +58,7 @@ describe('SessionManager instances', () => {
     const child = 'lineage-child' as SessionId
     const other = 'lineage-other' as SessionId
     const rows = () => manager.getListSnapshot().items.map(entry => [entry.sessionId, entry.depth])
-    manager.handleSessionAdded(summary(child, { parentSessionId: parent }))
+    manager.handleSessionAdded(summary(child, { parentSessionId: parent, origin: 'subagent' }))
     manager.handleSessionAdded(summary(other))
     expect(rows()).toEqual([[other, 0], [child, 0]])
     manager.handleSessionAdded(summary(parent))
@@ -67,7 +67,7 @@ describe('SessionManager instances', () => {
     expect(rows()).toEqual([[other, 0], [child, 0]])
     manager.handleSessionAdded(summary(parent))
     expect(rows()).toEqual([[parent, 0], [child, 1], [other, 0]])
-    manager.handleSessionAdded(summary(other, { parentSessionId: parent }))
+    manager.handleSessionAdded(summary(other, { parentSessionId: parent, origin: 'subagent' }))
     expect(rows()).toEqual([[parent, 0], [other, 1], [child, 1]])
   })
 
@@ -398,9 +398,9 @@ describe('SessionManager instances', () => {
     const stopObserving = manager.subscribe(() => { published.resolve(undefined) })
     try {
       manager.handleControlFrame({ type: 'projection', sessionId: S1,
-        key: 'sessionListMetadata', value: { blank: false, lastPromptAt: 1200 }, seq: 8 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 1200 } }], seq: 8 })
       manager.handleControlFrame({ type: 'projection', sessionId: S2,
-        key: 'sessionListMetadata', value: { blank: true, lastPromptAt: null }, seq: 2 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: null } }], seq: 2 })
       // The initial notification must finish while neither Session is resident.
       await published.promise
 
@@ -481,7 +481,7 @@ describe('SessionManager query lifetime', () => {
     await Promise.resolve()
     const before = manager.getListSnapshot()
 
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'changed', seq: 2 })
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'title', val: 'changed' }], seq: 2 })
     const changed = manager.getListSnapshot()
     expect(changed.projectionsBySession[S1]?.values.title).toBe('changed')
     expect(changed.projectionsBySession[S1]).not.toBe(before.projectionsBySession[S1])
@@ -511,8 +511,8 @@ describe('SessionManager query lifetime', () => {
     onTestFinished(stopFirst)
     onTestFinished(stopSecond)
 
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'stale', seq: 8 })
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'replay', seq: 9 })
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'title', val: 'stale' }], seq: 8 })
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'title', val: 'replay' }], seq: 9 })
     manager.handleControlFrame({ type: 'baseline', value: { projections: {
       [S1]: { asOfSeq: 8, values: { title: 'old baseline' } },
     } } })
@@ -522,7 +522,7 @@ describe('SessionManager query lifetime', () => {
     expect(first).not.toHaveBeenCalled()
     expect(second).not.toHaveBeenCalled()
 
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'accepted', seq: 11 })
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'title', val: 'accepted' }], seq: 11 })
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values.title).toBe('accepted')
     await Promise.resolve()
     expect(first).toHaveBeenCalledOnce()
@@ -540,7 +540,7 @@ describe('SessionManager query lifetime', () => {
   it('establishes readiness from a stale-cut baseline without overwriting newer values', async ({ mock, remote }) => {
     const manager = makeManager(mock, remote)
     onTestFinished(() => manager.dispose())
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'pushed', seq: 9 })
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'title', val: 'pushed' }], seq: 9 })
 
     manager.handleControlFrame({ type: 'baseline', value: { projections: {
       [S1]: { asOfSeq: 8, values: { title: 'older baseline' } },
@@ -581,7 +581,7 @@ describe('SessionManager query lifetime', () => {
     const entries = [{ id: S2, createdAt: 1, mode: 'one-shot' as const }]
     try {
       if (warm) {
-        manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 0, value: entries })
+        manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'subagentCatalog', val: entries }], seq: 0 })
       }
       remote.session.projections.mockRejectedValueOnce(failure)
       await manager.refreshProjections(S1)
@@ -808,9 +808,9 @@ describe('list lifecycle', () => {
     const manager = makeManager(mock, remote)
     try {
       manager.handleControlFrame({ type: 'projection', sessionId: S1,
-        key: 'sessionListMetadata', value: { blank: false, lastPromptAt: 1200 }, seq: 8 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 1200 } }], seq: 8 })
       manager.handleControlFrame({ type: 'projection', sessionId: S2,
-        key: 'sessionListMetadata', value: { blank: true, lastPromptAt: null }, seq: 2 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: null } }], seq: 2 })
       remote.session.list.mockResolvedValue(ok({ items: [
         summary(S1, { blank: true }), summary(S2),
       ] as never[] }))
@@ -819,7 +819,7 @@ describe('list lifecycle', () => {
       expect(manager.get(S1).getSnapshot().blank).toBe(false)
       expect(manager.get(S2).getSnapshot().blank).toBe(false)
       manager.handleControlFrame({ type: 'projection', sessionId: S1,
-        key: 'sessionListMetadata', value: { blank: true, lastPromptAt: null }, seq: 7 })
+        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: null } }], seq: 7 })
       expect(manager.getListSnapshot().items[0]).toMatchObject({ blank: false, updatedAt: 1200 })
     } finally {
       await manager.dispose()
@@ -976,7 +976,7 @@ describe('list lifecycle', () => {
   it('retains title projections before list arrival, keeps last-wins by seq, and clears them on removal', async ({ mock, remote }) => {
     const manager = makeManager(mock, remote)
     const titleFrame = (title: string, seq: number) => {
-      manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: title, seq })
+      manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'title', val: title }], seq })
     }
     titleFrame('Newest', 4)
     titleFrame('Stale', 3)
@@ -996,11 +996,36 @@ describe('list lifecycle', () => {
     expect(manager.getListSnapshot().items.find(item => item.sessionId === S1)?.title).toBeUndefined()
   })
 
+  it('applies every key of one per-event frame with one list invalidation and per-key seq gating', async ({ mock, remote }) => {
+    remote.session.list.mockResolvedValue(ok({ items: [summary(S1, { blank: true })] as never[] }))
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    await manager.refreshList()
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'title', val: 'Newest' }], seq: 4 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // Bracket access reaches the private list notifier; projection-store notifiers stay out of the count.
+    const markFrameDirty = vi.spyOn(manager['notifier'], 'markFrameDirty')
+    const markDirty = vi.spyOn(manager['notifier'], 'markDirty')
+
+    manager.handleControlFrame({
+      type: 'projection', sessionId: S1, seq: 3, changes: [
+        { key: 'title', val: 'Stale' },
+        { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 1200 } },
+      ],
+    })
+    expect(markFrameDirty).toHaveBeenCalledOnce()
+    expect(markDirty).not.toHaveBeenCalled()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(manager.getListSnapshot().items[0]).toMatchObject({ sessionId: S1, title: 'Newest', blank: false })
+    expect(manager.projectionValues(S1)).toMatchObject({ sessionListMetadata: { blank: false, lastPromptAt: 1200 } })
+  })
+
   it('fills cold titles from the list rows\' projections block as cached values', async ({ mock, remote }) => {
     const manager = makeManager(mock, remote)
     // A push frame landed before the list: S2's title is a sequenced value.
     manager.handleControlFrame({
-      type: 'projection', sessionId: S2, key: 'title', value: 'Pushed', seq: 9,
+      type: 'projection', sessionId: S2, changes: [{ key: 'title', val: 'Pushed' }], seq: 9,
     })
     remote.session.list.mockResolvedValue(ok({
       items: [
@@ -1022,7 +1047,7 @@ describe('list lifecycle', () => {
     const manager = makeManager(mock, remote)
     try {
       await manager.refreshList()
-      manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'Unflushed', seq: 4 })
+      manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'title', val: 'Unflushed' }], seq: 4 })
 
       manager.handleConnected()
       await manager.refreshList()
@@ -1100,7 +1125,7 @@ describe('subagent catalogs', () => {
     const manager = makeManager(mock, remote)
     onTestFinished(() => manager.dispose())
     const entries = [{ id: S2, createdAt: 1, mode: 'external' as const, label: 'external task' }]
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 0, value: entries })
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'subagentCatalog', val: entries }], seq: 0 })
 
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values.subagentCatalog).toEqual(entries)
     expect(manager.subagentAddress(S2)).toBeUndefined()
@@ -1112,8 +1137,9 @@ describe('subagent catalogs', () => {
     onTestFinished(() => manager.dispose())
     manager.handleSessionAdded(summary(S2, { parentSessionId: S1, origin: 'subagent' }))
     manager.handleControlFrame({
-      type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 0,
-      value: [{ id: S2, createdAt: 1, mode: 'continuable', label: 'worker' }],
+      type: 'projection', sessionId: S1, seq: 0, changes: [
+        { key: 'subagentCatalog', val: [{ id: S2, createdAt: 1, mode: 'continuable', label: 'worker' }] },
+      ],
     })
 
     expect(manager.subagentAddress(S2)).toEqual({
@@ -1224,7 +1250,7 @@ describe('subagent catalogs', () => {
           childSessionId: S2,
           mode: 'continuable',
         },
-        assistantStream: true,
+        activate: true, assistantStream: true,
         maxMessages: 500,
         turnWindow: { minMessages: 50, minTurns: 2 },
       },
@@ -1268,14 +1294,17 @@ describe('subagent catalogs', () => {
     const client = await start()
     const manager = new SessionManager(client.ctx.remote)
     const entries = [{ id: S2, createdAt: 1, mode: 'unknown' as const }]
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 0, value: entries })
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'subagentCatalog', val: entries }], seq: 0 })
     const address = manager.subagentAddress(S2)!
     expect(address).toEqual({ parentSessionId: S1, childSessionId: S2, mode: 'unknown' })
     manager.resolveTarget(address)
     const child = manager.get(S2)
     expect(child.getSnapshot().subagent?.address.mode).toBe('unknown')
-    manager.handleControlFrame({ type: 'projection', sessionId: S2, key: 'subagent', seq: 0,
-      value: { seq: SessionSeq(0), mode: 'continuable', label: 'repaired child' } })
+    manager.handleControlFrame({
+      type: 'projection', sessionId: S2, seq: 0, changes: [
+        { key: 'subagent', val: { seq: SessionSeq(0), mode: 'continuable', label: 'repaired child' } },
+      ],
+    })
     await child.open()
     expect(child.getSnapshot().subagent?.address).toEqual({ ...address, mode: 'continuable' })
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values.subagentCatalog).toEqual(entries)
@@ -1286,8 +1315,9 @@ describe('subagent catalogs', () => {
     const manager = makeManager(mock, remote)
     manager.handleSessionAdded(summary(S2, { origin: 'subagent', parentSessionId: S1, running: true }))
     manager.handleControlFrame({
-      type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 4,
-      value: [{ id: S2, createdAt: 1, mode: 'continuable', label: 'worker' }],
+      type: 'projection', sessionId: S1, seq: 4, changes: [
+        { key: 'subagentCatalog', val: [{ id: S2, createdAt: 1, mode: 'continuable', label: 'worker' }] },
+      ],
     })
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values.subagentCatalog).toEqual([
       { id: S2, createdAt: 1, mode: 'continuable', label: 'worker' },
@@ -1320,7 +1350,7 @@ describe('subagent catalogs', () => {
     if (source === 'control') {
       manager.handleControlFrame({ type: 'baseline', value: { projections: { [S1]: baseline } } })
     } else {
-      mock.stream(FOLLOW, followScript(ok({ records: [], hasMore: false, projections: baseline })))
+      mock.stream(FOLLOW, followScript(ok({ cursor: baseline.asOfSeq, records: [], hasMore: false, projections: baseline })))
       await session.open()
     }
 
@@ -1345,7 +1375,7 @@ describe('subagent catalogs', () => {
       if (source === 'control') {
         manager.handleControlFrame({ type: 'baseline', value: { projections: { [S1]: baseline } } })
       } else {
-        mock.stream(FOLLOW, followScript(ok({ records: [], hasMore: false, projections: baseline })))
+        mock.stream(FOLLOW, followScript(ok({ cursor: baseline.asOfSeq, records: [], hasMore: false, projections: baseline })))
         await manager.get(S1).open()
       }
       response.resolve(ok({ kind: 'migration-required', values: {
@@ -1370,8 +1400,9 @@ describe('subagent catalogs', () => {
     const manager = makeManager(mock, remote)
     const read = manager.refreshProjections(S1)
     manager.handleControlFrame({
-      type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 5,
-      value: [{ id: S2, createdAt: 1, mode: 'continuable', label: 'pushed' }],
+      type: 'projection', sessionId: S1, seq: 5, changes: [
+        { key: 'subagentCatalog', val: [{ id: S2, createdAt: 1, mode: 'continuable', label: 'pushed' }] },
+      ],
     })
     response.resolve(ok({ kind: 'sequenced', asOfSeq: 3, values: { subagentCatalog: [] } }))
     await read
@@ -1432,8 +1463,11 @@ describe('subagent catalogs', () => {
     remote.session.projections.mockImplementation(() => response.promise)
     const manager = makeManager(mock, remote)
     const read = manager.refreshProjections(S1)
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 1,
-      value: [{ id: S2, createdAt: 1, mode: 'one-shot' }] })
+    manager.handleControlFrame({
+      type: 'projection', sessionId: S1, seq: 1, changes: [
+        { key: 'subagentCatalog', val: [{ id: S2, createdAt: 1, mode: 'one-shot' }] },
+      ],
+    })
     response.resolve(ok(null))
     await read
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values.subagentCatalog).toEqual([
@@ -1482,9 +1516,12 @@ describe('subagent catalogs', () => {
   it('keeps completed unselected child metadata with its durable catalog row', ({ mock, remote }) => {
     const manager = makeManager(mock, remote)
     manager.handleSessionAdded(summary(S2, { origin: 'subagent', parentSessionId: S1, running: true }))
-    manager.handleControlFrame({ type: 'projection', sessionId: S2, key: 'title', value: 'finished child', seq: 2 })
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 1,
-      value: [{ id: S2, createdAt: 1, mode: 'one-shot' }] })
+    manager.handleControlFrame({ type: 'projection', sessionId: S2, changes: [{ key: 'title', val: 'finished child' }], seq: 2 })
+    manager.handleControlFrame({
+      type: 'projection', sessionId: S1, seq: 1, changes: [
+        { key: 'subagentCatalog', val: [{ id: S2, createdAt: 1, mode: 'one-shot' }] },
+      ],
+    })
     manager.handleSessionRemoved(S2)
     expect(manager.getListSnapshot().items[0]).toMatchObject({ title: 'finished child', running: false })
     expect(manager.getListSnapshot().items.find(item => item.sessionId === S2)?.running).toBe(false)
@@ -1499,8 +1536,11 @@ describe('subagent catalogs', () => {
   it('retries a failed initial read without discarding pushed entries', async ({ mock, remote }) => {
     remote.session.projections.mockImplementation(() => Promise.resolve(err(new RemoteError('gateway/internal', 'offline', {}))))
     const manager = makeManager(mock, remote)
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'subagentCatalog', seq: 2,
-      value: [{ id: S2, createdAt: 1, mode: 'one-shot' }] })
+    manager.handleControlFrame({
+      type: 'projection', sessionId: S1, seq: 2, changes: [
+        { key: 'subagentCatalog', val: [{ id: S2, createdAt: 1, mode: 'one-shot' }] },
+      ],
+    })
     await manager.refreshProjections(S1)
     expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({ state: 'error', values: { subagentCatalog: [{ id: S2 }] } })
     remote.session.projections.mockImplementation(() => Promise.resolve(ok({ kind: 'sequenced', asOfSeq: 2, values: { subagentCatalog: [] } })))
@@ -1630,7 +1670,8 @@ describe('remaining branches', () => {
 
     expect(remote.session.fork).toHaveBeenCalledExactlyOnceWith({ sessionId: S1, atSeq: 7, ...permission })
     expect(remote.session.follow).not.toHaveBeenCalled()
-    expect(manager.getListSnapshot().items[0]).toMatchObject({ sessionId: S2, parentSessionId: S1 })
+    expect(manager.getListSnapshot().items[0]).toMatchObject({ sessionId: S2 })
+    expect(manager.getListSnapshot().items[0]).not.toHaveProperty('parentSessionId')
   })
 
   it('reconciles a fork child published before workspace attachment fails', async ({ mock, remote }) => {
@@ -1642,13 +1683,12 @@ describe('remaining branches', () => {
     expect(result).toMatchObject({ ok: false, error: { code: 'session/workspace-attach-failed' } })
     expect(manager.getListSnapshot().items).toEqual([expect.objectContaining({
       sessionId: S2,
-      parentSessionId: S1,
       blank: true,
     })])
 
-    manager.handleSessionAdded(summary(S2, { blank: true, parentSessionId: S1 }))
+    manager.handleSessionAdded(summary(S2, { blank: true }))
     expect(manager.getListSnapshot().items[0]?.blank).toBe(true)
-    manager.handleSessionAdded(summary(S2, { blank: false, parentSessionId: S1 }))
+    manager.handleSessionAdded(summary(S2, { blank: false }))
     expect(manager.getListSnapshot().items[0]?.blank).toBe(false)
   })
 
@@ -1860,7 +1900,7 @@ describe('connected generation', () => {
         expect(manager.getListSnapshot().items[0]?.title).toBe('Previous generation')
         if (source === 'control update') {
           manager.handleControlFrame({
-            type: 'projection', sessionId: S1, key: 'title', value: null, seq: 1,
+            type: 'projection', sessionId: S1, changes: [{ key: 'title', val: null }], seq: 1,
           })
         } else if (source === 'cached list hint') {
           manager.handleSessionAdded({
@@ -2111,6 +2151,7 @@ describe('connected generation', () => {
 
   it('refreshes query baselines without rebuilding independently resumed Session sources', async ({ mock, remote, start }) => {
     mock.stream(FOLLOW, followScript(ok({
+      cursor: 5,
       records: entries(plainTurn(SessionSeq(0), 0, 'a', 'b')) as never[],
       hasMore: false,
       modelSelection: { provider: 'deepseek-official', model: 'deepseek-chat' },
@@ -2206,5 +2247,32 @@ describe('archived Session baseline', () => {
     remote.session.list.mockResolvedValueOnce(ok({ items: [summary(S1), summary(S2, { updatedAt: 50 })] }))
     await manager.ensureArchivedList()
     expect(remote.session.list).toHaveBeenCalledTimes(4)
+  })
+})
+
+describe('Session summary projection replacement', () => {
+  it('drops a stale summary-excluded key when a reconnect refresh replaces the row block', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    // A row block from a verbose Host still carrying an excluded key; the wire
+    // type no longer admits it, so the fixture is parsed as annotated JSON.
+    const verboseBlock = JSON.parse(
+      '{"kind":"cached","asOfSeq":1,"values":{"title":"stale","turnOutline":[]}}',
+    ) as SessionProjectionHints
+    remote.session.list.mockResolvedValueOnce(ok({ items: [{ ...summary(S1), projections: verboseBlock }] }))
+    await manager.refreshList()
+    expect(manager.getListSnapshot().items[0]?.projectionValues).toHaveProperty('turnOutline')
+
+    // A reconnect clears every per-Session value store before pulling again, so
+    // the refreshed summary block is the row's only source: the excluded key
+    // cannot survive the replacement.
+    remote.session.list.mockResolvedValueOnce(ok({
+      items: [{ ...summary(S1), projections: { kind: 'cached', asOfSeq: 2, values: { title: 'fresh' } } }],
+    }))
+    manager.handleConnected()
+    await manager.refreshList()
+    const entry = manager.getListSnapshot().items[0]
+    expect(entry?.projectionValues).toEqual({ title: 'fresh' })
+    expect(entry?.title).toBe('fresh')
   })
 })

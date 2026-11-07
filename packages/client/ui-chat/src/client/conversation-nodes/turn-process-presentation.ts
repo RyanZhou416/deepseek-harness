@@ -29,8 +29,8 @@ function samePresentation(
     && left.turnStarted === right.turnStarted
     && left.turnClosed === right.turnClosed
     && left.hasExternalProcess === right.hasExternalProcess
-    && left.hasInterleavedInput === right.hasInterleavedInput
-    && left.compactAnswer === right.compactAnswer)
+    && left.hasNonReplyProcess === right.hasNonReplyProcess
+    && left.hasInterleavedInput === right.hasInterleavedInput)
 }
 
 function derivePresentation(
@@ -57,20 +57,25 @@ function derivePresentation(
   }
 
   let hasExternalProcess = false
+  let hasNonReplyProcess = false
   let hasInterleavedInput = false
-  let compactAnswer = true
   for (const key of keys) {
     const node = nodes.get(key) as ChatNode | undefined
     if (node === undefined || !isVisibleChatNode(node) || node.kind === 'turn-process') continue
     if (isAtOrOutside(node, 'input')
       && (openingHumanAnchor === undefined || node.anchorSeq > openingHumanAnchor)) {
       hasInterleavedInput = true
-      if (spec.answerAnchorSeq === null || node.anchorSeq < spec.answerAnchorSeq) compactAnswer = false
     }
     if (TURN_PROCESS_INDEPENDENT_KINDS.has(node.kind)) continue
     // Process rows after the protected reply still belong to the same outer
     // control, so they keep it usable; the reply itself stays outside the fold.
-    if (isTurnProcessMember(spec, false, processRow(node))) hasExternalProcess = true
+    if (!isTurnProcessMember(spec, false, processRow(node))) continue
+    hasExternalProcess = true
+    // When every reply stays visible, another Step's reply folds only its reasoning.
+    if (node.kind !== 'assistant-step'
+      || node.data.blocks.some(block => block.kind === 'reasoning' && block.text.trim() !== '')) {
+      hasNonReplyProcess = true
+    }
   }
   return {
     turn,
@@ -78,8 +83,8 @@ function derivePresentation(
     turnStarted: location.turn.start !== undefined,
     turnClosed: location.turn.status === 'closed',
     hasExternalProcess,
+    hasNonReplyProcess,
     hasInterleavedInput,
-    compactAnswer,
   }
 }
 

@@ -6,7 +6,7 @@ Status: implemented
 
 ## 问题
 
-harness 需要面向模型的 web 工具，但不能将模型约定绑定到某一家厂商的 API 形状上。搜索是当前的压力点：从一开始就同时支持 Exa 搜索和 Perplexity 搜索——两种刻意不同的提供方形状（Exa 返回扁平的 `results[]`，每项包含 `{title, url, highlights, publishedDate}`；Perplexity 返回一段生成式回答加引用列表）——正是用来证明归一化的 web 约定并非只是镜像某一家厂商。Fetch 是另一项独立操作：匿名 HTTP(S) fetch 后端涉及传输、重定向、解码和大小限制等关注点，与提供方支撑的搜索并不相同。
+harness 需要面向模型的 web 工具，但不能将模型约定绑定到某一家厂商的 API 形状上。搜索是当前的压力点：从一开始就同时支持 Exa 搜索和 Perplexity 搜索——两种刻意不同的提供方形状（Exa 返回扁平的 `results[]`，每项包含 `{title, url, highlights, publishedDate}`；Perplexity 返回一段生成式回答加引用列表）——正是用来证明归一化的 web 约定并非只是镜像某一家厂商。Fetch 是另一项独立操作：匿名公开 HTTP(S) fetch 后端涉及传输、安全、重定向、解码和大小限制等关注点，与提供方支撑的搜索并不相同。
 
 面向模型的 API 必须保持稳定，而后端可以更换。更换搜索提供方不应改变模型发起查询的方式；更换 fetch 实现不应改变模型请求 URL 的方式。反过来，提供方包也不应仅仅因为自己有额外的提供方特有旋钮就暴露自己的面向模型工具 schema。
 
@@ -32,7 +32,7 @@ Web 访问是一个一等能力 seam，遵循[能力 seam Agent Note](2026-06-13
 - 工具绝不会仅仅因为其选定的提供方缺失、配置错误、缺少凭证、存在歧义或暂时不可用就被注销。
 - 提供方在执行时解析，当选定的能力无法运行时返回结构化的 `WebError`。
 
-这使模型 schema 保持稳定，而不将插件加载顺序、凭证状态或 HMR（热模块替换）时序纳入面向模型的约定。如果 web 搜索已启用但不存在可用的搜索提供方，`web_search` 仍然可见，执行时以结构化的 `WebError`（如 `WEB_PROVIDER_UNAVAILABLE` 或 `WEB_PROVIDER_CONFIGURED_UNAVAILABLE`）失败。如果某个提供方在 `dsh-tool-web` 之后出现，下一次执行即可使用它而无需更改 schema。如果某个提供方在调用过程中消失，执行以结构化的 `WebError` 失败，而不是静默选择另一个提供方或回退到 `UNKNOWN_TOOL`。
+这使模型 schema 保持稳定，而不将插件加载顺序、凭证状态或 HMR（热模块替换）时序纳入面向模型的约定。如果 web 搜索已启用但不存在可用的搜索提供方，`web_search` 仍然可见，执行时以结构化的 `WebError`（如 `WEB_PROVIDER_UNAVAILABLE` 或 `WEB_PROVIDER_CONFIGURED_UNAVAILABLE`）失败。发行版的 `dsh-tool-web` 按模型请求收窄了这一点：选中的提供方报告该请求的搜索无法鉴权时，它会[撤下 `web_search`](2026-09-27-web-search-offered-by-provider-readiness.zh.md)。如果某个提供方在 `dsh-tool-web` 之后出现，下一次执行即可使用它而无需更改 schema。如果某个提供方在调用过程中消失，执行以结构化的 `WebError` 失败，而不是静默选择另一个提供方或回退到 `UNKNOWN_TOOL`。
 
 该 seam 刻意不暴露任何观察面——没有注册表变更事件，也没有聚合的能力状态查询。不可用性是调用方通过执行观察到的事实：`search()`/`fetch()` 在调用时解析提供方，并抛出命名了失败原因的结构化 `WebError`。[观察面 Agent Note](../../archived/simplification/2026-07-04-drop-unconsumed-web-observation-surface.md) 记录了这一判断：基于调用的派生选择与基于启用的注册使得没有消费方需要变更信号或独立于执行和错误路由的可用性探测；未来的提供方状态面板会重新引入它实际消费的最小信号或查询。
 
@@ -202,7 +202,7 @@ Exa 搜索将提供方扁平 `results[]` 的每一项映射为 `WebSearchSource`
 
 ## Fetch 请求与结果 schema
 
-`web_fetch` 的实现是一个匿名 HTTP(S) fetch 提供方 `http`。它从具体 URL 经进程的普通 `fetch` 传输获取字节，应用下述传输卫生措施，解码文本内容，并仅返回最小的模型可用结果：最终 URL、状态码、正文和截断标志。它不携带浏览器 cookie、编辑器凭证、git 凭证或内部认证令牌，也不添加自己的目标地址策略。
+`web_fetch` 的实现是一个匿名 HTTP(S) fetch 提供方 `http`。它从具体 URL 获取字节，应用下述传输卫生措施，解码文本内容，并仅返回最小的模型可用结果：最终 URL、状态码、正文和截断标志。它不携带浏览器 cookie、编辑器凭证、git 凭证或内部认证令牌。它不限制目的地址。
 
 seam 请求比 OpenCode 的面向模型工具更小：
 
@@ -210,7 +210,7 @@ seam 请求比 OpenCode 的面向模型工具更小：
 
 seam 请求刻意不包含逐调用超时、`format`、`prompt` 或提供方特有的提取控制。取消通过直接的可选执行信号实现，fetch 提供方拥有一个部署配置的超时兜底。`format` 是对已获取资源的展示决策；`prompt` 是更高层的 LLM 摘要指令；Firecrawl、Exa、Tavily 或 Parallel 等提取 API 可能不暴露具体的 HTTP 响应。如果产品日后需要提供方支撑的页面提取，那是一个独立的 `web_extract` 能力或对本 seam 的刻意扩展——提取语义绝不通过将每个 HTTP 字段设为可选来偷渡进 `web_fetch`。
 
-HTTP 状态码是已获取资源状态的一部分，不自动构成工具失败。通过网络成功获取到 `404` 或 `500` 响应时，会返回带有状态码和有界解码正文（当内容类型受支持时）的 `WebFetchResult`。`WebError` 用于无法获取或表示资源的失败：无效 URL、被拒绝的 URL 凭证、重定向策略违规、超时、abort、响应过大、不支持的内容类型、提供方失败或网络失败。
+HTTP 状态码是已获取资源状态的一部分，不自动构成工具失败。通过网络成功获取到 `404` 或 `500` 响应时，会返回带有状态码和有界解码正文（当内容类型受支持时）的 `WebFetchResult`。`WebError` 用于无法安全获取或表示资源的失败：无效或被阻断的 URL、重定向策略违规、超时、abort、响应过大、不支持的内容类型、提供方失败或网络失败。
 
 ```ts
 export interface WebFetchRequest {
@@ -233,18 +233,17 @@ export type WebFetchBody =
 
 `WebFetchBody` 是封闭的可辨识联合类型，因为正文类别需要 seam、提供方和工具三方协调变更，而非独立的插件扩展。穷举 switch 使新类别在每个渲染器处编译失败，直到被处理。独立的对象分支为类别特有字段留出空间。
 
-提供方负责资源获取：URL 校验、HTTP 传输、重定向策略、超时、abort 传播、字节上限、字符集解码、内容类型分类和二进制拒绝。`dsh-tool-web` 负责展示：HTML 转 Markdown、HTML 转纯文本、面向模型的截断格式化，以及未来的摘要。
+提供方负责安全的资源获取：URL 校验、HTTP 传输、重定向策略、超时、abort 传播、字节上限、字符集解码、内容类型分类和二进制拒绝。`dsh-tool-web` 负责展示：HTML 转 Markdown、HTML 转纯文本、面向模型的截断格式化，以及未来的摘要。
 
 fetch 提供方的资源控制：
 
 - 仅接受 `http:` 和 `https:` URL；拒绝 URL 中的凭证。
-- 请求经进程的全局 `fetch` 发出并省略凭据，因此路由跟随已配置的代理环境或系统 TUN 路由，目标地址在此从不被解析、分类或过滤。只要进程的网络能到达，loopback、私有、link-local 与云 metadata 主机就可访问；该暴露说明及其保留规则由 [FORK_MAINTENANCE.md](../../../../FORK_MAINTENANCE.md) 拥有。
 - 强制执行最大 URL 长度、响应字节上限、解码正文字符上限、超时和重定向跳数上限。
 - Abort 信号传播到网络获取和高开销解码。
-- 仅自动跟随同源重定向，每个跟随的跳转都会按同样的长度、协议和凭证规则重新校验目标 URL。跨源重定向以 `WEB_REDIRECT_BLOCKED` 失败，要求一次新的工具调用。（Claude Code 的 WebFetch 使用同样的模型——它不自动跟随跨主机重定向，而是将重定向目标返回给模型以发起新调用。）
+- 仅自动跟随同源重定向；每个跟随的跳转都会重复 URL 校验。跨源重定向以 `WEB_REDIRECT_BLOCKED` 失败，要求一次新的工具调用。（Claude Code 的 WebFetch 使用同样的模型——它不自动跟随跨主机重定向，而是将重定向目标返回给模型以发起新调用。）
 - 请求携带显式的产品 User-Agent，而非静默伪装浏览器。
 
-提供方刻意不做地址分类：这些部署必须到达 loopback、私有网络与经 TUN 转换的目标，因此 `WEB_BLOCKED_URL` 只在 URL 凭证上抛出。[Web 抓取可到达进程能到达的任何目标](2026-10-11-web-fetch-unrestricted-destinations.zh.md) 拥有该决策，并取代本 note 的地址分类规则；本 note 的其余内容保持当前。
+请求使用进程级 dispatcher，因此由已安装的出站代理策略与系统解析器决定连接。loopback、内网与云 metadata 目的地址都可访问。
 
 ## 工具消费方行为
 
@@ -310,19 +309,16 @@ fetch 提供方的资源控制：
 
 ### 镜像 Claude Code 的 `url + prompt` WebFetch 形状
 
-在 seam 层面否决。`prompt` 将 fetch 变成 LLM 摘要，并将 web 获取耦合到模型提供方。harness seam 应当确定性地获取和解码；`dsh-tool-web` 日后可以将摘要作为展示模式提供，而无需让 `ctx.web` 依赖 `ctx.llm`。
+在 seam 层面否决。`prompt` 将 fetch 变成 LLM 摘要，并将公开 web 获取耦合到模型提供方。harness seam 应当确定性地获取和解码；`dsh-tool-web` 日后可以将摘要作为展示模式提供，而无需让 `ctx.web` 依赖 `ctx.llm`。
 
-### 验证 DNS 后调用普通 fetch
+<a id="restrict-fetch-to-public-addresses"></a>
+### 只允许抓取公开地址
 
-作为半吊子方案否决。普通 fetch 在打开连接时会再次解析 hostname，因此先校验一组地址、再让 fetch 自行解析，仍会留下 rebinding 时间窗口；把已验证解析结果通过连接的 lookup 回调传入，可以在保留基于 hostname 的 HTTP 与 TLS 行为的同时关闭这一窗口。已交付的提供方完全不施加地址策略，两种机制都不存在；这一比较所服务的目标地址策略目标已由 [Web 抓取可到达进程能到达的任何目标](2026-10-11-web-fetch-unrestricted-destinations.zh.md) 取代。
+否决。解析每个 hostname、拒绝任何非公开解析结果并把连接固定到已验证地址，并不能约束模型，因为模型可以通过已挂载的 shell 工具访问相同网络；同时在 DNS 返回非公开地址的主机上（例如使用 fake-IP DNS 的 TUN 模式代理），这会拒绝所有页面。需要阻止模型访问私有目的地址的部署应使用网络隔离、`tools/pre-execute` 策略，或不挂载抓取工具。
 
-### 只阻断看起来像私网的 hostname 字符串，不固定解析地址
+### 在公开抓取前要求逐次审批
 
-否决，因为 hostname 语法无法确定连接目的地址：任意看似公开的名称都可能解析到 loopback、私有网段或云 metadata 地址。字符串检查会承诺它无法兑现的隔离。这一否决背后的目标地址策略目标已由 [Web 抓取可到达进程能到达的任何目标](2026-10-11-web-fetch-unrestricted-destinations.zh.md) 取代。
-
-### 在抓取前要求逐次审批
-
-已交付的 preset 不采用这一方案。逐次确认会打断普通浏览，却不能可靠控制数据出站：模型可以通过已挂载的 shell 工具访问同一网络。要求专门确认步骤的部署可以添加 `tools/pre-execute` 策略或禁用 `web_fetch`。
+已交付的 preset 不采用这一方案。逐次确认会打断普通浏览，却不能可靠控制数据出站：模型可以通过已挂载的 shell 工具访问相同网络。要求专门确认步骤的部署可以添加 `tools/pre-execute` 策略或禁用 `web_fetch`。
 
 ## 后果
 
@@ -334,7 +330,7 @@ fetch 提供方的资源控制：
 
 **提供方状态可能在启动后变化。** 一个工具可能在步骤开始时组装的请求中可见，但在执行前失去其提供方。执行路径重新解析并以结构化错误失败。
 
-**Fetch 能到达进程能到达的一切，且不只是只读工具。** 提供方不施加任何地址策略，因此模型可以通过任何可到达的 URL 泄露数据，也可以读取本进程能到达的 loopback、私有网络与云 metadata 服务；抓取文本仍是不受信任的模型输入。已交付的 `cordis`、`code` 与 `standard` preset 会在所有 sandbox 和审批模式下暴露 `web_fetch`，无需逐次确认，因此必须限制目标地址的部署要在 `web_fetch` 之外强制执行。
+**Fetch 是网络边界，不仅仅是只读工具。** `web_fetch` 可以访问主机能访问的任何目的地址，包括 loopback 与内网服务；模型可以通过 URL 泄露数据，抓取文本也仍是不受信任的模型输入。已交付的 `cordis`、`code` 与 `standard` preset 会在所有 sandbox 和审批模式下暴露 `web_fetch`，无需逐次确认。
 
 **大量 web 内容可能损害上下文质量。** 提供方强制执行字节/字符上限并报告 `truncated`；`tool-web` 格式化有界的模型输出，附带清晰的继续或后续引导。
 

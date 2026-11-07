@@ -3,12 +3,11 @@ import type { RefObject } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { DesktopOnboardingProps } from './onboarding-contract.ts'
 import { OnboardingIllustration } from './OnboardingIllustration.tsx'
-import { useOnboardingArtwork, type LoadOnboardingArtwork } from './onboarding-artwork.ts'
+import art from './assets/onboarding-recharge.webp'
+import artDark from './assets/onboarding-recharge-dark.webp'
+import artZh from './assets/onboarding-recharge-zh.webp'
+import artZhDark from './assets/onboarding-recharge-zh-dark.webp'
 import css from './DesktopOnboarding.module.css'
-
-/** Import the credit screenshots as a lazy chunk on first display. */
-const loadArtwork: LoadOnboardingArtwork = async locale =>
-  (await import('./onboarding-credit-artwork.ts')).creditArtwork(locale)
 
 /** @param props - credit facts, localized content and recharge/navigation actions. @returns the credit step. */
 export function OnboardingCreditStep({ t, locale, heading, busy, funded, canRecharge, onContinue, onRecharge, onLater }:
@@ -21,9 +20,8 @@ export function OnboardingCreditStep({ t, locale, heading, busy, funded, canRech
     onRecharge: () => void
     onLater: () => void
   }) {
-  const artwork = useOnboardingArtwork(loadArtwork, locale)
   return <div className={`${css.content} ${css.credit}`}>
-    <OnboardingIllustration className={css.creditIllustration} artwork={artwork} />
+    <OnboardingIllustration className={css.creditIllustration} src={locale === 'zh' ? artZh : art} darkSrc={locale === 'zh' ? artZhDark : artDark} />
     <div className={css.copy}>
       <h1 id="desktop-onboarding-title" ref={heading} tabIndex={-1}>{t('onboardingCredit')}</h1>
       <p className={css.heroDescription}>{t('onboardingCreditDescription')}</p>

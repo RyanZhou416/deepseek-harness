@@ -31,7 +31,7 @@ import type { Volatile } from '@deepseek-ai/cordis'
 import type { SubagentModelOverride } from './model-override-types.ts'
 import type { PreparedSubagentModel } from './types.ts'
 
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -208,7 +208,7 @@ export class SubagentRuntime extends TypertRemoteService {
       }),
     ]).default(false).volatile(),
   })
-  static inject = ['workingDirectory']
+  static inject = ['workingDirectory', 'sessionProjections']
   private providers = new Map<string, SubagentProvider>()
   private manager: SubagentManager | undefined
   /**
@@ -236,14 +236,16 @@ export class SubagentRuntime extends TypertRemoteService {
         if (this.manager === manager) this.manager = undefined
       }, 'subagents.managerBinding()')
     })
-    ctx.inject(['sessionProjections'], (projectionCtx) => {
-      projectionCtx.sessionProjections.register(subagentCatalogProjectionDefinition)
-      projectionCtx.sessionProjections.register(subagentTimingProjectionDefinition)
-      projectionCtx.sessionProjections.register(subagentIdentityProjectionDefinition)
-    })
     // Archive admission: this runtime is the owner that knows which live
     // children descend from a Session and how a parent stops them.
     ctx.inject(['agents'], (agentsCtx: Context) => { installSubagentArchiveAdmission(agentsCtx) })
+  }
+
+  protected async [Service.init](): Promise<void> {
+    const { sessionProjections } = this.ctx
+    await sessionProjections.register(subagentCatalogProjectionDefinition)
+    await sessionProjections.register(subagentTimingProjectionDefinition)
+    await sessionProjections.register(subagentIdentityProjectionDefinition)
   }
 
   /**
@@ -323,13 +325,13 @@ export class SubagentRuntime extends TypertRemoteService {
     const selected: SubagentActivationSpec = agentOptions === undefined && override === null
       ? spec
       : {
-          ...spec,
-          request: {
-            ...spec.request,
-            ...agentOptions === undefined ? {} : { agentOptions },
-            ...override === null ? {} : { inheritReasoningEffort: false },
-          },
-        }
+        ...spec,
+        request: {
+          ...spec.request,
+          ...agentOptions === undefined ? {} : { agentOptions },
+          ...override === null ? {} : { inheritReasoningEffort: false },
+        },
+      }
     return provider.prepareContinuable === undefined
       ? manager.startExternal(selected)
       : manager.startLocal(selected)

@@ -96,12 +96,6 @@ function cancellableDelay(delayMs: number, signal: AbortSignal): Promise<boolean
   })
 }
 
-/**
- * Install provider-routed normal or unbounded request recovery.
- * @param ctx - plugin context that owns the listener and active waits.
- * @param config - empty executor config; provider registrations own policy.
- * @param internals - non-serializable deterministic hooks for tests.
- */
 interface RetryStateEntry {
   retry: number
   retryId: RetryId
@@ -114,16 +108,19 @@ const llmRetryStateSchema: zod.ZodType<LlmRetryState> = zod.record(zod.string(),
   retry: zod.number().int().nonnegative(),
   retryId: zod.string(),
 })) as unknown as zod.ZodType<LlmRetryState>
-declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionStateMap {
-    /** Retry state for the current step by provider and policy. */
-    llmRetry: LlmRetryState
-  }
-}
 
-export function apply(ctx: Context, config: Config = {}, internals: RetryInternals = {}): void {
+/**
+ * Install provider-routed normal or unbounded request recovery.
+ * Recovery admitted during activation awaits projection registration. A
+ * registration failure propagates; cancellation or disposal suppresses retries.
+ * @param ctx - plugin context that owns the listener and active waits.
+ * @param config - empty executor config; provider registrations own policy.
+ * @param internals - non-serializable deterministic hooks for tests.
+ * @returns when recovery listeners and their projection are ready.
+ */
+export async function apply(ctx: Context, config: Config = {}, internals: RetryInternals = {}): Promise<void> {
   validateConfig(config)
-  ctx.sessionProjections.register({
+  const projectionReady = ctx.sessionProjections.register({
     key: 'llmRetry',
     stateVersion: 1,
     stateSchema: llmRetryStateSchema,
@@ -161,7 +158,6 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     signal: AbortSignal,
   ): Promise<RequestErrorAction> {
     const fusedSignal = AbortSignal.any([signal, lifetime.signal])
-    if (fusedSignal.aborted) return
     const eventData: LlmRetryEventData = policy.mode === 'normal'
       ? {
         retryId,
@@ -200,13 +196,14 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     next: () => Promise<RequestErrorAction>,
   ): Promise<RequestErrorAction> {
     if (policy === undefined) return next()
+    const llmRetryProjectionHandle = await projectionReady
+    if (signal.aborted || ctx.fiber.uid === null || lifetime.signal.aborted) return
     // A producer-forbidden resend outranks every policy, `always` included:
     // this executor schedules no wait and no durable retry record, and leaves
     // the decision to the listeners after it. The loop independently refuses
     // any retry action for the same failure, so this is not the only guard.
     if (failure.retryDisposition === 'forbid') return next()
     if (policy.mode === 'always') {
-      if (signal.aborted || lifetime.signal.aborted) return
       const fusedSignal = AbortSignal.any([signal, lifetime.signal])
       // The loop and plugin lifetime stay open until delegated recovery settles.
       // An abort then wins before the decision or fallback can mutate later state.
@@ -226,7 +223,7 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     }
 
     const policyKey = retryPolicyKey(policy)
-    const retryState = ctx.sessionProjections.stateOf(agent.session, 'llmRetry') as LlmRetryState
+    const retryState = llmRetryProjectionHandle.stateOf(agent.session)
     const previous = retryState[retryStateKey(provider, policyKey)]
     const previousRetry = previous?.retry ?? 0
     if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return next()
@@ -265,4 +262,5 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     lifetime.abort(new Error('llm-retry plugin disposed'))
     await Promise.allSettled([...active])
   }, 'llm-retry: abort and drain active recovery')
+  await projectionReady
 }

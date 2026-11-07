@@ -20,9 +20,11 @@
 # control/follow projections and on-demand `session.projections` reads. Keys the
 # list reads stay in the hints and are not excluded: `title`,
 # `sessionListMetadata`, `agentPreset`, `subagent`, `subagentCatalog`,
-# `subagentTiming`, and `tokenUsage` (subagent header rows of unopened children),
-# plus `contextPressure` and `contextBreakdown`, which the dsh-context agent
-# graph reads from catalog rows (fork-plugins/dsh-context/src/client/agentTree.ts).
+# `subagentTiming`, and `tokenUsage` (subagent header rows of unopened children).
+# `contextPressure` and `contextBreakdown` need no entry here: upstream marks
+# both summary-excluded at registration, so a Session summary never carries them
+# and no list config can add them back. The dsh-context agent graph therefore
+# falls back to `contextTimeline` and `tokenUsage` for unopened child Sessions.
 #
 # `historyPageMaxBytes` bounds each history page (Session open, live opening,
 # and Load earlier) to about 2 MiB of serialized records, trimmed at message
@@ -43,16 +45,3 @@
       - permissions
       - modelSelection
       - imageLimits
-
-# Downlink WebSocket compression for large stream frames (history pages, big
-# tool results) so remote browsers over tunnels or reverse proxies receive a
-# fraction of the bytes. Frames under 1 MiB stay plain; level 1, four
-# concurrent deflate contexts and no context takeover bound CPU and zlib memory.
-- id: typert-gateway
-  config:
-    streamCompression:
-      enabled: true
-      threshold: 1048576
-      level: 1
-      concurrencyLimit: 4
-      serverNoContextTakeover: true

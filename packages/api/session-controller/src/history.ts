@@ -1,12 +1,9 @@
-/** Cold Session history pagination and live-event source. */
+/** Shared Session history pagination, address validation and wire conversion. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { Deque } from '@deepseek-ai/dsh-deque'
-import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import {
   isAppendSurfaceEvent,
   SessionLogOffset,
-  SessionSeq,
 } from '@deepseek-ai/dsh-session'
 import type {
   SessionEvent,
@@ -21,27 +18,21 @@ import type {
   SessionWindowRequest,
 } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionObservation, type SessionWindowRead } from '@deepseek-ai/dsh-session-query'
-import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
-import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {
   SessionAddress,
-  SessionAssistantStreamFrame,
   SessionEventEntry,
-  SessionFollowRequest,
-  SessionFollowFrame,
   SessionHistoryRecord,
-  SessionPage,
   SessionPageRequest,
   SessionProjectionBaseline,
   SessionProjectionValues,
   SessionWireHeader,
   SessionWireEvent,
 } from './types.ts'
-import { SessionAssistantStreamAccumulator } from './assistant-stream.ts'
 
-const DEFAULT_MAX_MESSAGES = 50
+/** Message budget applied when a history request omits `maxMessages`. */
+export const DEFAULT_MAX_MESSAGES = 50
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 /** Largest event count one bounded stored-history window read may request. */
 const SESSION_WINDOW_MAX_EVENTS = 10_000
@@ -54,587 +45,22 @@ const SESSION_WINDOW_MIN_EVENTS = 2_000
  * That budget trims a page near the caller's cut, so requesting the complete
  * alignment bound first decodes rows the page cannot carry. 256 keeps the first
  * decode to about an eighth of that bound while a typical 500-message opening
- * still resolves inside the growth sequence. It is not derived from the budget:
- * the budget bounds the bytes a page may carry, not the rows message/Turn
- * alignment needs, and a derived row count would shrink toward one event at the
- * small budgets the paging tests configure. The value is an implementation
- * constant because it changes only read granularity, never the served page.
+ * still resolves inside the growth sequence.
  */
 const SESSION_WINDOW_FIRST_EVENTS = 256
 /** Factor by which a budgeted window read grows while its page is undecided. */
 const SESSION_WINDOW_GROWTH = 4
 /**
  * Stored artifact size below which a complete observation is cheaper than a
- * cold window index build.
- *
- * Building the index and decoding frames exceeded the complete read for the
- * audit's 949 KB Session (80-98 ms against 26 ms) and stayed well below it for
- * the 161 MB Session, so a small stored artifact answers from the exact
- * observation instead. Backends that report no size keep the window path.
+ * cold window index build. Backends that report no size keep the window path.
  */
 const SMALL_STORED_SESSION_BYTES = 2 * 1024 * 1024
 
-interface FollowOpening {
-  readonly frame: Extract<SessionFollowFrame, { readonly type: 'snapshot' }>
-  readonly cursor: SessionSeqCursor
-  readonly assistantStreamOrdinalCut: number
-  readonly promotion?: SessionObservation
-}
-
-/** Implements cold-safe history operations delegated by the Session Controller. */
-export class SessionHistoryController {
-  private readonly closeFollowers = new Set<() => void>()
-  private readonly assistantStreams = new Map<SessionId, SessionAssistantStreamAccumulator>()
-
-  /**
-   * @param ctx - Host context carrying Session query and projection services.
-   * @param promote - starts ordinary Session activation after snapshot delivery.
-   * @param retain - keeps an addressed Agent resident through opening delivery.
-   * @param maxPageBytes - serialized UTF-8 byte budget for one page's records;
-   *   `0` disables the cap and keeps the configured message/Turn limits alone.
-   */
-  constructor(
-    private readonly ctx: Context,
-    private readonly promote: (observation: SessionObservation) => void,
-    private readonly retain: (sessionId: SessionId) => () => void = () => () => {},
-    private readonly maxPageBytes = 0,
-  ) {
-    ctx.on('agent/assistant-stream', ({ agent, frame }) => {
-      let stream = this.assistantStreams.get(agent.session.id)
-      if (stream === undefined) {
-        stream = new SessionAssistantStreamAccumulator()
-        this.assistantStreams.set(agent.session.id, stream)
-      }
-      stream.accept(frame, cursorBeforeNext(agent.session.seq))
-    }, { global: true })
-    ctx.on('agent/disposed', ({ agent }) => {
-      this.assistantStreams.delete(agent.session.id)
-    }, { global: true })
-    ctx.effect(() => () => {
-      for (const close of this.closeFollowers) close()
-      this.closeFollowers.clear()
-    }, 'session-controller.history')
-  }
-
-  /**
-   * Read one message-aligned history page without activating an Agent.
-   * @param request - durable address and backwards-page cursor.
-   * @param signal - caller cancellation for persistence reads.
-   * @returns a contiguous event page.
-   */
-  async page(request: SessionPageRequest, signal: AbortSignal): Promise<SessionPage> {
-    validatePageRequest(request)
-    const throughSeq: SessionSeqCursor = request.throughSeq === -1
-      ? -1
-      : SessionSeq(request.throughSeq)
-    const beforeSeq = request.beforeSeq === undefined
-      ? undefined
-      : SessionLogOffset(request.beforeSeq)
-    // Live Sessions and gap repairs keep the existing source path without an extra async hop.
-    const windowSessionId = throughSeq >= 0 && beforeSeq === undefined
-      ? undefined
-      : this.windowSessionId(request.address)
-    let windowPage: SessionPage | undefined
-    if (windowSessionId !== undefined && !await this.isSmallStoredSource(windowSessionId, signal)) {
-      windowPage = await this.pageFromWindow(windowSessionId, request, throughSeq, beforeSeq, signal)
-    }
-    if (windowPage !== undefined) return windowPage
-    using source = await this.sourceFor(request.address, signal, false)
-    signal.throwIfAborted()
-    const sourceLog = source.events
-    const sourceCursor: SessionSeqCursor = sourceLog.at(-1)?.seq ?? -1
-    if (throughSeq > sourceCursor) {
-      throw new RemoteError(
-        'gateway/bad-request',
-        `session page through seq ${String(throughSeq)} is past cursor ${String(sourceCursor)}`,
-        {},
-      )
-    }
-    /* v8 ignore next -- Session and persistence validation guarantee a dense zero-based event prefix. */
-    if (throughSeq >= 0 && sourceLog[throughSeq]?.seq !== throughSeq) {
-      throw new RemoteError('gateway/internal', `session log does not contain through seq ${String(throughSeq)}`, {})
-    }
-    const page = paginate(
-      sourceLog,
-      beforeSeq,
-      request.maxMessages ?? DEFAULT_MAX_MESSAGES,
-      throughSeq,
-      request.turnWindow,
-      this.maxPageBytes,
-    )
-    const records = pageRecords(page.events)
-    return {
-      records,
-      hasMore: page.hasMore,
-    }
-  }
-
-  /**
-   * Serve one page from a bounded stored window when the Session is not live.
-   *
-   * Only the empty tail cut (`throughSeq === -1`) and older pages (`beforeSeq`)
-   * take this path: those cuts need no dense-array probe of the complete log.
-   * An older-page window ends at the page's own cut, so its tail proves the
-   * dense anchor directly below that cut while the rows above it — already held
-   * by the caller — are never decoded. A window whose tail does not reach that
-   * anchor falls back: an opening balances an interrupted Turn with synthetic
-   * closers that the stored window does not contain, so only the complete log
-   * can serve a cut above the stored window cursor. A configured byte budget
-   * grows the requested row bound from {@link SESSION_WINDOW_FIRST_EVENTS} until
-   * the page is decided, so a budget-trimmed page does not decode the alignment
-   * bound. Returns undefined when the complete source must answer.
-   * @param sessionId - non-live Session addressed by the request.
-   * @param request - validated page request.
-   * @param throughSeq - inclusive cut derived from the request.
-   * @param beforeSeq - exclusive end of the requested page, when present.
-   * @param signal - caller cancellation for the window read.
-   * @returns the message-aligned page, or undefined to use the complete source.
-   */
-  private async pageFromWindow(
-    sessionId: SessionId,
-    request: SessionPageRequest,
-    throughSeq: SessionSeqCursor,
-    beforeSeq: SessionLogOffsetType | undefined,
-    signal: AbortSignal,
-  ): Promise<SessionPage | undefined> {
-    const older = throughSeq >= 0
-    const end = Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1)
-    if (!older) {
-      const read = await this.readStoredWindow(sessionId, { signal, maxEvents: 1 })
-      if (read === undefined) return undefined
-      this.validateWindow(request.address, read.window, read.projections)
-      // A negative cut ends before every event, so the validated page is empty.
-      return { records: [], hasMore: false }
-    }
-    for (const maxEvents of windowReadBounds(request, this.maxPageBytes)) {
-      signal.throwIfAborted()
-      // The page cut is the window end: the read decodes exactly the page's own
-      // span instead of every stored row between the cut and the cursor.
-      const read = await this.readStoredWindow(sessionId, { beforeSeq: end, signal, maxEvents })
-      if (read === undefined) return undefined
-      this.validateWindow(request.address, read.window, read.projections)
-      // A positive cut needs the stored row immediately below it; a cut at seq 0
-      // is the real empty page. Anything else needs the complete log, including a
-      // cut the complete observation's closers pushed above the stored cursor.
-      if (end > 0 && read.window.events.at(-1)?.seq !== end - 1) return undefined
-      const page = paginateSlice(
-        read.window.events,
-        SessionLogOffset(read.window.events[0]?.seq ?? read.window.cursor + 1),
-        SessionLogOffset(end),
-        request.maxMessages ?? DEFAULT_MAX_MESSAGES,
-        request.turnWindow,
-        this.maxPageBytes,
-      )
-      if (page === undefined) continue
-      return {
-        records: pageRecords(page.events),
-        hasMore: page.hasMore,
-      }
-    }
-    return undefined
-  }
-
-  /**
-   * Read one bounded stored window, mapping a missing Session to the complete
-   * source path's canonical not-found handling.
-   * @param sessionId - stored Session to read.
-   * @param request - bounded window request.
-   * @returns the validated window and checkpoint, or undefined to fall back.
-   */
-  private async readStoredWindow(
-    sessionId: SessionId,
-    request: SessionWindowRequest,
-  ): Promise<SessionWindowRead | undefined> {
-    try {
-      return await this.ctx.sessionQuery.readWindow(sessionId, request)
-    } catch (error: unknown) {
-      if (error instanceof SessionQueryError && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') {
-        return undefined
-      }
-      throw error
-    }
-  }
-
-  /**
-   * Resolve a non-live ordinary Session the bounded window path may serve.
-   * @param address - durable history address.
-   * @returns the addressed Session id, or undefined when the complete source is required.
-   */
-  private windowSessionId(address: SessionAddress): SessionId | undefined {
-    if (address.kind !== 'session') return undefined
-    return this.ctx.sessions.get(address.sessionId) === undefined ? address.sessionId : undefined
-  }
-
-  /**
-   * Whether a stored artifact is small enough that the complete observation
-   * costs less than a window read.
-   *
-   * A window avoids materializing a large log, but below
-   * {@link SMALL_STORED_SESSION_BYTES} its cold index build costs more than the
-   * complete observation. Missing, unsized, or failed metadata keeps the window
-   * path.
-   * @param sessionId - stored Session to size.
-   * @param signal - caller cancellation for the metadata read.
-   * @returns true only when the backend reports a size below the threshold.
-   */
-  private async isSmallStoredSource(sessionId: SessionId, signal: AbortSignal): Promise<boolean> {
-    const persistence = this.ctx.get('sessionPersistence')
-    if (persistence === undefined) return false
-    let stored: SessionPersistenceSnapshot | undefined
-    try {
-      stored = await persistence.stat(sessionId, { signal })
-    } catch {
-      // An unknown size is not evidence of a small artifact, so the window path
-      // reports the canonical failure; caller cancellation still wins.
-      signal.throwIfAborted()
-      return false
-    }
-    signal.throwIfAborted()
-    const sizeBytes = stored?.sizeBytes
-    return sizeBytes !== undefined && sizeBytes < SMALL_STORED_SESSION_BYTES
-  }
-
-  /**
-   * Validate a stored window header exactly as a complete observation.
-   * @param address - durable history address being served.
-   * @param window - stored window whose header identifies the generation.
-   * @param projections - checkpoint baseline, when the window path carries one.
-   */
-  private validateWindow(
-    address: SessionAddress,
-    window: SessionWindow,
-    projections: SessionWindowRead['projections'],
-  ): void {
-    if (window.header.cwd === undefined) rejectNotFound(address)
-    validateAddress(address, window.header, window.inheritedEventCount, projections)
-  }
-
-  /**
-   * Follow events appended after an initial cursor on one durable address.
-   * @param request - durable address and last committed sequence already held by the caller.
-   * @param signal - stream cancellation owned by the Remote carrier.
-   * @returns a complete opening snapshot followed by gap-free durable events and opted-in assistant frames.
-   */
-  async *follow(request: SessionFollowRequest, signal: AbortSignal): AsyncIterable<SessionFollowFrame> {
-    validateHistoryWindow(request)
-    const { address } = request
-    const target = addressId(address)
-    const releaseRetention = this.retain(target)
-    let retentionReleased = false
-    const releaseOpeningRetention = (): void => {
-      if (retentionReleased) return
-      retentionReleased = true
-      releaseRetention()
-    }
-    const buffered = new Deque<
-      | { readonly type: 'event'; readonly event: SessionEvent }
-      | {
-        readonly type: 'assistant-stream'
-        readonly frame: SessionAssistantStreamFrame
-        readonly ordinal: number
-      }
-    >()
-    let snapshotCursor: SessionSeqCursor | undefined
-    let assistantStreamOrdinal = 0
-    let wake: (() => void) | undefined
-    const notify = (): void => {
-      const resume = wake
-      wake = undefined
-      resume?.()
-    }
-    const follower = { closed: false }
-    const close = (): void => {
-      follower.closed = true
-      notify()
-    }
-    this.closeFollowers.add(close)
-    const disposeEvent = this.ctx.on('session/event', (session, event) => {
-      if (session.id !== target) return
-      buffered.pushBack({ type: 'event', event })
-      notify()
-    }, { global: true })
-    const disposeCreated = this.ctx.on('session/created', (session) => {
-      if (session.id !== target) return
-      // Constructor seed events have no session/event notification. Normally
-      // only the end-seed suffix is new; if persistence advanced after the
-      // opening observation, replay everything beyond that snapshot cursor.
-      // oxlint-disable-next-line typescript/no-deprecated -- The created-session seed must be buffered synchronously before later events.
-      const suffix = session.snapshotEvents(snapshotCursor === undefined
-        ? session.firstLiveSeq
-        : SessionLogOffset(snapshotCursor + 1))
-      for (let index = suffix.length - 1; index >= 0; index -= 1) {
-        buffered.pushFront({ type: 'event', event: suffix[index] as SessionEvent })
-      }
-      notify()
-    }, { global: true })
-    const disposeAssistantStream = request.assistantStream !== true
-      ? undefined
-      : this.ctx.on('agent/assistant-stream', ({ agent, frame }) => {
-        if (agent.session.id !== target) return
-        buffered.pushBack({
-          type: 'assistant-stream',
-          frame: wireAssistantStreamFrame(frame, cursorBeforeNext(agent.session.seq)),
-          ordinal: ++assistantStreamOrdinal,
-        })
-        notify()
-      }, { global: true })
-    const onAbort = (): void => { notify() }
-    signal.addEventListener('abort', onAbort, { once: true })
-    let pendingPromotion: SessionObservation | undefined
-    try {
-      const opening: FollowOpening | undefined = await this.openFollow(request, signal, () => assistantStreamOrdinal)
-      const cursor = opening.cursor
-      snapshotCursor = cursor
-      const assistantStreamOrdinalCut = opening.assistantStreamOrdinalCut
-      pendingPromotion = opening.promotion
-      yield opening.frame
-      releaseOpeningRetention()
-      if (pendingPromotion !== undefined) {
-        try {
-          this.promoteOpening(pendingPromotion)
-        } finally {
-          pendingPromotion = undefined
-        }
-      }
-      let nextOffset = SessionLogOffset(cursor + 1)
-      while (!follower.closed && !signal.aborted) {
-        const item = buffered.popFront()
-        if (item === undefined) {
-          await new Promise<void>((resolve) => { wake = resolve })
-          continue
-        }
-        if (item.type === 'assistant-stream') {
-          if (item.ordinal > assistantStreamOrdinalCut) {
-            yield { type: 'assistant-stream', frame: item.frame }
-          }
-          continue
-        }
-        const expectedSeq = SessionSeq(nextOffset)
-        if (item.event.seq < expectedSeq) continue
-        if (item.event.seq !== expectedSeq) {
-          throw new RemoteError('gateway/internal', `session event stream skipped seq ${String(expectedSeq)}`, {})
-        }
-        nextOffset = SessionLogOffset(nextOffset + 1)
-        yield entryFor(item.event)
-      }
-    } finally {
-      pendingPromotion?.[Symbol.dispose]()
-      releaseOpeningRetention()
-      this.closeFollowers.delete(close)
-      signal.removeEventListener('abort', onAbort)
-      disposeCreated()
-      disposeEvent()
-      disposeAssistantStream?.()
-    }
-  }
-
-  /** Transfer one prepared observation after the opening frame reaches its consumer. */
-  private promoteOpening(observation: SessionObservation): void {
-    try {
-      this.promote(observation)
-    } catch (error: unknown) {
-      observation[Symbol.dispose]()
-      throw error
-    }
-  }
-
-  /** Materialize one bounded opening frame and release its complete history before delivery. */
-  private async openFollow(
-    request: SessionFollowRequest,
-    signal: AbortSignal,
-    ordinal: () => number,
-  ): Promise<FollowOpening> {
-    // Live Sessions keep the existing source path without an extra async hop.
-    const windowSessionId = this.windowSessionId(request.address)
-    let windowOpening: FollowOpening | undefined
-    if (windowSessionId !== undefined && !await this.isSmallStoredSource(windowSessionId, signal)) {
-      windowOpening = await this.openWindow(windowSessionId, request, signal, ordinal)
-    }
-    if (windowOpening !== undefined) return windowOpening
-    using source = await this.sourceFor(request.address, signal, true)
-    const events = source.events
-    signal.throwIfAborted()
-    const cursor = source.cursor
-    const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES, cursor, request.turnWindow,
-      this.maxPageBytes)
-    const assistantStream = request.assistantStream === true
-      ? this.assistantStreams.get(addressId(request.address))?.snapshot() ?? { revision: 0 }
-      : undefined
-    // The accumulator snapshot and this watermark are synchronous. Frames
-    // through the cut are represented or superseded by that baseline.
-    const assistantStreamOrdinalCut = ordinal()
-    return {
-      frame: {
-        type: 'snapshot',
-        header: wireHeader(source.header),
-        cursor,
-        records: pageRecords(page.events),
-        hasMore: page.hasMore,
-        // An observation without a projection cut carries no exact block; an
-        // empty block would claim whole-log emptiness and clear cached rows.
-        ...source.projections === undefined ? {} : { projections: projectionBlock(source.projections) },
-        ...assistantStream === undefined ? {} : { assistantStream },
-      },
-      cursor,
-      assistantStreamOrdinalCut,
-      ...request.address.kind === 'session' && source.source === 'prepared'
-        ? { promotion: source.retain() }
-        : {},
-    }
-  }
-
-  /**
-   * Build the opening frame from one bounded stored window when the Session is
-   * not live and the persistence index can serve it.
-   *
-   * A window without a complete projection checkpoint still opens: the frame
-   * omits its projection block instead of inventing an empty exact cut, which
-   * would clear the client's cached values. Only parent Session addresses use
-   * this path; subagent addresses stay on the complete observation because the
-   * `subagent` projection is part of address validation. No prepared historical
-   * Session is materialized here. A configured byte budget grows the requested
-   * row bound from {@link SESSION_WINDOW_FIRST_EVENTS} until the page is decided
-   * and the window still shows the log's final Turn boundary.
-   * @param sessionId - non-live parent Session addressed by the request.
-   * @param request - follow request and caller history limits.
-   * @param signal - stream cancellation.
-   * @param ordinal - current assistant-stream frame watermark.
-   * @returns the complete opening, or undefined to use the exact source.
-   */
-  private async openWindow(
-    sessionId: SessionId,
-    request: SessionFollowRequest,
-    signal: AbortSignal,
-    ordinal: () => number,
-  ): Promise<FollowOpening | undefined> {
-    const bounds = windowReadBounds(request, this.maxPageBytes)
-    for (const [index, maxEvents] of bounds.entries()) {
-      signal.throwIfAborted()
-      const read = await this.readStoredWindow(sessionId, { signal, maxEvents })
-      if (read === undefined) return undefined
-      this.validateWindow(request.address, read.window, read.projections)
-      const windowEvents = read.window.events
-      const windowBase = SessionLogOffset(windowEvents[0]?.seq ?? read.window.cursor + 1)
-      // A window that omits the log's final Turn boundary cannot tell an
-      // interrupted Turn from one whose start lies below it, so its synthetic
-      // closers would differ from the complete observation. Grow until the
-      // boundary is inside the window, and keep the bounded window's answer at
-      // the last bound.
-      if (index < bounds.length - 1 && !tailTurnSettled(windowEvents, windowBase)) continue
-      // The complete observation balances an interrupted final turn with in-memory
-      // closers; a tail window must present the same transcript shape.
-      const events = [...windowEvents, ...interruptedTurnClosers(windowEvents)]
-      const cursor = SessionSeq(events.at(-1)?.seq ?? -1)
-      const page = paginateSlice(
-        events,
-        windowBase,
-        SessionLogOffset(cursor + 1),
-        request.maxMessages ?? DEFAULT_MAX_MESSAGES,
-        request.turnWindow,
-        this.maxPageBytes,
-      )
-      if (page === undefined) continue
-      const assistantStream = request.assistantStream === true
-        ? this.assistantStreams.get(sessionId)?.snapshot() ?? { revision: 0 }
-        : undefined
-      // The accumulator snapshot and this watermark are synchronous. Frames
-      // through the cut are represented or superseded by that baseline.
-      const assistantStreamOrdinalCut = ordinal()
-      return {
-        frame: {
-          type: 'snapshot',
-          header: wireHeader(read.window.header),
-          cursor,
-          records: pageRecords(page.events),
-          hasMore: page.hasMore,
-          ...read.projections === undefined ? {} : { projections: projectionBlock(read.projections) },
-          ...assistantStream === undefined ? {} : { assistantStream },
-        },
-        cursor,
-        assistantStreamOrdinalCut,
-      }
-    }
-    return undefined
-  }
-
-  private async sourceFor(
-    address: SessionAddress,
-    signal: AbortSignal,
-    withProjections: boolean,
-  ): Promise<SessionObservation> {
-    const sessionId = addressId(address)
-    try {
-      const observation = await this.ctx.sessionQuery.observeSession(sessionId, {
-        signal,
-        projectionMode: withProjections || address.kind === 'subagent' ? 'all' : 'none',
-      })
-      if (observation.header.cwd === undefined) {
-        observation[Symbol.dispose]()
-        rejectNotFound(address)
-      }
-      try {
-        validateAddress(
-          address,
-          observation.header,
-          observation.inheritedEventCount,
-          observation.projections,
-        )
-      } catch (error: unknown) {
-        observation[Symbol.dispose]()
-        throw error
-      }
-      return observation
-    } catch (error: unknown) {
-      if (error instanceof SessionQueryError
-        && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') rejectNotFound(address)
-      throw error
-    }
-  }
-
-}
-
-function cursorBeforeNext(nextSeq: SessionLogOffsetType): SessionSeqCursor {
-  return nextSeq === 0 ? -1 : SessionSeq(nextSeq - 1)
-}
-
-function wireAssistantStreamFrame(
-  frame: AssistantStreamFrame,
-  durableCursor: SessionSeqCursor,
-): SessionAssistantStreamFrame {
-  if (frame.type === 'start') return { ...frame, startedAfterSeq: durableCursor }
-  if (frame.type === 'end') return frame
-  return {
-    ...frame,
-    chunk: frame.chunk as JsonValue,
-  }
-}
-
-function projectionBlock(
-  snapshot: NonNullable<SessionObservation['projections']>,
-): SessionProjectionBaseline {
-  return {
-    asOfSeq: snapshot.asOfSeq,
-    // Projection definitions validate whole JSON values before snapshot publication.
-    values: snapshot.values as SessionProjectionValues,
-  }
-}
-
-function validatePageRequest(request: SessionPageRequest): void {
-  if (!Number.isSafeInteger(request.throughSeq)
-    || request.throughSeq < -1
-    || Object.is(request.throughSeq, -0)) {
-    throw new RemoteError('gateway/bad-request', 'throughSeq must be an integer greater than or equal to -1', {})
-  }
-  if (request.beforeSeq !== undefined
-    && (!Number.isSafeInteger(request.beforeSeq)
-      || request.beforeSeq < 0
-      || Object.is(request.beforeSeq, -0))) {
-    throw new RemoteError('gateway/bad-request', 'beforeSeq must be a non-negative safe integer', {})
-  }
-  validateHistoryWindow(request)
-}
-
-function validateHistoryWindow(request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>): void {
+/**
+ * Reject an invalid message budget or turn window.
+ * @param request - history window fields.
+ */
+export function validateHistoryWindow(request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>): void {
   if (request.maxMessages !== undefined
     && (!Number.isSafeInteger(request.maxMessages) || request.maxMessages <= 0)) {
     throw new RemoteError('gateway/bad-request', 'maxMessages must be a positive safe integer', {})
@@ -651,11 +77,23 @@ function validateHistoryWindow(request: Pick<SessionPageRequest, 'maxMessages' |
   }
 }
 
-function addressId(address: SessionAddress): SessionId {
+/**
+ * Select the Session whose log an address names.
+ * @param address - ordinary Session or direct-subagent address.
+ * @returns the Session whose log the address reads.
+ */
+export function addressId(address: SessionAddress): SessionId {
   return address.kind === 'session' ? address.sessionId : address.childSessionId
 }
 
-function validateAddress(
+/**
+ * Reject an address that does not match the observed Session.
+ * @param address - ordinary Session or direct-subagent address.
+ * @param header - observed Session header.
+ * @param inheritedEventCount - observed fork-inherited event count.
+ * @param projections - observed projections; subagent addresses require them.
+ */
+export function validateAddress(
   address: SessionAddress,
   header: SessionHeader,
   inheritedEventCount: SessionLogOffsetType,
@@ -696,7 +134,13 @@ function validateAddress(
   }
 }
 
-function rejectNotFound(address: SessionAddress): never {
+/**
+ * Reject a missing Session using its address-specific error.
+ * @param address - ordinary Session or direct-subagent address.
+ * @returns never; this operation always throws.
+ * @throws RemoteError `session/not-found` or `subagent/not-found`.
+ */
+export function rejectNotFound(address: SessionAddress): never {
   if (address.kind === 'session') {
     throw new RemoteError('session/not-found', `session "${address.sessionId}" not found`, { sessionId: address.sessionId })
   }
@@ -706,7 +150,17 @@ function rejectNotFound(address: SessionAddress): never {
   })
 }
 
-function paginate(
+/**
+ * Cut one message-aligned backwards page from a contiguous event prefix.
+ * @param events - contiguous events starting at seq 0.
+ * @param beforeSeq - exclusive upper offset of an older page.
+ * @param maxMessages - message budget.
+ * @param throughSeq - inclusive log cut.
+ * @param turnWindow - optional turn-boundary stop rule.
+ * @param maxBytes - serialized-record byte budget; `0` keeps the message/Turn limits alone.
+ * @returns the page events and whether older events remain.
+ */
+export function paginate(
   events: readonly SessionEvent[],
   beforeSeq: SessionLogOffsetType | undefined,
   maxMessages: number,
@@ -724,26 +178,22 @@ function paginate(
 }
 
 /**
- * Cut one message-aligned page from a contiguous event slice that may begin
- * above seq 0, then shorten it to the configured serialized-byte budget.
+ * Cut one message-aligned backwards page from the slice `[baseSeq, endSeq)`.
  *
- * Returns undefined when the cut or a cited source event falls below the slice,
- * because only the complete log can answer that page. One case is decided
- * without the alignment cut: when the slice's trailing records already exceed
- * the byte budget, the trim keeps the newest message group that fits, and older
- * events could only add bytes, so that trimmed start is the one a complete read
- * would also choose. The page is returned from it instead of asking for a
- * deeper window. `hasMore` follows the complete-log rule: the page does not
- * start at the log's first event.
- * @param events - contiguous durable events.
- * @param baseSeq - absolute seq of `events[0]`.
- * @param endSeq - exclusive absolute end of the page.
- * @param maxMessages - message budget that stops the backwards scan.
- * @param turnWindow - optional Turn alignment minima.
- * @param maxBytes - positive serialized-record byte budget; `0` keeps the message/Turn cut.
- * @returns the page, or undefined when the slice cannot cover its cut.
+ * The returned start always falls on a counted message's group start, so a
+ * message whose cited source events lie below it can never be served without
+ * them. Under a byte budget the start also moves forward toward newer messages
+ * until the serialized records fit; the newest message group is always kept so
+ * a page always makes progress.
+ * @param events - contiguous events covering `[baseSeq, endSeq)`.
+ * @param baseSeq - offset of the slice's first event.
+ * @param endSeq - exclusive upper offset of the slice.
+ * @param maxMessages - message budget.
+ * @param turnWindow - optional turn-boundary stop rule.
+ * @param maxBytes - serialized-record byte budget; `0` keeps the message/Turn limits alone.
+ * @returns the page events and whether older events remain, or undefined when the slice hides its cut.
  */
-function paginateSlice(
+export function paginateSlice(
   events: readonly SessionEvent[],
   baseSeq: SessionLogOffsetType,
   endSeq: SessionLogOffsetType,
@@ -796,22 +246,19 @@ function paginateSlice(
 }
 
 /**
- * Shorten one message-aligned page to a serialized UTF-8 byte budget.
+ * Move one message-aligned page start toward newer events until its serialized
+ * records fit the byte budget.
  *
- * The page keeps its tail — the caller's cut — and only its start moves toward
- * newer events, always to the group start of a counted message. A page that
- * already fits is returned unchanged. The budget therefore overrides the
- * caller's message and Turn minima when the configured cap is smaller than the
- * page they select; the newest message is kept even when it alone exceeds the
- * budget so a page always makes progress. A message group whose cited sources
- * fall below a candidate start makes that start unusable, because the page
- * would carry a surface event without its source.
- * @param events - contiguous durable events.
- * @param baseSeq - absolute seq of `events[0]`.
- * @param start - relative index of the message-aligned page start.
- * @param end - relative exclusive end of the page.
- * @param maxBytes - positive serialized-record budget, or `0` when uncapped.
- * @returns the relative index of the trimmed page start.
+ * The scan is linear in the page: group starts and their suffix minima decide
+ * which starts keep every message's cited sources on the page, then one
+ * newest-first pass sums serialized bytes. The newest message group is kept even
+ * when it alone exceeds the budget.
+ * @param events - contiguous events covering the page.
+ * @param baseSeq - offset of the page slice's first event.
+ * @param start - page-relative candidate start.
+ * @param end - page-relative exclusive end.
+ * @param maxBytes - serialized-record byte budget; `0` keeps `start`.
+ * @returns the page-relative start that fits the budget.
  */
 function trimToByteBudget(
   events: readonly SessionEvent[],
@@ -872,16 +319,34 @@ function trimToByteBudget(
 }
 
 /**
- * Events one bounded window request must cover for a message-aligned page.
- *
- * The window ends at the page's own cut, so this bound is the lookback depth
- * below that cut: enough rows to reach the message and Turn minima.
+ * Convert a committed event to its wire entry.
+ * @param event - committed Session event.
+ * @returns the wire event entry.
+ */
+export function entryFor(event: SessionEvent): SessionEventEntry {
+  return {
+    type: 'event',
+    // Session.append validates and freezes event data as JSON before publication.
+    event: event as unknown as SessionWireEvent,
+  }
+}
+
+/**
+ * Encode one bounded logical page without changing its pagination cut.
+ * @param events - page events.
+ * @returns the wire records.
+ */
+export function pageRecords(events: readonly SessionEvent[]): SessionHistoryRecord[] {
+  return events.map(entryFor)
+}
+
+/**
+ * Event count one message-aligned page needs above its own lookback: enough
+ * rows to reach the message and Turn minima.
  * @param request - caller history limits.
  * @returns the bounded `maxEvents` to request from persistence.
  */
-function windowEventBound(
-  request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>,
-): number {
+export function windowEventBound(request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>): number {
   const messages = request.maxMessages ?? DEFAULT_MAX_MESSAGES
   const turnHeadroom = (request.turnWindow?.minTurns ?? 0) * 64
   return Math.min(
@@ -893,19 +358,17 @@ function windowEventBound(
 /**
  * Event counts to try for one stored window read.
  *
- * Without a serialized byte budget the window requests the alignment bound once,
- * as it always has. With one, the first request uses
- * {@link SESSION_WINDOW_FIRST_EVENTS} and each retry multiplies the bound by
- * {@link SESSION_WINDOW_GROWTH} up to {@link windowEventBound}: the caller stops
- * at the first bound whose page is decided (alignment resolved, history start
- * reached, or budget exhausted). Every bound stays within the existing row
- * bound, so a window that never decides its page still falls back to the
- * complete read exactly as before.
+ * Without a serialized byte budget the window requests the alignment bound
+ * once. With one, the first request uses 256 events and each retry multiplies
+ * the bound by four up to the alignment bound: the caller stops at the first
+ * bound whose page is decided (alignment resolved, history start reached, or
+ * budget exhausted). Every bound stays within the alignment bound, so a window
+ * that never decides its page still falls back to the complete read.
  * @param request - caller history limits.
  * @param maxBytes - configured serialized-record byte budget; `0` requests one bounded read.
  * @returns the event counts to request, strictly increasing and ending at the alignment bound.
  */
-function windowReadBounds(
+export function windowReadBounds(
   request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>,
   maxBytes: number,
 ): readonly number[] {
@@ -932,7 +395,7 @@ function windowReadBounds(
  * @param baseSeq - absolute seq of `events[0]`.
  * @returns true when the window's closer decision matches the complete log.
  */
-function tailTurnSettled(events: readonly SessionEvent[], baseSeq: SessionLogOffsetType): boolean {
+export function tailTurnSettled(events: readonly SessionEvent[], baseSeq: SessionLogOffsetType): boolean {
   if (baseSeq === 0) return true
   for (const event of events) {
     if (event.type === 'turn/start' || event.type === 'turn/end') return true
@@ -940,20 +403,102 @@ function tailTurnSettled(events: readonly SessionEvent[], baseSeq: SessionLogOff
   return false
 }
 
-/** Translate current logical Session metadata to the browser wire. */
-function wireHeader(header: SessionHeader): SessionWireHeader {
+/**
+ * Translate current logical Session metadata to the browser wire.
+ * @param header - immutable logical Session metadata.
+ * @returns the detached wire header.
+ */
+export function wireHeader(header: SessionHeader): SessionWireHeader {
   return { ...header }
 }
 
-function entryFor(event: SessionEvent): SessionEventEntry {
+/**
+ * Wrap one projection snapshot as the wire baseline.
+ * @param snapshot - validated projection values from an observation or window.
+ * @returns the detached baseline block.
+ */
+export function projectionBlock(
+  snapshot: NonNullable<SessionObservation['projections']>,
+): SessionProjectionBaseline {
   return {
-    type: 'event',
-    // Session.append validates and freezes event data as JSON before publication.
-    event: event as unknown as SessionWireEvent,
+    asOfSeq: snapshot.asOfSeq,
+    // Projection definitions validate whole JSON values before snapshot publication.
+    values: snapshot.values as SessionProjectionValues,
   }
 }
 
-/** Encode one bounded logical page without changing its pagination cut. */
-function pageRecords(events: readonly SessionEvent[]): SessionHistoryRecord[] {
-  return events.map(entryFor)
+/**
+ * Resolve a non-live ordinary Session the bounded window path may serve.
+ * @param ctx - Host context owning the Session store.
+ * @param address - durable history address.
+ * @returns the addressed Session id, or undefined when the complete source is required.
+ */
+export function windowSessionId(ctx: Context, address: SessionAddress): SessionId | undefined {
+  if (address.kind !== 'session') return undefined
+  return ctx.sessions.get(address.sessionId) === undefined ? address.sessionId : undefined
+}
+
+/**
+ * Whether a stored artifact is small enough that the complete observation
+ * costs less than a window read.
+ *
+ * A window avoids materializing a large log, but below the threshold its cold
+ * index build costs more than the complete observation. Missing, unsized, or
+ * failed metadata keeps the window path.
+ * @param ctx - Host context owning persistence.
+ * @param sessionId - stored Session to size.
+ * @param signal - caller cancellation for the metadata read.
+ * @returns true only when the backend reports a size below the threshold.
+ */
+export async function isSmallStoredSource(ctx: Context, sessionId: SessionId, signal: AbortSignal): Promise<boolean> {
+  const persistence = ctx.get('sessionPersistence')
+  if (persistence === undefined) return false
+  let stored: SessionPersistenceSnapshot | undefined
+  try {
+    stored = await persistence.stat(sessionId, { signal })
+  } catch {
+    // An unknown size is not evidence of a small artifact, so the window path
+    // reports the canonical failure; caller cancellation still wins.
+    signal.throwIfAborted()
+    return false
+  }
+  signal.throwIfAborted()
+  const sizeBytes = stored?.sizeBytes
+  return sizeBytes !== undefined && sizeBytes < SMALL_STORED_SESSION_BYTES
+}
+
+/**
+ * Read one bounded stored window, mapping a missing Session to the complete
+ * source path's canonical not-found handling.
+ * @param ctx - Host context owning Session Query.
+ * @param sessionId - stored Session to read.
+ * @param request - bounded window request.
+ * @returns the validated window and checkpoint, or undefined to fall back.
+ */
+export async function readStoredWindow(
+  ctx: Context,
+  sessionId: SessionId,
+  request: SessionWindowRequest,
+): Promise<SessionWindowRead | undefined> {
+  try {
+    return await ctx.sessionQuery.readWindow(sessionId, request)
+  } catch (error: unknown) {
+    if (error instanceof SessionQueryError && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') return undefined
+    throw error
+  }
+}
+
+/**
+ * Validate a stored window header exactly as a complete observation.
+ * @param address - durable history address being served.
+ * @param window - stored window whose header identifies the generation.
+ * @param projections - checkpoint baseline, when the window path carries one.
+ */
+export function validateWindow(
+  address: SessionAddress,
+  window: SessionWindow,
+  projections: SessionWindowRead['projections'],
+): void {
+  if (window.header.cwd === undefined) rejectNotFound(address)
+  validateAddress(address, window.header, window.inheritedEventCount, projections)
 }

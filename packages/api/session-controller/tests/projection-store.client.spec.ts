@@ -351,13 +351,13 @@ describe('manager frame routing', () => {
   it('lands projection frames before instantiation and the Session adopts the same store', ({ mock, remote }) => {
     const manager = makeManager(mock, remote)
     manager.handleControlFrame({
-      type: 'projection', sessionId: sid('s1'), key: 'test/marks', value: { marks: ['early'] }, seq: 7,
+      type: 'projection', sessionId: sid('s1'), changes: [{ key: 'test/marks', val: { marks: ['early'] } }], seq: 7,
     })
     const session = manager.get(sid('s1'))
     expect(session.projections.get('test/marks')).toEqual({ marks: ['early'] })
     // Frames after instantiation land in the same store.
     manager.handleControlFrame({
-      type: 'projection', sessionId: sid('s1'), key: 'test/marks', value: { marks: ['later'] }, seq: 9,
+      type: 'projection', sessionId: sid('s1'), changes: [{ key: 'test/marks', val: { marks: ['later'] } }], seq: 9,
     })
     expect(session.projections.get('test/marks')).toEqual({ marks: ['later'] })
   })
@@ -369,7 +369,7 @@ describe('manager frame routing', () => {
     }))
     await manager.refreshList()
     manager.handleControlFrame({
-      type: 'projection', sessionId: sid('s1'), key: 'title', value: 'Projected title', seq: 4,
+      type: 'projection', sessionId: sid('s1'), changes: [{ key: 'title', val: 'Projected title' }], seq: 4,
     })
     await Promise.resolve()
     expect(manager.getListSnapshot().items[0]?.title).toBe('Projected title')
@@ -441,7 +441,7 @@ describe('manager frame routing', () => {
 
     // A frame past the block's watermark still advances it.
     manager.handleControlFrame({
-      type: 'projection', sessionId: sid('s1'), key: 'title', value: 'Frame title', seq: 41,
+      type: 'projection', sessionId: sid('s1'), changes: [{ key: 'title', val: 'Frame title' }], seq: 41,
     })
     await Promise.resolve()
     expect(manager.getListSnapshot().items[0]?.title).toBe('Frame title')
@@ -465,8 +465,8 @@ describe('manager frame routing', () => {
     expect(manager.getListSnapshot().items[0]?.projectionValues).toBe(baseline)
 
     manager.handleControlFrame({
-      type: 'projection', sessionId: sid('s1'), key: 'test/marks',
-      value: { marks: ['live'] }, seq: 3,
+      type: 'projection', sessionId: sid('s1'), changes: [{ key: 'test/marks', val: { marks: ['live'] } }],
+      seq: 3,
     })
     await Promise.resolve()
     expect(manager.getListSnapshot().items[0]?.projectionValues)
@@ -481,10 +481,12 @@ describe('manager frame routing', () => {
     }))
     await manager.refreshList()
     manager.handleControlFrame({
-      type: 'projection', sessionId: sid('s1'), key: 'title', value: 'Doomed', seq: 4,
+      type: 'projection', sessionId: sid('s1'), changes: [{ key: 'title', val: 'Doomed' }], seq: 4,
     })
     if (catalog !== undefined) {
-      manager.handleControlFrame({ type: 'projection', sessionId: sid('s1'), key: 'subagentCatalog', value: catalog, seq: 4 })
+      manager.handleControlFrame({
+        type: 'projection', sessionId: sid('s1'), changes: [{ key: 'subagentCatalog', val: catalog }], seq: 4,
+      })
     }
     manager.handleSessionRemoved(sid('s1'))
     expect(manager.getListSnapshot().projectionsBySession[sid('s1')]).toBeUndefined()

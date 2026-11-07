@@ -7,7 +7,7 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionWindow, SessionWindowRequest } from '@deepseek-ai/dsh-session-persistence'
 import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import { describe, expect, it, vi } from 'vitest'
-import { SessionHistoryController } from '../src/history.ts'
+import { SessionHistoryController } from './history-test-controller.ts'
 import type {
   SessionFollowFrame,
   SessionFollowRequest,

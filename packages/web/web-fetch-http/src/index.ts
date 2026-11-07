@@ -1,6 +1,6 @@
 /**
- * Anonymous HTTP(S) `WebFetchProvider` plugin using the process transport and system network.
- * It contributes to `ctx.web` without restricting destination addresses.
+ * Anonymous HTTP(S) `WebFetchProvider` plugin. It contributes to the
+ * `ctx.web` registry without owning the service.
  *
  * @module @deepseek-ai/dsh-web-fetch-http
  */

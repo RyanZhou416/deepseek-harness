@@ -9,19 +9,13 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
-import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { ReactLoopAgent } from '../src/agent.ts'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
-
-const REGISTRATION_INACTIVE = /projection registration is not active/
 
 const cleanups: (() => Promise<void> | void)[] = []
 afterEach(async () => {
@@ -37,12 +31,7 @@ afterEach(async () => {
 async function harness(adapter: MockAdapter) {
   const ctx = new Context()
   cleanups.push(() => ctx.fiber.dispose())
-  await ctx.plugin(LlmRuntime)
-  await ctx.plugin(SessionStore)
-  await ctx.plugin(SessionProjectionRegistry)
-  await ctx.plugin(SystemPrompt)
-  await ctx.plugin(ToolRuntime)
-  await ctx.plugin(AgentRegistry)
+  await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(AgentLoop, { agents: [] })
   ctx.llm.registerAdapter(['mock'], adapter)
   return ctx
@@ -87,24 +76,25 @@ describe('Agent.cancel() against an unwinding lifecycle', () => {
     expect(canceledSplices(agent)).toBe(canceledAtUnload)
   })
 
-  it('still reports a missing registration from every live inbox read', async () => {
+  it('keeps retained inbox reads usable after the registration is released', async () => {
     const adapter = new MockAdapter([textResponse('unused')])
     const ctx = await harness(adapter)
     const agent = await ctx.agentLoop.create(SessionId('unwound-read'), { provider: 'mock', model: 'mock' })
 
     await ctx.fiber.dispose()
 
-    // Only cancellation tolerates the unwound registration; the read and
-    // mutation surfaces keep the mandatory invariant failure.
-    expect(() => (agent as ReactLoopAgent).inbox.hasPending).toThrow(REGISTRATION_INACTIVE)
-    expect(() => agent.inbox.nextTurn).toThrow(REGISTRATION_INACTIVE)
-    expect(() => { (agent as ReactLoopAgent).inbox.clear() }).toThrow(REGISTRATION_INACTIVE)
+    // The reader is retained by the loop's handle, so reading keeps working
+    // after release; only the registration-liveness flag reports the unwind
+    // that cancellation consults.
+    expect((agent as ReactLoopAgent).inbox.isRegistered).toBe(false)
+    expect(() => (agent as ReactLoopAgent).inbox.hasPending).not.toThrow()
+    expect(agent.inbox.nextTurn).toEqual([])
   })
 
-  it('a live lifecycle with a missing projection still fails loud and still aborts the activity', async () => {
+  it('a live lifecycle with a missing projection still aborts the activity', async () => {
     // No AgentLoop is mounted, so the registry never holds the inbox unit while
-    // the loop context itself stays active: the invariant failure must survive,
-    // and the abort must land regardless because the clear threw.
+    // the loop context itself stays active: the durable clear still commits
+    // through the retained reader, and the abort must land.
     const ctx = new Context()
     cleanups.push(() => ctx.fiber.dispose())
     await mountAgentLoopTestDependencies(ctx)
@@ -115,7 +105,11 @@ describe('Agent.cancel() against an unwinding lifecycle', () => {
     await ctx.plugin(class {
       static inject = ['agents', 'sessions', 'llm', 'tools', 'systemPrompt', 'sessionProjections']
       constructor(public ctx: Context) {
-        agent = new ReactLoopAgent(ctx, id, { provider: 'mock', model: 'mock' }, session)
+        agent = new ReactLoopAgent(ctx, id, { provider: 'mock', model: 'mock' }, session, {
+          modelSelection: () => ({ lastUsed: null, pending: null }),
+          inbox: () => ({ 'next-turn': [], 'next-step': [] }),
+          inboxRegistered: () => false,
+        }, 0)
       }
     })
     cleanups.push(() => agent.scope.dispose())
@@ -129,7 +123,7 @@ describe('Agent.cancel() against an unwinding lifecycle', () => {
       return reason
     })
 
-    expect(() => { agent.cancel({ kind: 'parent' }) }).toThrow(REGISTRATION_INACTIVE)
+    expect(() => { agent.cancel({ kind: 'parent' }) }).not.toThrow()
     await expect(activity).resolves.toEqual({ kind: 'parent' })
     await agent.whenIdle()
   })

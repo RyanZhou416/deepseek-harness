@@ -19,6 +19,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 
 /** The pinned identity line the parity body opens with. */
@@ -139,6 +140,7 @@ async function mount(): Promise<{
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt, { personaPrefix: '', personaSuffix: '' })
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
 
@@ -240,7 +242,14 @@ describe('agent loop parity integration', () => {
     expect(fallback.headers.has('x-cc-system-layout')).toBe(false)
     const system = JSON.stringify(fallback.body['system'])
     expect(system).toContain('State one.')
-    expect(system).toContain('State two.')
+    expect(system).not.toContain('State two.')
     expect(system).not.toContain(IDENTITY)
+    // A model without mid-conversation system messages receives the in-history
+    // prompt update as a system reminder in the message history, not as a second
+    // system prompt.
+    const history = JSON.stringify(fallback.body['messages'])
+    expect(history).toContain('<system-reminder>')
+    expect(history).toContain('State two.')
+    expect(history).not.toContain(IDENTITY)
   })
 })

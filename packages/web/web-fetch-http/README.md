@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-With `dsh-web-fetch-http`, the harness can fetch HTTP(S) resources through the web service (`ctx.web`) and get their status code plus bounded, decoded content without sending credentials. Choose it for bounded retrieval with URL validation, same-origin redirects, byte caps, and an explicit product `User-Agent`. Requests go through the process's ordinary fetch transport, so any destination the process can reach, including loopback and private networks, is fetchable. It returns non-2xx responses as results rather than errors, and rejects binary data and unsupported content types. The model-facing `web_fetch` tool lives in `dsh-tool-web`, which renders this provider's bodies.
+With `dsh-web-fetch-http`, the harness can fetch HTTP(S) pages through the web service (`ctx.web`) and get their status code plus bounded, decoded content without sending credentials. Choose it when a composition needs retrieval with URL validation, same-origin redirects, byte and character caps, and an explicit product `User-Agent`. It returns non-2xx responses as results rather than errors, and rejects binary data and unsupported content types. It does not restrict destination addresses, so it reaches loopback and private-network hosts. The model-facing `web_fetch` tool lives in `dsh-tool-web`, which renders this provider's bodies.
 
 ## Table of Contents
 
@@ -29,11 +29,11 @@ Mount the provider in a composition that already loads the web service; it regis
 
 ### When to choose it
 
-Choose this backend when a deployment must fetch HTTP(S) resources with bounded output: no credentials are sent, redirects cannot escape the origin, and every response is capped. Destination addresses are unrestricted, so `web_fetch` reaches loopback, private-network, and other hosts this process can reach; mount it only where the model may use that reach.
+Choose this backend when a deployment must fetch pages with bounded output: no credentials are sent, redirects cannot escape the origin, and every response is capped.
 
 ### Minimal configuration
 
-Load the web service and the provider; configurable limits have safe defaults and validate at plugin construction, so an invalid value fails loudly instead of building a provider with nonsensical caps. The URL length limit is fixed at 2,048 characters.
+Load the web service and the provider; configurable limits have safe defaults and validate at plugin construction, so an invalid value fails loudly instead of building a provider with nonsensical caps. The URL security limit is fixed at 2,048 characters.
 
 ```yaml
 - name: '@deepseek-ai/dsh-web'
@@ -52,7 +52,7 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 ### What a fetch returns
 
-A successful call yields a `WebFetchResult`: the final URL after allowed redirects, the HTTP status code, a decoded body classified as `html` or `text`, and a `truncated` flag. A non-2xx response is a result, not an error — the status code is part of the fetched resource state; `WebError` is reserved for failures to retrieve or represent the resource.
+A successful call yields a `WebFetchResult`: the final URL after allowed redirects, the HTTP status code, a decoded body classified as `html` or `text`, and a `truncated` flag. A non-2xx response is a result, not an error — the status code is part of the fetched resource state; `WebError` is reserved for failures to safely retrieve or represent the resource.
 
 ```text
 const page = await ctx.web.fetch({ url: 'https://example.com' })
@@ -61,11 +61,13 @@ const page = await ctx.web.fetch({ url: 'https://example.com' })
 
 ### Transport behavior
 
-The provider keeps requests anonymous and bounded: it accepts only `http:` and `https:` URLs without embedded credentials and rejects URLs over 2,048 characters. It sends one `GET` through the process's global `fetch` with credentials omitted, so routing follows the configured HTTP proxy or a system TUN route. The provider never resolves, classifies, or filters destination addresses: loopback, private, and link-local hosts are as reachable as any other. Each same-origin redirect is validated again before the next hop; cross-origin redirects fail and require a fresh call. The provider also enforces byte, character, hop, and time caps, rejects unsupported content types, and sends an explicit product `User-Agent`.
+The provider keeps requests anonymous and bounded: it accepts only `http:` and `https:` URLs without embedded credentials and rejects URLs over 2,048 characters. Requests go through the process-wide dispatcher, so the installed proxy policy applies and the system resolver chooses the address; any destination address is allowed. Same-origin redirects are followed; cross-origin redirects fail and require a fresh call. The provider also enforces byte, character, hop, and time caps, rejects unsupported content types, and sends an explicit product `User-Agent`.
+
+A malformed comma- or whitespace-joined charset declaration containing a UTF-8 label (such as `charset=utf-8,gbk`) is decoded strictly as UTF-8. Recovery rejects invalid UTF-8 without trying another encoding. When the byte cap cuts a character, recovery omits the incomplete suffix and returns `truncated: true`; a complete response using recovery must pass the EOF check. Valid single-label declarations retain ordinary replacement decoding.
 
 ### Failures and recovery
 
-Failures throw `WebError` with a machine-routable code: `WEB_INVALID_URL`, `WEB_BLOCKED_URL`, `WEB_FETCH_TOO_LARGE`, `WEB_FETCH_TIMEOUT`, `WEB_REDIRECT_BLOCKED`, `WEB_UNSUPPORTED_CONTENT_TYPE`, `WEB_ABORTED`, or `WEB_PROVIDER_ERROR`. Direct callers can route on the code; the model-facing `web_fetch` tool surfaces the failure text to the model under its own error wrapper.
+Failures throw `WebError` with a machine-routable code: `WEB_INVALID_URL`, `WEB_BLOCKED_URL`, `WEB_FETCH_TOO_LARGE`, `WEB_FETCH_TIMEOUT`, `WEB_REDIRECT_BLOCKED`, `WEB_UNSUPPORTED_CONTENT_TYPE`, `WEB_ABORTED`, or `WEB_PROVIDER_ERROR`. `WEB_UNSUPPORTED_CONTENT_TYPE` covers unsupported media types, unsupported charset declarations, and invalid UTF-8 during malformed-declaration recovery. Direct callers can route on the code; the model-facing `web_fetch` tool surfaces the failure text to the model under its own error wrapper.
 
 -----
 
@@ -89,12 +91,12 @@ The package is built on one separation and one layered timeout:
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: config schema, limit validation, provider registration |
-| [`src/provider.ts`](src/provider.ts) | The `HttpFetchProvider`: global-fetch transport, redirect following, capped reads, charset decoding |
+| [`src/provider.ts`](src/provider.ts) | The `HttpFetchProvider`: transport, redirect following, capped reads, charset decoding |
 | [`src/policy.ts`](src/policy.ts) | URL validation, same-origin checks, content-type classification, charset parsing |
 
 ### Read path
 
-A fetch validates the URL, then sends one global `fetch` GET with credentials omitted and the product `User-Agent`. The destination address is not inspected, so loopback and private hosts connect through the process's own network. Every same-origin redirect re-runs URL validation before the next hop; a cross-origin redirect fails. The final response is classified by `Content-Type`, decoded from its declared charset, and read under the byte cap; the decoded text is then truncated to the character cap.
+A fetch validates the URL and sends the request. It repeats URL validation for each same-origin redirect; a cross-origin redirect fails before response bytes are accepted. The final response is classified by `Content-Type`, decoded from its declared charset (malformed declarations containing UTF-8 use strict UTF-8 recovery), and read under the byte cap; the decoded text is then truncated to the character cap.
 
 </details>
 
@@ -130,9 +132,10 @@ No direct invalidation; the named consumer owns any request-prefix changes.
 
 These limits define when the provider is unsafe or a poor fit. They are current package constraints.
 
-- **Destinations are unrestricted** — the provider does not resolve, classify, or filter destination addresses, so `web_fetch` reaches loopback, private, link-local, and cloud-metadata endpoints this process can reach. Deployments that need a narrower policy must enforce it outside this package, for example with a `tools/pre-execute` policy or a network-level egress rule; the provider offers no address mode and no allowlist.
+- **Private destinations are reachable** — loopback, private-network, and cloud metadata addresses are fetched like any other host. A deployment that must keep the model away from them needs a `tools/pre-execute` policy, network confinement, or no fetch tool.
 - **Only textual content decodes** — html/xhtml and `text/*` plus JSON/XML families; a missing `Content-Type` or any binary type throws `WEB_UNSUPPORTED_CONTENT_TYPE`, and text-extractable PDF decoding is named deferred work.
-- **Charset comes only from the `Content-Type` header** (UTF-8 default) — an HTML `<meta charset>` declaration is ignored, and a declared-but-unrecognized charset label throws rather than falling back.
+- **Charset comes only from the `Content-Type` header** (UTF-8 default) — an HTML `<meta charset>` declaration is ignored, and unsupported declarations without a UTF-8 label throw.
+- **UTF-8 recovery is a preference, not encoding detection** — bytes can be valid as both UTF-8 and another encoding, even in a long response. Recovery chooses UTF-8 in that case; malformed declarations without a UTF-8 label remain unsupported.
 
 <a id="dev-note"></a>
 ### Dev Note

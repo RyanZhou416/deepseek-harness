@@ -39,20 +39,6 @@ type BoundStreamOpener = (
 /** Convert an invocation or carrier failure to a stable wire value. */
 export type RemoteStreamFailureMapper = (error: unknown) => RemoteStreamFailure
 
-/** Downlink compression policy for the mux WebSocket. */
-export interface RemoteStreamCompression {
-  /** Whether the server offers the `permessage-deflate` extension; a Client that does not offer it receives plain frames. */
-  readonly enabled: boolean
-  /** Smallest serialized frame in bytes the server compresses. */
-  readonly threshold: number
-  /** zlib deflate level from 0 (store) through 9 (best compression). */
-  readonly level: number
-  /** Concurrent zlib operations allowed before ws sends a frame uncompressed. */
-  readonly concurrencyLimit: number
-  /** Release the per-message zlib context after each frame instead of retaining it for the connection. */
-  readonly serverNoContextTakeover: boolean
-}
-
 const MAX_MISSED_HEARTBEATS = 2
 
 /**
@@ -96,9 +82,22 @@ interface HeartbeatState {
   previous: CarrierWriteSample | undefined
 }
 
+/** Carrier options for {@link RemoteStreamMuxServer}. */
+export interface RemoteStreamMuxServerOptions {
+  /** Interval between WebSocket Ping control frames. */
+  readonly heartbeatIntervalMs: number
+  /** Buffered uplink frame bytes one logical stream may hold before it fails. */
+  readonly streamInboxBytes: number
+  /** Whether accepted connections negotiate the `permessage-deflate` extension. */
+  readonly compression: boolean
+}
+
 /** Own the no-server WebSocket acceptor and every active logical stream. */
 export class RemoteStreamMuxServer {
   private readonly server: WebSocketServer
+  private readonly heartbeatIntervalMs: number
+  private readonly streamInboxBytes: number
+  private readonly compression: boolean
   private readonly connections = new Set<Promise<void>>()
   private readonly heartbeats = new WeakMap<WebSocket, HeartbeatState>()
   private heartbeatTimer: NodeJS.Timeout | undefined
@@ -106,27 +105,21 @@ export class RemoteStreamMuxServer {
   /**
    * @param open - Gateway stream dispatcher.
    * @param failure - Gateway error-to-wire mapper.
-   * @param heartbeatIntervalMs - interval between WebSocket Ping control frames.
-   * @param streamInboxBytes - buffered uplink frame bytes one logical stream may hold before it fails.
-   * @param compression - downlink compression policy; disabled keeps ws's plain framing.
+   * @param options - heartbeat interval, uplink inbox bound, and compression setting for accepted connections.
    */
   constructor(
     private readonly open: RemoteStreamOpener,
     private readonly failure: RemoteStreamFailureMapper,
-    private readonly heartbeatIntervalMs: number,
-    private readonly streamInboxBytes: number,
-    compression: RemoteStreamCompression,
+    options: RemoteStreamMuxServerOptions,
   ) {
+    this.heartbeatIntervalMs = options.heartbeatIntervalMs
+    this.streamInboxBytes = options.streamInboxBytes
+    this.compression = options.compression
     this.server = new WebSocketServer({
       noServer: true,
-      ...compression.enabled ? {
-        perMessageDeflate: {
-          threshold: compression.threshold,
-          concurrencyLimit: compression.concurrencyLimit,
-          serverNoContextTakeover: compression.serverNoContextTakeover,
-          zlibDeflateOptions: { level: compression.level },
-        },
-      } : {},
+      // `ws` ignores its own `threshold` option while context takeover is
+      // enabled, so the mux decides per frame in send().
+      perMessageDeflate: options.compression ? { zlibDeflateOptions: { level: 1 } } : false,
     })
   }
 
@@ -151,7 +144,9 @@ export class RemoteStreamMuxServer {
       this.startHeartbeat()
       const bound: BoundStreamOpener = (endpoint, payload, uplink, control, window) =>
         this.open(endpoint, payload, uplink, peer, control, window)
-      const connection = new RemoteStreamMuxConnection(websocket, bound, this.failure, this.streamInboxBytes, alive)
+      const connection = new RemoteStreamMuxConnection(
+        websocket, bound, this.failure, this.streamInboxBytes, this.compression, alive,
+      )
       const done = connection.run().catch((error: unknown) => {
         console.error('[api-gateway] Remote stream connection failed:', error)
       }).then(async () => { await release() }).catch((error: unknown) => {
@@ -233,14 +228,16 @@ class RemoteStreamMuxConnection {
     private readonly open: BoundStreamOpener,
     private readonly failure: RemoteStreamFailureMapper,
     private readonly streamInboxBytes: number,
+    private readonly compression: boolean,
     private readonly alive: () => void,
   ) {}
 
   /**
    * Serve frames until the socket closes. A Pong, any received frame, and a
-   * downlink write that waited in the local send buffer and then completed
-   * count as peer activity, so a congested link that delays the Pong behind
-   * data keeps its socket. A write that completes at once proves nothing
+   * downlink write that does not complete at once count as peer activity, so
+   * a congested link that delays the Pong behind data keeps its socket. A
+   * frame above the compression threshold deflates asynchronously, so its
+   * completion always counts; a write that completes at once proves nothing
    * about the peer and does not count. The server's heartbeat additionally
    * counts carrier write progress, which covers a frame still draining
    * between ticks.
@@ -391,7 +388,9 @@ class RemoteStreamMuxConnection {
         return
       }
       let queued = false
-      this.socket.send(text, (error) => {
+      this.socket.send(text, {
+        compress: this.compression && text.length >= 1024,
+      }, (error) => {
         if (error) {
           reject(error)
           return
@@ -399,11 +398,10 @@ class RemoteStreamMuxConnection {
         if (queued) this.alive()
         resolve()
       })
-      // Read after send(): bytes still buffered mean the local send buffer was
-      // full, so their completion requires the peer to acknowledge data.
-      // Compression runs after send() returns, so a compressed frame can leave
-      // nothing here even when its bytes have not reached the peer yet; the
-      // heartbeat's carrier write progress covers that case.
+      // Read after send(): buffered bytes mean the write did not complete at
+      // once, so its completion counts as peer activity. For a compressed frame
+      // the buffered bytes include ws's deflate queue, not just the TCP send
+      // buffer.
       queued = this.socket.bufferedAmount > 0
     }))
     this.writes = delivery.catch(() => undefined)
@@ -547,9 +545,8 @@ function rawText(data: RawData): string {
  * Read one connection's carrier write counters. The upgrade carrier is the
  * `net.Socket` the HTTP server accepted, so a carrier that reports no
  * `bytesWritten` (a test fixture Duplex) yields `undefined` and that socket
- * keeps the Pong and inbound-frame rules only.
- *
- * @param websocket - accepted mux socket whose queued downlink bytes are read.
+ * keeps the plain Pong rule.
+ * @param websocket - accepted socket whose queued downlink bytes are read.
  * @param carrier - upgrade socket ws writes that socket's frames through.
  * @returns The counters, or `undefined` when the carrier reports none.
  */
@@ -564,14 +561,13 @@ function sampleCarrierWrite(websocket: WebSocket, carrier: CarrierSocket): Carri
 }
 
 /**
- * Whether the peer is still consuming an in-flight downlink write: bytes were
- * queued at the previous tick, and the carrier has since taken more than the
- * Ping frame this server wrote itself. A Ping can drain alone while the peer is
- * still receiving a data frame, so its two bytes do not count.
- *
+ * Whether the carrier kept draining downlink bytes because of work the peer
+ * still owes. A tick only counts when the previous tick observed queued bytes,
+ * and the carrier has since taken more than the empty Ping frame the server
+ * sent itself.
  * @param previous - Carrier counters from the previous tick.
- * @param current - Carrier counters from this tick.
- * @returns `true` when the downlink advanced beyond this server's own Ping frame.
+ * @param current - Carrier counters sampled at this tick.
+ * @returns whether the carrier made progress on queued downlink bytes.
  */
 function downlinkWriteProgressed(previous: CarrierWriteSample, current: CarrierWriteSample): boolean {
   const pending = previous.writableLength > 0 || previous.bufferedAmount > 0

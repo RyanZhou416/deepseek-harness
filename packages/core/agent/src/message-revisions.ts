@@ -39,9 +39,7 @@ export function installUserMessageRevisions(ctx: Context): void {
   })
 }
 
-/** Revision processing requires the loop's registered whole-log input projection. */
+/** Revision processing requires the registry's registered user-input projection. */
 function requiredUserInput(ctx: Context, session: Session): UserInputProjection {
-  const state = ctx.sessionProjections.stateOf(session, 'userInput')
-  if (state === undefined) throw new Error('User revision requires the userInput projection')
-  return state
+  return ctx.agents.userInputOf(session)
 }

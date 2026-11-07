@@ -80,6 +80,11 @@
   config:
     enabled: false
 
+# The recorded tool catalog includes the optional patch tool.
+- id: tool-fs
+  config:
+    applyPatch: true
+
 # This recorded compatibility composition explicitly enables the optional Goal stack.
 - id: goal-disabled
   disabled: true

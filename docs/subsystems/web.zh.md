@@ -54,15 +54,18 @@ interface WebSearchResult {
 
 ```ts type-equiv
 /**
- * One citeable source. A source always has a URL; `title`, `snippet`, and
- * `publishedAt` are optional because not every provider returns them — forcing
+ * One citeable source. A source always has a URL; `title`, `snippet`, `summary`,
+ * and `publishedAt` are optional because not every provider returns them — forcing
  * adapters to invent them would make the seam lie (Perplexity citations may be
  * URL-only). `dsh-tool-web` renders `title ?? hostname(url)` for display.
  */
 interface WebSearchSource {
   readonly url: string
   readonly title?: string
+  /** Short excerpt suited to display. */
   readonly snippet?: string
+  /** Longer excerpt suited to model reading; consumers bound its length. */
+  readonly summary?: string
   /** Publication/crawl timestamp as a provider-supplied ISO-8601 string. */
   readonly publishedAt?: string
 }
@@ -122,13 +125,15 @@ type WebFetchBody =
 
 提供方的 `available(): boolean` 是一个廉价的本地检查（凭证是否存在、配置是否可解析），**禁止发起网络调用**。它是执行时选择提供方的输入，而不是健康检查系统：`search()`／`fetch()` 会读取它来选择可用的提供方。选择失败时，调用方会收到可据以分支处理的结构化 `WebError`；其错误代码和消息会说明缺失的 id 或存在歧义的候选集。
 
+搜索或抓取提供方还可以实现 `ready(llmProvider): Promise<boolean>`，这是只检查配置、禁止发起网络调用的判断：它回答为该对话路由上的模型请求发起的操作是否有可发送的凭据。`searchReady(llmProvider?)` 与 `fetchReady(llmProvider?)` 只询问 `search()` 或 `fetch()` 会选中的提供方，把没有 `ready()` 的提供方视为就绪，并在选择失败时回答 true，因为对应操作会把该失败报告为 `WebError`。就绪判断不是选择输入；`dsh-tool-web` 把它作为 `web_search` 与 `web_fetch` 的激活条件，因此路由回答 false 的模型步骤既不声明也不派发该工具。
+
 选择从不依赖注册顺序、配置顺序或 HMR（热模块替换）顺序：一项能力要么有显式的提供方 id（配置 `searchProvider`／`fetchProvider`，或填充同一字段的对应环境变量），要么在恰好只有一个可用提供方注册时自动选择；如果存在多个可用提供方却未配置 id，则抛出 `WEB_PROVIDER_AMBIGUOUS`，而不会选用最先注册的提供方。每次操作在执行时读取配置的 id，因此保存的设置变更无需重新挂载 `ctx.web` 即对下一次搜索或抓取生效。
 
 ## 抓取网络策略
 
 已交付的 Cordis、Code 与 Standard preset 会在所有 sandbox 和审批模式下暴露 `web_fetch`，无需逐次确认。文件 sandbox preset 不管辖 Web 网络访问。需要确认步骤的部署必须添加 `tools/pre-execute` 策略或禁用抓取。
 
-HTTP 提供方通过进程的全局 `fetch` 发送每个请求，因此路由跟随已配置的 HTTP 代理或系统 TUN 路由。它校验 URL 形态（仅 HTTP(S)、不含内嵌凭据、长度有界），并且只跟随同源重定向，每一跳都重新校验。它不解析、分类或过滤目标地址，因此只要进程能到达，loopback、私有、link-local 与云 metadata 目标都可访问；需要更窄策略的部署必须在本包之外强制执行。这些请求自身不携带凭据，也不会阻止模型把数据发送到可到达的 URL。
+HTTP 提供方通过进程的全局 `fetch` 发送每个请求，因此路由跟随已配置的 HTTP 代理或系统 TUN 路由。它校验 URL 形态（仅 HTTP(S)、不含内嵌凭据、长度有界），并且只跟随同源重定向，每一跳都重新校验；跨源重定向需要新的工具调用。它不解析、分类或过滤目标地址，因此只要进程能到达，loopback、私有、link-local 与云 metadata 目标都可访问。这些请求自身不携带凭据，也不会阻止模型把数据发送到可到达的 URL。需要阻止模型访问私有目的地址的部署必须使用网络隔离、`tools/pre-execute` 策略，或不挂载抓取工具。
 
 ## 错误
 
@@ -136,7 +141,7 @@ HTTP 提供方通过进程的全局 `fetch` 发送每个请求，因此路由跟
 
 ## 服务
 
-`WebRuntime` 注册搜索与抓取提供方，以 `WEB_DUPLICATE_PROVIDER` 拒绝重复 id，并在执行时以结构化的选择错误解析提供方。本地抓取后端仅接受 HTTP(S)、拒绝凭证、限制 URL 长度、通过全局 `fetch` 发送一次省略凭据的 GET、对每一次同源重定向跳转重新校验、限制重定向次数、字节数、字符数和时间，并解码正文；展示由工具负责。
+`WebRuntime` 注册搜索与抓取提供方，以 `WEB_DUPLICATE_PROVIDER` 拒绝重复 id，并在执行时以结构化的选择错误解析提供方。本地抓取后端仅接受 HTTP(S)、拒绝凭证、限制 URL 长度、经已安装的代理策略以全局 `fetch` 发送一次省略凭据的 GET、对每一次同源重定向跳转重新校验、限制重定向次数、字节数、字符数和时间，并解码正文；展示由工具负责。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -192,6 +197,16 @@ registerFetchProvider(provider: WebFetchProvider): () => void
 async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>
 
 /**
+ * Whether the provider `search()` would select can authenticate a search made for a
+ * model request on the `llmProvider` chat route. Asks only that provider's `ready()`;
+ * one without `ready()` counts as ready. Makes no network calls. A selection failure
+ * answers true, because `search()` reports that failure as a structured `WebError`.
+ * @param llmProvider - the provider route id of the model request, when known.
+ * @returns false only when the selected provider reports that it cannot authenticate.
+ */
+async searchReady(llmProvider?: string): Promise<boolean>
+
+/**
  * Retrieve one URL through the selected provider. Resolves the provider at
  * call time with the selection rules above; throws {@link WebError} when the
  * capability cannot run. A non-2xx response is a result, not a throw.
@@ -200,6 +215,16 @@ async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearch
  * @returns the retrieval outcome; non-2xx responses resolve descriptively.
  */
 async fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult>
+
+/**
+ * Whether the provider `fetch()` would select can authenticate a fetch made for a
+ * model request on the `llmProvider` chat route. Asks only that provider's `ready()`;
+ * one without `ready()` counts as ready. Makes no network calls. A selection failure
+ * answers true, because `fetch()` reports that failure as a structured `WebError`.
+ * @param llmProvider - the provider route id of the model request, when known.
+ * @returns false only when the selected provider reports that it cannot authenticate.
+ */
+async fetchReady(llmProvider?: string): Promise<boolean>
 ```
 
 Source: [`packages/web/web/src/index.ts`](../../packages/web/web/src/index.ts)

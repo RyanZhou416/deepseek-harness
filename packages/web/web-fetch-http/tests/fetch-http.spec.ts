@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Mock } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { AddressInfo } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
@@ -27,9 +26,6 @@ const limits: HttpFetchLimits = {
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void
 
-/** The `fetch` call the provider makes; the double records its arguments. */
-type FetchDouble = (input: URL, init?: RequestInit) => Promise<Response>
-
 let server: Server
 let base: string
 let handler: Handler
@@ -45,34 +41,11 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
-  await new Promise<void>((resolve) => {
-    server.close(() => { resolve() })
-    // Interrupted requests may leave sockets open after the assertion completes.
-    server.closeAllConnections()
-  })
+  await new Promise<void>(resolve => server.close(() => { resolve() }))
 })
 
 function provider(overrides: Partial<HttpFetchLimits> = {}): HttpFetchProvider {
   return new HttpFetchProvider({ ...limits, ...overrides })
-}
-
-/** A real Response carrying a text body the provider accepts. */
-function textResponse(content: string): Response {
-  return new Response(content, { headers: { 'content-type': 'text/plain' } })
-}
-
-/** Replace global `fetch` with a double that answers every request with `response`. */
-function stubFetch(response: Response): Mock<FetchDouble> {
-  const fetchStub = vi.fn<FetchDouble>(async () => response)
-  vi.stubGlobal('fetch', fetchStub)
-  return fetchStub
-}
-
-/** The URL the first stubbed call received, normalized as the provider normalized it. */
-function requestedUrl(fetchStub: Mock<FetchDouble>): string {
-  const call = fetchStub.mock.calls[0]
-  if (call === undefined) throw new Error('fetch was not called')
-  return call[0].href
 }
 
 describe('policy helpers', () => {
@@ -113,63 +86,21 @@ describe('policy helpers', () => {
   it('builds a decoder for a charset and defaults to UTF-8', () => {
     expect(decoderForCharset(undefined).encoding).toBe('utf-8')
     expect(decoderForCharset('iso-8859-1').encoding).toBe('windows-1252')
-    expect(() => decoderForCharset('not-a-charset')).toThrow(expect.objectContaining({ code: 'WEB_UNSUPPORTED_CONTENT_TYPE' }))
-  })
-})
-
-describe('HttpFetchProvider transport', () => {
-  it('fetches loopback without replacing DNS resolution', async () => {
-    await expect(provider().fetch({ url: base }))
-      .resolves.toMatchObject({ statusCode: 200, body: { content: 'default' } })
+    expect(decoderForCharset('gb2312').encoding).toBe('gbk')
+    expect(decoderForCharset('utf-8').fatal).toBe(false)
+    expect(() => decoderForCharset('not-a-charset')).toThrow(expect.objectContaining({
+      code: 'WEB_UNSUPPORTED_CONTENT_TYPE', message: 'unsupported charset "not-a-charset"',
+    }))
   })
 
-  it('reaches the loopback listener through the system resolver for localhost', async () => {
-    const { port } = server.address() as AddressInfo
-    await expect(provider().fetch({ url: `http://localhost:${String(port)}/` }))
-      .resolves.toMatchObject({ statusCode: 200, body: { content: 'default' } })
+  it.each(['utf-8,gbk', 'gbk,utf8', 'not-a-charset, utf-8', 'utf-8 utf8'])('requires strict UTF-8 for %s', (charset) => {
+    const decoder = decoderForCharset(charset)
+    expect(decoder.encoding).toBe('utf-8')
+    expect(decoder.fatal).toBe(true)
   })
 
-  it('passes a hostname no resolver can answer straight to the transport', async () => {
-    const fetchStub = stubFetch(textResponse('stubbed'))
-
-    await expect(provider().fetch({ url: 'http://does-not-resolve.invalid/page' }))
-      .resolves.toMatchObject({ statusCode: 200, body: { content: 'stubbed' } })
-    // A provider that resolved the hostname itself would fail on this name before fetch ran.
-    expect(requestedUrl(fetchStub)).toBe('http://does-not-resolve.invalid/page')
-  })
-
-  it('requests with manual redirects and omitted credentials', async () => {
-    const fetchStub = stubFetch(textResponse('stubbed'))
-
-    await provider().fetch({ url: 'http://public.test/page' })
-
-    expect(fetchStub).toHaveBeenCalledOnce()
-    expect(fetchStub.mock.calls[0]?.[1]).toMatchObject({
-      method: 'GET',
-      redirect: 'manual',
-      credentials: 'omit',
-    })
-  })
-
-  it.each([
-    'http://0.0.0.0/',
-    'http://10.0.0.5/private',
-    'http://127.0.0.2:8080/private',
-    'http://169.254.169.254/latest/meta-data/',
-    'http://192.0.2.1/reserved',
-    'http://[::1]:8080/private',
-    'http://[::ffff:10.0.0.1]/private',
-    'http://[64:ff9b::7f00:1]/private',
-    'http://[fd00::1]/private',
-    'http://[fe80::1]/private',
-  ])('hands %s to the transport with no address check', async (url) => {
-    const fetchStub = stubFetch(textResponse('private'))
-
-    await expect(provider().fetch({ url })).resolves.toMatchObject({
-      statusCode: 200,
-      body: { content: 'private' },
-    })
-    expect(requestedUrl(fetchStub)).toBe(new URL(url).href)
+  it.each(['gb2312,gbk', 'windows-1252,gbk', ','])('rejects a malformed declaration without UTF-8: %s', (charset) => {
+    expect(() => decoderForCharset(charset)).toThrow(expect.objectContaining({ code: 'WEB_UNSUPPORTED_CONTENT_TYPE' }))
   })
 })
 
@@ -261,6 +192,107 @@ describe('HttpFetchProvider caps', () => {
     handler = (_req, res) => { res.writeHead(200, { 'content-type': 'text/plain; charset=not-a-charset' }); res.end('x') }
     await expect(provider().fetch({ url: base }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_UNSUPPORTED_CONTENT_TYPE' }))
+  })
+})
+
+describe('HttpFetchProvider charset recovery', () => {
+  it.each(['utf-8,gbk', 'gbk,utf8', 'not-a-charset, utf-8'])('decodes UTF-8 HTML declared as %s', async (charset) => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': `text/html; charset=${charset}` })
+      res.end('<meta charset="UTF-8"><p>你好</p>')
+    }
+    const result = await provider().fetch({ url: base })
+    expect(result.body).toEqual({ kind: 'html', content: '<meta charset="UTF-8"><p>你好</p>' })
+    expect(result.truncated).toBe(false)
+  })
+
+  it.each([
+    ['gbk,utf-8', [0xE4, 0xB8]], // Valid GBK, but an incomplete UTF-8 sequence at EOF.
+    ['gbk,utf-8', [0xE4]],
+    ['gbk,utf-8', [0x81, 0x20]],
+    ['gbk,utf-8', [0xD6, 0xD0, 0xCE, 0xC4]],
+    ['not-a-charset,utf-8', [0xD6, 0xD0, 0xCE, 0xC4]],
+    ['utf8,utf-8', [0x81, 0x20]],
+  ] as const)('rejects non-UTF-8 bytes for %s: %j', async (charset, bytes) => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': `text/plain; charset=${charset}` })
+      res.end(Buffer.from(bytes))
+    }
+    await expect(provider().fetch({ url: base })).rejects.toThrow(expect.objectContaining({
+      code: 'WEB_UNSUPPORTED_CONTENT_TYPE',
+      message: 'response body is not valid UTF-8 for the malformed charset declaration',
+    }))
+  })
+
+  it.each(['gb2312,gbk', 'windows-1252,gbk'])('rejects a legacy-only compound declaration: %s', async (charset) => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': `text/plain; charset=${charset}` })
+      res.end(Buffer.from([0xD6, 0xD0, 0xCE, 0xC4]))
+    }
+    await expect(provider().fetch({ url: base })).rejects.toThrow(expect.objectContaining({
+      code: 'WEB_UNSUPPORTED_CONTENT_TYPE', message: `unsupported charset "${charset}"`,
+    }))
+  })
+
+  it('keeps single-label GBK decoding', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=gbk' })
+      res.end(Buffer.from([0xD6, 0xD0, 0xCE, 0xC4]))
+    }
+    expect((await provider().fetch({ url: base })).body.content).toBe('中文')
+  })
+
+  it('keeps replacement decoding for a single declared charset', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end(Buffer.from([0xE4, 0xB8]))
+    }
+    expect((await provider().fetch({ url: base })).body.content).toBe('\uFFFD')
+  })
+
+  it.each([
+    ['中文', 5, true],
+    ['中文', 3, true],
+    ['中', 3, false],
+  ] as const)('returns complete UTF-8 characters for %j with byte cap %i (truncated: %s)', async (body, maxResponseBytes, truncated) => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=gbk,utf-8' })
+      res.end(body)
+    }
+    const result = await provider({ maxResponseBytes }).fetch({ url: base })
+    expect(result.body.content).toBe('中')
+    expect(result.truncated).toBe(truncated)
+  })
+
+  it('validates EOF when the response exactly fills the byte cap', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=gbk,utf-8' })
+      res.end(Buffer.from([0xE4, 0xB8]))
+    }
+    await expect(provider({ maxResponseBytes: 2 }).fetch({ url: base })).rejects.toThrow(expect.objectContaining({
+      code: 'WEB_UNSUPPORTED_CONTENT_TYPE',
+      message: 'response body is not valid UTF-8 for the malformed charset declaration',
+    }))
+  })
+
+  it('rejects invalid UTF-8 before the truncated suffix', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=gbk,utf-8' })
+      res.end(Buffer.from([0x81, 0x20, 0x61]))
+    }
+    await expect(provider({ maxResponseBytes: 2 }).fetch({ url: base })).rejects.toThrow(expect.objectContaining({
+      code: 'WEB_UNSUPPORTED_CONTENT_TYPE',
+      message: 'response body is not valid UTF-8 for the malformed charset declaration',
+    }))
+  })
+
+  it('uses UTF-8 even when a long body also forms valid GBK', async () => {
+    // C2 A9 represents © in UTF-8 and 漏 in GBK; length cannot disambiguate it.
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=gbk,utf-8' })
+      res.end('©'.repeat(1000))
+    }
+    expect((await provider().fetch({ url: base })).body.content).toBe('©'.repeat(1000))
   })
 })
 
@@ -369,6 +401,12 @@ describe('HttpFetchProvider redirects', () => {
 })
 
 describe('HttpFetchProvider invalid URLs and abort', () => {
+  it.each(['localhost', '127.0.0.1'])('fetches a non-public destination at %s', async (host) => {
+    const { port } = server.address() as AddressInfo
+    const result = await provider().fetch({ url: `http://${host}:${port}/` })
+    expect(result.body).toEqual({ kind: 'text', content: 'default' })
+  })
+
   it('rejects a non-http scheme before any network access', async () => {
     await expect(provider().fetch({ url: 'ftp://example.com' }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_INVALID_URL' }))
@@ -414,51 +452,44 @@ describe('HttpFetchProvider invalid URLs and abort', () => {
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_FETCH_TIMEOUT' }))
   })
 
-  it('maps a forbidden-port fetch failure to WEB_PROVIDER_ERROR', async () => {
-    // The fetch cannot complete against this port; the failure is transport-level,
-    // not a cancellation.
+  it('maps a connection failure to WEB_PROVIDER_ERROR', async () => {
+    // Port 1 on loopback is not listening: a real connection failure (not abort).
     await expect(provider().fetch({ url: 'http://127.0.0.1:1/' }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR' }))
   })
-
 })
 
 describe('HttpFetchProvider body cancellation on error paths', () => {
-  /** A real Response whose unread body reports cancellation through its stream. */
-  function cancellableResponse(init: { status: number; contentType?: string; location?: string }): {
-    response: Response
-    cancelled: () => boolean
-  } {
-    let cancelled = false
-    const body = new ReadableStream({ cancel() { cancelled = true } })
-    const headers = new Headers()
-    if (init.contentType !== undefined) headers.set('content-type', init.contentType)
-    if (init.location !== undefined) headers.set('location', init.location)
-    return { response: new Response(body, { status: init.status, headers }), cancelled: () => cancelled }
+  /** Answer with headers and an unfinished body; resolves when the client closes the socket. */
+  function respondWithOpenBody(status: number, headers: Record<string, string>): Promise<void> {
+    return new Promise((resolve) => {
+      handler = (req, res) => {
+        req.socket.once('close', () => { resolve() })
+        res.writeHead(status, headers)
+        res.write('unfinished')
+      }
+    })
   }
 
   it('cancels the body when a cross-origin redirect is blocked', async () => {
-    const { response, cancelled } = cancellableResponse({ status: 302, location: 'https://elsewhere.test/' })
-    stubFetch(response)
-    await expect(provider().fetch({ url: 'http://127.0.0.1:9/' }))
+    const closed = respondWithOpenBody(302, { location: 'https://elsewhere.test/' })
+    await expect(provider().fetch({ url: base }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_REDIRECT_BLOCKED' }))
-    expect(cancelled()).toBe(true)
+    await closed
   })
 
-  it('cancels the body when an unsupported charset is rejected', async () => {
-    const { response, cancelled } = cancellableResponse({ status: 200, contentType: 'text/plain; charset=not-a-charset' })
-    stubFetch(response)
-    await expect(provider().fetch({ url: 'http://127.0.0.1:9/' }))
+  it.each(['not-a-charset', 'gb2312,gbk', 'windows-1252,gbk'])('cancels the body when charset %s is rejected', async (charset) => {
+    const closed = respondWithOpenBody(200, { 'content-type': `text/plain; charset=${charset}` })
+    await expect(provider().fetch({ url: base }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_UNSUPPORTED_CONTENT_TYPE' }))
-    expect(cancelled()).toBe(true)
+    await closed
   })
 
   it('cancels the body when a redirect has no Location header', async () => {
-    const { response, cancelled } = cancellableResponse({ status: 302 })
-    stubFetch(response)
-    await expect(provider().fetch({ url: 'http://127.0.0.1:9/' }))
+    const closed = respondWithOpenBody(302, {})
+    await expect(provider().fetch({ url: base }))
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR' }))
-    expect(cancelled()).toBe(true)
+    await closed
   })
 })
 

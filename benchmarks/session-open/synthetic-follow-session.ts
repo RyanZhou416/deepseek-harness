@@ -15,7 +15,6 @@
 import { stat } from 'node:fs/promises'
 import { scheduler } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
-import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import { MessageId, freezeMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
@@ -31,7 +30,6 @@ import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { generationLogPath } from '../../packages/session/session-persistence-jsonl/src/format.ts'
-import { installModelSelectionProjection } from '../../packages/api/session-controller/src/model-selection-projection.ts'
 import { SYNTHETIC_SESSION_CWD, SYNTHETIC_SESSION_ID } from './session-open.constants.ts'
 
 /** Completed turns persisted together as one physical frame. */
@@ -210,9 +208,7 @@ export async function verifySyntheticFollowSession(
 
 /** Register the client-visible projection units the real bundles mount. */
 async function installFollowProjectionSet(ctx: Context): Promise<void> {
-  ctx.sessionProjections.register(turnBoundaryProjectionDefinition)
-  ctx.sessionProjections.register(agentPresetProjectionDefinition)
-  installModelSelectionProjection(ctx)
+  await ctx.sessionProjections.register(agentPresetProjectionDefinition)
   await ctx.plugin(SessionTitleService, {
     fallbackMaxWords: 5,
     fallbackMaxBytes: 40,

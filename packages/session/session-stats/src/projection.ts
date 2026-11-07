@@ -76,12 +76,6 @@ interface SessionStatsState extends SessionStatsTotals {
   turnSpeedDecodeTokens: number
 }
 
-declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionStateMap {
-    sessionStats: SessionStatsState
-  }
-}
-
 const sessionStatsSchema = z.object({
   turns: z.number().int().nonnegative(),
   steps: z.number().int().nonnegative(),
@@ -268,5 +262,6 @@ export const sessionStatsProjectionDefinition = {
   wire: {
     viewSchema: sessionStatsSchema,
     view: statsView,
+    summary: false,
   },
 } satisfies ProjectionDefinition<'sessionStats', SessionStatsState>
