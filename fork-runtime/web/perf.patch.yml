@@ -23,8 +23,8 @@
 # `subagentTiming`, and `tokenUsage` (subagent header rows of unopened children).
 # `contextPressure` and `contextBreakdown` need no entry here: upstream marks
 # both summary-excluded at registration, so a Session summary never carries them
-# and no list config can add them back. The dsh-context agent graph therefore
-# falls back to `contextTimeline` and `tokenUsage` for unopened child Sessions.
+# and no list config can add them back. The dsh-context agent graph reads them
+# for unopened child Sessions through its own on-demand head request.
 #
 # `historyPageMaxBytes` bounds each history page (Session open, live opening,
 # and Load earlier) to about 2 MiB of serialized records, trimmed at message

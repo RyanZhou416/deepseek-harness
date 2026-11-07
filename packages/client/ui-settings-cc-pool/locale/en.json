@@ -1,5 +1,6 @@
 {
   "meta": {
-    "title": "ui-settings-cc-pool"
+    "title": "CC pool settings",
+    "description": "Configure the CC subscription pool credentials and model list overrides."
   }
 }
