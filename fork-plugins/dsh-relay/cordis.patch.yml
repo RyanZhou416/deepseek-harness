@@ -1,0 +1,8 @@
+# Bundle patch layer: the row mounts the package's node half; the `dsh.client`
+# declaration in package.json makes the web shell load its `./client` bundle as
+# the browser half. The plugin carries no deployment values — the user enters
+# the relay domain, username, password, and personal client key on its settings
+# page, where they are stored in the DSH credential service.
+- insert:
+    - id: dsh-relay
+      name: dsh-relay

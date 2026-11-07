@@ -6,7 +6,7 @@
 
 ## 仓库内构建与安装
 
-Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）与 workspace 的 `@deepseek-ai/dsh-llm-cc-pool` provider bundle 一起链接到选定的 `web` profile。当前格式的 profile 无需第二条命令、私有 registry 或手工提供的 tgz。构建会**修改 profile**，因此必须先停止 Host。`build.cmd` 不带选项地运行 `scripts/fork-plugins-build.ts`，所以守卫只探测默认的 `127.0.0.1:3080`；要守卫其他端点上的 Host，请直接以 `--host`/`--port` 运行该脚本。该端点仍有响应时，守卫会在触碰任何 profile 文件之前失败；守卫无法验证的端点同样使运行失败，绝不假定没有 Host 在运行。
+Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把五个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell、Relay）与 workspace 的 `@deepseek-ai/dsh-llm-cc-pool` provider bundle 一起链接到选定的 `web` profile。当前格式的 profile 无需第二条命令、私有 registry 或手工提供的 tgz。构建会**修改 profile**，因此必须先停止 Host。`build.cmd` 不带选项地运行 `scripts/fork-plugins-build.ts`，所以守卫只探测默认的 `127.0.0.1:3080`；要守卫其他端点上的 Host，请直接以 `--host`/`--port` 运行该脚本。该端点仍有响应时，守卫会在触碰任何 profile 文件之前失败；守卫无法验证的端点同样使运行失败，绝不假定没有 Host 在运行。
 
 构建只面向当前 profile 格式：没有旧 profile 检测、转换、备份或迁移。仍声明 `llm-pi-ai` `providers.cc-pool` 的旧 profile 必须先运行一次性 [`scripts/migrate-legacy-cc-pool-profile.ts`](../scripts/migrate-legacy-cc-pool-profile.ts)，再运行 `build.cmd`。该脚本备份 profile、seed 文件与 `$DSH_HOME/settings.yaml`，结构移除 legacy 声明，并在“无 profile / 无 package.json”跳过之前清理 `settings.yaml` 中的同名声明——即使 web profile 尚不存在，Home 里的旧声明也会被清理（不写 profile marker）。随后它确保专用 bundle/link、按需 seed、写入 `.dsh-profile-migrations.json` 后退出；其 Host 守卫接受与 `scripts/fork-plugins-build.ts` 相同的 `--host`/`--port` 选项。它是唯一持有 legacy 知识的位置，所有维护中的 profile 迁移完成后可删除。
 
@@ -14,6 +14,7 @@ Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把四�
 
 - Subscriptions 从源码编译 `lib/index.js` 与 `lib/client.js`。staged manifest 内联 `@tormentalabs/claude-code-wire-compat`（来自 `fork-plugins/claude-code-wire-compat` 源码，构建时用仓库 TypeScript 编译器生成其 `dist/`）与 `undici`，删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer，且不声明运行时依赖。公开的 optional provider 条目（`@cursor/sdk`、`@oven/bun-*`）保留声明；link 安装不会安装被链接包的 optional 依赖，因此这些 provider 需要另行提供对应包。staged 包不附带声明文件；源码检出仍是类型来源。
 - AetherShell 从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖，版本等于 Harness cohort（`0.2.2-rc.1`）。
+- Relay 通过插件共享的 client 选项从源码编译 `lib/index.js` 与 `lib/client.js`，harness peer 保持外部依赖并钉在 cohort 上，不声明运行时依赖。
 - AgentTeams 与 Context 在 `.build/fork-plugins/work/` 的隔离副本中构建；staging 只读取该副本的构建产物，不读取提交的 `lib/`。Context 保留 `zod` 运行时依赖，由仓库安装解析。
 - workspace 的 `@deepseek-ai/dsh-llm-cc-pool` 包从根构建产物复制到 `.build/fork-plugins/llm-cc-pool/`，并作为 provider bundle 与 fork 插件一起链接。
 
@@ -110,3 +111,12 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 - profile 安装：`link:` 指向 `.build/fork-plugins/aether-shell`
 
 该 bundle 保持所有 `@deepseek-ai/*` peer 为外部依赖，版本等于 Harness cohort（`0.2.2-rc.1`），且是纯 Host 插件，不含客户端资源。它需要外部 AetherShell 解释器——legacy 模式目标 `12.0.2`，typed 模式要求 `12.0.2+ryan.2`——插件不分发该解释器。保留与验证要求见 `fork-plugins/dsh-plugin-aether-shell/FORK_MAINTENANCE.md`。
+
+## Relay
+
+- 源码：`fork-plugins/dsh-relay`
+- 当前私有版本：`0.1.0`
+- profile 目标：DSH `0.2.2-rc.1`
+- profile 安装：`link:` 指向 `.build/fork-plugins/relay`
+
+插件通过内置的 **远程访问** 设置页把本机 DSH Web 发布到 DshRelay 中继服务器。中继域名、用户名、密码和个人客户端密钥保存在 DSH 凭据服务；每次连接都重新铸造 DSH 浏览器会话 Cookie，向中继客户端 API 注册，并托管一条指向本机 Web 端口的 `frpc` 隧道。frp 压缩包按 release 与平台以 SHA-256 固定。插件不含任何部署值：中继地址与账号由用户填写。协议见 [`docs/protocol.md`](dsh-relay/docs/protocol.md)，插件说明见 [README](dsh-relay/README.zh.md)，保留要求见 `fork-plugins/dsh-relay/FORK_MAINTENANCE.md`。

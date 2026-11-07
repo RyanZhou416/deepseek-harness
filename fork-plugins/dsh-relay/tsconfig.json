@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noImplicitAny": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "paths": {
+      "@deepseek-ai/cordis": ["../../vendor/cordis/lib/types/index.d.ts"],
+      "@deepseek-ai/schemastery": ["../../vendor/schemastery/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-credentials": ["../../packages/credentials/credentials/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-credentials/types": ["../../packages/credentials/credentials/lib/types/types.d.ts"],
+      "@deepseek-ai/dsh-brand": ["../../packages/util/brand/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-home-paths": ["../../packages/util/home-paths/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-client-connection": ["../../packages/client/connection/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-host-webserver": ["../../packages/host/webserver/src/index.ts"],
+      "@deepseek-ai/dsh-api-remotes/client": ["../../packages/api/remotes/lib/types/client/index.d.ts"],
+      "@deepseek-ai/dsh-client-locale/client": ["../../packages/client/locale/lib/types/client/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-settings/client": ["../../packages/client/ui-settings/lib/types/client/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-renderer/client": ["../../packages/client/ui-renderer/lib/types/client/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-slots": ["../../packages/client/ui-slots/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-primitives": ["../../packages/client/ui-primitives/lib/types/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

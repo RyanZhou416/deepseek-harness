@@ -102,6 +102,28 @@ const contextSource = {
   },
 } satisfies PluginManifest
 
+const relaySource = {
+  name: 'dsh-relay',
+  version: '0.1.0',
+  private: true,
+  type: 'module',
+  main: 'lib/index.js',
+  types: 'lib/index.d.ts',
+  exports: {
+    '.': './lib/index.js',
+    './client': './lib/client.js',
+    './package.json': './package.json',
+  },
+  scripts: { build: 'tsdown' },
+  devDependencies: { tsdown: '0.22.2' },
+  peerDependencies: {
+    '@deepseek-ai/cordis': '^4.1.0',
+    '@deepseek-ai/dsh-credentials': COHORT,
+    '@deepseek-ai/dsh-home-paths': COHORT,
+    '@deepseek-ai/schemastery': '^3.19.0',
+  },
+} satisfies PluginManifest
+
 describe('fork plugin staging manifests', () => {
   it('strips private runtime and development dependencies from the subscriptions package', () => {
     const staged = stagedManifest(subscriptionsSource, 'subscriptions')
@@ -163,9 +185,35 @@ describe('fork plugin staging manifests', () => {
     expect(() => { assertStagedManifest(wrongCohort, 'aether-shell', COHORT) }).toThrow(`must be ${COHORT}`)
   })
 
+  it('stages the relay bundles without a declaration artifact or runtime dependency', () => {
+    const staged = stagedManifest(relaySource, 'relay')
+    expect(staged.dependencies).toBeUndefined()
+    expect(staged.devDependencies).toBeUndefined()
+    expect(staged.scripts).toBeUndefined()
+    expect(staged.types).toBeUndefined()
+    expect(staged.main).toBeUndefined()
+    expect(staged.exports).toEqual({
+      '.': './lib/index.js',
+      './client': './lib/client.js',
+      './package.json': './package.json',
+    })
+    expect(staged.files).toEqual(['lib/**/*.js', 'cordis.patch.yml'])
+    expect(staged.peerDependencies).toEqual({
+      '@deepseek-ai/cordis': '^4.1.0',
+      '@deepseek-ai/dsh-credentials': COHORT,
+      '@deepseek-ai/dsh-home-paths': COHORT,
+      '@deepseek-ai/schemastery': '^3.19.0',
+    })
+    expect(() => { assertStagedManifest(staged, 'relay', COHORT) }).not.toThrow()
+  })
+
   it('pins the tracked source-built plugins to the Harness version the profile installs', async () => {
     const cohort = await harnessCohort()
-    for (const [id, directory] of [['subscriptions', 'dsh-plugin-subscriptions'], ['aether-shell', 'dsh-plugin-aether-shell']] as const) {
+    for (const [id, directory] of [
+      ['subscriptions', 'dsh-plugin-subscriptions'],
+      ['aether-shell', 'dsh-plugin-aether-shell'],
+      ['relay', 'dsh-relay'],
+    ] as const) {
       const source = JSON.parse(await readFile(join(REPOSITORY_ROOT, 'fork-plugins', directory, 'package.json'), 'utf8')) as PluginManifest
       expect(() => { assertStagedManifest(stagedManifest(source, id), id, cohort) }).not.toThrow()
     }
@@ -173,14 +221,17 @@ describe('fork plugin staging manifests', () => {
 })
 
 describe('fork plugin build recipe', () => {
-  it('builds all four fork plugins from source', () => {
-    expect(PLUGINS.map(entry => entry.id)).toEqual(['subscriptions', 'aether-shell', 'agent-teams', 'context'])
+  it('builds all five fork plugins from source', () => {
+    expect(PLUGINS.map(entry => entry.id)).toEqual(['subscriptions', 'aether-shell', 'agent-teams', 'context', 'relay'])
     for (const entry of PLUGINS) {
       expect(entry.mode).toBe('build')
       expect(entry.outputs.length).toBeGreaterThan(0)
       expect(entry.stage.length).toBeGreaterThan(0)
     }
     expect(PLUGINS.filter(entry => entry.builder === 'isolated').map(entry => entry.id)).toEqual(['agent-teams', 'context'])
+    expect(PLUGINS.filter(entry => entry.builder === 'relay').map(entry => entry.id)).toEqual(['relay'])
+    expect(plugin('relay').outputs).toEqual(['lib/index.js', 'lib/client.js'])
+    expect(plugin('relay').workCopy).toEqual([])
   })
 
   it('never treats a prebuilt lib directory as a build input', () => {

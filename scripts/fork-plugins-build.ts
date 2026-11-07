@@ -1,12 +1,12 @@
 /**
- * Build or stage the four fork plugins and the workspace llm-cc-pool package,
+ * Build or stage the five fork plugins and the workspace llm-cc-pool package,
  * then install them into the selected web profile by local path.
  *
  * `build.cmd` runs this after the ordinary root build. Every fork plugin is
- * built from source: subscriptions and aether-shell emit their bundles directly
- * into the staging directory, while agent-teams and context are copied into an
- * isolated work directory under `.build/fork-plugins/work/` and run their own
- * `build` script there. Before the subscriptions bundle is emitted, its inlined
+ * built from source: subscriptions, relay, and aether-shell emit their bundles
+ * directly into the staging directory, while agent-teams and context are
+ * copied into an isolated work directory under `.build/fork-plugins/work/` and
+ * run their own `build` script there. Before the subscriptions bundle is emitted, its inlined
  * Claude wire builder (`fork-plugins/claude-code-wire-compat`) is compiled from
  * source with the repository TypeScript compiler, so no tarball is a build
  * input. The workspace llm-cc-pool package is copied from the
@@ -77,15 +77,15 @@ export const DEFAULT_HOST_PORT = 3080
 export const LAUNCHER_HOME_DIRECTORY = 'deepseek-harness-data'
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
-const SCRIPT_VERSION = 8
+const SCRIPT_VERSION = 9
 const WORK_MARKER_FILE = '.fork-plugin-build.json'
 const DEPENDENCY_MARKER_FILE = '.fork-plugin-deps.json'
 
 /** Plugin ids this script stages or copies from the workspace, in installation order. */
-export type PluginId = 'subscriptions' | 'aether-shell' | 'agent-teams' | 'context' | 'llm-cc-pool'
+export type PluginId = 'subscriptions' | 'aether-shell' | 'agent-teams' | 'context' | 'relay' | 'llm-cc-pool'
 
 /** How a plugin's staged package obtains its runtime files. */
-export type PluginBuilder = 'subscriptions' | 'aether-shell' | 'isolated' | 'workspace'
+export type PluginBuilder = 'subscriptions' | 'aether-shell' | 'isolated' | 'relay' | 'workspace'
 
 /** One fork plugin, its build recipe, and the files staging copies. */
 export interface PluginDefinition {
@@ -159,6 +159,17 @@ const PLUGIN_DEFINITIONS = [
     ],
     installDependencies: true,
   },
+  {
+    id: 'relay',
+    name: 'dsh-relay',
+    directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-relay'),
+    mode: 'build',
+    builder: 'relay',
+    outputs: ['lib/index.js', 'lib/client.js'],
+    stage: ['cordis.patch.yml'],
+    workCopy: [],
+    installDependencies: false,
+  },
 ] as const satisfies readonly PluginDefinition[]
 
 /** The plugin definitions, for tests that assert the staging recipe. */
@@ -189,6 +200,7 @@ export const WORKSPACE_PLUGINS: readonly PluginDefinition[] = WORKSPACE_PLUGIN_D
 
 const SUBSCRIPTIONS_PLUGIN = PLUGIN_DEFINITIONS[0]
 const AETHER_SHELL_PLUGIN = PLUGIN_DEFINITIONS[1]
+const RELAY_PLUGIN = PLUGIN_DEFINITIONS[4]
 
 /** One transport module the staged subscriptions package emits beside `lib/index.js`. */
 export interface SubscriptionsTransportModule {
@@ -631,9 +643,13 @@ export function sourcePaths(plugin: PluginDefinition): string[] {
   if (plugin.builder === 'isolated') return [...plugin.workCopy]
   // These builders read their sources directly and stage copied entries from
   // the source package; `lib` stays out of the recipe either way.
-  return plugin.id === 'subscriptions'
-    ? ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts', 'tsdown.client.options.mjs']
-    : ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts']
+  if (plugin.builder === 'subscriptions') {
+    return ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts', 'tsdown.client.options.mjs']
+  }
+  if (plugin.builder === 'relay') {
+    return ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts', 'tsdown.client.options.mjs']
+  }
+  return ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts']
 }
 
 async function hashFile(path: string): Promise<string> {
@@ -763,6 +779,18 @@ export function stagedManifest(source: PluginManifest, pluginId: PluginId): Plug
     delete manifest.peerDependenciesMeta
     manifest.exports = { '.': './lib/lifecycle.mjs', './package.json': './package.json' }
     manifest.files = ['lib', 'cordis.patch.yml']
+  } else if (pluginId === 'relay') {
+    // The node and browser halves are bundles; no declaration artifact ships.
+    delete manifest.dependencies
+    delete manifest.peerDependenciesMeta
+    delete manifest.types
+    delete manifest.main
+    manifest.exports = {
+      '.': './lib/index.js',
+      './client': './lib/client.js',
+      './package.json': './package.json',
+    }
+    manifest.files = ['lib/**/*.js', 'cordis.patch.yml']
   } else if (pluginId === 'context') {
     // zod is a real runtime dependency of the context host half; the profile
     // link resolves it from the repository install.
@@ -1226,9 +1254,51 @@ export function buildSubscriptionsTransport(pluginDirectory: string, stagingDire
   ], { cwd: pluginDirectory })
 }
 
+/**
+ * Write the generated relay tsdown config: the node half as an ESM bundle and
+ * the browser half through the plugin's shared client options.
+ * @param stagingDirectory - staged package root.
+ * @returns the generated config path.
+ */
+async function relayConfig(stagingDirectory: string): Promise<string> {
+  const path = join(CONFIG_ROOT, 'relay.mjs')
+  const clientOptions = pathToFileURL(join(RELAY_PLUGIN.directory, 'tsdown.client.options.mjs')).href
+  const config = [
+    "import { defineConfig } from 'tsdown'",
+    `import { clientBuildOptions } from ${quote(clientOptions)}`,
+    '',
+    `const cwd = ${quote(RELAY_PLUGIN.directory)}`,
+    `const outDir = ${quote(join(stagingDirectory, 'lib'))}`,
+    '',
+    'export default defineConfig([',
+    '  {',
+    `    name: ${quote('dsh-relay-staged')},`,
+    '    cwd,',
+    "    entry: { index: 'src/index.ts' },",
+    '    outDir,',
+    "    format: ['esm'],",
+    "    platform: 'node',",
+    "    target: 'es2024',",
+    '    fixedExtension: false,',
+    '    dts: false,',
+    '    sourcemap: false,',
+    '    clean: false,',
+    "    deps: { neverBundle: [new RegExp('^@deepseek-ai/')] },",
+    '  },',
+    '  {',
+    '    ...clientBuildOptions,',
+    '    cwd,',
+    '    outDir,',
+    '  },',
+    '])',
+    '',
+  ].join('\n')
+  await writeFile(path, config)
+  return path
+}
+
 /** Write the generated aether-shell tsdown config. */
-async function aetherConfig(stagingDirectory: string): Promise<string> {
-  const path = join(CONFIG_ROOT, 'aether-shell.mjs')
+async function aetherConfig(stagingDirectory: string): Promise<string> {  const path = join(CONFIG_ROOT, 'aether-shell.mjs')
   const config = [
     "import { defineConfig } from 'tsdown'",
     '',
@@ -1653,7 +1723,9 @@ async function buildPlugin(
     } else {
       const config = plugin.builder === 'subscriptions'
         ? await subscriptionsConfig(temporary, dependencies.wireEntry, dependencies.undiciEntry)
-        : await aetherConfig(temporary)
+        : plugin.builder === 'relay'
+          ? await relayConfig(temporary)
+          : await aetherConfig(temporary)
       if (plugin.builder === 'subscriptions') buildWireCompat()
       log(`building ${plugin.name} from source`)
       run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
@@ -1798,7 +1870,7 @@ async function verifyInstalledProfile(staged: readonly StagedPlugin[], profileDi
 }
 
 /**
- * Build or stage the four fork plugins and the workspace llm-cc-pool package,
+ * Build or stage the five fork plugins and the workspace llm-cc-pool package,
  * then make the selected web profile resolve them.
  * @param options - parsed command-line options.
  */

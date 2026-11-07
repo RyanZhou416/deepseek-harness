@@ -1,0 +1,4 @@
+# The plugin is its own pnpm workspace root so an install never walks up into
+# the repository workspace.
+packages:
+  - .

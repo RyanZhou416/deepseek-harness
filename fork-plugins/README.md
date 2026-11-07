@@ -6,7 +6,7 @@ This directory contains plugin sources that must track this fork's DSH APIs and 
 
 ## Repo-integrated build and install
 
-On Windows, `build.cmd` builds the source plugins and links the four fork plugins (AgentTeams, Context, Subscriptions, AetherShell) plus the workspace `@deepseek-ai/dsh-llm-cc-pool` provider bundle into the selected `web` profile after the ordinary root build. A current profile needs no second command, private registry, or hand-supplied tarball. The build **mutates the profile**, so stop the Host first. `build.cmd` runs `scripts/fork-plugins-build.ts` without options, so its guard probes only the default `127.0.0.1:3080`; to guard a Host on another endpoint, run the script directly with `--host`/`--port`. The guard fails before touching any profile file while a Host answers there, and an endpoint it cannot verify fails the run instead of assuming no Host is running.
+On Windows, `build.cmd` builds the source plugins and links the five fork plugins (AgentTeams, Context, Subscriptions, AetherShell, Relay) plus the workspace `@deepseek-ai/dsh-llm-cc-pool` provider bundle into the selected `web` profile after the ordinary root build. A current profile needs no second command, private registry, or hand-supplied tarball. The build **mutates the profile**, so stop the Host first. `build.cmd` runs `scripts/fork-plugins-build.ts` without options, so its guard probes only the default `127.0.0.1:3080`; to guard a Host on another endpoint, run the script directly with `--host`/`--port`. The guard fails before touching any profile file while a Host answers there, and an endpoint it cannot verify fails the run instead of assuming no Host is running.
 
 The build targets the current profile format only: it has no legacy-profile detection, conversion, backup, or migration. An old profile that still declares `llm-pi-ai` `providers.cc-pool` must first be converted by the one-time [`scripts/migrate-legacy-cc-pool-profile.ts`](../scripts/migrate-legacy-cc-pool-profile.ts) script, then `build.cmd` must be run. That script backs up the profile, seed files, and `$DSH_HOME/settings.yaml`, removes the legacy declaration structurally, and cleans the matching `settings.yaml` declaration before the missing-profile and missing-package.json skips — a home with the legacy route and no web profile is still cleaned, without a profile marker. It then ensures the dedicated bundle/link, seeds as needed, writes `.dsh-profile-migrations.json`, and exits. Its Host guard accepts the same `--host`/`--port` options as `scripts/fork-plugins-build.ts`. It is the only legacy owner and can be deleted after every maintained profile is migrated.
 
@@ -14,6 +14,7 @@ The build targets the current profile format only: it has no legacy-profile dete
 
 - Subscriptions compiles `lib/index.js` and `lib/client.js` from source. The staged manifest inlines `@tormentalabs/claude-code-wire-compat` (from the `fork-plugins/claude-code-wire-compat` source, whose `dist/` the build compiles with the repository TypeScript compiler) and `undici`, removes the type-only `@deepseek-ai/dsh-llm-request-record` peer, and declares no runtime dependency. Public optional provider entries (`@cursor/sdk`, `@oven/bun-*`) stay declared; a link install does not install a linked package's optional dependencies, so those providers need the package available separately. The staged package ships no declarations; the source checkout remains the type source.
 - AetherShell compiles `lib/lifecycle.mjs` from source and keeps every `@deepseek-ai/*` peer external at the Harness cohort (`0.2.2-rc.1`).
+- Relay compiles `lib/index.js` and `lib/client.js` from source through the plugin's shared client options, keeps its harness peers external at the cohort, and ships no runtime dependency.
 - AgentTeams and Context build in isolated work copies under `.build/fork-plugins/work/`; staging reads their built output there, never a committed `lib/`. Context keeps its `zod` runtime dependency, resolved from the repository install.
 - The workspace `@deepseek-ai/dsh-llm-cc-pool` package is copied from the root build output into `.build/fork-plugins/llm-cc-pool/` and linked as a provider bundle beside the fork plugins.
 
@@ -110,3 +111,12 @@ The private build keeps upstream multi-account providers, usage UI, Codex search
 - Profile install: `link:` to `.build/fork-plugins/aether-shell`
 
 The bundle keeps every `@deepseek-ai/*` peer external at the Harness cohort (`0.2.2-rc.1`) and is a pure Host plugin with no client assets. It requires the external AetherShell interpreter — legacy mode targets `12.0.2`, typed mode requires `12.0.2+ryan.2` — and the plugin does not redistribute it. See `fork-plugins/dsh-plugin-aether-shell/FORK_MAINTENANCE.md` for preservation and verification.
+
+## Relay
+
+- Source: `fork-plugins/dsh-relay`
+- Current private version: `0.1.0`
+- Profile target: DSH `0.2.2-rc.1`
+- Profile install: `link:` to `.build/fork-plugins/relay`
+
+The plugin publishes the local DSH Web Host through a DshRelay server from a built-in **Remote access** settings page. It stores the relay domain, username, password, and personal client key in the DSH credential service, mints a fresh DSH browser-session cookie per connection, registers with the relay's client API, and supervises an `frpc` tunnel to the local web port. The frp archive is pinned per release and platform by SHA-256. It carries no deployment value: the user enters the relay address and account. See [`docs/protocol.md`](dsh-relay/docs/protocol.md), the plugin [README](dsh-relay/README.md), and `fork-plugins/dsh-relay/FORK_MAINTENANCE.md`.

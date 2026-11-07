@@ -77,6 +77,11 @@
     maxNodes: 400
     maxArchiveNodes: 100
     maxFileOps: 100
+# Remote access through the user's DshRelay account. The plugin carries no
+# deployment values: the relay domain, username, password, and personal client
+# key are entered on its settings page and stored in the DSH credential service.
+- id: dsh-relay
+  disabled: false
 # 独立进程重任务旁路：每个调用启动完整但隔离的 SDK Harness；子会话写入
 # process-workers，绝不混入现有 sessions。不施加固定 Agent 并发上限。
 - insert:
