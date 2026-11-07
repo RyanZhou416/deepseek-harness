@@ -19,9 +19,10 @@ const excludedPrefixes = [
   'fork-plugins/dsh-context/',
   'fork-plugins/dsh-plugin-subscriptions/',
   '.agents/notes/archived/',
-  // Lock files record wheel sizes and package digests whose hex tokens can equal a commit prefix.
-  'python/sdk/uv.lock',
 ]
+// Lock files record wheel sizes and package digests whose hex tokens can equal a commit prefix,
+// so the repository scan skips this one; the policy function still inspects it directly.
+const excludedScanFiles = new Set(['python/sdk/uv.lock'])
 const gitOutputLimit = 64 * 1024 * 1024
 // One 41-byte line per object; 1.2 million objects produce about 49 MiB.
 const objectListingLimit = 1024 * 1024 * 1024
@@ -71,7 +72,7 @@ function readMaintainedFiles(repoRoot: string): Map<string, string> {
     cwd: repoRoot,
     encoding: 'utf8',
     maxBuffer: gitOutputLimit,
-  }).split('\0').filter(file => file !== '' && isMaintained(file))
+  }).split('\0').filter(file => file !== '' && isMaintained(file) && !excludedScanFiles.has(file))
   const sources = new Map<string, string>()
   for (const file of files) {
     const path = resolve(repoRoot, file)

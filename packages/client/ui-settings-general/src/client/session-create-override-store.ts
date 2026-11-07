@@ -13,6 +13,7 @@ export interface SessionCreateOverrideCatalog {
 
 /** Loads the Host model directory on demand and publishes it to the row. */
 export class SessionCreateOverrideCatalogStore {
+  /** Live model directory the override row renders. */
   readonly store = createSnapshotStore<SessionCreateOverrideCatalog>({
     status: 'idle',
     groups: [],

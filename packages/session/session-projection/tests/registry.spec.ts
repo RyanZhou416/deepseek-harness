@@ -160,9 +160,10 @@ describe('SessionProjectionRegistry drive', () => {
       const unit = marksUnit()
       const view = vi.spyOn(unit.wire, 'view')
       const stateParse = vi.spyOn(unit.stateSchema, 'parse')
-      ctx.sessionProjections.register(unit)
-      ctx.sessionProjections.register(stableViewUnit(state => state.value))
-      ctx.sessionProjections.register(countUnit())
+      void ctx.sessionProjections.register(unit)
+      void ctx.sessionProjections.register(stableViewUnit(state => state.value))
+      void ctx.sessionProjections.register(countUnit())
+      // oxlint-disable-next-line typescript/no-deprecated -- These cases assert the deprecated cached read itself.
       expect(ctx.sessionProjections.cachedSnapshot(session)).toBeUndefined()
       const complete = ctx.sessionProjections.snapshot(session)
       const rows = ctx.sessionProjections.checkpoint(session)
@@ -170,9 +171,11 @@ describe('SessionProjectionRegistry drive', () => {
       stateParse.mockClear()
       const excluded = new Set(['test/marks'])
 
+      // oxlint-disable-next-line typescript/no-deprecated -- These cases assert the deprecated cached read itself.
       expect(ctx.sessionProjections.cachedSnapshot(session, undefined, excluded)).toEqual({
         asOfSeq: -1, values: { 'test/stable-view': { marks: [] } },
       })
+      // oxlint-disable-next-line typescript/no-deprecated -- These cases assert the deprecated cached read itself.
       expect(ctx.sessionProjections.cachedSnapshot(session, ['test/marks'], excluded)).toBeUndefined()
       expect(ctx.sessionProjections.viewCheckpoint(rows, undefined, excluded)).toEqual({
         'test/stable-view': { marks: [] },
@@ -180,6 +183,7 @@ describe('SessionProjectionRegistry drive', () => {
       expect(ctx.sessionProjections.viewCheckpoint(rows, ['test/marks'], excluded)).toEqual({})
       expect(view).not.toHaveBeenCalled()
       expect(stateParse).not.toHaveBeenCalled()
+      // oxlint-disable-next-line typescript/no-deprecated -- These cases assert the deprecated cached read itself.
       expect(ctx.sessionProjections.cachedSnapshot(session, undefined, new Set(['unregistered']))).toEqual(complete)
       expect(ctx.sessionProjections.snapshot(session)).toEqual(complete)
     } finally {
@@ -1090,9 +1094,9 @@ describe('SessionProjectionRegistry drive', () => {
 describe('SessionProjectionRegistry wire key enumeration', () => {
   it('lists client-visible keys in registration order and excludes host-only units', async () => {
     const { ctx } = await harness()
-    ctx.sessionProjections.register(marksUnit())
-    ctx.sessionProjections.register(countUnit())
-    ctx.sessionProjections.register(stableViewUnit(state => state.value))
+    void ctx.sessionProjections.register(marksUnit())
+    void ctx.sessionProjections.register(countUnit())
+    void ctx.sessionProjections.register(stableViewUnit(state => state.value))
 
     expect(ctx.sessionProjections.wireKeys()).toEqual(['test/marks', 'test/stable-view'])
   })
@@ -1100,7 +1104,7 @@ describe('SessionProjectionRegistry wire key enumeration', () => {
   it('reports no client-visible keys for an empty registry or one holding only host-only units', async () => {
     const { ctx } = await harness()
     expect(ctx.sessionProjections.wireKeys()).toEqual([])
-    ctx.sessionProjections.register(countUnit())
+    void ctx.sessionProjections.register(countUnit())
     expect(ctx.sessionProjections.wireKeys()).toEqual([])
   })
 
@@ -1118,7 +1122,7 @@ describe('SessionProjectionRegistry wire key enumeration', () => {
   it('drops a key when its registering fiber unloads (HMR safety)', async () => {
     const { ctx } = await harness()
     const fiber = await ctx.plugin(Object.assign((inner: Context) => {
-      inner.sessionProjections.register(marksUnit())
+      void inner.sessionProjections.register(marksUnit())
     }, { inject: ['sessionProjections'] }))
     expect(ctx.sessionProjections.wireKeys()).toEqual(['test/marks'])
     await fiber.dispose()

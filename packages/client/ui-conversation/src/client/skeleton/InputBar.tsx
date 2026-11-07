@@ -194,9 +194,11 @@ export const InputBar = memo(function InputBar({
   }
 
   // Automatic desktop focus restores and reveals the draft selection without
-  // scrolling the conversation.
+  // scrolling the conversation. A touch-first device is recognised either by its
+  // user agent or by a coarse primary pointer, so neither path summons its software
+  // keyboard on landing.
   useEffect(() => {
-    if (locked || editor === null || hasCoarsePrimaryPointer()) return
+    if (locked || editor === null || isMobileDevice() || hasCoarsePrimaryPointer()) return
     focusDraftEditor(editor, revealSelection)
   }, [locked, sessionId, editor])
 

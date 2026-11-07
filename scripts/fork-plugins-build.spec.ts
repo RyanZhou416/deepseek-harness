@@ -696,7 +696,9 @@ describe('workspace plugin staging', () => {
       )) as PluginManifest
       expect(stagedPeer.name).toBe('@deepseek-ai/dsh-llm')
       const staged = JSON.parse(await readFile(join(staging, 'package.json'), 'utf8')) as PluginManifest
-      expect(staged.peerDependencies).toEqual({ '@deepseek-ai/dsh-llm': '0.2.1-rc.2' })
+      // A `workspace:*` peer resolves to the root manifest's version, whatever the release is.
+      const rootManifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
+      expect(staged.peerDependencies).toEqual({ '@deepseek-ai/dsh-llm': rootManifest.version })
     } finally {
       await rm(root, { recursive: true, force: true })
     }

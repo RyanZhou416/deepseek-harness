@@ -260,6 +260,10 @@ describe('share reader access policy', () => {
     const allowed = await fixture()
     expect(allowed.decide('session/fork', session('own-child'), CALL)).toEqual(ALLOW)
     expect(allowed.decide('session/rename', session('own-child'))).toEqual(ALLOW)
+    // Revising the latest prompt is child-only, exactly like renaming it.
+    expect(allowed.decide('session/editLastMessage', session('own-child'))).toEqual(ALLOW)
+    expect(allowed.decide('session/editLastMessage', session('source'))).toEqual(deny('liveshare/read-only'))
+    expect(allowed.decide('session/editLastMessage', session('other-child'))).toEqual(deny('liveshare/read-only'))
     // The owner's fork switch gates the fork role alone, so turning it off leaves the child role as it was.
     const switchedOff = await fixture({ allowsFork: false })
     expect(switchedOff.decide('session/fork', session('own-child'), CALL)).toEqual(deny('fork-not-permitted'))
@@ -309,6 +313,9 @@ describe('share reader access policy', () => {
     expect(decide('session/prompt', session('own-child'))).toEqual(ALLOW)
     expect(decide('session/prompt', session('own-child'), CALL)).toEqual(deny('fork-ceiling-uninstalled'))
     expect(decide('session/cancel', session('own-child'), CALL)).toEqual(ALLOW)
+    // A revision drives the child's next request, so the installed ceiling gates it like a prompt.
+    expect(decide('session/editLastMessage', session('own-child'))).toEqual(ALLOW)
+    expect(decide('session/editLastMessage', session('own-child'), CALL)).toEqual(deny('fork-ceiling-uninstalled'))
   })
 
   it('reads a share whose tier this host cannot establish, and drives nothing of it', async () => {
@@ -338,8 +345,8 @@ describe('share reader access policy', () => {
       { resource: GLOBAL, actions: [...GLOBAL_ACTIONS].sort() },
       { resource: session('source'), actions: [...reads, 'session/cancel', 'session/fork', 'session/prompt'].sort() },
       // The reader's own fork carries the source grant's fork verb, and is the only Session it may rename.
-      { resource: session('own-child'), actions: [...reads, 'session/cancel', 'session/fork', 'session/prompt',
-        'session/rename'].sort() },
+      { resource: session('own-child'), actions: [...reads, 'session/cancel', 'session/editLastMessage',
+        'session/fork', 'session/prompt', 'session/rename'].sort() },
       // A revoked fork stays readable, so the page states it as read-only rather than unknown.
       { resource: session('revoked-child'), actions: [...reads].sort() },
       { resource: workspace('shared-ws'), actions: ['workspace/follow'] },
@@ -364,10 +371,11 @@ describe('share reader access policy', () => {
     expect(await sourceActions({ allowsFork: false })).toEqual([...SESSION_READS, 'session/cancel', 'session/prompt'].sort())
     const { grants } = await fixture({ mode: 'view' })
     expect(grants().find(grant => grant.resource.kind === 'session' && grant.resource.id === 'own-child')?.actions)
-      .toEqual([...SESSION_READS, 'session/cancel', 'session/fork', 'session/prompt', 'session/rename'].sort())
-    // The switch removes the child's fork alone: the child role and its rename stay in the snapshot.
+      .toEqual([...SESSION_READS, 'session/cancel', 'session/editLastMessage', 'session/fork', 'session/prompt',
+        'session/rename'].sort())
+    // The switch removes the child's fork alone: the child role, its revision, and its rename stay in the snapshot.
     expect(await childActions({ allowsFork: false }))
-      .toEqual([...SESSION_READS, 'session/cancel', 'session/prompt', 'session/rename'].sort())
+      .toEqual([...SESSION_READS, 'session/cancel', 'session/editLastMessage', 'session/prompt', 'session/rename'].sort())
   })
 })
 
@@ -382,6 +390,7 @@ describe('derived policy actions', () => {
       'session/prompt',
       'session/cancel',
       'session/fork',
+      'session/editLastMessage',
       'session/rename',
       'fileUploads/upload',
     ])

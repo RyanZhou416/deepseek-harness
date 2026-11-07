@@ -29,7 +29,7 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/types'
 import type {} from '@deepseek-ai/dsh-credentials/types'
 import { CcPoolSection } from './CcPoolSection.tsx'
-import { en, zh, type CcPoolSettingsLocaleKey } from './locales.ts'
+import { en, ja, es, fr, de, ru, pt, zh, type CcPoolSettingsLocaleKey } from './locales.ts'
 import { createCcPoolOperations } from './operations.ts'
 import { CcPoolSettingsPage } from './settings-controller.ts'
 import type { CcPoolSectionFace } from './settings-controller.ts'
@@ -65,7 +65,7 @@ export const inject = ['slots', 'locale', 'remote', 'remote.credentials', 'remot
  */
 export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS)
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-cc-pool: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en, ja, es, fr, de, ru, pt }), 'ui-settings-cc-pool: dictionaries')
   const page = new CcPoolSettingsPage(ctx.configForms.get<CcPoolSettings>(CC_POOL_NS), createCcPoolOperations(ctx))
   ctx.effect(() => {
     const disposers = [

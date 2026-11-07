@@ -1476,7 +1476,9 @@ describe('catalog dropdown rendering cost', () => {
     openPinned()
     const aside = within(screen.getByRole('treeitem', { name: /worker/ }))
       .getByRole('button', { name: '在侧边栏打开 worker' })
-    fireEvent.mouseEnter(aside)
+    vi.useFakeTimers()
+    fireEvent.pointerEnter(aside)
+    act(() => { vi.advanceTimersByTime(150) })
 
     const tooltip = screen.getByRole('tooltip')
     expect(tooltip.parentElement).toBe(document.body)

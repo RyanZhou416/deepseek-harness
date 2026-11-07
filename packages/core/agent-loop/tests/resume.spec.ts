@@ -1507,7 +1507,7 @@ describe('resume projection checkpoints', () => {
     const root = await persistSession(sessionId)
     const ctx = await mountPersistentHarness(root, new MockAdapter([]))
     const folded: SessionSeq[] = []
-    ctx.sessionProjections.register({
+    const foldedUnit = await ctx.sessionProjections.register({
       key: 'resume-test/folded',
       stateSchema: z.number(),
       init: () => 0,
@@ -1529,7 +1529,7 @@ describe('resume projection checkpoints', () => {
     expect(events.map(event => event.seq)).toEqual([0, 1])
     // Only events appended after the stored log reach the unit.
     expect(folded.every(seq => seq > 1)).toBe(true)
-    expect(ctx.sessionProjections.stateOf(handle.agent.session, 'resume-test/folded')).toBe(2 + folded.length)
+    expect(foldedUnit.stateOf(handle.agent.session)).toBe(2 + folded.length)
     await handle.dispose()
     await ctx.fiber.dispose()
   })

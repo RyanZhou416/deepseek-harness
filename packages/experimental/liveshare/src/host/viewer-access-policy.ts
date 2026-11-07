@@ -166,17 +166,17 @@ const VIEWER_SOURCE_WRITE_ROLE: RemoteAccessRole<'session'> = {
 }
 
 /**
- * Prompting, stopping, and renaming one of the reader's own visible forks.
+ * Prompting, stopping, revising, and renaming one of the reader's own visible forks.
  *
- * This role binds only a forked child, never the source Session: only a child can be renamed, so the
- * shared Session keeps `session/fork` as its one Session verb and a reader cannot rename the owner's
- * Session through the policy. The role carries no share switch of its own; a revoked fork stays readable
- * through the read role and carries no action of this one.
+ * This role binds only a forked child, never the source Session: only a child can be renamed or have its
+ * latest prompt revised, so the shared Session keeps `session/fork` as its one Session verb and a reader
+ * cannot rewrite or rename the owner's Session through the policy. The role carries no share switch of its
+ * own; a revoked fork stays readable through the read role and carries no action of this one.
  */
 const VIEWER_CHILD_ROLE: RemoteAccessRole<'session'> = {
   name: 'liveshare:viewer-child',
   resource: 'session',
-  actions: ['session/prompt', 'session/cancel', 'session/rename'],
+  actions: ['session/prompt', 'session/cancel', 'session/editLastMessage', 'session/rename'],
 }
 
 /** Following one Workspace that holds a Session the reader can see. */
@@ -342,7 +342,8 @@ function childWriteRefusal(
   allowsPrompt: () => ReturnType<ForkRegistry['allowsPrompt']>,
 ): string | undefined {
   if (child.revokedAt !== undefined) return 'fork-source-revoked'
-  if (action !== 'session/prompt' || !concrete) return undefined
+  // Revising the latest prompt drives the child's next request, so it follows the same ceiling.
+  if ((action !== 'session/prompt' && action !== 'session/editLastMessage') || !concrete) return undefined
   const decision = allowsPrompt()
   return decision.ok ? undefined : decision.code
 }

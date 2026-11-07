@@ -14,7 +14,8 @@ import {
 import { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import PermissionPresetService from '@deepseek-ai/dsh-permission-presets'
 import type SessionReferenceResolver from '@deepseek-ai/dsh-session-reference'
-import type { SessionObservation, SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
+import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { executeModelTool } from './execute-call.ts'
 import { projectionRegistryFixture, toolExecutorFixture } from './host-services.ts'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
@@ -133,7 +134,7 @@ async function setup(sessionCreateOverride?: SessionCreateModelOverride) {
   const listCandidates = vi.fn<SessionReferenceResolver['listCandidates']>()
   ctx.provide('sessionReferenceResolver', { listCandidates } as unknown as SessionReferenceResolver)
   const listSessions = vi.fn<SessionQueryEngine['listSessions']>().mockResolvedValue([])
-  ctx.provide('sessionQuery', { listSessions, observeSession } as unknown as SessionQueryEngine)
+  ctx.provide('sessionQuery', Object.assign(Object.create(SessionQueryEngine.prototype) as SessionQueryEngine, { listSessions, observeSession }))
   const pinnedState: { ids: SessionId[] } = { ids: [] }
   const pinSession = vi.fn(async (id: SessionId) => {
     pinnedState.ids = [id, ...pinnedState.ids.filter(candidate => candidate !== id)]
@@ -559,7 +560,7 @@ describe('dsh-tool-session-message', () => {
     context = ctx
     await mountAgentLoopTestDependencies(ctx)
     const resolveAgent = vi.fn<SessionController['resolveAgent']>()
-    ctx.provide('sessionController', { resolveAgent } as unknown as SessionController)
+    ctx.provide('sessionController', Object.assign(Object.create(SessionController.prototype) as SessionController, { resolveAgent }))
     ctx.provide('sessionReferenceResolver', {
       listCandidates: vi.fn<SessionReferenceResolver['listCandidates']>(),
     } as unknown as SessionReferenceResolver)

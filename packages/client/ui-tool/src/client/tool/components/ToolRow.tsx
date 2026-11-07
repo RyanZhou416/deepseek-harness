@@ -184,10 +184,10 @@ export const ToolRow = memo(function ToolRow({
   const expandable = state !== 'preparing' && (inputRaw !== null || hasOutput || card !== null)
   const open = expanded && expandable
   const outputText = useMemo(() => {
-    if (!open || card !== null) return null
+    if (!open) return null
     if (output !== undefined) return output
     return outputNode === undefined || outputNode === null ? null : resultText(outputNode) || null
-  }, [card, open, output, outputNode])
+  }, [open, output, outputNode])
   const bodyText = useMemo(
     () => open && card === null && inputRaw !== null ? formatToolBody(variant, inputRaw) : null,
     [card, inputRaw, open, variant],

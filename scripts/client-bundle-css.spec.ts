@@ -260,9 +260,12 @@ describe('client bundle package asset imports', () => {
       })
       const output = builds.flatMap(bundle => bundle.chunks).find(chunk => chunk.type === 'chunk' && chunk.fileName === 'client.js')
       const code = output?.type === 'chunk' ? output.code : ''
-      expect(code).toContain(`require.asset(${JSON.stringify(WHALE_URL)})`)
-      expect(code).not.toContain('__dshPackageAsset_')
-      expect(code).toContain('"__dshPackageAsset("')
+      // The published artifact is minified, so the minifier owns its quote
+      // style; the loader call and the plugin's own string must survive it.
+      const readable = code.replaceAll('`', '"')
+      expect(readable).toContain(`require.asset(${JSON.stringify(WHALE_URL)})`)
+      expect(readable).not.toContain('__dshPackageAsset_')
+      expect(readable).toContain('"__dshPackageAsset("')
     } finally {
       for (const bundle of builds) await bundle[Symbol.asyncDispose]()
     }

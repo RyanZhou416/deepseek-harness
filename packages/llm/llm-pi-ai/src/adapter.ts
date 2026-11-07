@@ -146,7 +146,7 @@ function messageIdentity(message: RequestMessage): string {
  * @param options - the assembled request.
  * @returns a stable UUID-shaped base identity for this logical request.
  */
-function logicalRequestId(provider: string, model: string, options: GenerateOptions): string {
+function logicalRequestId(provider: string, model: string, options: GenerateOptions<string>): string {
   const digest = createHash('sha256').update(JSON.stringify([
     options.sessionId === undefined ? '' : String(options.sessionId),
     options.purpose ?? '',
@@ -940,7 +940,7 @@ interface CcWireParityRequest {
  * @param options - the assembled request.
  * @returns the declared class, or undefined when the request declares none.
  */
-function ccWireParityRequestClass(options: GenerateOptions): CcWireParityRequestClass | undefined {
+function ccWireParityRequestClass(options: GenerateOptions<string>): CcWireParityRequestClass | undefined {
   switch (options.requestClass) {
     case 'main':
     case 'compaction':

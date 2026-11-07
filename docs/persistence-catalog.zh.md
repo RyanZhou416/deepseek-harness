@@ -683,7 +683,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'llm/request-record': LlmRequestRecordData
 ```
 
-来源：[`packages/llm/llm-request-record/src/types.ts:116`](../packages/llm/llm-request-record/src/types.ts)
+来源：[`packages/llm/llm-request-record/src/types.ts:117`](../packages/llm/llm-request-record/src/types.ts)
 
 <a id="llmretry--log-only"></a>
 
@@ -4159,7 +4159,7 @@ SHA-256: `47224277c28ed86afbff7c16a163a63be87a1fb1c3dc3d23825d744f195abc42`
 
 SHA-256: `c4cf006d344d48273524a0d7ca7749129cb01839637d06a6d3d13a4c580553b5`
 
-来源：[`packages/llm/llm-request-record/src/types.ts:38`](../packages/llm/llm-request-record/src/types.ts)
+来源：[`packages/llm/llm-request-record/src/types.ts:39`](../packages/llm/llm-request-record/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -4183,7 +4183,7 @@ SHA-256: `c4cf006d344d48273524a0d7ca7749129cb01839637d06a6d3d13a4c580553b5`
 
 SHA-256: `e8fef258f18b9b6d576d4c7a30941d731f844621602f927b5d22a5763de6cc0f`
 
-来源：[`packages/llm/llm-request-record/src/types.ts:28`](../packages/llm/llm-request-record/src/types.ts)
+来源：[`packages/llm/llm-request-record/src/types.ts:29`](../packages/llm/llm-request-record/src/types.ts)
 
 以下类型之一：
 

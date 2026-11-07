@@ -42,7 +42,8 @@ describe('AssistantMarkdown reasoning blocks', () => {
     expect(calls).not.toHaveBeenCalled()
     fireEvent.click(view.getByRole('button'))
     expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { rawText: text, text, running: false })
-    expect(view.getByText('Visible reasoning').tagName).toBe('STRONG')
+    // Markdown text leaves stay inside React-owned wrappers, so read the emphasis element around one.
+    expect(view.getByText('Visible reasoning').closest('strong')).not.toBeNull()
     expect(blocks.map(block => block.text)).toEqual(texts)
   })
 
@@ -59,7 +60,7 @@ describe('AssistantMarkdown reasoning blocks', () => {
     fireEvent.click(view.getByRole('button'))
     expect(calls).toHaveBeenCalledTimes(1)
     expect(calls.mock.calls[0]?.[0]).toBe('conversation.chat.reasoning.body')
-    expect(calls.mock.calls[0]?.[1]).toEqual({ text, running: streaming })
+    expect(calls.mock.calls[0]?.[1]).toEqual({ rawText: text, text, running: streaming })
   })
 
   it.each([false, true])('waits for non-whitespace reasoning when streaming=%s', (streaming) => {

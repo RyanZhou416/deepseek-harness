@@ -681,7 +681,7 @@ Source: [`packages/jobs/jobs/src/types.ts:64`](../packages/jobs/jobs/src/types.t
 'llm/request-record': LlmRequestRecordData
 ```
 
-Source: [`packages/llm/llm-request-record/src/types.ts:116`](../packages/llm/llm-request-record/src/types.ts)
+Source: [`packages/llm/llm-request-record/src/types.ts:117`](../packages/llm/llm-request-record/src/types.ts)
 
 <a id="llmretry--log-only"></a>
 
@@ -4157,7 +4157,7 @@ Sources: [`packages/llm/llm/src/types.ts:48`](../packages/llm/llm/src/types.ts)
 
 SHA-256: `c4cf006d344d48273524a0d7ca7749129cb01839637d06a6d3d13a4c580553b5`
 
-Sources: [`packages/llm/llm-request-record/src/types.ts:38`](../packages/llm/llm-request-record/src/types.ts)
+Sources: [`packages/llm/llm-request-record/src/types.ts:39`](../packages/llm/llm-request-record/src/types.ts)
 
 | Property | Presence | Type |
 |---|---|---|
@@ -4181,7 +4181,7 @@ Sources: [`packages/llm/llm-request-record/src/types.ts:38`](../packages/llm/llm
 
 SHA-256: `e8fef258f18b9b6d576d4c7a30941d731f844621602f927b5d22a5763de6cc0f`
 
-Sources: [`packages/llm/llm-request-record/src/types.ts:28`](../packages/llm/llm-request-record/src/types.ts)
+Sources: [`packages/llm/llm-request-record/src/types.ts:29`](../packages/llm/llm-request-record/src/types.ts)
 
 One of:
 

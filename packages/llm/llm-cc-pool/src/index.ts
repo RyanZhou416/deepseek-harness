@@ -80,7 +80,7 @@
  *
  * @module @deepseek-ai/dsh-llm-cc-pool
  */
-import type { Context, Fiber } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { assertUsableApiKey, LlmError, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
@@ -779,9 +779,9 @@ export function apply(ctx: Context, config: Config): void {
   // policy's cross-field requirements are facts no single field schema can
   // express; check them on the same waterfall so an invalid settings write is
   // refused instead of stored and re-loaded as a broken route.
-  ctx.on('internal/config', function (this: Fiber, _raw, next) {
+  ctx.on('internal/config', (fiber, next) => {
     const raw: unknown = next()
-    if (this !== ctx.fiber) return raw
+    if (fiber !== ctx.fiber) return raw
     const candidate = Config(raw as import('./config.ts').Options)
     resolvePoolModels(candidate.models.get())
     resolvePoolCachePolicy(cachePolicyOf(candidate))

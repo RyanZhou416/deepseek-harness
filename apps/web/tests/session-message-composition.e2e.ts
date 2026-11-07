@@ -89,7 +89,7 @@ it('creates an ordinary Session in the caller workspace and starts its attribute
   expect(target.header.parentSession).toBeUndefined()
   expect(target.header.origin).toBeUndefined()
   expect(ctx.permissionPresets.current(target)).toBe('read-only')
-  expect(ctx.sessionProjections.stateOf(target, 'agentPreset')).toBe('standard')
+  expect(ctx.agentPresets.presetForSession(target)).toBe('standard')
   const entered = target.snapshotEvents().find(event => event.type === 'user/message')
   expect(entered?.type === 'user/message' ? entered.data.source : undefined).toEqual({
     kind: 'agent-message', form: 'relay', senderSessionId: callerId,

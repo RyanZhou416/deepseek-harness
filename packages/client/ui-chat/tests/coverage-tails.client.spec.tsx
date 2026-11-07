@@ -23,17 +23,19 @@ describe('tails', () => {
         blocks={[{ kind: 'text', text: 'source words' }]} textInteractionSource={textInteractionSource} streaming={streaming} />
     )
     const view = render(body(false, true))
-    const paragraph = view.getByText('source words')
+    // Markdown text leaves sit inside React-owned wrappers, so the stable
+    // paragraph is the one around the rendered text.
+    const paragraph = view.getByText('source words').closest('p')!
     const markdown = paragraph.parentElement
     expect(view.container.querySelector('[data-text-interaction-source]')).toBeNull()
 
     view.rerender(body(true, false))
     expect(view.container.querySelector('[data-text-interaction-source]')).toBe(markdown)
-    expect(view.getByText('source words')).toBe(paragraph)
+    expect(view.getByText('source words').closest('p')).toBe(paragraph)
 
     view.rerender(body(false, false))
     expect(view.container.querySelector('[data-text-interaction-source]')).toBeNull()
-    expect(view.getByText('source words').parentElement).toBe(markdown)
+    expect(view.getByText('source words').closest('p')?.parentElement).toBe(markdown)
   })
 
   it('AssistantMarkdown renders reasoning as a Think row and unknown blocks as JSON fallback', () => {

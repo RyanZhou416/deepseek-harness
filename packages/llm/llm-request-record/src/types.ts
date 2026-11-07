@@ -25,6 +25,9 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
  * Messages request; the other two members are the auxiliary purposes
  * {@link GenerateOptions.purpose} declares.
  */
+// The staged lint Program resolves the purpose map without its producer augmentations, so the
+// derived union reads as `never` there.
+// oxlint-disable-next-line typescript/no-redundant-type-constituents -- Narrower program resolution.
 export type LlmRequestRecordPurpose = NonNullable<GenerateOptions['purpose']> | 'conversation'
 
 /**

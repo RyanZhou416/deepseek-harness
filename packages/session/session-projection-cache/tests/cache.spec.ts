@@ -437,7 +437,7 @@ describe('SessionProjectionCache write policy', () => {
   it('keeps the captured live cut detached while waiting for log durability', async () => {
     const { ctx, root, cache } = await harness()
     const state = { marks: [] as string[] }
-    ctx.sessionProjections.register({
+    void ctx.sessionProjections.register({
       key: 'cache-test/mutable',
       stateSchema: z.object({ marks: z.array(z.string()) }),
       init: () => state,
@@ -496,7 +496,7 @@ describe('SessionProjectionCache write policy', () => {
 
   it('rejects a non-JSON cold checkpoint without failing the synchronous cold read', async () => {
     const { ctx, root, cache } = await harness()
-    ctx.sessionProjections.register({
+    void ctx.sessionProjections.register({
       key: 'cache-test/marks2',
       stateSchema: z.custom<Map<string, string>>(() => true),
       init: () => new Map<string, string>(),
@@ -765,7 +765,7 @@ describe('SessionProjectionCache listing read', () => {
       'cache-test/marks3': { ver: 1, seq: SessionSeq(7), val: { marks: ['summary'] } },
     })
     const { ctx, cache } = await harness({ root })
-    ctx.sessionProjections.register(marks3Unit)
+    void ctx.sessionProjections.register(marks3Unit)
     const header = headerOf(SessionId('filtered-hints'))
     const excluded = new Set(['cache-test/marks'])
     expect(cache.cachedSnapshot(header, undefined, excluded)).toEqual({
@@ -933,7 +933,7 @@ describe('SessionProjectionCache listing read', () => {
       'cache-test/marks3': { ver: 99, seq: SessionSeq(7), val: { marks: ['other-version'] } },
     })
     const { ctx, cache } = await harness({ root })
-    ctx.sessionProjections.register(marks3Unit)
+    void ctx.sessionProjections.register(marks3Unit)
 
     // A row written under another unit stateVersion is not served, and the
     // returned watermark covers only served rows. A consumer that reads an
@@ -1108,9 +1108,9 @@ describe('SessionProjectionCache retained-byte budget', () => {
     await ctx.plugin({ name: storageDomainName, inject: storageDomainInject, apply: storageDomainApply, Config: storageDomainConfig }, { backend: 'json' })
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
-    ctx.sessionProjections.register(marksUnit())
-    ctx.sessionProjections.register(titleUnit)
-    ctx.sessionProjections.register(listMetadataUnit)
+    void ctx.sessionProjections.register(marksUnit())
+    void ctx.sessionProjections.register(titleUnit)
+    void ctx.sessionProjections.register(listMetadataUnit)
     const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => {})
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000, maxRetainedBytes })

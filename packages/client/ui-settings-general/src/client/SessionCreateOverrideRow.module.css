@@ -43,8 +43,10 @@
   line-height: 22px;
   cursor: pointer;
 }
-.selector:hover:not(:disabled):not([aria-disabled='true']) {
-  background: var(--dsw-alias-interactive-bg-hover);
+@media (hover: hover) {
+  .selector:hover:not(:disabled):not([aria-disabled='true']) {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
 }
 .selector:disabled,
 .selector[aria-disabled='true'] {

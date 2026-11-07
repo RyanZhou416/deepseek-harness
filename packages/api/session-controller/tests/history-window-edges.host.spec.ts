@@ -166,7 +166,7 @@ async function fixture(options: FixtureOptions = {}) {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   installSessionReadTestServices(ctx)
-  if (options.wireTitle === true) ctx.sessionProjections.register(titleProjectionDefinition)
+  if (options.wireTitle === true) void ctx.sessionProjections.register(titleProjectionDefinition)
   const meta = options.meta ?? header()
   const events = interruptedTurn()
   ctx.provide('sessionPersistence', testSessionPersistence(ctx, {

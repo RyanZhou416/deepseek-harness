@@ -136,6 +136,19 @@ describe('skill-filesystem watcher failures', () => {
     const home = await tempDir('skill-watch-initiator')
     await writeSkill(join(home, '.dsh/skills'), 'detached-skill')
     const ctx = new Context()
+    // The Agent registry injects the projection registry for its userInput unit;
+    // this watcher test only attributes initiators, so an empty-log registry suffices.
+    ctx.provide('sessionProjections', {
+      register: async (unit: { init(header: unknown, inheritedEventCount: unknown): unknown }) => {
+        const read = (session: { readonly header: unknown }): unknown => unit.init(session.header, undefined)
+        return {
+          stateOf: read,
+          readerFor: (session: { readonly header: unknown }) => () => read(session),
+          dispose: () => Promise.resolve(),
+        }
+      },
+      wireKeys: () => [],
+    })
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(SkillRegistry)
     const fiber = await ctx.plugin(SkillFileSystem, {

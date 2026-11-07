@@ -1,7 +1,7 @@
 /** Partial clones of real local repositories: reads, README lookup, limits, eviction, and Git failures, including a stalled Git fixture. */
 import { execFileSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -227,7 +227,8 @@ it('deletes least recently used repositories beyond the cache size and stale sta
   await repositories.read(first.url, first.commit, 'README.md', 100, signal)
   expect(readdirSync(join(root, 'cache')).filter(name => name.startsWith('.init-'))).toEqual(['.init-running'])
   rmSync(join(root, 'cache', '.init-running'), { recursive: true })
-  rmSync(join(root, 'cache', 'vanished'))
+  // A dangling symlink is unlinked by path; recursive removal follows Windows link semantics.
+  unlinkSync(join(root, 'cache', 'vanished'))
   rmSync(join(root, 'cache', 'stray.txt'))
   await repositories.read(second.url, second.commit, 'README.md', 100, signal)
   await repositories.settled()
