@@ -194,7 +194,7 @@ function contextOf(logs: readonly string[]): NormalizeContext {
   return {
     sessionIds: headers.flatMap(header => typeof header.id === 'string' ? [header.id] : []),
     cwd,
-    cwdAliases: [cwd.split(sep).join('/')],
+    cwdAliases: [cwd.split(sep).join('/'), JSON.stringify(cwd).slice(1, -1)],
   }
 }
 
@@ -997,6 +997,42 @@ describe('headless recorded-session snapshots', () => {
       expect(existsSync(join(scenario.dir, 'input.json')), `${scenario.name}: task comes from session JSONL`).toBe(false)
       expect(existsSync(join(scenario.dir, 'stdout.expected.jsonl')), `${scenario.name}: no ACP transcript`).toBe(false)
     }
+  })
+
+  it.each([
+    { platform: 'Windows', cwd: String.raw`C:\Users\runner\Temp\dsh-log-snap-demo` },
+    { platform: 'POSIX', cwd: '/tmp/dsh-log-snap-demo' },
+    { platform: 'POSIX with quotes', cwd: '/tmp/dsh-"quoted"-snap-demo' },
+  ])('normalizes JSON-quoted runtime cwd on $platform without changing unrelated text', ({ cwd }) => {
+    const runtimeContext = (text: string) => ({
+      type: 'user/message',
+      data: {
+        content: [{ type: 'text', text }],
+        source: {
+          kind: 'runtime-context',
+          form: 'snapshot',
+          sections: [{ name: 'working-directory:current', text }],
+        },
+      },
+    })
+    const unrelated = {
+      type: 'user/message',
+      data: {
+        content: [{
+          type: 'text',
+          text: `${JSON.stringify(`${cwd}-other`)} ${JSON.stringify(`${cwd}.backup`)} ${String.raw`regex: \d+\w+`}`,
+        }],
+      },
+    }
+    const log = [
+      { type: 'session', id: 'runtime-cwd', createdAt: 1, cwd },
+      runtimeContext(`Current working directory: ${JSON.stringify(cwd)}.`),
+      unrelated,
+    ].map(record => JSON.stringify(record)).join('\n')
+    const normalized = records(normalizeSessionSnapshots([log], contextOf([log]))[0]!)
+    expect(normalized[0]).toMatchObject({ cwd: '{{cwd}}' })
+    expect(normalized[1]).toEqual(runtimeContext('Current working directory: "{{cwd}}".'))
+    expect(normalized[2]).toEqual(unrelated)
   })
 
   it('keeps packed chunk rows logically equal to their unpacked recording', async () => {

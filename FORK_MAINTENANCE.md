@@ -521,7 +521,7 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 2026-10-18 在本机跑全量得到 137 失败 / 45 通过 / 16 跳过（198 用例）；抽查的 `request header` 与 `session 0` 差异全部是上面两类平台项。唯一与合并相关、且与平台无关的遗留是 fork 自录场景 `background-job-wait-wake`：它的会话文件仍是 `session.v2.jsonl`，而当前只保留 v3 基线与 v4 当前格式。打包后的快照文件不是持久化层能直接读取的原始 generation log，官方 `migrate:sessions-to-v4` 会报 `corrupt_log`；正规修复是用同一个场景重新录制，这需要 `DEEPSEEK_API_KEY`。
 
-**Preservation rule.** 语料结论以 Linux 运行为准；Windows 差异按平台解释，不修改期望值、不去改 fixture 迁就 Windows。该场景在重新录制前保持现状。
+**Preservation rule.** 语料结论以 Linux 运行为准；Windows 差异按平台解释，不修改期望值、不去改 fixture 迁就 Windows。该场景在重新录制前保持现状。Headless 比较上下文须把本次工作目录及其 JSON 转义写法作为精确别名交给归一化器，以稳定运行时上下文中的目录文本；只替换已知目录，保留相似目录名和无关反斜杠文本。[适配器回归](snapshots/session/headless.snapshot.ts)覆盖 Windows、POSIX 和带引号的 POSIX 目录，聚焦命令为 `node node_modules/vitest/vitest.mjs run --config vitest.snapshot.config.ts snapshots/session/headless.snapshot.ts -t 'normalizes JSON-quoted runtime cwd|claude-policy-unknown-keys'`。
 
 **Focused verification.** 需要真实结论时在 Linux 上跑 `pnpm run test:snapshot`；重新录制用 `pnpm run test:snapshot:record -t background-job-wait-wake`（会调用真实模型）。fork 自己的插件套件（agent-teams / context / subscriptions）与仓库 build、typecheck、文档门禁不受此影响，仍按各自小节验证。
 
