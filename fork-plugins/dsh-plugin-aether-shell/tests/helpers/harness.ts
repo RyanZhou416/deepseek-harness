@@ -26,10 +26,12 @@ import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as AetherShell from '../../src/index.ts'
+import { executeToolCall } from './execute.ts'
 
 /** Absolute path of the deterministic interpreter fixture every harness spawns. */
 export const AETHER_FIXTURE = fileURLToPath(new URL('../fixtures/ae-fixture.mjs', import.meta.url))
@@ -177,6 +179,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SandboxPolicyService, { mode: options.mode ?? 'danger-full-access', workspaceRoot: workspace })
   await ctx.plugin(RecordingSandboxProvider)
@@ -199,7 +202,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     confineCalls,
     agent,
     pluginFiber,
-    call: (name, args, callOptions = {}) => ctx.tools.execute({
+    call: (name, args, callOptions = {}) => executeToolCall(ctx, {
       callId: ToolCallId(`aether-${++callCounter}`),
       name,
       arguments: args,

@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import * as AetherShell from '../src/index.ts'
+import { executeToolCall } from './helpers/execute.ts'
 import { AETHER_FIXTURE, createHarness, text, valueOf } from './helpers/harness.ts'
 import type { Harness } from './helpers/harness.ts'
 
@@ -55,7 +56,7 @@ describe('aether-shell registration lifecycle', () => {
   it('refuses a call once the plugin is unloaded', async () => {
     const mounted = await setup()
     await mounted.pluginFiber.dispose()
-    const result = await mounted.ctx.tools.execute({
+    const result = await executeToolCall(mounted.ctx, {
       callId: ToolCallId('after-dispose'),
       name: 'aether_call',
       arguments: { builtin: 'pwd' },
@@ -95,9 +96,10 @@ describe('aether-shell teardown quiescence', () => {
     await mounted.pluginFiber.dispose()
     const result = await pending
     // A `pwd` exchange has only three admissible settlements: it finished
-    // first, teardown stopped it, or dispatch observed the cancellation.
+    // first, teardown stopped a started body, or the executor re-resolved the
+    // registration at dispatch after the unload and refused it as unknown.
     if (result.isError) {
-      expect(result.error.info?.code).toBe(TOOL_ABORTED)
+      expect([TOOL_ABORTED, 'UNKNOWN_TOOL']).toContain(result.error.info?.code)
     } else {
       const value = valueOf(result)
       expect(['value', 'interrupted']).toContain(value['kind'])
@@ -111,7 +113,7 @@ describe('aether-shell teardown quiescence', () => {
     await mounted.pluginFiber.dispose()
     const result = await pending
     if (result.isError) {
-      expect(result.error.info?.code).toBe(TOOL_ABORTED)
+      expect([TOOL_ABORTED, 'UNKNOWN_TOOL']).toContain(result.error.info?.code)
     } else {
       const value = valueOf(result)
       expect(['value', 'interrupted']).toContain(value['kind'])

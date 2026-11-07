@@ -28,9 +28,11 @@ import * as sessionProjection from '@deepseek-ai/dsh-session-projection'
 import * as sandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
 import * as subprocessLocal from '@deepseek-ai/dsh-subprocess-local'
 import * as systemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as nativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import * as tools from '@deepseek-ai/dsh-tools'
 import * as aetherShell from '../src/index.ts'
 import * as passthroughSandbox from './fixtures/loader/passthrough-sandbox.ts'
+import { executeToolCall } from './helpers/execute.ts'
 import { AETHER_FIXTURE, sessionAgent, text, valueOf } from './helpers/harness.ts'
 
 /** The committed composition this suite boots, kept pristine by copying it. */
@@ -40,6 +42,7 @@ const COMMITTED_CONFIG = new URL('./fixtures/loader/cordis.yml', import.meta.url
 const MODULES = new Map<string, unknown>([
   ['@deepseek-ai/dsh-system-prompt', systemPrompt],
   ['@deepseek-ai/dsh-tools', tools],
+  ['@deepseek-ai/dsh-tool-executor-native', nativeToolExecutor],
   ['@deepseek-ai/dsh-session-projection', sessionProjection],
   ['@deepseek-ai/dsh-sandbox-policy', sandboxPolicy],
   ['@deepseek-ai/dsh-sandbox-local', passthroughSandbox],
@@ -144,7 +147,7 @@ describe('aether-shell through a real Loader composition', () => {
     const booted = await boot()
     const workspace = booted.sandboxPolicy.resolve().workspaceRoot
     const agent = sessionAgent(workspace)
-    const call = (name: string, args: unknown) => booted.tools.execute({
+    const call = (name: string, args: unknown) => executeToolCall(booted, {
       callId: ToolCallId(`loader-${name}`),
       name,
       arguments: args,

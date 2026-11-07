@@ -27,7 +27,7 @@ kind: "package-bundle"
 
 ### 前置条件与安装
 
-插件面向 DSH `0.2.1-rc.2`：它针对支持按结果省略展示 metadata 的本 fork Host 构建，替换软件包不会升级正在运行的 Host。默认的 `legacy` 数据模式支持原生 AetherShell `12.0.2` 协议；`typed-v1` 需要个人构建版 `12.0.2+ryan.2` 提供的类型化数据能力。单独安装 AetherShell；如果 Host 已继承的 PATH 中没有它，配置解释器绝对路径。Windows 系统级安装可使用 `C:\Program Files\AetherShell\ae.exe`；修改 PATH 不会更新已运行 Host 的环境。
+插件面向 DSH `0.2.2-rc.1`：它针对该 Host 的工具运行时构建，其中模型工具批次由独立的 tool-executor 插件结算；替换软件包不会升级正在运行的 Host。默认的 `legacy` 数据模式支持原生 AetherShell `12.0.2` 协议；`typed-v1` 需要个人构建版 `12.0.2+ryan.2` 提供的类型化数据能力。单独安装 AetherShell；如果 Host 已继承的 PATH 中没有它，配置解释器绝对路径。Windows 系统级安装可使用 `C:\Program Files\AetherShell\ae.exe`；修改 PATH 不会更新已运行 Host 的环境。
 
 从 checkout 构建并打包，无须安装依赖：
 
@@ -38,7 +38,7 @@ pwsh -NoProfile -File fork-plugins/dsh-plugin-aether-shell/scripts/run-local.ps1
 
 从 checkout 运行 `pnpm dsh plugin --profile <profile> add <tarball> --ignore-scripts`，先在隔离的 Harness home 中安装生成的压缩包，再在真实 profile 中启用。bundle 插入一个 `aether-shell` 插件条目，不禁用其他 shell 条目。启用前备份 profile 配置。Host 运行时可通过 DSH 包管理替换软件包；已加载的模块版本会继续运行，直到重启。安装后重启，以配套的 Host 构建加载新软件包。不要手工覆盖已加载的模块文件。
 
-本 fork 的 `build.cmd` 还会在普通构建之后从源码构建该插件并链接到选定的 `web` profile，同事无需手工转交 tarball。该路径要求先停止 Host，从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.1-rc.2`；见 [fork 插件构建说明](../README.zh.md#repo-integrated-build-and-install)。
+本 fork 的 `build.cmd` 还会在普通构建之后从源码构建该插件并链接到选定的 `web` profile，同事无需手工转交 tarball。该路径要求先停止 Host，从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.2-rc.1`；见 [fork 插件构建说明](../README.zh.md#repo-integrated-build-and-install)。
 
 ### 选择合适的工具
 

@@ -13,13 +13,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { unsupportedInbox, unsupportedModel } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import type { JobHandle, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import LocalJobRegistry, { type Config as JobsConfig } from '@deepseek-ai/dsh-jobs-local'
 import { HarnessError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session/types'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { TOOL_ABORTED } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { runForegroundQuery } from '../src/foreground.ts'
@@ -111,6 +112,7 @@ function stubAgent(ctx: Context, id: SessionId, workspace: string): { agent: Age
     id,
     options: {},
     session,
+    model: unsupportedModel(),
     inbox: unsupportedInbox(),
     status: 'idle' as const,
     ctx: scopeFiber.ctx,
@@ -133,6 +135,9 @@ function stubAgent(ctx: Context, id: SessionId, workspace: string): { agent: Age
  */
 async function createHarness(jobsConfig: JobsConfig = {}): Promise<ForegroundHarness> {
   const ctx = new Context()
+  // The live-agent registry folds its own Session projections, so its
+  // prerequisite registry must be mounted before it for `ctx.agents` to exist.
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalJobRegistry, jobsConfig)
   ctx.jobs.attachController('aether-foreground-test')

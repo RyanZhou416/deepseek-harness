@@ -17,6 +17,7 @@ import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-ses
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -37,6 +38,7 @@ import {
   RESULT_PAGE_ARG_CODE,
 } from '../src/results.ts'
 import type { AetherResultId, AetherResultPage, AetherResultsSettings } from '../src/results.ts'
+import { executeToolCall } from './helpers/execute.ts'
 
 /** The retrieval id no store ever mints. */
 const UNKNOWN_ID = aetherResultId('00000000-0000-4000-8000-000000000000')
@@ -127,6 +129,7 @@ async function mount(options: {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   const config = resolveConfig(options.config ?? {})
@@ -143,7 +146,7 @@ async function mount(options: {
     store,
     config,
     agent: id => liveAgent(ctx, id),
-    call: (name, args, agent) => ctx.tools.execute({
+    call: (name, args, agent) => executeToolCall(ctx, {
       callId: ToolCallId(`results-${name}`),
       name,
       arguments: args,

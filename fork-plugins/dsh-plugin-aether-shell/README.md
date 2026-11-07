@@ -27,7 +27,7 @@ Let an agent query AetherShell operations, evaluate typed programs, keep one int
 
 ### Prerequisites and installation
 
-The plugin targets DSH `0.2.1-rc.2`: it is built against the Host whose tool runtime accepts omitted per-result presentation metadata, and replacing the package does not upgrade an already running Host. The default `legacy` data mode supports the native AetherShell `12.0.2` protocol; `typed-v1` requires the typed-data capabilities provided by the personal `12.0.2+ryan.2` build. Install AetherShell separately and configure its absolute executable path when the Host's existing PATH does not include it. Windows system-level installation can use `C:\Program Files\AetherShell\ae.exe`; changing PATH does not update an already-running Host's environment.
+The plugin targets DSH `0.2.2-rc.1`: it is built against that Host's tool runtime, where a separate tool-executor plugin settles model tool batches, and replacing the package does not upgrade an already running Host. The default `legacy` data mode supports the native AetherShell `12.0.2` protocol; `typed-v1` requires the typed-data capabilities provided by the personal `12.0.2+ryan.2` build. Install AetherShell separately and configure its absolute executable path when the Host's existing PATH does not include it. Windows system-level installation can use `C:\Program Files\AetherShell\ae.exe`; changing PATH does not update an already-running Host's environment.
 
 Build and pack from the checkout without installing dependencies:
 
@@ -38,7 +38,7 @@ pwsh -NoProfile -File fork-plugins/dsh-plugin-aether-shell/scripts/run-local.ps1
 
 From the checkout, install the generated tarball with `pnpm dsh plugin --profile <profile> add <tarball> --ignore-scripts` in an isolated Harness home before activating it in the real profile. The bundle inserts one `aether-shell` plugin row and does not disable other shell rows. Back up profile configuration before activation. Use DSH package management to replace a package while the Host runs; the loaded module generation stays active until restart. Restart after installation to load the new package with its matching Host build. Do not manually overwrite loaded module files.
 
-This fork's `build.cmd` also stages and links the plugin into the selected `web` profile after the ordinary build, so a colleague needs no tarball handoff. That path requires the Host to be stopped, compiles `lib/lifecycle.mjs` from source, and keeps every `@deepseek-ai/*` peer external at `0.2.1-rc.2`; see [the fork plugin build instructions](../README.md#repo-integrated-build-and-install).
+This fork's `build.cmd` also stages and links the plugin into the selected `web` profile after the ordinary build, so a colleague needs no tarball handoff. That path requires the Host to be stopped, compiles `lib/lifecycle.mjs` from source, and keeps every `@deepseek-ai/*` peer external at `0.2.2-rc.1`; see [the fork plugin build instructions](../README.md#repo-integrated-build-and-install).
 
 ### Choose the appropriate tool
 

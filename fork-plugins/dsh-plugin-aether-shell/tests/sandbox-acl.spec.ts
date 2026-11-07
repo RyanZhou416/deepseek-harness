@@ -28,10 +28,12 @@ import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as AetherShell from '../src/index.ts'
+import { executeToolCall } from './helpers/execute.ts'
 import { AETHER_FIXTURE, installedInterpreter, sessionAgent, valueOf } from './helpers/harness.ts'
 
 /** The provider manifest the ACL runner resolves its FFI dependency from. */
@@ -95,6 +97,7 @@ async function setup(
   context = ctx
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SandboxPolicyService, { mode, workspaceRoot: workspace })
   await ctx.plugin(LocalSandboxProvider)
@@ -106,7 +109,7 @@ async function setup(
   })
   const agent = sessionAgent(workspace)
   return {
-    call: (name, args) => ctx.tools.execute({
+    call: (name, args) => executeToolCall(ctx, {
       callId: ToolCallId(`acl-${name}`),
       name,
       arguments: args,

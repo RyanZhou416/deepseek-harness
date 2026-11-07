@@ -24,7 +24,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { unsupportedInbox, unsupportedModel } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import type { JobEvent } from '@deepseek-ai/dsh-jobs'
 import LocalJobRegistry, { type Config as JobsConfig } from '@deepseek-ai/dsh-jobs-local'
@@ -37,6 +37,7 @@ import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session/types'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { createAetherBackgroundTool } from '../src/background.ts'
@@ -44,6 +45,7 @@ import type { AetherBackgroundSettings } from '../src/background.ts'
 import { resolveConfig } from '../src/config.ts'
 import type { Config as AetherConfig } from '../src/config.ts'
 import { AetherProcesses, createExecutableResolver } from '../src/exec.ts'
+import { executeToolCall } from './helpers/execute.ts'
 import { installedInterpreter } from './helpers/harness.ts'
 
 /** Absolute path of the background fixture every job in this suite spawns. */
@@ -194,6 +196,7 @@ function stubAgent(ctx: Context, id: SessionId, cwd: string): { agent: Agent; di
     id,
     options: {},
     session,
+    model: unsupportedModel(),
     inbox: unsupportedInbox(),
     status: 'idle' as const,
     ctx: scopeFiber.ctx,
@@ -234,6 +237,7 @@ async function createBackgroundHarness(options: BackgroundHarnessOptions = {}): 
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SandboxPolicyService, { mode: options.mode ?? 'danger-full-access', workspaceRoot: workspace })
   await ctx.plugin(RecordingSandboxProvider)
@@ -277,7 +281,7 @@ async function createBackgroundHarness(options: BackgroundHarnessOptions = {}): 
     graceMs: resolved.graceMs,
     agent: owned.agent,
     sessionId,
-    call: (args, callOptions = {}) => ctx.tools.execute({
+    call: (args, callOptions = {}) => executeToolCall(ctx, {
       callId: ToolCallId(`aether-bg-${++callCounter}`),
       name: 'aether_job_start',
       arguments: args,
