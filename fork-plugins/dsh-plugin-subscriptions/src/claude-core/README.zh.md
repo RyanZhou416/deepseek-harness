@@ -15,7 +15,7 @@
 
 control 义务来自服务端 `enforce_`/`require_` 族的 `restrictions`，**不是 allow 注册表里的键**（注册表为固定产物生成的 34 键，加上由一份线上文档新增的 `allow_connector_file_downloads`）：`controlRequirements(document)` 只读 `restrictions`，给出三态（`allowed:true` ⇒ `active`、`false` ⇒ `not-enforced`、缺键 ⇒ `unknown`；非布尔由 envelope parser 整份 `parse_failed`，**不得**降级为 `unknown`），并把本构建无 consumer 的生效项列进 `unsupportedActiveControls`（distinct、固定顺序）。本构建没有设备 enrollment / cloud-create / link 操作，也没有已证的 web_search / MCP connector 执行器，因此生效的 control 只产出这一条状态事实：**它自身不产生拒绝、不 park、不改变任何已有限制路径**；真实执行绑定属 P6-host。
 
-`KNOWN_CONTROL_KEYS` / `isKnownControlKey(key)` 是**同一份**分类：这两个已证义务键从**操作权限键命名空间**中排除（owner 的实时 `restrictionKeys` 与持久化投影的 unknown-key 计数共用它），因此它们不会被当成未知操作键而拒绝 Messages/工具；**不是前缀规则**——非这两个键的 `require_`/`enforce_` 键、以及其它真正未知键，仍按既有保守路径拒绝并计数。已持久化记录不保留 control 状态，恢复后 control 保持 `unknown`（不显示为 `false`）；只有计数、无法归因到原键的旧快照**保持原保守状态**，直到既有读取路径取得新的真实文档。
+`KNOWN_CONTROL_KEYS` / `isKnownControlKey(key)` 是**同一份**分类：这两个已证义务键从**操作权限键命名空间**中排除（owner 的实时 `restrictionKeys` 与持久化投影的 unknown-key 计数共用它），因此它们不会被当成未知操作键而拒绝 Messages/工具；**不是前缀规则**——非这两个键的 `require_`/`enforce_` 键仍是普通限制键。纯 core 对不在固定注册表内的限制键仍返回 `unsupported`：`evaluateLivePolicy` 与 `evaluateWithoutLivePolicy` 不会改答 allow，注册表也不新增条目。该 `unsupported` 是 core 的判定，不是插件的操作决定：[claude-policy-limits.ts](../providers/claude-policy-limits.ts) 把未注册的操作键映射为显式的 `enforcement: 'ignored'`（不是 `inapplicable`）并计数，因此它不施加操作限制，也不取消任何已注册键的拒绝或 taint。owner 不再发出 `policy_limits_unknown_keys`；auth/RPC 状态词汇仍为兼容解析该历史代码；持久化记录的版本与字段不变，未知键计数成为非阻断诊断。已持久化记录不保留 control 状态，恢复后 control 保持 `unknown`（不显示为 `false`）；无法归因到原键的旧快照把其计数保留为该诊断，直到既有读取路径取得新的真实文档。
 
 `quota-observation.ts` 的 port 边界（Mac 侧复用同一 strict 输出时必须连带登记）：
 

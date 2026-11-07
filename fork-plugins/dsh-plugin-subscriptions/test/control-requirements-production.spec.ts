@@ -9,13 +9,13 @@
  *
  * Live level: the whole plugin composition is mounted over the real apply chain, so a committed
  * Claude request runs the real `restrictionKeys` -> `limitsKeysFor` -> operation-denial decision.
- * A document that states only the two known controls reaches the wire; one that also states a
- * truly unknown key is still refused conservatively; one where a registered key is denied still
- * refuses exactly the operation that key reaches.
+ * A document that states only the two known controls reaches the wire; one that also states an
+ * unregistered key keeps it counted as an ignored scope; one where a registered key is denied
+ * still refuses exactly the operation that key reaches.
  *
  * Durable level: the persisted projection and its restore run over an in-memory store, so a
  * restart is observed without a filesystem, and a stored count that cannot be attributed to a
- * key is never cleared.
+ * key is reported and ignored rather than cleared or read as a refusal.
  *
  * Everything is synthesized: no network and no credential. The owner-level and durable-level
  * cases also use no environment value and no timer. A live case installs its provider-fetch
@@ -450,21 +450,24 @@ test('a controls-only document persists no unknown operation key and reloads wit
   }
 })
 
-test('a stored unknown-key count that cannot be attributed is never cleared', async () => {
-  // An older projection counted the two control keys as unknown operation keys. The count names
-  // no key, so nothing here may read it as those controls and release what it blocks.
+test('a stored unknown-key count that cannot be attributed is reported and ignored, never cleared', async () => {
+  // An older projection counted two keys whose names it never kept. The count is now a
+  // nonblocking diagnostic: the restart may not read it as those controls, but it also refuses
+  // no operation, and only a confirmed read replaces the count with a re-projected document.
   const memory = memoryStore([storedRecord(2)])
   const before = await restored(memory.store)
   try {
-    assert.equal(before.limits?.state, 'blocked')
-    assert.deepEqual(before.limits?.blockers, ['policy_limits_unknown_keys'])
+    assert.equal(before.limits?.state, 'stale')
+    assert.equal(before.limits?.fallback, 'stale')
+    assert.equal(before.limits?.blockers, undefined, 'an unattributable unknown-key count is not a blocker')
+    assert.equal(before.limits?.unsupportedScopeCount, 1, 'the count is reported as one nonblocking scope')
     assert.equal(memory.records()[0]?.unknownKeys, 2, 'the unattributable count is left exactly as it was')
   } finally {
     await before.owner.dispose()
   }
 
-  // The conservative state ends the way every other one does: a confirmed read through the
-  // owner's existing path adopts a real document and re-projects the record.
+  // A confirmed read through the owner's existing path adopts a real document, re-projects the
+  // record, and clears the obsolete diagnostic.
   const adopted = await readPolicy(
     { restrictions: { require_trusted_devices: { allowed: true } } },
     { persistence: memory.store, force: true },
@@ -472,6 +475,7 @@ test('a stored unknown-key count that cannot be attributed is never cleared', as
   try {
     assert.equal(adopted.limits?.state, 'current')
     assert.equal(adopted.limits?.blockers, undefined)
+    assert.equal(adopted.limits?.unsupportedScopeCount, undefined, 'the clean document clears the count')
     assert.deepEqual(adopted.limits?.controlRequirements, {
       trustedDevices: 'active',
       webSearchMcpIsolation: 'unknown',
@@ -694,14 +698,6 @@ function assertWireReached(error: unknown): void {
     'the failure names the local transport, so the request reached it')
 }
 
-/** The failure a request ends in when a policy refused it before the wire. */
-function assertRefusal(error: unknown, code: string): LlmError {
-  assert.ok(error instanceof LlmError, `the request was refused: ${String(error)}`)
-  assert.equal(error.code, code)
-  assert.doesNotMatch(errorChain(error), /BUN_PATH|Bun transport/i, 'the refusal happened before the wire')
-  return error
-}
-
 test('a controls-only document reaches the wire, and every other stated key keeps its verdict', async () => {
   // The two known controls are classified out of the operation-permission key set, so the
   // request passes every policy gate and fails only at the pinned local transport.
@@ -731,8 +727,9 @@ test('a controls-only document reaches the wire, and every other stated key keep
     await controlsOnly.dispose()
   }
 
-  // A truly unknown operation-permission key keeps its conservative refusal: the classification
-  // is a closed list of two keys, never a prefix.
+  // An unregistered operation-permission key is counted and ignored, never read as the control
+  // beside it: the classification is a closed list of two keys, never a prefix, and the request
+  // reaches the wire instead of being refused.
   const withUnknown = await mount(() => Response.json({
     restrictions: {
       require_trusted_devices: { allowed: true },
@@ -740,8 +737,10 @@ test('a controls-only document reaches the wire, and every other stated key keep
     },
   }))
   try {
-    const refused = assertRefusal(await withUnknown.request('session-unknown'), 'POLICY_LIMITS_UNSUPPORTED')
-    assert.equal(refused.failure?.retryDisposition, 'forbid', 'the unknown key still stops the resend')
+    assertWireReached(await withUnknown.request('session-unknown'))
+    const claude = await withUnknown.status()
+    const accounts = claude['accounts'] as { key: string; policyLimits?: PolicyLimitsStatus }[]
+    assert.equal(accounts[0]?.policyLimits?.unsupportedScopeCount, 1, 'the unregistered key is reported as a scope')
   } finally {
     await withUnknown.dispose()
   }

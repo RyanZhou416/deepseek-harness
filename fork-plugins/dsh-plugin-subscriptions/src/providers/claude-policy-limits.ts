@@ -137,6 +137,8 @@ export type PolicyKeyMapping =
   | { readonly enforcement: 'unsupported'; readonly operations: readonly DshPolicyOperation[]; readonly reason: string }
   /** This build has no such capability at all, with the exact reason recorded. */
   | { readonly enforcement: 'inapplicable'; readonly reason: string }
+  /** An unregistered restriction is reported but imposes no operation restriction. */
+  | { readonly enforcement: 'ignored'; readonly reason: string }
 
 /** The conservative set an unprovable key reaches inside the attributed session. */
 const ATTRIBUTED_OPERATIONS: readonly DshPolicyOperation[] = [
@@ -218,8 +220,8 @@ const POLICY_KEY_MAPPING: Readonly<Record<PolicyKey, PolicyKeyMapping>> = Object
 /**
  * The enforcement one policy key resolves to.
  *
- * A key this build does not map is not assumed harmless: it reaches the attributed session's
- * operations conservatively, and the reason says so.
+ * Unregistered keys are ignored for forward compatibility, not interpreted as permission or
+ * as aliases of known keys. A registered key without a mapping still refuses operations.
  * @param key - the policy key.
  * @returns the mapping, with a recorded reason when it is not an exact one.
  */
@@ -229,7 +231,7 @@ export function policyKeyMapping(key: string): PolicyKeyMapping {
     : undefined
   if (mapped !== undefined) return mapped
   if (policyRegistration(key) === undefined) {
-    return { enforcement: 'unsupported', operations: ATTRIBUTED_OPERATIONS, reason: 'key is outside the pinned registry' }
+    return { enforcement: 'ignored', reason: 'key is outside the pinned registry; ignored for forward compatibility' }
   }
   return { enforcement: 'unsupported', operations: ATTRIBUTED_OPERATIONS, reason: 'this build has no exact mapping for the key' }
 }
@@ -248,22 +250,19 @@ export const POLICY_MAPPING_GAPS: readonly string[] = Object.freeze(
 export type PolicyLimitsBlockerCode =
   /** The durable store exists but cannot be trusted; a restriction may have been lost. */
   | 'policy_limits_state_unavailable'
-  /** The stored document stated restriction keys this build cannot re-state. */
-  | 'policy_limits_unknown_keys'
   /** The stored document named core skills, whose names are not retained. */
   | 'policy_limits_core_skills_unstored'
   /** The stored document's taints did not all normalize, so its taint set is incomplete. */
   | 'policy_limits_lossy_taints'
 
 /**
- * One capability an accepted document configures that this build does not provide.
+ * One nonblocking policy fact this build does not apply.
  *
- * It is reported, never enforced: a capability default is a per-capability value, so losing
- * one is not evidence that any policy key was restricted, and it must not turn into a
- * whole-request refusal.
+ * Capability defaults, pending notices and unregistered restriction keys are reported here
+ * without changing the verdicts of registered policy keys.
  */
 export interface PolicyLimitsUnsupportedScope {
-  /** The capability the document configures, named when this build knows it. */
+  /** A known capability name or a fixed category for unapplied policy facts. */
   readonly scope: string
   /** The fixed reason it cannot be applied here. */
   readonly reason: string
@@ -309,7 +308,7 @@ export interface PolicyLimitsStatus {
   notice?: boolean
   /** The normalized compliance taints in force. */
   taints?: readonly string[]
-  /** Capabilities the document configures that this build does not provide. */
+  /** Nonblocking policy facts this build does not apply, with no remote key text. */
   unsupportedScopes?: readonly PolicyLimitsUnsupportedScope[]
   /**
    * The control obligations the document in force states, when it states any.
@@ -393,6 +392,8 @@ interface AccountState {
    * does not know. Their values are never retained, and they are reported, never enforced.
    */
   unknownDefaults: number
+  /** Unknown restriction count from a stored snapshot whose key names were not retained. */
+  restoredUnknownKeys: number
   /**
    * Whether a read or a restore has settled an observation into this state. Until it has, the
    * account has nothing to report and a read in flight is the only fact there is.
@@ -616,6 +617,7 @@ export class ClaudePolicyLimitsOwner {
       document,
       state.unknownDefaults,
       document.monitoringNotice !== null && !state.noticeTextKnown,
+      state.restoredUnknownKeys + unknownPolicyKeyCount(document),
     )
     // A document that answered neither control states no obligation, so the field is omitted
     // rather than reported as two `unknown` requirements this account never received.
@@ -1032,6 +1034,7 @@ export class ClaudePolicyLimitsOwner {
       status: { state: 'unavailable', reason: 'never-read', fallback: 'none' },
       noticeTextKnown: false,
       unknownDefaults: 0,
+      restoredUnknownKeys: 0,
       settled: false,
       blockers: [...this.blockersForNewState()],
       inFlight: undefined,
@@ -1118,6 +1121,7 @@ export class ClaudePolicyLimitsOwner {
         state.settled = true
         state.noticeTextKnown = true
         state.unknownDefaults = 0
+        state.restoredUnknownKeys = 0
         state.unsupported = this.mappingGaps()
         // Nothing is persisted: the fail-open answer states that this account never read a
         // document at all, and a stored empty projection would read as evidence it did.
@@ -1153,6 +1157,7 @@ export class ClaudePolicyLimitsOwner {
         state.settled = true
         state.noticeTextKnown = true
         state.unknownDefaults = 0
+        state.restoredUnknownKeys = 0
         state.unsupported = this.mappingGaps()
         this.persist(state)
         this.notify(account)
@@ -1306,6 +1311,7 @@ export class ClaudePolicyLimitsOwner {
     // reports no requirement rather than one the server never made again.
     state.noticeTextKnown = false
     state.unknownDefaults = record.unknownDefaults
+    state.restoredUnknownKeys = record.unknownKeys
     state.receivedAt = record.receivedAt
     // A restored document is a `stale` prior: the reader may not answer a missing route with
     // the fail-open policy, because a restriction already in force must survive the restart.
@@ -1403,14 +1409,13 @@ function restoredDocument(record: ClaudePersistedPolicyLimitsRecord): PolicyLimi
 /** The blockers an incomplete stored projection leaves in force. */
 function restoredBlockers(record: ClaudePersistedPolicyLimitsRecord): readonly PolicyLimitsBlockerCode[] {
   const blockers: PolicyLimitsBlockerCode[] = []
-  if (record.unknownKeys > 0) blockers.push('policy_limits_unknown_keys')
   if (record.coreSkillsPresent) blockers.push('policy_limits_core_skills_unstored')
   if (record.lossyTaints) blockers.push('policy_limits_lossy_taints')
   return blockers
 }
 
 /**
- * The capabilities one document configures that this build cannot apply.
+ * Nonblocking policy facts this build cannot apply, including unregistered restrictions.
  *
  * A `defaults` entry is a per-capability default value, never a verdict about a policy key.
  * A monitoring notice whose text was not stored is a display fact pending the next confirmed
@@ -1420,12 +1425,14 @@ function restoredBlockers(record: ClaudePersistedPolicyLimitsRecord): readonly P
  * @param document - the document in force, live or restored.
  * @param unknownDefaults - how many defaults entries this build cannot type.
  * @param noticePending - whether a notice is in force whose text this process has not read.
+ * @param unknownKeys - unregistered restriction count; only its presence is reported.
  * @returns the scopes to report, in a stable order.
  */
 function unsupportedScopes(
   document: PolicyLimitsDocument,
   unknownDefaults: number,
   noticePending: boolean,
+  unknownKeys: number,
 ): readonly PolicyLimitsUnsupportedScope[] {
   const scopes: PolicyLimitsUnsupportedScope[] = []
   let untyped = unknownDefaults > 0
@@ -1445,6 +1452,12 @@ function unsupportedScopes(
       reason: 'the accepted policy stated a capability default this build cannot type; it is counted and never applied',
     })
   }
+  if (unknownKeys > 0) {
+    scopes.push({
+      scope: 'policy-keys',
+      reason: 'the accepted policy contains unregistered restriction keys; they are counted and ignored',
+    })
+  }
   if (noticePending) {
     scopes.push({
       scope: 'policy-notice',
@@ -1454,13 +1467,18 @@ function unsupportedScopes(
   return scopes
 }
 
+/** Count unregistered operation keys without retaining their names outside the document. */
+function unknownPolicyKeyCount(document: PolicyLimitsDocument): number {
+  return Object.keys(document.restrictions).filter(key => !isKnownControlKey(key) && policyRegistration(key) === undefined).length
+}
+
 /**
  * Project one confirmed state into the record the store keeps.
  *
  * Every member is a fact this plugin derived, never a value the server sent: a restriction is
  * its bool for a registered key, a taint is already bounded by the pinned pattern, and a
- * notice, a `defaults` value, a core skill name and an unregistered key survive only as the
- * existence facts the restore blocks on.
+ * notice, a `defaults` value, a core skill name and an unregistered key survive only as
+ * counts or existence facts. Unregistered keys remain nonblocking after restore.
  *
  * The unknown-key count is the operation-permission namespace's: a known control obligation is
  * classified out of it, exactly as `restrictionKeys` classifies it out of the live key set, so
@@ -1469,13 +1487,9 @@ function unsupportedScopes(
 function projectRecord(state: AccountState): ClaudePersistedPolicyLimitsRecord {
   const document = state.document
   const restrictions: ClaudePersistedPolicyLimitsRestriction[] = []
-  let unknownKeys = 0
+  const unknownKeys = state.restoredUnknownKeys + unknownPolicyKeyCount(document)
   for (const [key, entry] of Object.entries(document.restrictions)) {
-    if (isKnownControlKey(key)) continue
-    if (policyRegistration(key) === undefined) {
-      unknownKeys += 1
-      continue
-    }
+    if (isKnownControlKey(key) || policyRegistration(key) === undefined) continue
     restrictions.push({ key, allowed: entry.allowed })
   }
   const defaults: ClaudePersistedPolicyLimitsDefault[] = []

@@ -748,13 +748,10 @@ export const POLICY_LIMITS_UNSUPPORTED = 'POLICY_LIMITS_UNSUPPORTED'
 export const POLICY_LIMITS_UNAVAILABLE = 'POLICY_LIMITS_UNAVAILABLE'
 
 /**
- * The placeholder an unknown policy key is reported as.
+ * The redacted key name for a refusal whose supplied mapping names an unregistered key.
  *
- * A key the provider stated is remote text: it may echo a credential, a prompt fragment or an
- * instruction, and this refusal reaches the model, the client's error projection and the
- * session log. Only the pinned registry's own key names may travel, so an unknown key is
- * reported as this fixed placeholder and its value never crosses the boundary — the core still
- * evaluates the original key internally, and the denial it produces is unchanged.
+ * The default operation mapping ignores unregistered keys. Any enforcing mapping still must
+ * not echo remote key text into a model-facing error or a Session log.
  */
 export const UNSUPPORTED_POLICY_KEY = 'unsupported_policy_key'
 
@@ -878,10 +875,9 @@ export function claudeToolOperation(definition: ToolDefinition | undefined): Dsh
  * Only a document in force decides, and then a key is consulted only for the operations its
  * mapping declares: a refusal that reaches the web-fetch capability never stops the plugin's
  * own egress, and one that reaches the catalogue fetch never stops model inference. A key
- * whose mapping is `inapplicable` reaches nothing here, while a key this build cannot map
- * exactly refuses the operations that mapping names, with its recorded reason — an unknown key
- * the live document states is therefore refused conservatively, and that is a deliberate
- * difference from the pinned client's own consumer set.
+ * whose mapping is `inapplicable` reaches nothing here. Unregistered keys are explicitly
+ * `ignored` for forward compatibility; the owner reports their presence without their names.
+ * A registered key this build cannot enforce exactly still refuses its mapped operations.
  * @param input - the owner's status, the keys in force, the operation and the answers.
  * @returns a denial, or an allow when nothing in force reaches the operation.
  * @internal Exported for tests only; not part of the plugin's public surface.
@@ -901,16 +897,15 @@ export function policyLimitsOperationDenial(input: {
   }
   if (status.fallback === 'none') return { decision: 'allow' }
   for (const key of input.keys) {
-    const answer = input.verdict(key)
-    // `allow` is the only answer that contributes nothing; an `unsupported` answer is a
-    // refusal this build must not read as permission.
-    if (answer.verdict === 'allow') continue
     const mapped = input.mapping(key)
-    if (mapped.enforcement === 'inapplicable') continue
+    if (mapped.enforcement === 'inapplicable' || mapped.enforcement === 'ignored') continue
+    const answer = input.verdict(key)
+    // Ignoring an unregistered key does not turn an unsupported verdict for a mapped operation
+    // into permission: known operation restrictions still require an explicit allow.
+    if (answer.verdict === 'allow') continue
     if (!mapped.operations.includes(input.operation)) continue
-    // Only a key from the pinned registry may travel in the refusal: it is the only key whose
-    // name is this build's own fixed vocabulary, and the refusal reaches the model, the error
-    // projection and the session log. An unknown key keeps its denial and loses its name.
+    // Refusals may name only registered keys. A supplied enforcing mapping cannot expose
+    // remote key text to the model, error projection or Session log.
     const registered = REGISTERED_POLICY_KEYS.has(key)
     return {
       decision: 'deny',
@@ -2495,9 +2490,8 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
    * The keys one account's `policy_limits` verdicts are consulted for: the pinned registry,
    * plus every key the account's own state states — including a key this build does not know.
    *
-   * The keys the registry knows are always consulted, so the no-live-policy table answers
-   * exactly as it does in the core, and the owner's own key list is what makes an unknown key
-   * the provider stated reachable here instead of being silently skipped.
+   * Registered keys retain their core verdicts. The operation mapping explicitly ignores
+   * unregistered document keys; their diagnostic presence stays owned by the policy state.
    * @param account - the canonical account key.
    * @returns the keys to consult.
    */

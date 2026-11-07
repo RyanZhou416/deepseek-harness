@@ -1,0 +1,10 @@
+version: 1
+scenario: claude-policy-unknown-keys
+profile: headless
+composition: claude-policy-unknown-keys
+recording: authored
+header:
+  class: claude-policy-unknown-keys
+  pin: true
+replay:
+  override: true

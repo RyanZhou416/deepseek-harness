@@ -13,8 +13,10 @@
  * `createRecordingAssembly` is what a programmatic host (the production spec) mounts as its
  * Loader entry; `apply` is what the headless snapshot composition mounts, and it adds the
  * first-dispatch driver on top. Both use `driveRecordedAttempts`, so one driver serves both
- * hosts. `name`, `inject` and `Config` are the real plugin's own, so the Loader validates the
- * entry's config with the production schema.
+ * hosts. A sibling probe reuses that surface with its own stored session and one exact fetch
+ * answer (see `options.session` and `capture.exact` below) instead of copying this module.
+ * `name`, `inject` and `Config` are the real plugin's own, so the Loader validates the entry's
+ * config with the production schema.
  *
  * Egress is closed for the whole life of the mounted composition, without a server or a new
  * production option. Every path the production route can reach is stated: the Messages POST and
@@ -121,9 +123,10 @@ function storedSession() {
  * The assembly calls this before the real `apply` runs, so the composition never serves a
  * request from a store that holds nothing yet; the write lands under the caller's private
  * `DSH_HOME`.
+ * @param session - the stored session to write; omitted keeps this module's own recording account.
  */
-async function seedSyntheticAccount() {
-  await saveAccountSession('claude', ACCOUNT, storedSession())
+async function seedSyntheticAccount(session = storedSession()) {
+  await saveAccountSession('claude', ACCOUNT, session)
 }
 
 /**
@@ -148,6 +151,9 @@ function postedSystemTexts(body) {
  * exist so a destination this composition did not state fails the case instead of being
  * reached. The log reader the POST-time check needs belongs to one driven sequence, so it is
  * attached for exactly that sequence.
+ * A composition that needs one exact HTTP answer the plugin builds through `proxiedFetch`
+ * (the managed-settings read, for instance) states it as `exact` on the returned object before
+ * mounting; the guard below consults it for that URL and refuses every other one as before.
  * @returns the capture the composing host reads and the assembly mounts.
  */
 export function createCapture() {
@@ -159,6 +165,7 @@ export function createCapture() {
     refused,
     productionFiber: undefined,
     proxy: undefined,
+    exact: undefined,
     attach(reader) { recordsNow = reader },
     detach() { recordsNow = undefined },
   }
@@ -204,17 +211,24 @@ export function createCapture() {
  *
  * The route's remaining egress path — the maintenance owner's managed-settings read — is built
  * over `proxiedFetch`, so a process-global guard is what makes it fail here instead of reaching
- * a peer. It is installed before the seed and the real `apply` and lives until the composition's
- * context is disposed, which is also what covers the registration, pre-request and teardown
- * windows. The exact previous property descriptor is captured first and returned as the
- * restoration, so a host that already stated its own fetch keeps it.
- * @param capture - the capture that records what was refused.
+ * a peer. A capture that states an `exact` answer for one request gets that answer instead; the
+ * default capture states none, so every request is refused exactly as before. The guard is
+ * installed before the seed and the real `apply` and lives until the composition's context is
+ * disposed, which is also what covers the registration, pre-request and teardown windows. The
+ * exact previous property descriptor is captured first and returned as the restoration, so a
+ * host that already stated its own fetch keeps it.
+ * @param capture - the capture that records what was refused and may state one exact answer.
  * @returns the restoration, idempotent so a failure path may also run it.
  */
 function installEgressGuard(capture) {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : String(input?.url ?? input)
+    const exact = capture.exact
+    if (typeof exact === 'function') {
+      const stated = await exact(url, init)
+      if (stated !== undefined) return stated
+    }
     capture.refused.push(`process-global fetch: ${url}`)
     throw new Error(`recording probe: the driven composition reached the process-global fetch (${url})`)
   }
@@ -367,7 +381,9 @@ export function requireRecordedAttempts(observed, texts) {
  * `apply` that becomes asynchronous is awaited rather than treated as already finished.
  * @param capture - the capture whose transports the route is given.
  * @param options - `seed: false` mounts a composition whose account was stored by an earlier
- *   process, so this one reads that store instead of writing it again.
+ *   process, so this one reads that store instead of writing it again; `session` replaces the
+ *   synthetic stored session this probe seeds, so one composition can state its own eligibility
+ *   and account shape while keeping every other recording invariant.
  * @returns the plugin object a composition mounts, carrying its capture.
  */
 export function createRecordingAssembly(capture, options = {}) {
@@ -383,7 +399,7 @@ export function createRecordingAssembly(capture, options = {}) {
       // it on the failure path, where a rejected apply never collects this effect's disposer.
       ctx.effect(() => restoreEgress, 'claude-request-recording-probe: process-global fetch guard')
       try {
-        if (options.seed !== false) await seedSyntheticAccount()
+        if (options.seed !== false) await seedSyntheticAccount(options.session)
         const production = ctx.plugin(Object.assign(
           (inner) => subscriptions.apply(inner, config, {
             claudeMessagesFetch: capture.transport,

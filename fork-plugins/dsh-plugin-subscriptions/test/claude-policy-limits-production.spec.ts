@@ -710,20 +710,26 @@ test('the guard enforces the verdicts through the Host registry, and a similar n
   assert.equal(webFetch.runs('fetch_web') + webFetch.runs('host_probe'), 2)
   await webFetch.dispose()
 
-  // An unknown key the provider stated is refused conservatively over the operations this
-  // build cannot place — a deliberate difference from the pinned client's own consumer set,
-  // which has no way to state that reach.
+  // An unregistered key the provider stated is ignored for forward compatibility: it imposes
+  // no operation restriction, so it stops neither Messages nor a Host tool. It is still counted
+  // and reported as a nonblocking scope rather than silently dropped.
   const unknown = await mount({
     policy: () => Response.json({ restrictions: { allow_something_new: { allowed: false } } }),
     seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  // The same conservative answer refuses this plugin's own model request when it is sent
-  // under that document: an unknown restriction is never read as permission. The key the
-  // provider stated is remote text, so the refusal names the fixed placeholder instead.
-  assertRefusal(await unknown.request('session-a'), 'POLICY_LIMITS_UNSUPPORTED')
-  const unknownRefusal = await unknown.executeMessage('session-a', 'host_probe')
-  assert.ok(unknownRefusal?.includes('unsupported_policy_key'), `the refusal names the placeholder: ${String(unknownRefusal)}`)
-  assert.equal(unknown.runs('host_probe'), 0, 'the tool body never ran')
+  assertWireReached(await unknown.request('session-a'))
+  assert.equal((await unknown.execute('session-a', 'host_probe')).isError, false, 'an ignored key stops no Host tool')
+  assert.equal(unknown.runs('host_probe'), 1)
+  const unknownAccounts = (await unknown.status())['accounts'] as {
+    policyLimits?: { blockers?: unknown; unsupportedScopeCount?: number }
+  }[]
+  assert.equal(unknownAccounts[0]?.policyLimits?.blockers, undefined, 'an unregistered key is not a snapshot blocker')
+  assert.equal(unknownAccounts[0]?.policyLimits?.unsupportedScopeCount, 1,
+    'the ignored key is reported as a nonblocking scope')
+  // The durable projection keeps its count, never its name.
+  const unknownStore = readFileSync(join(process.env.DSH_HOME!, 'plugins', 'subscriptions', 'claude-policy-limits.json'), 'utf8')
+  assert.ok(unknownStore.includes('"unknownKeys":1'), 'the unregistered key survives as a count')
+  assert.equal(unknownStore.includes('allow_something_new'), false, 'the unregistered key name is never stored')
   await unknown.dispose()
 
   // A non-empty `defaults` map is a provider answer this build does not translate into a
@@ -789,16 +795,95 @@ test('the live connector file-downloads refusal stops neither Messages nor a Hos
   assert.ok(persisted.includes('"unknownKeys":0'), 'the registered key is not counted as unknown')
   await app.dispose()
 
-  // A genuinely unknown key still takes the conservative path under the fixed placeholder.
-  const unknown = await mount({
+  // An unregistered lookalike of the registered key is ignored too, never read as that key: it
+  // refuses nothing, and the registered key above keeps its own inapplicable denial.
+  const lookalike = await mount({
     policy: () => Response.json({ restrictions: { allow_connector_file_download: { allowed: false } } }),
     seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  assertRefusal(await unknown.request('session-a'), 'POLICY_LIMITS_UNSUPPORTED')
-  const unknownRefusal = await unknown.executeMessage('session-a', 'host_probe')
-  assert.ok(unknownRefusal?.includes('unsupported_policy_key'), `the refusal names the placeholder: ${String(unknownRefusal)}`)
-  assert.equal(unknown.runs('host_probe'), 0, 'the truly unknown key still refuses the Host tool')
-  await unknown.dispose()
+  assertWireReached(await lookalike.request('session-a'))
+  assert.equal((await lookalike.execute('session-a', 'host_probe')).isError, false)
+  assert.equal(lookalike.runs('host_probe'), 1)
+  const lookalikeAccounts = (await lookalike.status())['accounts'] as {
+    policyLimits?: { state?: string; blockers?: unknown; deniedCount?: number; unsupportedScopeCount?: number }
+  }[]
+  assert.equal(lookalikeAccounts[0]?.policyLimits?.state, 'current')
+  assert.equal(lookalikeAccounts[0]?.policyLimits?.blockers, undefined,
+    'an ignored lookalike is not the registered inapplicable refusal')
+  assert.equal(lookalikeAccounts[0]?.policyLimits?.deniedCount, 1,
+    'the stated denial is counted, never enforced')
+  assert.equal(lookalikeAccounts[0]?.policyLimits?.unsupportedScopeCount, 1,
+    'the ignored key is counted, not interpreted')
+  await lookalike.dispose()
+})
+
+test('the live unregistered allow_cobalt_plinth_alkanet refusal is ignored beside a registered refusal and a known control', async () => {
+  const app = await mount({
+    policy: () => Response.json({
+      restrictions: {
+        // The incident's key: stated by the live service after this build was pinned, not in the
+        // registry, and never an alias of the registered `allow_cobalt_plinth`.
+        allow_cobalt_plinth_alkanet: { allowed: false },
+        allow_connector_file_downloads: { allowed: false },
+        require_trusted_devices: { allowed: true },
+      },
+    }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
+  // The unregistered refusal must not globally refuse Messages or tools: the request advances
+  // past the policy gate to the local transport, and the Host tool still executes.
+  assertWireReached(await app.request('session-a'))
+  assert.equal((await app.execute('session-a', 'host_probe')).isError, false)
+  assert.equal(app.runs('host_probe'), 1)
+
+  const accounts = (await app.status())['accounts'] as {
+    policyLimits?: {
+      state: string
+      blockers?: unknown
+      unsupportedScopeCount?: number
+      controlRequirements?: {
+        trustedDevices: string
+        webSearchMcpIsolation: string
+        unsupportedActiveControls: readonly string[]
+      }
+    }
+  }[]
+  const limits = accounts[0]?.policyLimits
+  assert.equal(limits?.state, 'current')
+  assert.equal(limits?.blockers, undefined, 'the unregistered key contributes no blocker')
+  assert.equal(limits?.unsupportedScopeCount, 1, 'the unregistered key is counted as an ignored scope')
+  assert.deepEqual(limits?.controlRequirements, {
+    trustedDevices: 'active',
+    webSearchMcpIsolation: 'unknown',
+    unsupportedActiveControls: ['trusted-devices'],
+  }, 'the known control stays a reported obligation, not a refusal')
+  const { readFileSync } = await import('node:fs')
+  const persisted = readFileSync(join(process.env.DSH_HOME!, 'plugins', 'subscriptions', 'claude-policy-limits.json'), 'utf8')
+  assert.ok(persisted.includes('"key":"allow_connector_file_downloads"'), 'the registered key keeps its name')
+  assert.ok(persisted.includes('"unknownKeys":1'), 'the unregistered key survives as a count')
+  assert.equal(persisted.includes('allow_cobalt_plinth_alkanet'), false, 'the unregistered key name is never stored')
+  await app.dispose()
+})
+
+test('a mixed document blocks the known web-fetch refusal and not an unrelated Host tool', async () => {
+  const app = await mount({
+    policy: () => Response.json({
+      restrictions: {
+        allow_something_new: { allowed: false },
+        allow_web_fetch: { allowed: false },
+      },
+    }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
+  assertWireReached(await app.request('session-a'))
+  const refusal = await app.executeMessage('session-a', 'web_fetch')
+  assert.ok(refusal?.includes('POLICY_LIMITS_UNSUPPORTED'), `the web-fetch refusal names its code: ${String(refusal)}`)
+  assert.ok(refusal?.includes('allow_web_fetch'), 'the registered key is named in its refusal')
+  assert.equal(app.runs('web_fetch'), 0, 'the known web-fetch capability is refused')
+  assert.equal((await app.execute('session-a', 'host_probe')).isError, false,
+    'the unregistered key does not widen the web-fetch refusal to a Host tool')
+  assert.equal(app.runs('host_probe'), 1)
+  await app.dispose()
 })
 
 test('a request that names no session is judged and starts no background owner', async () => {
@@ -818,14 +903,15 @@ test('a request that names no session is judged and starts no background owner',
   assertRefusal(await app.request(), CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED)
   assert.equal(app.policy.calls.length, 0, 'no background owner was started, so nothing was reused')
 
-  // A document that states an unknown key refuses this plugin's own model request too: the
-  // conservative answer is never read as permission, and the failure text stays silent.
-  const denied = await mount({
+  // An unregistered key the provider states is ignored for forward compatibility: it stops
+  // neither this plugin's own model request nor the one after it.
+  const ignored = await mount({
     policy: () => Response.json({ restrictions: { allow_something_new: { allowed: true } } }),
     seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  assertRefusal(await denied.request('session-1'), 'POLICY_LIMITS_UNSUPPORTED')
-  await denied.dispose()
+  assertWireReached(await ignored.request('session-1'))
+  assertWireReached(await ignored.request('session-1'))
+  await ignored.dispose()
   await app.dispose()
 })
 
@@ -859,39 +945,39 @@ test('a two-account pool does not move a refused request onto the other account'
   await app.dispose()
 })
 
-test('an unknown policy key is refused without letting its text reach a model, a log or the status', async () => {
-  // A provider-stated key is remote text: it could echo a credential, a prompt fragment or an
-  // instruction. The denial must survive, and the text must not cross any boundary this
-  // plugin owns — the model-facing tool error, the request failure or the status projection.
+test('ignored key text is absent from request failures, tool results, status and the store', async () => {
+  // Remote key text can contain secrets or instructions; ignoring its restriction must not
+  // expose that text through another output.
   const secret = 'synthetic TOKEN=do-not-echo'
   const app = await mount({
     policy: () => Response.json({ restrictions: { [secret]: { allowed: false } } }),
     seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  // The request itself is refused by the same conservative answer; the attribution its
-  // readiness recorded before that decision still judges this session's tool calls.
-  assertRefusal(await app.request('session-a'), 'POLICY_LIMITS_UNSUPPORTED')
-
-  const refusal = await app.executeMessage('session-a', 'host_probe')
-  assert.ok(refusal?.includes('unsupported_policy_key'), `the refusal names the placeholder: ${String(refusal)}`)
-  assert.ok(!refusal?.includes(secret), 'the model-facing refusal never quotes the provider key')
-  assert.equal(app.runs('host_probe'), 0, 'the unknown key still refused the call')
+  const attempted = await app.request('session-a')
+  assertWireReached(attempted)
+  assert.equal(errorChain(attempted).includes(secret), false, 'the local transport failure never quotes the key')
+  const toolResult = await app.execute('session-a', 'host_probe')
+  assert.equal(toolResult.isError, false, 'the ignored key refuses no Host tool')
+  assert.equal(JSON.stringify(toolResult).includes(secret), false, 'the tool result never quotes the key')
+  assert.equal(app.runs('host_probe'), 1)
   const status = JSON.stringify(await app.status())
   assert.ok(!status.includes(secret), 'the status projection reports a count, never the key')
+  assert.ok(status.includes('"unsupportedScopeCount":1'), 'the ignored key is reported as a nonblocking scope')
+  const { readFileSync } = await import('node:fs')
+  const persisted = readFileSync(join(process.env.DSH_HOME!, 'plugins', 'subscriptions', 'claude-policy-limits.json'), 'utf8')
+  assert.equal(persisted.includes(secret), false, 'the store never keeps the unregistered key name')
+  assert.ok(persisted.includes('"unknownKeys":1'), 'the ignored key survives as a count')
   await app.dispose()
 
-  // Under a document that states it as allowed, this plugin's own model request is refused by
-  // the same conservative answer, and the failure text is equally silent about the key.
+  // The same key stated as allowed is ignored too: the request continues and the text stays off
+  // every owned boundary, so neither value is read as a permission or as a refusal.
   const model = await mount({
     policy: () => Response.json({ restrictions: { [secret]: { allowed: true } } }),
     seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  const failure: unknown = await model.request('session-a')
-  assert.ok(failure instanceof LlmError, `the request was refused: ${String(failure)}`)
-  assert.equal(failure.code, 'POLICY_LIMITS_UNSUPPORTED')
-  const text = `${failure.message}\n${errorChain(failure)}`
-  assert.ok(!text.includes(secret), 'the request refusal never quotes the provider key')
-  assert.ok(text.includes('unsupported_policy_key'), `the refusal names the placeholder: ${text}`)
+  assertWireReached(await model.request('session-a'))
+  const modelStatus = JSON.stringify(await model.status())
+  assert.ok(!modelStatus.includes(secret), 'the status projection never quotes the provider key')
   await model.dispose()
 })
 

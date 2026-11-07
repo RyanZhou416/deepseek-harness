@@ -291,15 +291,19 @@ test('every registered key is classified, and nothing maps by name', () => {
   assert.ok(webFetch.enforcement === 'unsupported' && webFetch.operations.includes('web_fetch'))
   for (const key of POLICY_KEYS) {
     const mapping = policyKeyMapping(key)
+    assert.notEqual(mapping.enforcement, 'ignored', `${key} retains its registered mapping`)
     if (mapping.enforcement !== 'unsupported') continue
     assert.equal(mapping.operations.includes('host.tools'), false, `${key} never refuses a Host tool`)
   }
-  // An unregistered key is refused conservatively over the attributed operations.
-  const unknown = policyKeyMapping('allow_something_new')
-  assert.equal(unknown.enforcement, 'unsupported')
-  assert.deepEqual(unknown.enforcement === 'unsupported' ? unknown.operations : [], [
-    'provider.messages', 'provider.catalog_fetch', 'provider.network', 'web_fetch', 'file_transfer', 'host.tools',
-  ])
+  // An unregistered key is ignored for forward compatibility: it reaches no operation, so a key
+  // the live service adds after this build was pinned cannot globally refuse Messages or a Host
+  // tool. It is not read as an alias of a registered key either.
+  const unknown = policyKeyMapping('allow_cobalt_plinth_alkanet')
+  assert.deepEqual(unknown, {
+    enforcement: 'ignored',
+    reason: 'key is outside the pinned registry; ignored for forward compatibility',
+  })
+  assert.equal(Object.hasOwn(unknown, 'operations'), false)
 })
 
 test('one account adopts a document, answers verdicts from it, and reads single-flight', async () => {
@@ -339,6 +343,8 @@ test('one account adopts a document, answers verdicts from it, and reads single-
   assert.equal(limits.verdict('acct', 'allow_model_catalog').verdict, 'deny')
   assert.equal(limits.verdict('acct', 'allow_web_fetch').verdict, 'allow')
   assert.equal(limits.verdict('acct', 'allow_product_feedback').verdict, 'deny')
+  // The generic core verdict for an unregistered key stays unsupported; only the operation
+  // mapping ignores it, so the owner never reads the unknown value as permission.
   assert.equal(limits.verdict('acct', 'allow_something_new').verdict, 'unsupported')
 })
 
@@ -853,6 +859,118 @@ test('a restored document that states the connector file-downloads key blocks no
   )
 })
 
+test('a restored snapshot of only unregistered keys is counted and refuses nothing', async () => {
+  const path = join(stateRoot, 'unknown-only-restore.json')
+  const firstTransport = wire()
+  const first = owner(firstTransport, { persistence: new FileClaudePolicyLimitsState({ path }) }, false)
+  await first.hydrate()
+  first.bind('acct', 's1', TEST_IDENTITY)
+  firstTransport.set({
+    status: 200,
+    body: JSON.stringify({ restrictions: { allow_cobalt_plinth_alkanet: { allowed: false } } }),
+  })
+  assert.equal((await first.ensure('acct', { force: true })).outcome, 'current')
+  // Live, the unregistered key is counted and reported, and it refuses nothing: a service that
+  // adds a key after this build was pinned must not globally refuse Messages or Host tools.
+  assert.deepEqual(first.status('acct')?.blockers, [])
+  assert.deepEqual(first.status('acct')?.unsupportedScopes, [{
+    scope: 'policy-keys',
+    reason: 'the accepted policy contains unregistered restriction keys; they are counted and ignored',
+  }])
+  assert.equal(first.verdict('acct', 'allow_model_catalog').verdict, 'allow', 'the ignored key reaches no operation')
+  assert.equal(first.verdict('acct', 'allow_cobalt_plinth_alkanet').verdict, 'unsupported',
+    'the generic core verdict for an unregistered key stays unsupported')
+  await first.dispose()
+
+  // The projection keeps the count, not the key name, and the restart does not turn it into a
+  // global blocker: no fresh read is needed to restore operations the key never restricted.
+  const stored = readFileSync(path, 'utf8')
+  assert.equal(stored.includes('allow_cobalt_plinth_alkanet'), false, 'the unregistered key name is never stored')
+  assert.ok(stored.includes('"unknownKeys":1'), 'the unregistered key survives as a count')
+
+  const transport = wire()
+  const second = owner(transport, { persistence: new FileClaudePolicyLimitsState({ path }) }, false)
+  await second.hydrate()
+  assert.equal(transport.calls.length, 0, 'a restore performs no read')
+  assert.deepEqual(second.status('acct')?.blockers, [], 'the restored count is not a blocker')
+  assert.equal(second.status('acct')?.state, 'stale')
+  assert.deepEqual(second.status('acct')?.unsupportedScopes, [{
+    scope: 'policy-keys',
+    reason: 'the accepted policy contains unregistered restriction keys; they are counted and ignored',
+  }], 'the count is reported as a nonblocking scope')
+  assert.equal(second.verdict('acct', 'allow_model_catalog').verdict, 'allow', 'the stale prior is already answerable')
+  assert.equal(second.verdict('acct', 'allow_model_catalog').reason, 'no_deny_evidence')
+})
+
+test('a restored mixed document keeps its known refusal and ignores the unregistered key', async () => {
+  const path = join(stateRoot, 'unknown-mixed-restore.json')
+  const firstTransport = wire()
+  const first = owner(firstTransport, { persistence: new FileClaudePolicyLimitsState({ path }) }, false)
+  await first.hydrate()
+  first.bind('acct', 's1', TEST_IDENTITY)
+  firstTransport.set({
+    status: 200,
+    body: JSON.stringify({
+      restrictions: {
+        allow_model_catalog: { allowed: false },
+        allow_cobalt_plinth_alkanet: { allowed: false },
+      },
+    }),
+  })
+  assert.equal((await first.ensure('acct', { force: true })).outcome, 'current')
+  assert.equal(first.verdict('acct', 'allow_model_catalog').reason, 'explicit_deny')
+  await first.dispose()
+
+  // The registered refusal keeps its name; the unregistered key survives only as a count.
+  const stored = readFileSync(path, 'utf8')
+  assert.ok(stored.includes('"key":"allow_model_catalog"'), 'the registered refusal keeps its name')
+  assert.equal(stored.includes('allow_cobalt_plinth_alkanet'), false, 'the unregistered key name is never stored')
+  assert.ok(stored.includes('"unknownKeys":1'), 'the unregistered key survives as a count')
+
+  const second = owner(wire(), { persistence: new FileClaudePolicyLimitsState({ path }) }, false)
+  await second.hydrate()
+  assert.deepEqual(second.status('acct')?.blockers, [], 'the ignored key blocks nothing')
+  assert.deepEqual(second.status('acct')?.unsupportedScopes, [{
+    scope: 'policy-keys',
+    reason: 'the accepted policy contains unregistered restriction keys; they are counted and ignored',
+  }])
+  assert.equal(second.verdict('acct', 'allow_model_catalog').verdict, 'deny', 'the known refusal survives the restart')
+  assert.equal(second.verdict('acct', 'allow_model_catalog').reason, 'explicit_deny')
+})
+
+test('a confirmed read after a restore clears the ignored-key diagnostic', async () => {
+  const path = join(stateRoot, 'unknown-cleared.json')
+  const firstTransport = wire()
+  const first = owner(firstTransport, { persistence: new FileClaudePolicyLimitsState({ path }) }, false)
+  await first.hydrate()
+  first.bind('acct', 's1', TEST_IDENTITY)
+  firstTransport.set({
+    status: 200,
+    body: JSON.stringify({ restrictions: { allow_cobalt_plinth_alkanet: { allowed: false } } }),
+  })
+  await first.ensure('acct', { force: true })
+  await first.dispose()
+
+  const transport = wire()
+  const second = owner(transport, { persistence: new FileClaudePolicyLimitsState({ path }) }, false)
+  await second.hydrate()
+  assert.equal(second.status('acct')?.unsupportedScopes?.length, 1, 'the restored count is diagnosed')
+  assert.deepEqual(second.status('acct')?.blockers, [], 'the restored count blocks nothing')
+
+  // A successful replacement is what clears the obsolete count; the restore itself never needed
+  // a read to stop refusing operations.
+  second.bind('acct', 's1', TEST_IDENTITY)
+  transport.set({ status: 200, body: JSON.stringify({ restrictions: {} }) })
+  assert.equal((await second.ensure('acct', { force: true })).outcome, 'current')
+  assert.equal(second.status('acct')?.unsupportedScopes, undefined, 'a clean document clears the diagnostic')
+  assert.deepEqual(second.status('acct')?.blockers, [])
+  assert.equal(second.status('acct')?.state, 'current')
+  assert.equal(second.verdict('acct', 'allow_model_catalog').verdict, 'allow')
+  // Disposal owns the persist step the adoption started: the record is on disk when it settles.
+  await second.dispose()
+  assert.ok(readFileSync(path, 'utf8').includes('"unknownKeys":0'), 'the replacement record counts no unknown key')
+})
+
 test('an incomplete stored projection blocks the account, and the file carries no raw value', async () => {
   const path = join(stateRoot, 'blocked.json')
   const firstTransport = wire()
@@ -890,10 +1008,9 @@ test('an incomplete stored projection blocks the account, and the file carries n
   const second = owner(transport, { persistence: new FileClaudePolicyLimitsState({ path }) }, false)
   await second.hydrate()
   // A notice whose text was not stored is a display fact, not a permission: it is reported as
-  // a pending scope and refuses nothing, while the genuinely unprovable facts stay blockers.
-  assert.deepEqual(second.status('acct')?.blockers, [
-    'policy_limits_unknown_keys', 'policy_limits_core_skills_unstored',
-  ])
+  // a pending scope and refuses nothing, the unregistered key is a counted scope that refuses
+  // nothing either, and only the genuinely unprovable facts stay blockers.
+  assert.deepEqual(second.status('acct')?.blockers, ['policy_limits_core_skills_unstored'])
   assert.equal(second.status('acct')?.state, 'blocked')
   assert.equal(second.status('acct')?.notice, true)
   assert.equal(second.monitoringNotice('acct'), undefined, 'the stored record kept no notice text')
@@ -903,12 +1020,16 @@ test('an incomplete stored projection blocks the account, and the file carries n
       reason: 'the accepted policy stated a capability default this build cannot type; it is counted and never applied',
     },
     {
+      scope: 'policy-keys',
+      reason: 'the accepted policy contains unregistered restriction keys; they are counted and ignored',
+    },
+    {
       scope: 'policy-notice',
       reason: 'a monitoring notice is in force; its text was not stored, so it is shown after the next confirmed read',
     },
   ], 'what this build cannot apply is reported as a scope, never enforced')
   assert.equal(second.verdict('acct', 'allow_model_catalog').verdict, 'deny', 'a blind spot refuses rather than relaxes')
-  assert.equal(second.verdict('acct', 'allow_model_catalog').reason, 'policy_limits_unknown_keys')
+  assert.equal(second.verdict('acct', 'allow_model_catalog').reason, 'policy_limits_core_skills_unstored')
 
   // A confirmed read is the only thing that clears the blockers, and it restores the notice.
   second.bind('acct', 's1', TEST_IDENTITY)
