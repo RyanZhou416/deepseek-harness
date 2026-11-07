@@ -36,26 +36,6 @@
 #           contextWindow: 128000
 #           inputModalities: [text]
 
-# ChatGPT 子代理在创建前选择独立预设；冷恢复使用已记录的选择。
-# 预设内容仍由 DSH_HOME/.agent-presets/chatgpt-dsh/agent.cordis.yml 持有。
-- insert:
-    - id: preset-chatgpt-dsh
-      name: '@deepseek-ai/dsh-agent-preset'
-      config:
-        id: chatgpt-dsh
-        name: ChatGPT DSH 纪律模式
-        description: ChatGPT 专用工具与 DSH 纪律规则
-        plugins:
-          - id: chatgpt-dsh-contents
-            name: cordis:include
-            config:
-              path: ../../.agent-presets/chatgpt-dsh/agent.cordis.yml
-    - id: chatgpt-subagent-preset
-      name: ./chatgpt-subagent-preset.cjs
-      config:
-        preset: chatgpt-dsh
-        providers: [ codex ]
-        modelPattern: '^gpt-'
 - id: llm-subscriptions
   disabled: false
   config:

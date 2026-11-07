@@ -734,7 +734,6 @@ const PROFILE_BACKUP_FILES = [
   'pnpm-workspace.yaml',
   'compatibility.json',
   'memory-watchdog.cjs',
-  'chatgpt-subagent-preset.cjs',
   'goal-disabled.cjs',
   'memory-limits.patch.yml',
   MIGRATION_MARKER_FILE,
@@ -743,9 +742,6 @@ const PROFILE_BACKUP_FILES = [
 /** Home files the migration may rewrite or create. */
 const HOME_BACKUP_FILES = [
   SETTINGS_FILE,
-  '.agent-presets/chatgpt-dsh/agent.cordis.yml',
-  '.agent-presets/chatgpt-dsh/preset.yml',
-  '.agent-presets/chatgpt-dsh/no-escalation.cjs',
 ] as const
 
 function backupFileDestination(directory: string, entry: ProfileBackupEntry): string {

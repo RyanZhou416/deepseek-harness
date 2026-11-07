@@ -19,15 +19,11 @@ async function temporaryRoot(): Promise<string> {
 
 async function kit(root: string): Promise<string> {
   const directory = join(root, 'kit')
-  await mkdir(join(directory, 'agent-presets', 'chatgpt-dsh'), { recursive: true })
+  await mkdir(directory, { recursive: true })
   await writeFile(join(directory, 'portable-profile.patch.yml'), '- id: template\n  disabled: true\n')
   await writeFile(join(directory, 'memory-watchdog.cjs'), 'watchdog\n')
-  await writeFile(join(directory, 'chatgpt-subagent-preset.cjs'), 'preset\n')
   await writeFile(join(directory, 'goal-disabled.cjs'), 'disabled\n')
   await writeFile(join(directory, 'portable-memory-limits.patch.yml'), '- id: memory\n')
-  for (const file of ['agent.cordis.yml', 'preset.yml', 'no-escalation.cjs']) {
-    await writeFile(join(directory, 'agent-presets', 'chatgpt-dsh', file), `${file}\n`)
-  }
   return directory
 }
 
@@ -84,7 +80,6 @@ describe('portable profile seed', () => {
     expect(await readFile(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')).toContain('id: template')
     expect(await readFile(join(dshHome, 'profiles', 'web', 'memory-limits.patch.yml'), 'utf8')).toContain('id: memory')
     expect(await readFile(join(dshHome, 'profiles', 'web', 'goal-disabled.cjs'), 'utf8')).toBe('disabled\n')
-    expect(await readFile(join(dshHome, '.agent-presets', 'chatgpt-dsh', 'preset.yml'), 'utf8')).toBe('preset.yml\n')
     expect(result.copied.length).toBeGreaterThan(0)
   })
 

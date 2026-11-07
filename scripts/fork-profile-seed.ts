@@ -1,10 +1,10 @@
 /**
  * Seed a fresh Web profile from the fork's portable profile kit.
  *
- * The kit is a tracked template: `portable-profile.patch.yml`, the local
- * watchdog and ChatGPT preset plugins, and the ChatGPT preset files. It is
- * copied only when the profile is first created. An existing profile patch is
- * never overwritten; support files are added only when absent.
+ * The kit is a tracked template: `portable-profile.patch.yml` and the local
+ * watchdog, Goal-disabled and memory-limit files. It is copied only when the
+ * profile is first created. An existing profile patch is never overwritten;
+ * support files are added only when absent.
  *
  * @module scripts/fork-profile-seed
  */
@@ -18,17 +18,13 @@ const DEFAULT_KIT_ROOT = join(REPOSITORY_ROOT, 'fork-runtime', 'web')
 /** Files copied beside the profile patch. */
 const PROFILE_FILES = [
   ['memory-watchdog.cjs', 'memory-watchdog.cjs'],
-  ['chatgpt-subagent-preset.cjs', 'chatgpt-subagent-preset.cjs'],
   ['goal-disabled.cjs', 'goal-disabled.cjs'],
   ['portable-memory-limits.patch.yml', 'memory-limits.patch.yml'],
 ] as const
 
-/** Files copied into `$DSH_HOME/.agent-presets/chatgpt-dsh`. */
-const PRESET_FILES = ['agent.cordis.yml', 'preset.yml', 'no-escalation.cjs'] as const
-
 /** Options for {@link seedPortableProfile}. */
 export interface SeedOptions {
-  /** Harness home that owns `profiles/web` and `.agent-presets`. */
+  /** Harness home that owns `profiles/web`. */
   readonly dshHome: string
   /** Kit source directory; defaults to `fork-runtime/web`. */
   readonly kitRoot?: string
@@ -111,11 +107,6 @@ export async function seedPortableProfile(options: SeedOptions): Promise<SeedRes
 
   for (const [source, destination] of PROFILE_FILES) {
     await copyIfMissing(join(kitRoot, source), join(profileDirectory, destination), copied, kept)
-  }
-
-  const presetDirectory = join(options.dshHome, '.agent-presets', 'chatgpt-dsh')
-  for (const file of PRESET_FILES) {
-    await copyIfMissing(join(kitRoot, 'agent-presets', 'chatgpt-dsh', file), join(presetDirectory, file), copied, kept)
   }
 
   return {

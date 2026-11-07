@@ -285,13 +285,13 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 所有内置 base-backed profile 关闭 Goal 服务、自动续跑、模型工具与命令；Web 预设和目标栏也关闭。`goal-disabled` 准入插件阻止已排队的 Goal 轮次和收尾通知进入新模型请求，混合输入保留普通消息，旧 Goal 日志不改写。Goal 实现和历史格式仍保留，专用测试以显式 opt-in 组合继续覆盖它。
 
-部署前须在 Host 停止后同步外置 `chatgpt-dsh` 预设，禁用其 `command-goal` 与 `tool-goal` 两行。不得清空既有 Goal、会话或缓存来完成禁用。保留 `goal-round-driver/tests/disabled.spec.ts`、`apps/web/tests/goal-disabled.e2e.ts`、Web 预设组合测试和 `goal-disabled` 记录会话；合并上游时不得只关闭模型工具而恢复自动驱动。
+不得清空既有 Goal、会话或缓存来完成禁用。保留 `goal-round-driver/tests/disabled.spec.ts`、`apps/web/tests/goal-disabled.e2e.ts`、Web 预设组合测试和 `goal-disabled` 记录会话；合并上游时不得只关闭模型工具而恢复自动驱动。
 
 0.2.2-rc.1 合并里上游在 `apps/cli/tests/profiles/headless/goal-snapshot.patch.yml`、Web 预设组合与 CLI 组合中断言处插入了新的 `apply_patch`（tool-fs）与 sandbox-policy 行，fork 的 `goal-disabled` 行被夹在冲突块里重新应用：合并后必须逐一核对每份快照／CLI 组合仍带 `goal-disabled` 准入插件与其禁用的 goal 服务行，插入位置在 tool-fs `applyPatch` 与 sandbox-policy 之后，而不是只在 Web 预设里保留。**Preservation rule.** 上游再次改写这些组合时，先取上游结构，再把 `goal-disabled` 行补回同一位置；不得因为上游新增工具行就丢掉准入插件。
 
 ### Portable Web profile kit
 
-新同事的全新 `DSH_HOME` 必须由仓库内模板补齐，而不是依赖维护者机器上的 `profiles/web/cordis.patch.yml`。`fork-runtime/web/portable-profile.patch.yml` 是模板，`fork-runtime/web/memory-watchdog.cjs`、`goal-disabled.cjs`、`chatgpt-subagent-preset.cjs`、`portable-memory-limits.patch.yml` 与 `fork-runtime/web/agent-presets/chatgpt-dsh/` 是模板所需的本地文件。`scripts/fork-profile-seed.ts` 把模板写入新建或仍为空 patch 的 web profile，并在缺失时复制支持文件；已有非空用户 patch 与已有文件一律保留。`build.cmd` 与 `run.cmd` 在未设置 `DSH_HOME` 时统一使用仓库同级 `..\deepseek-harness-data`，使构建与启动指向同一个 profile。
+新同事的全新 `DSH_HOME` 必须由仓库内模板补齐，而不是依赖维护者机器上的 `profiles/web/cordis.patch.yml`。`fork-runtime/web/portable-profile.patch.yml` 是模板，`fork-runtime/web/memory-watchdog.cjs`、`goal-disabled.cjs` 与 `portable-memory-limits.patch.yml` 是模板所需的本地文件。`scripts/fork-profile-seed.ts` 把模板写入新建或仍为空 patch 的 web profile，并在缺失时复制支持文件；已有非空用户 patch 与已有文件一律保留。`build.cmd` 与 `run.cmd` 在未设置 `DSH_HOME` 时统一使用仓库同级 `..\deepseek-harness-data`，使构建与启动指向同一个 profile。
 
 模板包含插件开关（`dsh-context`、`llm-subscriptions`、`aether-shell`、`goal`/`goal-round-driver`/`command-goal`/`ui-goal` 禁用、模型 provider、locale、permission preset 等）；`DSH_HOME` 派生路径用 `!!js process.env.DSH_HOME`，AetherShell 路径可用 `AETHER_SHELL_EXE` 覆盖。API key 只保留环境变量名，不写入模板。订阅与 fork 插件包仍由 `build.cmd` 的 `fork-plugins-build.ts` 安装；模板不是 bundle 依赖清单的替代。禁用 Goal 时同时复制本地 `goal-disabled.cjs`，拦截恢复会话中排队的旧 Goal 轮次。模板的 `llm-pi-ai` 行只保留 `anthropic` provider：`cc-pool` 由 `fork-plugins-build.ts` 链接进 profile 的 `@deepseek-ai/dsh-llm-cc-pool` bundle 插入，模板不得再声明 `providers.cc-pool`，否则同一端点会有两条路由。
 
@@ -533,6 +533,8 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 **Workspace 手动排序。** 上游 0.2.2-rc.1 的会话 fork 变更让普通 fork 不再记录 `parentSession`，fork 早先“把新 fork 排在源会话之前”的放置逻辑随上游移除；保留的手工顺序只有 saved/pin/archive 三类（saved 内相对顺序不变、pin 分区在前、archive 灰显原位），父子与兄弟顺序、缺失或成环 parent 与深链仍由树派生。**Preservation rule.** 合并上游时不要把 `parentSession` 记录或 fork 前置放置加回来；手工顺序的语义以 `packages/client/ui-workspace/src/client/tree.ts` 与 `ui-workspace/tests/tree.client.spec.ts` 为准。
 
+**Profile 模板。** 上游让 `tool-subagent-control` 一并注册 `list_agents`，不再导出 `/list-agents` 子路径；模板中单独的 `tool-subagent-list-agents` 行已删除，留着会使所在预设失效、新会话无法创建。进程子代理行的 `dshHome: !!js ...` 表达式含 ` : `，必须整体加引号，否则 YAML 把它读成映射，`subagent-dsh-sdk` 拒绝该配置。种子脚本只在新建 profile 时复制模板，已有 profile 升级前须在 Host 停止后对 `profiles\web\cordis.patch.yml` 做同样两处修改。**Focused verification.** 以隔离 `DSH_HOME` 运行 `fork-plugins-build` 并启动 Web，日志无 `did not activate`，新建会话无 `agent-preset/invalid`。
+
 **UI 词典。** 上游在 0.2.2 新增了 `de`/`es`/`fr`/`ja`/`pt`/`ru` 等同级语言包；fork 新增的客户端键必须补齐到每一种随包语言，不能只补 `en`/`zh`。本次合并后 `pnpm run verify-client-ui-i18n` 通过（1290 个源码文件使用 locale-owned copy）。
 
 **Focused verification.** 本轮整合跑过：`verify-translation-pairing`（1203 对全部一致）、`verify-config-catalog`、`verify-module-graph`、`verify-doc-graphs`、`verify-tool-catalog`、`verify-cordis-api`、`verify-cordis-inspect-catalog`、`verify-client-catalog`、`verify-persistence-catalog`、`verify-persistence-formats`、`verify-persistence-changes`（66 roots / 21 records）、`verify-cordis-config`（370 个配置）、`verify-no-unknown-casts`、`verify-client-ui-i18n`、`verify-archived-agent-notes`（2781 个冻结产物）。完整构建与测试属于下一阶段。
@@ -555,7 +557,7 @@ The conversation-header subagent menu sorts each sibling level by creation time 
 
 Shipped base and Web preset delegation tools set `enableRunInForeground: false`. The tool omits the scheduling parameter and foreground output variant, defaults one-shot providers to background Jobs, and rejects explicit `run_in_background: false` before model validation or child creation. Continuable children retain their durable ids, messages and settlement notices. Preserve execution-time rejection, cancellation and Job collection; prompt-only guidance is insufficient. Workflow and Ralph keep their separate orchestration policies.
 
-The package default remains `true` for custom compositions. Deploying this policy to the existing Windows profile also requires `enableRunInForeground: false` on the external `chatgpt-dsh` preset's delegation rows. The optional [process-worker overlay](fork-runtime/web/subagent-process-background.patch.yml) changes the existing `subagent_process` row to a background Job. Apply runtime configuration only after the running Host has stopped; source changes do not update an already loaded tool. These changes do not modify Session formats or stored data.
+The package default remains `true` for custom compositions. The optional [process-worker overlay](fork-runtime/web/subagent-process-background.patch.yml) changes the existing `subagent_process` row to a background Job. Apply runtime configuration only after the running Host has stopped; source changes do not update an already loaded tool. These changes do not modify Session formats or stored data.
 
 Focused verification: `packages/subagent/tool-subagent/tests/tool-subagent.spec.ts`, model-selection tests, and the keyless `subagent-background-only` recorded-session scenario.
 
@@ -604,7 +606,7 @@ Web bundle 的 `standard`、`ptc` 与 `cordis` preset 在 Agent 工具作用域�
 
 同包的 `session` 对确切 Session id 执行 `archive`、`pin`、`unpin` 或 `rename`。`rename` 要求非空 `title`，通过 Session Controller 的 title 服务写入并返回实际存储的标题；archive 仍需对话内用户授权，运行中 Session 拒绝归档，pin/unpin 幂等。保持 action 枚举、可选 `title` 参数与输出 schema 同步；新增 rename 不能绕过 title 服务的规范化或 Session 解析。
 
-2026-10-18 合并到 0.2.1-rc.2 时，上游整体替换了 `packages/bundle/web-app/presets/{standard,ptc,cordis}.patch.yml`，三个文件中的 `tool-session-message` 行随之消失，Web 启动的工具目录对比因此报「移除 session 的 create/find/message_status/send 工具」。修复是把 `- id: tool-session-message` 与 `name: '@deepseek-ai/dsh-tool-session-message'` 两行重新插回三个 preset 的 `tool-jobs` 之后，并同步外置 `chatgpt-dsh` 预设；该包继续以 `workspace:*` 列在 web-app bundle 依赖中。**Preservation rule.** 上游以后再次改写这些 preset 文件时，必须逐行核对这三处插入，不能整文件接受上游版本。**Focused verification.** `dsh --profile web --dump-config` 输出三条 `tool-session-message`；`apps/web/tests/shipped-composition.e2e.ts` 的 `EXPECTED_TOOLS` 含 `session` 与 `session_query`（Windows 上仅 bash/pwsh 平台差异失败）；`pnpm exec tsx scripts/verify-cordis-config.ts` 报告 350 个配置通过。
+2026-10-18 合并到 0.2.1-rc.2 时，上游整体替换了 `packages/bundle/web-app/presets/{standard,ptc,cordis}.patch.yml`，三个文件中的 `tool-session-message` 行随之消失，Web 启动的工具目录对比因此报「移除 session 的 create/find/message_status/send 工具」。修复是把 `- id: tool-session-message` 与 `name: '@deepseek-ai/dsh-tool-session-message'` 两行重新插回三个 preset 的 `tool-jobs` 之后；该包继续以 `workspace:*` 列在 web-app bundle 依赖中。**Preservation rule.** 上游以后再次改写这些 preset 文件时，必须逐行核对这三处插入，不能整文件接受上游版本。**Focused verification.** `dsh --profile web --dump-config` 输出三条 `tool-session-message`；`apps/web/tests/shipped-composition.e2e.ts` 的 `EXPECTED_TOOLS` 含 `session` 与 `session_query`（Windows 上仅 bash/pwsh 平台差异失败）；`pnpm exec tsx scripts/verify-cordis-config.ts` 报告 350 个配置通过。
 
 #### Retired official Team scheduling patches
 
@@ -808,15 +810,9 @@ Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`�
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-context https://github.com/bowenliang123/dsh-context.git <tag> --squash`，再逐项重放 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` 所列行为。不得用 npm latest 直接覆盖真实 profile。
 
-### ChatGPT subagent preset
+### Retired ChatGPT preset
 
-仓内 [`fork-runtime/web/chatgpt-subagent-preset.cjs`](fork-runtime/web/chatgpt-subagent-preset.cjs) 是 `profiles\web\chatgpt-subagent-preset.cjs` 的部署源。Profile patch 必须同时插入 `preset-chatgpt-dsh`（`@deepseek-ai/dsh-agent-preset`，其 `plugins` 由 `cordis:include` 从 `../../.agent-presets/chatgpt-dsh/agent.cordis.yml` 加载）和 `chatgpt-subagent-preset`；只保留磁盘目录不会在 RC.1 注册自定义预设。选择器的 `preset`、`providers` 和 `modelPattern` 均须显式配置，缺失或非法值在激活时失败。
-
-选择器在 `subagent/child-preset` waterfall 中为 provider `codex` 或 model `^gpt-` 的新建进程内子代理选择 `chatgpt-dsh`，其他路由调用 `next()`；共享 `applyChildComposition()` 在子级插件挂载前安装目标预设并写入 `agent-preset/selected`。顶层、非 ChatGPT 与恢复的子代理不重新运行路由规则；恢复使用日志里的选择。目标预设无效时记录告警并继承父预设，不否决创建。不得在 `agent/created` 内异步重挂子级，也不得调用已移除的 `standingKeyFor()`。
-
-升级后运行 `scripts/fork-chatgpt-subagent-preset.spec.ts`、子代理定向测试与 Web 真实组合测试。真实 profile 启动后必须没有该行的激活警告，「Agent 预设」页应列出可选的 `chatgpt-dsh`，并确认内测声明确认与字号写入可持久化。2026-09-24 的 profile patch 备份位于 `diagnostics\profile-backups\pre-chatgpt-preset-registration-20260924-2200`；Session、凭据和预设正文未改动。
-
-Preset 位于 `.agent-presets\chatgpt-dsh`。`no-escalation.cjs` 从 pwsh/write/edit schema 隐藏 sandbox permission 参数，但不改变 executor；persona 正文使用必填 `prefix`。`agent.cordis.yml` 使用 `@deepseek-ai/dsh-workflow-ptc`，并保留自定义 persona、`no-escalation`、`tool-web.fetch:false`、`command-goal` 和 spawn `modelSelectionSettings:true`。
+2026-11-07 起 fork 不再提供 `chatgpt-dsh` Agent 预设及其 `chatgpt-subagent-preset` 选择器：模板、种子脚本与测试一并删除。已有 profile 升级时须在 Host 停止后删除 `profiles\web\cordis.patch.yml` 中的 `preset-chatgpt-dsh` 与 `chatgpt-subagent-preset` 两行，以及 `profiles\web\chatgpt-subagent-preset.cjs` 与 `.agent-presets\chatgpt-dsh`；`agent-preset-registry` 的 `selectedDefault` 不得指向 `chatgpt-dsh`。日志中记录了 `chatgpt-dsh` 的会话仍可阅读，但恢复运行会因预设缺失被拒绝。**Preservation rule.** 上游合并不得重新引入该预设或选择器。
 
 `bounded-subagent-provider.cjs` 仍在磁盘但没有 profile 引用。它是 dormant 历史文件；Alpha.2 的 `dsh-subagent.maxActiveSubagents` 已统一拥有 continuable child 并发限制，无需重新插入另一套 provider 包装。
 
@@ -1038,7 +1034,7 @@ corepack pnpm@10.30.2 verify
 - Host 的普通 Agent loop 仍主要运行在一个 Node event loop；process worker 是显式 one-shot 旁路，不是透明的全局多核调度。
 - 第一次不同的 broad SQLite query 仍可能同步占用一个 Host thread。
 - Watchdog 是最后一道优雅停机保护，不是 steady-state 回收机制，也不保证十小时高并发绝不退出。
-- macOS `run.command` 已具备自适应 4–16 GiB heap 与 Node reports，但不包含 Windows 外置 watchdog、safe supervisor、ChatGPT preset 或 process-worker profile；物理 macOS 冷启动仍是主机资格验证的必需步骤。
+- macOS `run.command` 已具备自适应 4–16 GiB heap 与 Node reports，但不包含 Windows 外置 watchdog、safe supervisor 或 process-worker profile；物理 macOS 冷启动仍是主机资格验证的必需步骤。
 - Process-worker SDK profile 的 stale `memory-admission` row 已删除；Alpha.2 的 Host Subagent runtime 默认把 continuable child pool 限制为 8。
 - AgentTeams 已随 fork 维护；live Lead 指令使用官方 Host Steer adapter，inactive child 使用 Host Queue adapter。每次 DSH 或 AgentTeams 上游更新都必须重新跑两条路径、退休成员和冷队长邮箱测试。
 - AgentTeams 的 append/claim/ack 仍会整份重写单个 mailbox JSONL；未读投影缓存已消除不变文件的每秒重读/解析，但超长高频写邮箱仍存在 O(N) 写放大。下一步只能在保持旧 JSONL 可读和归档历史完整的前提下优化。
