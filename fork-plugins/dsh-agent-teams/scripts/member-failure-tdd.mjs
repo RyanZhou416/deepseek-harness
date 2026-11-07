@@ -117,7 +117,15 @@ async function fixture(t, { captainStatus = 'idle', fallback, captainOffline = f
   const retryDisposers = []
   installRetry({
     logger: ctx.logger,
-    sessionProjections: { register(value) { projection = value }, stateOf() { return retryState } },
+    // 0.2.2 registration is awaited and returns the projection's disposable
+    // handle; the retry executor reads its per-Session state through it.
+    fiber: { uid: 1 },
+    sessionProjections: {
+      register(value) {
+        projection = value
+        return { uid: 'llmRetry', stateOf: () => retryState, dispose() {} }
+      },
+    },
     on(_name, listener) { retryHandler = listener; return () => {} },
     effect(setup) { retryDisposers.push(setup()) },
   })

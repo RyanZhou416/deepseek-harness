@@ -19,6 +19,18 @@ const requireTools = createRequire(import.meta.resolve('@deepseek-ai/dsh-tools')
 const requireDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
 const requireBase = createRequire(requireDsh.resolve('@deepseek-ai/dsh-base/package.json'))
 const { ToolResultPruner } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-compaction-tool-result-pruner')).href)
+// 0.2.2 separates execution from registration: `ToolRuntime` no longer takes a
+// `mode`, and the deployment default plus each presentation choice is a mounted
+// executor for its scope.
+const splitExecutors = (() => {
+  try { requireBase.resolve('@deepseek-ai/dsh-tool-executor-native'); return true } catch { return false }
+})()
+const NativeToolExecutor = splitExecutors
+  ? await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-tool-executor-native')).href)
+  : undefined
+const PtcToolExecutor = splitExecutors
+  ? await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-tool-executor-ptc')).href)
+  : undefined
 async function mountCodeRuntime(host, workspace) {
   const fibers = []
   const load = async (name, config) => {
@@ -56,8 +68,19 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   const host = new Context()
   const prompt = host.plugin(SystemPrompt, { includeHarnessIdentity: false })
   await prompt.await()
-  const tools = host.plugin(ToolRuntime, { mode: 'native' })
+  const tools = splitExecutors ? host.plugin(ToolRuntime) : host.plugin(ToolRuntime, { mode: 'native' })
   await tools.await()
+  const deploymentExecutor = splitExecutors ? host.plugin(NativeToolExecutor) : undefined
+  if (deploymentExecutor !== undefined) await deploymentExecutor.await()
+  // A scoped PTC mount is the 0.2.2 replacement for `tools.presentAs('ptc')`.
+  // Each presentation case owns a separate Agent so the deployment executor
+  // stays selected for every ordinary call in the same test.
+  const mountPtc = async agent => {
+    if (!splitExecutors) return agent.ctx.tools.presentAs('ptc')
+    const fiber = agent.ctx.plugin(PtcToolExecutor, {})
+    await fiber.await()
+    return () => fiber.dispose()
+  }
   const worker = await mountCodeRuntime(host, workspace)
   const agents = []
   const scopes = []
@@ -98,9 +121,26 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   await fiber.await()
   const assemble = agent => host.systemPrompt.assemble({ agent, scope: agent })
   const names = async agent => (await assemble(agent)).tools.map(tool => tool.name)
-  const execute = (agent, name, args = {}, signal = new AbortController().signal) => host.tools.execute({ name, arguments: args, callId: name + '-test', agent, signal })
+  // 0.2.2 dispatches complete call batches through the scope's executor; older
+  // hosts expose one call per `tools.execute`.
+  const execute = async (agent, name, args = {}, signal = new AbortController().signal) => {
+    if (!splitExecutors) return host.tools.execute({ name, arguments: args, callId: name + '-test', agent, signal })
+    const batch = await host.tools.execute({
+      calls: [{ type: 'tool-call', id: name + '-test', name, arguments: JSON.stringify(args) }],
+      agent,
+      signal,
+    })
+    return batch.results[0].result
+  }
   const captainNames = [...TEAM_TOOL_NAMES].sort()
   const header = async agent => { const assembled = await assemble(agent); return JSON.stringify({ system: renderPrompt(assembled), tools: assembled.tools }) }
+  // A dedicated Agent with the captain's identity carries one scoped PTC
+  // presentation without disturbing the deployment executor of the others.
+  const ptcCaptain = async () => {
+    const agent = createAgent(a.id)
+    host.emit('agent/session-start', { agent, source: 'resume' })
+    return { agent, restore: await mountPtc(agent) }
+  }
   const initialHeader = await header(a)
   const team = { id: 'saved', name: 'Saved', captainSessionId: a.id, createdAt: 1, members: [], tasks: [], taskSeq: 0, phase: 'staged' }
   try {
@@ -142,7 +182,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
         assert.equal(host.tools.get('agent_teams_open', legacy), undefined)
         assertCaptainProtocol(renderPrompt(await assemble(legacy)))
         for (const name of ['agent_teams_create', 'agent_teams_delete']) {
-          const result = await host.tools.execute({ name, arguments: name === 'agent_teams_create' ? { name: 'Legacy', approval: 'required' } : {}, callId: name + '-legacy', agent: legacy, signal: new AbortController().signal })
+          const result = await execute(legacy, name, name === 'agent_teams_create' ? { name: 'Legacy', approval: 'required' } : {})
           assert.equal(result.isError, false, JSON.stringify(result))
         }
         assertCaptainProtocol(renderPrompt(await assemble(legacy)))
@@ -199,31 +239,34 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       assert.deepEqual((await names(child)).sort(), [...MEMBER_TOOL_NAMES].sort())
     })
     await t.test('supported PTC presentation modes keep the operation SDK stable after status', async () => {
-      for (const mode of ['ptc', ...(!requireDsh('@deepseek-ai/dsh/package.json').version.startsWith('0.2.1') ? ['both'] : [])]) {
-        const restore = a.ctx.tools.presentAs(mode)
-        const assembly = await assemble(a)
-        const sdk = assembly.sections.find(section => section.name === 'tools:sdk').text
-        assert.doesNotMatch(sdk, /agent_teams_open/)
-        for (const name of TEAM_TOOL_NAMES) assert.ok(sdk.includes(name), name)
-        const before = await header(a)
-        const result = await host.tools.execute({ name: 'run_code', arguments: { code: 'return await tools.agent_teams_status({});', description: 'Read current team state' }, callId: 'sdk-status-' + mode, agent: a, signal: new AbortController().signal })
-        assert.equal(result.isError, false, JSON.stringify(result))
-        assert.equal(await header(a), before)
-        restore()
+      for (const mode of ['ptc']) {
+        const presentation = await ptcCaptain()
+        const presented = presentation.agent
+        try {
+          const assembly = await assemble(presented)
+          const sdk = assembly.sections.find(section => section.name === 'tools:sdk').text
+          assert.doesNotMatch(sdk, /agent_teams_open/)
+          for (const name of TEAM_TOOL_NAMES) assert.ok(sdk.includes(name), name)
+          const before = await header(presented)
+          const result = await execute(presented, 'run_code', { code: 'return await tools.agent_teams_status({});', description: 'Read current team state' })
+          assert.equal(result.isError, false, JSON.stringify(result))
+          assert.equal(await header(presented), before)
+        } finally { await presentation.restore() }
       }
     })
     await t.test('real run_code may discard status output without losing operating rules', async () => {
-      const restore = a.ctx.tools.presentAs('ptc')
+      const presentation = await ptcCaptain()
+      const presented = presentation.agent
       try {
-        const before = await header(a)
-        const result = await host.tools.execute({ name: 'run_code', arguments: { code: 'await tools.agent_teams_status({}); return "STATUS_OUTPUT_DISCARDED";', description: 'Inspect current team without returning the result' }, callId: 'discard-status-output', agent: a, signal: new AbortController().signal })
+        const before = await header(presented)
+        const result = await execute(presented, 'run_code', { code: 'await tools.agent_teams_status({}); return "STATUS_OUTPUT_DISCARDED";', description: 'Inspect current team without returning the result' })
         assert.equal(result.isError, false, JSON.stringify(result))
         assert.match(JSON.stringify(result.content), /STATUS_OUTPUT_DISCARDED/)
         assert.doesNotMatch(JSON.stringify(result.content), /attempt_id|captain protocol/)
-        assert.ok(a.session.events.some(event => event.type === 'tool/ptc-dispatch' && event.data.name === 'agent_teams_status'))
-        assertCaptainProtocol(renderPrompt(await assemble(a)))
-        assert.equal(await header(a), before)
-      } finally { restore() }
+        assert.ok(presented.session.events.some(event => event.type === 'tool/ptc-dispatch' && event.data.name === 'agent_teams_status'))
+        assertCaptainProtocol(renderPrompt(await assemble(presented)))
+        assert.equal(await header(presented), before)
+      } finally { await presentation.restore() }
     })
     await t.test('HMR removes old masks and restores persisted participants in existing scopes', async () => {
       await fiber.dispose()
@@ -248,7 +291,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       // This new Agent has no historical tool calls. Persisted work is
       // still directly addressable through the original business tools.
       assert.equal(cold.session.events.length, 0)
-      const result = await host.tools.execute({ name: 'agent_teams_status', arguments: {}, callId: 'cold-direct-status', agent: cold, signal: new AbortController().signal })
+      const result = await execute(cold, 'agent_teams_status')
       assert.equal(result.isError, false, JSON.stringify(result))
       assert.match(JSON.stringify(result.content), /Saved/)
       assertCaptainProtocol(renderPrompt(await assemble(cold)))
@@ -260,19 +303,35 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       assert.deepEqual(await names(a), captainNames)
     })
     await t.test('create, status and archive preserve the prefix in native and nested dispatch', async () => {
-      for (const nested of [false, true]) {
-        assert.equal(await header(a), initialHeader)
-        const exec = name => host.tools.execute({ name, arguments: name === 'agent_teams_create' ? { name: 'Saved', description: 'Preserve the requested goal', approval: 'required' } : {}, callId: name + '-test', agent: a, signal: new AbortController().signal, ...(nested ? { parent: {} } : {}) })
-        for (const name of ['agent_teams_create', 'agent_teams_status', 'agent_teams_delete']) {
-          const result = await exec(name)
-          assert.equal(result.isError, false, JSON.stringify(result))
-          assert.equal(await header(a), initialHeader)
-        }
-        assert.equal((await exec('agent_teams_status')).isError, true, 'Archived work is no longer an active team')
-        host.emit('agent/status', { agent: a, status: 'idle' })
-        assert.deepEqual(await names(a), captainNames)
+      const args = name => name === 'agent_teams_create'
+        ? { name: 'Saved', description: 'Preserve the requested goal', approval: 'required' }
+        : {}
+      assert.equal(await header(a), initialHeader)
+      for (const name of ['agent_teams_create', 'agent_teams_status', 'agent_teams_delete']) {
+        const result = await execute(a, name, args(name))
+        assert.equal(result.isError, false, JSON.stringify(result))
         assert.equal(await header(a), initialHeader)
       }
+      assert.equal((await execute(a, 'agent_teams_status')).isError, true, 'Archived work is no longer an active team')
+      host.emit('agent/status', { agent: a, status: 'idle' })
+      assert.deepEqual(await names(a), captainNames)
+      assert.equal(await header(a), initialHeader)
+      // Nested dispatch runs the same calls inside a program under a scoped PTC
+      // executor and must keep the fixed captain prefix as well.
+      const presentation = await ptcCaptain()
+      const presented = presentation.agent
+      try {
+        const before = await header(presented)
+        for (const name of ['agent_teams_create', 'agent_teams_status', 'agent_teams_delete']) {
+          const result = await execute(presented, 'run_code', {
+            code: `return await tools.${name}(${JSON.stringify(args(name))})`,
+            description: `Call ${name} through a program`,
+          })
+          assert.equal(result.isError, false, JSON.stringify(result))
+          assert.equal(await header(presented), before)
+        }
+        assertCaptainProtocol(renderPrompt(await assemble(presented)))
+      } finally { await presentation.restore() }
     })
     await t.test('even aggressive host result pruning cannot remove the system protocol', async () => {
       const pruner = new ToolResultPruner(new Context(), { thresholdChars: 128, headChars: 16, tailChars: 16 })

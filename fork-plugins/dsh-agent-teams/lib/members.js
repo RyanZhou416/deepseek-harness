@@ -11,12 +11,11 @@
  * which the captain reads through `agent_teams_status`.
  * @module dsh-agent-teams/members
  */
-import { installModelSelection } from '@deepseek-ai/dsh-agent';
 // Declaration merge only: makes ctx.subagents visible.
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent';
 import { createUserMessage, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { join } from 'node:path';
-import { guardSubagentCreation, startMember, usesManagedActivations, guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, startMemberWithLenientFilter, steerMemberPrompt, sessionOwnEvents } from "./harness-compat.js";
+import { applyFallbackRoute, guardSubagentCreation, installMemberModelSelection, recordMemberModelSelection, startMember, usesManagedActivations, guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, startMemberWithLenientFilter, steerMemberPrompt, sessionOwnEvents } from "./harness-compat.js";
 import { markMailboxDelivered, appendMailbox, CAPTAIN_KEY, createMessage, readRetiredMemberIds, readTeamSync, readTeam, releaseMailboxDelivery, withTeamLock, writeTeam } from "./state.js";
 import { mailboxPrompt } from "./mailbox.js";
 import { nearestLiveLead } from "./lineage.js";
@@ -609,8 +608,13 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
         // Legacy teams still need failure reporting even without a saved route.
         if (selection === undefined)
             return () => { disposeFailure(); cleanupAdmission(); };
-        const selectionRef = { current: modelSelection(selection), assembled: undefined };
-        const disposeSelection = installModelSelection(childCtx, selectionRef);
+        // A member that already failed over resumes on its saved backup route while
+        // its descriptor still names the original one. A host that owns selection
+        // starts the step from the recorded choice, so restore the saved route here.
+        const memberSelection = modelSelection(selection);
+        recordMemberModelSelection(child, memberSelection);
+        const selectionRef = { current: memberSelection, assembled: undefined };
+        const disposeSelection = installMemberModelSelection(childCtx, child, selectionRef);
         const fallback = selection.fallback;
         let switched = false;
         const disposeFallback = childCtx.on('agent/request-error', async (payload, next) => {
@@ -621,16 +625,15 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
             // explicit guard narrows that fact for the compiler.
             if (fallback !== undefined && transition.retry) {
                 switched = transition.switched;
-                selectionRef.current = transition.selection;
-                // Request recovery repeats buildRequest inside the current step; it
-                // does not re-run prompt assembly. Override that captured route too,
-                // otherwise the authorized retry would hit the failed primary again.
-                selectionRef.assembled = transition.selection;
+                // A host that fixes the step's route cannot retry it on another model;
+                // the recorded choice applies from the next step, so the failed attempt
+                // keeps its own outcome.
+                const retry = applyFallbackRoute(child, selectionRef, transition.selection);
                 await updateFallbackState(stateRoot, teamId, memberName, fallback, ctx).catch((error) => {
                     ctx.logger.warn(`agent-teams: failed to persist fallback route: ${String(error)}`);
                 });
                 ctx.logger.warn(`agent-teams: member ${child.id} switching to fallback ${fallback.provider}/${fallback.model} after ${payload.failure.code}`);
-                return { kind: 'retry' };
+                return retry;
             }
             return next();
         });

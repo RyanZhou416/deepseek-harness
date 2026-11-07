@@ -8,7 +8,7 @@
  * sendMessage instead steers a running Agent and must never carry team jobs.
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent';
+import { type Agent, type AgentOptions, type ModelSelection } from '@deepseek-ai/dsh-agent';
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm';
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session';
 import { type MemberToolFilter } from './tool-policies.ts';
@@ -84,6 +84,66 @@ export declare function onAgentReady(ctx: Context, listener: (agent: Agent, veto
 export declare function sessionOwnEvents(session: Session): readonly SessionEvent[];
 /** Install before the first request, including cold resume, with HMR cleanup. */
 export declare function installContinuableMemberSetup(ctx: Context, setup: Setup): void;
+/**
+ * Mutable route the pre-0.2.2 host loop reads inside its request hook. Hosts
+ * that own selection on the Agent keep this object inert.
+ */
+export interface MemberModelSelectionRef {
+    /** Route the next step should use; the fallback switch rewrites it. */
+    current: ModelSelection | undefined;
+    /** Route the current step captured during prompt assembly. */
+    assembled: ModelSelection | undefined;
+}
+/**
+ * Whether this Agent owns its model selection. 0.2.2 moved selection from the
+ * request hook's mutable ref to `Agent.model`: the loop captures the route
+ * before prompt assembly and rejects a request-time replacement, so a route
+ * change is recorded for the next step instead of rewriting the current one.
+ * @param agent - the member Agent to inspect.
+ * @returns whether the running host owns model selection on each Agent.
+ */
+export declare function hostOwnsModelSelection(agent: Agent): boolean;
+/**
+ * Install the member's route contributions on the running host.
+ *
+ * A host that owns selection only needs the switch notice: the route travels in
+ * the child's creation options and in recorded selections. Older hosts consume
+ * the mutable ref, so the plugin must supply every request route itself.
+ * @param ctx - the member Agent's scoped context.
+ * @param agent - the member Agent receiving route and notice contributions.
+ * @param selection - mutable route consumed by hosts without Agent-owned selection.
+ * @returns Disposer for the installed selection contributions.
+ */
+export declare function installMemberModelSelection(ctx: Context, agent: Agent, selection: MemberModelSelectionRef): () => void;
+/**
+ * Record a member route the running host would not otherwise start from.
+ *
+ * A cold resume restores the descriptor's creation route, while a member that
+ * already failed over keeps running on its saved backup route. Recording the
+ * saved choice is the only supported way to start a step there on hosts that
+ * own selection; an equal choice is skipped so no redundant `model/selection`
+ * event enters the session log.
+ * @param agent - the member Agent to route.
+ * @param selection - the member's saved route.
+ */
+export declare function recordMemberModelSelection(agent: Agent, selection: ModelSelection): void;
+/**
+ * Apply one accepted fallback route to a member whose request already failed.
+ *
+ * Hosts without Agent-owned selection rewrite the captured request route, so
+ * the recovery action retries the failed step on the backup route. From 0.2.2
+ * the loop fixes the step's route before assembly and refuses a replacement:
+ * this recovery records the backup route for the next step and declines the
+ * retry, so the failed attempt keeps its own outcome instead of repeating on
+ * the primary route.
+ * @param agent - the member Agent whose request failed.
+ * @param selection - mutable legacy route ref.
+ * @param next - the backup route to run.
+ * @returns the recovery action for hosts without Agent-owned selection.
+ */
+export declare function applyFallbackRoute(agent: Agent, selection: MemberModelSelectionRef, next: ModelSelection): {
+    kind: 'retry';
+} | undefined;
 /** Queue a distinct host-authored turn; never substitute model-message steer. */
 export declare function queueMemberPrompt(runtime: Context['subagents'], parent: Agent, childId: SessionId, content: ContentBlock[], signal: AbortSignal): Promise<MessageId>;
 /** Coordination joins the nearest step, including waking an idle/cold child. */

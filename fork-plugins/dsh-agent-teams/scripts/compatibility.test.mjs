@@ -180,7 +180,9 @@ test('doctor detects peer-only drift and a mismatched installed plugin', t => {
 })
 
 test('released target enters the download matrix and replaces the old source prediction', () => {
-  assert.equal(policy.recommendedHost, '0.2.1-rc.2')
+  assert.equal(policy.recommendedHost, '0.2.2-rc.1')
+  assert.ok(validatePolicy(policy).includes('0.2.2-rc.1'))
+  // The 0.2.1 generation stays a tested legacy target of the same package.
   assert.ok(validatePolicy(policy).includes('0.2.1-rc.2'))
   assert.ok(validatePolicy(policy).includes('0.2.0-rc.2'))
   assert.ok(!declaredHostVersions().includes('0.2.0'))

@@ -43,25 +43,37 @@ function modernRuntime() {
   return { [deliverKey]() {}, sendMessage() {} }
 }
 
-function child({ workspace = process.cwd(), effort, inherited = false } = {}) {
+/**
+ * Fake child Agent.
+ *
+ * The installed Harness owns model selection on each Agent (`Agent.model`): the
+ * loop captures the step's route before prompt assembly and rejects a
+ * request-time replacement, so a member route arrives through creation options
+ * or a recorded `model/selection`. `modelRecorded` collects the choices the
+ * plugin records.
+ */
+function child({ workspace = process.cwd(), effort, inherited = false, route = { provider: 'primary', model: 'model' } } = {}) {
   const descriptor = { type: 'subagent/descriptor', data: {
     version: 3, mode: 'continuable', provider: 'spawn', label: 'agent-teams:team:worker',
     agentProvider: 'primary', agentModel: 'model',
   } }
+  const recorded = []
   const agent = {
     id: 'member-id', status: 'idle', whenIdle: async () => {},
-    options: { provider: 'primary', model: 'model', reasoningEffort: effort },
+    options: { provider: route.provider, model: route.model, reasoningEffort: effort },
     session: { header: { cwd: workspace, parentSession: 'captain' }, ownEvents: () => inherited ? [] : [descriptor] },
+  }
+  agent.modelRecorded = recorded
+  agent.model = {
+    current: () => recorded.at(-1) ?? {
+      provider: agent.options.provider,
+      model: agent.options.model,
+      ...agent.options.reasoningEffort === undefined ? {} : { reasoningEffort: agent.options.reasoningEffort },
+    },
+    select(selection) { recorded.push({ ...selection }) },
   }
   agent.ctx = scope() // Harness 0.1.5 no longer exposes Context.agent.
   return agent
-}
-
-async function selection(agent) {
-  for (const assemble of agent.ctx.listeners.get('system-prompt/assemble') ?? []) {
-    await assemble({}, {}, async () => ({ variables: {} }))
-  }
-  return requestSelection(agent)
 }
 
 async function requestSelection(agent) {
@@ -76,6 +88,8 @@ async function requestSelection(agent) {
 await test('native SubagentRuntime keeps its receiver through FIFO delivery and retirement guard', async t => {
   const host = new Context()
   host.provide('workingDirectory', {})
+  // 0.2.2 registration is awaited and owns a disposable handle per projection.
+  host.provide('sessionProjections', { async register() { return { dispose() {} } } })
   const fiber = host.plugin(SubagentRuntime)
   t.after(() => fiber.dispose())
   await fiber.await()
@@ -179,21 +193,25 @@ await test('legacy session history excludes its inherited prefix; modern uses ow
   assert.deepEqual(sessionOwnEvents(session), [own])
 })
 
-await test('synchronous modern setup selects the first request, deduplicates events, and disposes for HMR', async () => {
+await test('synchronous modern setup routes the first step once, deduplicates events, and disposes for HMR', async () => {
   const ctx = scope({ subagents: modernRuntime() })
   const bridge = installMemberSelectionRuntime(ctx, '.agent-teams')
-  const agent = child()
+  const agent = child({ route: { provider: 'selected', model: 'selected-model' }, effort: 'high' })
   await bridge.withPending('captain', 'agent-teams:team:worker', {
     provider: 'selected', model: 'selected-model', reasoningEffort: 'high',
   }, async () => {
     ctx.emit('agent/session-start', { agent, source: 'startup' })
-    assert.equal(agent.ctx.listeners.get('agent/request').size, 1)
+    // The admission guard plus the host's switch-notice listener.
+    assert.equal(agent.ctx.listeners.get('agent/pre-step').size, 2)
     ctx.emit('agent/session-start', { agent, source: 'compact' })
-    assert.equal(agent.ctx.listeners.get('agent/request').size, 1)
-    assert.deepEqual(await selection(agent), { provider: 'selected', model: 'selected-model', reasoningEffort: 'high' })
+    assert.equal(agent.ctx.listeners.get('agent/pre-step').size, 2)
+    // Creation options already carry the resolved route, so no redundant
+    // model/selection event is recorded for a fresh member.
+    assert.deepEqual(agent.modelRecorded, [])
+    assert.deepEqual(agent.model.current(), { provider: 'selected', model: 'selected-model', reasoningEffort: 'high' })
   })
   ctx.dispose()
-  assert.equal(agent.ctx.listeners.get('agent/request').size, 0)
+  assert.equal(agent.ctx.listeners.get('agent/pre-step').size, 0)
   assert.equal(agent.ctx.listeners.get('agent/error').size, 0)
   agent.ctx.dispose()
 })
@@ -221,7 +239,7 @@ await test('setup exception blocks request instead of being swallowed by session
   installContinuableMemberSetup(ctx, () => { throw new Error('damaged durable model route') })
   const agent = child()
   ctx.emit('agent/session-start', { agent })
-  await assert.rejects(selection(agent), /member initialization failed.*damaged durable model route/)
+  await assert.rejects(() => requestSelection(agent), /member initialization failed.*damaged durable model route/)
   ctx.dispose()
   assert.equal(agent.ctx.listeners.get('agent/request').size, 0)
 })
@@ -257,22 +275,29 @@ for (const fallbackActive of [false, true]) {
     const ctx = scope({ subagents: modernRuntime() })
     t.after(() => ctx.dispose())
     installMemberSelectionRuntime(ctx, '.agent-teams')
-    const agent = child({ workspace })
+    // The descriptor restores the creation route, which is the original one
+    // even for a member that already failed over.
+    const agent = child({ workspace, effort: 'high' })
     ctx.emit('agent/session-start', { agent, source: 'resume' })
-    assert.deepEqual(await selection(agent), fallbackActive
-      ? { provider: 'backup', model: 'backup-model' }
-      : { provider: 'primary', model: 'model', reasoningEffort: 'high' })
     if (fallbackActive) {
+      // The saved backup route is recorded so the next step starts there; the
+      // backup route owns no effort of its own.
+      assert.deepEqual(agent.modelRecorded, [{ provider: 'backup', model: 'backup-model' }])
+      assert.deepEqual(agent.model.current(), { provider: 'backup', model: 'backup-model' })
       let delegated = 0
       const handler = [...agent.ctx.listeners.get('agent/request-error')][0]
       assert.equal(await handler({ agent, signal, failure: { code: 'AUTH' } }, async () => { delegated++ }), undefined)
       assert.equal(delegated, 1)
     } else {
+      assert.deepEqual(agent.modelRecorded, [])
+      assert.deepEqual(agent.model.current(), { provider: 'primary', model: 'model', reasoningEffort: 'high' })
       const handler = [...agent.ctx.listeners.get('agent/request-error')][0]
-      assert.deepEqual(await handler({ agent, signal, failure: { code: 'AUTH' } }, async () => undefined), { kind: 'retry' })
-      // Harness retries inside the SAME step, without assembling the prompt
-      // again. The accepted fallback must replace the captured request route.
-      assert.deepEqual(await requestSelection(agent), { provider: 'backup', model: 'backup-model' })
+      assert.equal(await handler({ agent, signal, failure: { code: 'AUTH' } }, async () => undefined), undefined)
+      // The loop fixes the failing step's route before assembly and refuses a
+      // request-time replacement, so the accepted fallback is recorded for the
+      // next step instead of retried inside the failed request.
+      assert.deepEqual(agent.modelRecorded, [{ provider: 'backup', model: 'backup-model' }])
+      assert.deepEqual(agent.model.current(), { provider: 'backup', model: 'backup-model' })
     }
   })
 }
@@ -413,7 +438,7 @@ await test('managed activations restore scoped persona and tools before fresh an
       ctx.emit('agent/created', { agent, source: cold ? 'resume' : 'create' })
       assert.deepEqual(installed.get('filter'), setup.toolFilter)
       assert.equal(installed.get('persona'), setup.persona)
-      assert.equal((await selection(agent)).provider, 'primary')
+      assert.equal(agent.model.current().provider, 'primary')
     }
     if (cold) await admit()
     else await bridge.withPending('captain', 'agent-teams:team:worker', { provider: 'primary', model: 'model' }, admit, setup)

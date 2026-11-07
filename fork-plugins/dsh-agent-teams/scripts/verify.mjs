@@ -1493,13 +1493,27 @@ function descriptorEvent(label, agentProvider = 'descriptor-provider', agentMode
 
 function fakeChildContext({ label, parentSessionId, cwd, agentProvider, agentModel }) {
   const listeners = new Map()
+  // The installed Harness owns model selection per Agent: the step's route is
+  // captured before assembly, so the plugin records a saved choice instead of
+  // rewriting request configuration.
+  const recorded = []
+  const route = {
+    current: () => recorded.at(-1) ?? { provider: 'captain-provider', model: 'captain-model' },
+    select: selection => { recorded.push({ ...selection }) },
+  }
   return {
     listeners,
+    recorded,
     context: {
       agent: {
+        id: label,
+        status: 'idle',
+        whenIdle: async () => {},
+        options: { provider: 'captain-provider', model: 'captain-model' },
+        model: route,
         session: {
           header: { parentSession: parentSessionId, cwd, seedLength: 0 },
-          events: [descriptorEvent(label, agentProvider, agentModel)],
+          ownEvents: () => [descriptorEvent(label, agentProvider, agentModel)],
         },
       },
       on(name, listener) {
@@ -1510,15 +1524,8 @@ function fakeChildContext({ label, parentSessionId, cwd, agentProvider, agentMod
   }
 }
 
-async function routedConfig(child) {
-  const assemble = child.listeners.get('system-prompt/assemble')
-  const request = child.listeners.get('agent/request')
-  await assemble({}, {}, async () => ({ variables: {} }))
-  return request({}, async () => ({
-    provider: 'unselected-provider',
-    model: 'unselected-model',
-    reasoningEffort: 'low',
-  }))
+function routedConfig(child) {
+  return { ...child.context.agent.model.current() }
 }
 
 let setupMemberSelection

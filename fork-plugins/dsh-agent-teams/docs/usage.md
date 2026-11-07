@@ -63,6 +63,8 @@
 
 `agent_teams_add_member` 默认不需要模型参数：成员沿用队长当前 LLM provider/model 时，会一并快照队长当前思考强度。用户明确要求某个角色使用其他模型时，可以同时传入可选的 `provider` + `model`；只覆盖 `model` 时沿用队长当前 LLM provider。provider 或 model 任一改变时，思考强度自动使用目标模型默认档；用户明确要求某个成员使用特定强度时，可以传入可选的 `reasoning_effort`（目标模型支持的档位 id，或 `"default"` 表示强制使用模型自身默认档）。插件不会为每个成员发起二次选择或弹窗。
 
+Harness `0.2.2` 起模型选择由宿主按 Agent 持有：解析出的路由随成员创建参数（descriptor 的 `agentProvider` / `agentModel` / `agentReasoningEffort`）下发，冷恢复时如果成员此前已切到 `fallback`，插件把该路由记录为成员选择再启动第一步。请求失败后接受的 `fallback` 同样写入成员选择，从下一步生效；失败的那次请求不会被改成在途重试，attempt 仍记为失败。`0.2.1-rc.2` 及更早宿主保留旧的请求路由覆盖与同一步重试。
+
 ## 配置
 
 在 profile 的 `cordis.patch.yml` 中覆盖：
