@@ -76,7 +76,7 @@ Response `200`:
 }
 ```
 
-The client builds its frpc configuration only from `tunnel`. `tunnel.user` and `tunnel.frpToken` must be sent as frpc `user` and `metadatas.frpToken`; the relay's frp server plugin rejects any other user or any other `remotePort`.
+The client builds its frpc configuration only from `tunnel`. frpc 0.71 always dials the WebSocket path `/~!frp` and has no setting to change it, so `tunnel.websocketPath` must be `/~!frp`; the client refuses any other value. `tunnel.user` and `tunnel.frpToken` must be sent as frpc `user` and `metadatas.frpToken`; the relay's frp server plugin rejects any other user or any other `remotePort`.
 
 ## `POST /password`
 

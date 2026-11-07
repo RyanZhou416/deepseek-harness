@@ -44,7 +44,7 @@ describe('frpc configuration', () => {
     expect(config).toContain('metadatas.frpToken = "user-token"')
     expect(config).toContain('auth.tokenSource.file.path = "/run/frp-shared-token"')
     expect(config).toContain('transport.protocol = "websocket"')
-    expect(config).toContain('transport.websocket.path = "/~!frp"')
+    expect(config).not.toContain('websocket.path')
     expect(config).toContain('transport.tls.enable = true')
     expect(config).toContain('transport.tls.trustedCaFile = "/run/frp-ca.crt"')
     expect(config).toContain('transport.tls.serverName = "203.0.113.10"')
@@ -81,5 +81,11 @@ describe('frpc configuration', () => {
       expect((await stat(files.sharedTokenPath)).mode & 0o777).toBe(0o600)
       expect((await stat(runDirectory)).mode & 0o777).toBe(0o700)
     }
+  })
+})
+
+describe('frpc websocket path', () => {
+  it('refuses a relay that expects a path frpc cannot dial', () => {
+    expect(() => renderFrpcConfig({ tunnel: { ...TUNNEL, websocketPath: '/custom' }, username: 'ryan', localPort: 3080, sharedTokenPath: '/t', caCertificatePath: '/c' })).toThrow(/frpc always uses/u)
   })
 })
