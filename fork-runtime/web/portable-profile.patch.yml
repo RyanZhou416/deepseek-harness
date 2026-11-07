@@ -105,7 +105,7 @@
       config:
         providerName: dsh-sdk-process-raw
         profile: sdk
-        dshHome: !!js process.env.DSH_HOME ? process.env.DSH_HOME + '/process-workers' : undefined
+        dshHome: !!js "process.env.DSH_HOME ? process.env.DSH_HOME + '/process-workers' : undefined"
         provider: deepseek-official
         model: deepseek-v4-flash
         maxTokens: 65536
@@ -309,8 +309,6 @@
         config:
           - id: tool-subagent-control
             name: '@deepseek-ai/dsh-tool-subagent-control'
-          - id: tool-subagent-list-agents
-            name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
           - id: tool-subagent
             name: '@deepseek-ai/dsh-tool-subagent'
             config:
@@ -431,8 +429,6 @@
         config:
           - id: tool-subagent-control
             name: '@deepseek-ai/dsh-tool-subagent-control'
-          - id: tool-subagent-list-agents
-            name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
           - id: tool-subagent
             name: '@deepseek-ai/dsh-tool-subagent'
             config:
@@ -558,8 +554,6 @@
         config:
           - id: tool-subagent-control
             name: '@deepseek-ai/dsh-tool-subagent-control'
-          - id: tool-subagent-list-agents
-            name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
           - id: tool-subagent
             name: '@deepseek-ai/dsh-tool-subagent'
             config:
