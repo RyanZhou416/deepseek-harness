@@ -397,7 +397,6 @@ describe('Session history and Web follow', () => {
         cursor: -1,
         retain: vi.fn(), [Symbol.dispose]: vi.fn(),
       } satisfies SessionObservation),
-      readWindow: () => Promise.resolve(undefined),
     } as never)
     const { web } = controllers(ctx, vi.fn())
     const abort = new AbortController()
@@ -498,7 +497,6 @@ describe('Session history and Web follow', () => {
     } as SessionObservation
     ctx.provide('sessionQuery', { readWindow: () => Promise.resolve(undefined),
       observeSession: () => Promise.resolve(source),
-      readWindow: () => Promise.resolve(undefined),
     } as never)
     const { web } = controllers(ctx, () => { throw new Error('activation failed') })
     const iterator = web.follow({ address: { kind: 'session', sessionId }, activate: true }, signal())
@@ -528,7 +526,6 @@ describe('Session history and Web follow', () => {
     } as SessionObservation
     ctx.provide('sessionQuery', { readWindow: () => Promise.resolve(undefined),
       observeSession: () => Promise.resolve(source),
-      readWindow: () => Promise.resolve(undefined),
     } as never)
     const activate = vi.fn()
     const { web } = controllers(ctx, activate)

@@ -36,6 +36,7 @@ function fakeAgent(ctx: Context, session: Session): Agent {
     options: {},
     session,
     inbox,
+    model: { current: () => undefined, select: () => {} },
     ctx: scope.ctx,
     get status() { return status },
     send: () => {},

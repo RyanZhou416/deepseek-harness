@@ -122,6 +122,7 @@ describe('session.list summary payload', () => {
     const everyValue = ctx.sessionProjections.snapshot(session).values
 
     const snapshot = await opening(ctx, id)
+    if (snapshot.projections === undefined) throw new Error('opening snapshot omitted its projection baseline')
     for (const key of SUMMARY_EXCLUDED_KEYS) {
       expect(snapshot.projections.values).toHaveProperty(key)
       expect(snapshot.projections.values[key as keyof typeof snapshot.projections.values])

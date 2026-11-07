@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import type { ComponentProps } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
@@ -8,6 +9,9 @@ import { LastMessageEditor } from '../src/client/chat/LastMessageEditor.tsx'
 import { UserMessageNodeView } from '../src/client/chat/MessageItem.tsx'
 import type { ChatNodeViewProps } from '../src/client/contract/slots.ts'
 import { zh } from '../src/client/locale.ts'
+
+/** Props of the shared user/steering message renderer under test. */
+type MessageViewProps = ComponentProps<typeof UserMessageNodeView>
 
 afterEach(cleanup)
 const t: ChatNodeViewProps['t'] = makeTranslate(zh, commonZh)
@@ -58,17 +62,17 @@ describe('last-message editor', () => {
       location: { kind: 'session' }, visibility: 'visible',
       data: { kind: 'user', seq: 4, time: 1000, content: [{ type: 'text', text: 'original' }], source: { kind: 'user' } },
     }
-    const props: Partial<ChatNodeViewProps<'user'>> = {
+    const props: Partial<MessageViewProps> = {
       node,
-      loadImage: async () => '', renderFactorySlot: () => null, openFile: vi.fn(),
+      loadImage: async () => '', renderFactorySlot: () => null, renderSlotChain: () => null, openFile: vi.fn(),
       editableMessageSeq: 4, editLastMessage: save, t,
     }
-    const view = render(<UserMessageNodeView {...props as ChatNodeViewProps<'user'>} />)
+    const view = render(<UserMessageNodeView {...props as MessageViewProps} />)
     fireEvent.click(screen.getByRole('button', { name: '编辑最后一条消息' }))
     expect(screen.getByRole<HTMLTextAreaElement>('textbox').value).toBe('original')
     fireEvent.click(screen.getByRole('button', { name: '取消' }))
     expect(save).not.toHaveBeenCalled()
-    view.rerender(<UserMessageNodeView {...props as ChatNodeViewProps<'user'>} editableMessageSeq={5} />)
+    view.rerender(<UserMessageNodeView {...props as MessageViewProps} editableMessageSeq={5} />)
     expect(screen.queryByRole('button', { name: '编辑最后一条消息' })).toBeNull()
   })
 })

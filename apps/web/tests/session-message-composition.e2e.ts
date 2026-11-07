@@ -1,6 +1,7 @@
 /** The shipped Web presets, not the Host global layer, own Session-addressed tools. */
 import { afterEach, expect, it } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { LlmAdapter, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
@@ -69,7 +70,7 @@ it('creates an ordinary Session in the caller workspace and starts its attribute
   ctx.permissionPresets.set(caller.session, 'read-only')
   const settled = scaffold.whenTurnSettled()
 
-  const result = await ctx.tools.execute({
+  const result = await executeModelToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId('session-create-web-task'),
     name: 'session',

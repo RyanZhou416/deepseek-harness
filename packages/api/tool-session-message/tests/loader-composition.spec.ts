@@ -16,6 +16,8 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as ToolSessionMessage from '../src/index.ts'
+import { executeModelTool } from './execute-call.ts'
+import { projectionRegistryFixture, toolExecutorFixture } from './host-services.ts'
 
 let root: string | undefined
 let context: Context | undefined
@@ -33,9 +35,11 @@ describe('tool-session-message through a real Loader composition', () => {
     const configPath = join(root, 'cordis.yml')
     await writeFile(configPath, [
       "- name: '@deepseek-ai/dsh-session'",
+      '- name: fixture-session-projections',
       "- name: '@deepseek-ai/dsh-agent'",
       "- name: '@deepseek-ai/dsh-system-prompt'",
       "- name: '@deepseek-ai/dsh-tools'",
+      '- name: fixture-tool-executor',
       '- name: fixture-session-controller',
       '- name: fixture-session-reference',
       '- name: fixture-session-query',
@@ -59,6 +63,8 @@ describe('tool-session-message through a real Loader composition', () => {
           case '@deepseek-ai/dsh-system-prompt': return { default: SystemPrompt }
           case '@deepseek-ai/dsh-tools': return { default: ToolRuntime }
           case '@deepseek-ai/dsh-tool-session-message': return ToolSessionMessage
+          case 'fixture-session-projections': return projectionRegistryFixture
+          case 'fixture-tool-executor': return toolExecutorFixture
           case 'fixture-session-controller':
             return {
               name: 'fixture-session-controller',
@@ -142,7 +148,7 @@ describe('tool-session-message through a real Loader composition', () => {
     await context.agents.register(sender)
     await context.agents.register(target)
 
-    const result = await context.tools.execute({
+    const result = await executeModelTool(context, {
       signal: new AbortController().signal,
       callId: ToolCallId('loader-session-message'),
       name: 'session',

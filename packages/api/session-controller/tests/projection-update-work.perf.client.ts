@@ -53,9 +53,9 @@ export async function measureProjectionUpdateWork(sessions: ClientSessions, afte
       const sessionId = ids[index % PROJECTION_WORKLOAD.activeSessions] as SessionId
       const seq = index + 1
       const title = `Synthetic update ${seq}`
-      sessions.handleControlFrame({ type: 'projection', sessionId, key: 'title', value: title, seq })
+      sessions.handleControlFrame({ type: 'projection', sessionId, seq, changes: [{ key: 'title', val: title }] })
       await publish()
-      sessions.handleControlFrame({ type: 'projection', sessionId, key: 'title', value: 'Ignored replay', seq })
+      sessions.handleControlFrame({ type: 'projection', sessionId, seq, changes: [{ key: 'title', val: 'Ignored replay' }] })
       await publish()
       if (sessions.list.getSnapshot().byId[sessionId]?.title !== title) {
         throw new Error('accepted projection was lost during replay')

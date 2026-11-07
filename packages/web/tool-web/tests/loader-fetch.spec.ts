@@ -7,11 +7,14 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import * as systemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as tools from '@deepseek-ai/dsh-tools'
 import * as web from '@deepseek-ai/dsh-web'
 import * as fetchHttp from '@deepseek-ai/dsh-web-fetch-http'
 import * as toolWeb from '@deepseek-ai/dsh-tool-web'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { SessionId } from '@deepseek-ai/dsh-session'
 
 let context: Context | undefined
 let server: Server | undefined
@@ -68,9 +71,19 @@ describe('web_fetch real Loader composition', () => {
     })
     await ctx.loader.await()
 
-    const call = (id: string, url: string) => ctx.tools.execute({
-      name: 'web_fetch', callId: ToolCallId(id), arguments: { url }, signal: new AbortController().signal,
-    })
+    // web_fetch is a conditional registration, so each call needs its step admission.
+    const agent = { id: SessionId('tool-web-loader-fetch') } as Agent
+    const call = async (id: string, url: string) => {
+      const signal = new AbortController().signal
+      const toolSet = await ctx.tools.resolve({ agent, modelSelection: { provider: 'test', model: 'test' }, signal })
+      try {
+        return await executeToolFixture(ctx, {
+          agent, toolSet, name: 'web_fetch', callId: ToolCallId(id), arguments: { url }, signal,
+        })
+      } finally {
+        toolSet.dispose()
+      }
+    }
     const result = await call('fetch-loopback', url)
     expect(result.isError).toBe(false)
     const text = result.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')

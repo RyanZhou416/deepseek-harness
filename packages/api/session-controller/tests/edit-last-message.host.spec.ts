@@ -236,7 +236,7 @@ describe('editing the latest user message', () => {
     expect(adapter.requests[1]!.messages.filter(entry => entry.role === 'user').flatMap(entry => entry.content))
       .toEqual([{ type: 'text', text: 'revised question' }, { type: 'text', text: 'newer steering' }])
     const newer = userEvents(source.session).find(event => event.data.content.some(block => block.type === 'text' && block.text === 'newer steering'))!
-    expect(ctx.sessionProjections.stateOf(source.session, 'userInput')?.latest?.seq).toBe(newer.seq)
+    expect(ctx.agents.userInputOf(source.session).latest?.seq).toBe(newer.seq)
     expect((await remote.editLastMessage(edit(userEvents(source.session).at(-1)!.seq, 'stale revision', 'revision-2'))).ok).toBe(false)
   })
 

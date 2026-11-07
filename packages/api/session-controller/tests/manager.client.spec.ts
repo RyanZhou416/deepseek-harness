@@ -674,7 +674,7 @@ describe('on-demand exact projections', () => {
 
   it('does not read when the opening already served an exact cut', async ({ mock, remote, start }) => {
     mock.stream(FOLLOW, followScript(ok({
-      records: [], hasMore: false, projections: { asOfSeq: 4, values: { title: 'from opening' } },
+      cursor: 4, records: [], hasMore: false, projections: { asOfSeq: 4, values: { title: 'from opening' } },
     })))
     const client = await start()
     const manager = new SessionManager(client.ctx.remote)

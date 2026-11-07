@@ -12,6 +12,9 @@ const STATS: SessionStatsProjection = {
   ttftSteps: 8,
   decodeMs: 300_000,
   decodeTokens: 60_000,
+  lastTurnSpeedTurn: 10,
+  lastTurnSpeedDecodeMs: 300_000,
+  lastTurnSpeedDecodeTokens: 60_000,
 }
 
 const USAGE: TokenUsageProjection = {

@@ -1106,12 +1106,12 @@ describe('SessionProjectionRegistry wire key enumeration', () => {
 
   it('counts one shared key once while any registrant of it remains', async () => {
     const { ctx } = await harness()
-    const first = ctx.sessionProjections.register(marksUnit())
-    const second = ctx.sessionProjections.register(marksUnit())
+    const first = await ctx.sessionProjections.register(marksUnit())
+    const second = await ctx.sessionProjections.register(marksUnit())
     expect(ctx.sessionProjections.wireKeys()).toEqual(['test/marks'])
-    first()
+    await first.dispose()
     expect(ctx.sessionProjections.wireKeys()).toEqual(['test/marks'])
-    second()
+    await second.dispose()
     expect(ctx.sessionProjections.wireKeys()).toEqual([])
   })
 

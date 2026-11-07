@@ -4,7 +4,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { MessageId, ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import {
@@ -14,7 +14,9 @@ import {
 import { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import PermissionPresetService from '@deepseek-ai/dsh-permission-presets'
 import type SessionReferenceResolver from '@deepseek-ai/dsh-session-reference'
-import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
+import type { SessionObservation, SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
+import { executeModelTool } from './execute-call.ts'
+import { projectionRegistryFixture, toolExecutorFixture } from './host-services.ts'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import * as tool from '../src/index.ts'
 import type { SessionCreateModelOverride } from '@deepseek-ai/dsh-agent-default-model'
@@ -27,6 +29,25 @@ afterEach(async () => {
   await context?.fiber.dispose()
   context = undefined
 })
+
+/**
+ * Wrap a header and event log in the observation lease the query service hands out.
+ * @param header - Session header the status query reads.
+ * @param events - contiguous events at the reported cursor.
+ * @returns the synthetic observation for the mocked query.
+ */
+function observationOf(header: SessionHeader, events: readonly SessionEvent[]): SessionObservation {
+  const observation: SessionObservation = {
+    source: 'live',
+    header,
+    inheritedEventCount: SessionLogOffset(0),
+    events,
+    cursor: events.length === 0 ? -1 : events[events.length - 1]!.seq,
+    retain: () => observation,
+    [Symbol.dispose]() {},
+  }
+  return observation
+}
 
 function makeAgent(ctx: Context, id: string, cwd?: string, origin?: 'subagent'): Agent {
   const session = ctx.sessions.create(SessionId(id), {
@@ -57,11 +78,13 @@ async function setup(sessionCreateOverride?: SessionCreateModelOverride) {
   const ctx = new Context()
   context = ctx
   await ctx.plugin(SessionStore)
+  await ctx.plugin(projectionRegistryFixture)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(toolExecutorFixture)
   const resolveAgent = vi.fn<SessionController['resolveAgent']>()
-  const inspect = vi.fn<SessionController['inspect']>()
+  const observeSession = vi.fn<SessionQueryEngine['observeSession']>()
   const create = vi.fn<SessionController['create']>()
   const rename = vi.fn<SessionController['rename']>()
   const selectModel = vi.fn(async (request: {
@@ -78,7 +101,7 @@ async function setup(sessionCreateOverride?: SessionCreateModelOverride) {
     },
   }))
   const sessionController = Object.assign(Object.create(SessionController.prototype) as SessionController, {
-    inspect, resolveAgent, create, rename, selectModel,
+    resolveAgent, create, rename, selectModel,
   })
   ctx.provide('sessionController', sessionController)
   const currentSelection = vi.fn().mockReturnValue({ provider: 'test-provider', model: 'test-model' })
@@ -110,7 +133,7 @@ async function setup(sessionCreateOverride?: SessionCreateModelOverride) {
   const listCandidates = vi.fn<SessionReferenceResolver['listCandidates']>()
   ctx.provide('sessionReferenceResolver', { listCandidates } as unknown as SessionReferenceResolver)
   const listSessions = vi.fn<SessionQueryEngine['listSessions']>().mockResolvedValue([])
-  ctx.provide('sessionQuery', { listSessions } as unknown as SessionQueryEngine)
+  ctx.provide('sessionQuery', { listSessions, observeSession } as unknown as SessionQueryEngine)
   const pinnedState: { ids: SessionId[] } = { ids: [] }
   const pinSession = vi.fn(async (id: SessionId) => {
     pinnedState.ids = [id, ...pinnedState.ids.filter(candidate => candidate !== id)]
@@ -131,13 +154,13 @@ async function setup(sessionCreateOverride?: SessionCreateModelOverride) {
   ctx.provide('workspaceRegistry', workspaceRegistry as never)
   const fiber = await ctx.plugin(tool)
   return {
-    ctx, fiber, inspect, listCandidates, listSessions, resolveAgent, create, rename, selectModel, currentSelection,
+    ctx, fiber, observeSession, listCandidates, listSessions, resolveAgent, create, rename, selectModel, currentSelection,
     permissions: { current, resolve, set }, workspace: { archiveSession, pinSession, unpinSession, pinnedState, archivedState },
   }
 }
 
 function execute(ctx: Context, args: unknown, agent?: Agent, signal = new AbortController().signal) {
-  return ctx.tools.execute({
+  return executeModelTool(ctx, {
     signal,
     callId: ToolCallId(`session-message-${String(++nextCall)}`),
     name: 'session',
@@ -147,7 +170,7 @@ function execute(ctx: Context, args: unknown, agent?: Agent, signal = new AbortC
 }
 
 function createSession(ctx: Context, args: unknown, agent?: Agent, signal = new AbortController().signal) {
-  return ctx.tools.execute({
+  return executeModelTool(ctx, {
     signal,
     callId: ToolCallId(`session-create-${String(++nextCall)}`),
     name: 'session',
@@ -163,7 +186,7 @@ function runSessionTool(
   agent?: Agent,
   signal = new AbortController().signal,
 ) {
-  return ctx.tools.execute({
+  return executeModelTool(ctx, {
     signal,
     callId: ToolCallId(`session-tool-${String(++nextCall)}`),
     name,
@@ -422,7 +445,7 @@ describe('dsh-tool-session-message', () => {
     const signal = new AbortController().signal
 
     workspace.archivedState.ids.push(SessionId('matched-session'))
-    const result = await ctx.tools.execute({
+    const result = await executeModelTool(ctx, {
       signal,
       callId: ToolCallId('find-session'),
       name: 'session_query',
@@ -445,17 +468,13 @@ describe('dsh-tool-session-message', () => {
   })
 
   it('queries one exact Session status without activating it', async () => {
-    const { ctx, inspect, listSessions, workspace } = await setup()
+    const { ctx, observeSession, listSessions, workspace } = await setup()
     const caller = makeAgent(ctx, 'status-query-caller', '/workspace')
     const target = makeAgent(ctx, 'status-query-target', '/workspace')
     await ctx.agents.register(caller)
     await ctx.agents.register(target)
-    inspect.mockResolvedValue({
-      meta: target.session.header,
-      inheritedEventCount: SessionLogOffset(0),
-      events: [],
-    })
-    const query = () => ctx.tools.execute({
+    observeSession.mockResolvedValue(observationOf(target.session.header, []))
+    const query = () => executeModelTool(ctx, {
       signal: new AbortController().signal,
       callId: ToolCallId(`status-${String(++nextCall)}`),
       name: 'session_query',
@@ -467,7 +486,7 @@ describe('dsh-tool-session-message', () => {
     expect(idle.isError).toBe(false)
     expect(resultText(idle)).toContain('status: idle')
     expect(resultText(idle)).toContain('archived false')
-    expect(inspect).toHaveBeenCalled()
+    expect(observeSession).toHaveBeenCalledWith(target.id, expect.objectContaining({ projectionMode: 'none' }))
     expect(listSessions).not.toHaveBeenCalled()
 
     workspace.archivedState.ids.push(target.id)
@@ -481,7 +500,7 @@ describe('dsh-tool-session-message', () => {
     const { ctx, listCandidates } = await setup()
     const caller = makeAgent(ctx, 'finder-validation', '/workspace')
     const unregister = await ctx.agents.register(caller)
-    const find = (query: string, signal = new AbortController().signal) => ctx.tools.execute({
+    const find = (query: string, signal = new AbortController().signal) => executeModelTool(ctx, {
       signal,
       callId: ToolCallId(`find-validation-${String(++nextCall)}`),
       name: 'session_query',
@@ -540,8 +559,7 @@ describe('dsh-tool-session-message', () => {
     context = ctx
     await mountAgentLoopTestDependencies(ctx)
     const resolveAgent = vi.fn<SessionController['resolveAgent']>()
-    const inspect = vi.fn<SessionController['inspect']>()
-    ctx.provide('sessionController', { inspect, resolveAgent } as unknown as SessionController)
+    ctx.provide('sessionController', { resolveAgent } as unknown as SessionController)
     ctx.provide('sessionReferenceResolver', {
       listCandidates: vi.fn<SessionReferenceResolver['listCandidates']>(),
     } as unknown as SessionReferenceResolver)
@@ -702,7 +720,7 @@ describe('dsh-tool-session-message', () => {
   })
 
   it('reports pending-context terminal blocking without waking the target', async () => {
-    const { ctx, inspect } = await setup()
+    const { ctx, observeSession } = await setup()
     const caller = makeAgent(ctx, 'status-caller', '/caller')
     const target = makeAgent(ctx, 'status-target', '/target')
     Object.assign(target, { status: 'running' })
@@ -726,13 +744,9 @@ describe('dsh-tool-session-message', () => {
         data: { target: 'next-step', start: 0, inserted: [tracked] },
       },
     ] as SessionEvent[]
-    inspect.mockResolvedValueOnce({
-      meta: target.session.header,
-      inheritedEventCount: SessionLogOffset(0),
-      events,
-    })
+    observeSession.mockResolvedValueOnce(observationOf(target.session.header, events))
 
-    const result = await ctx.tools.execute({
+    const result = await executeModelTool(ctx, {
       signal: new AbortController().signal,
       callId: ToolCallId('status-call'),
       name: 'session_query',
@@ -746,15 +760,11 @@ describe('dsh-tool-session-message', () => {
   })
 
   it('validates status identity and reports an offline unknown pair', async () => {
-    const { ctx, inspect } = await setup()
+    const { ctx, observeSession } = await setup()
     const caller = makeAgent(ctx, 'status-validation-caller', '/caller')
     const unregister = await ctx.agents.register(caller)
-    inspect.mockResolvedValue({
-      meta: caller.session.header,
-      inheritedEventCount: SessionLogOffset(0),
-      events: [],
-    })
-    const status = (args: unknown, signal = new AbortController().signal) => ctx.tools.execute({
+    observeSession.mockResolvedValue(observationOf(caller.session.header, []))
+    const status = (args: unknown, signal = new AbortController().signal) => executeModelTool(ctx, {
       signal,
       callId: ToolCallId(`status-validation-${String(++nextCall)}`),
       name: 'session_query',
