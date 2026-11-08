@@ -438,6 +438,44 @@ describe('Remote stream mux server compression', () => {
     await once(client, 'close')
   })
 
+  it('compresses every frame at or above a lowered threshold', async () => {
+    const entry = await startMux(async (_endpoint, _payload, uplink) => echoUplink(uplink), 2_000, 262_144, true, undefined, 0)
+    const client = await connect(entry.url)
+    const writer = acceptedSocket(entry.mux) as {
+      send(data: string, options: { compress?: boolean }, callback: (error?: Error) => void): void
+    }
+    const sending = vi.spyOn(writer, 'send')
+    const frames = collectFrames(client)
+    client.send(openFrame('small'))
+    client.send(itemFrame('small', 'tiny'))
+    await vi.waitFor(() => {
+      expect(frames).toContainEqual({ type: 'item', streamId: 'small', value: 'tiny' })
+    })
+    expect(sending.mock.calls.find(([data]) => data.includes('"tiny"'))?.[1]).toEqual({ compress: true })
+    sending.mockRestore()
+    client.close()
+    await once(client, 'close')
+  })
+
+  it('never compresses on a server with compression disabled, whatever the threshold', async () => {
+    const entry = await startMux(async (_endpoint, _payload, uplink) => echoUplink(uplink), 2_000, 262_144, false, undefined, 0)
+    const client = await connect(entry.url)
+    const writer = acceptedSocket(entry.mux) as {
+      send(data: string, options: { compress?: boolean }, callback: (error?: Error) => void): void
+    }
+    const sending = vi.spyOn(writer, 'send')
+    const frames = collectFrames(client)
+    client.send(openFrame('plain'))
+    client.send(itemFrame('plain', 'tiny'))
+    await vi.waitFor(() => {
+      expect(frames).toContainEqual({ type: 'item', streamId: 'plain', value: 'tiny' })
+    })
+    expect(sending.mock.calls.find(([data]) => data.includes('"tiny"'))?.[1]).toEqual({ compress: false })
+    sending.mockRestore()
+    client.close()
+    await once(client, 'close')
+  })
+
   it('keeps a socket alive while compressed frames are written without a Pong', { timeout: 20_000 }, async () => {
     const stop = Promise.withResolvers<undefined>()
     // A 500 ms interval leaves a 1 s activity window, so thread-pool deflate
@@ -754,12 +792,14 @@ async function startMux(
   streamInboxBytes = 262_144,
   compression = true,
   peer?: PeerScope,
+  compressionThreshold = 1_024,
 ): Promise<RunningMux> {
   const admitted = peer ?? await fixturePeer()
   const mux = new RemoteStreamMuxServer(open, mapFailure, {
     heartbeatIntervalMs,
     streamInboxBytes,
     compression,
+    compressionThreshold,
   })
   const http = createServer()
   http.on('upgrade', (request, socket, head) => { mux.handleUpgrade(request, socket, head, admitted) })

@@ -148,6 +148,8 @@ type ConnectionRpcError = Extract<ConnectionRpcResult, { readonly ok: false }>['
 const NEVER_ABORTED_SIGNAL = new AbortController().signal
 const DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 2_000
 const DEFAULT_STREAM_INBOX_BYTES = 262_144
+/** Frames below 1 KiB stay uncompressed unless a deployment lowers the threshold. */
+const DEFAULT_WEBSOCKET_COMPRESSION_THRESHOLD = 1024
 const EMPTY_ASYNC_ITERABLE: AsyncIterable<never> = {
   [Symbol.asyncIterator]: () => ({ next: () => Promise.resolve({ value: undefined, done: true }) }),
 }
@@ -162,12 +164,19 @@ export interface Config {
   readonly streamInboxBytes?: number
   /** Per-message compression for the Remote stream WebSocket; `'none'` disables the extension. @default 'deflate' */
   readonly websocketCompression?: 'none' | 'deflate'
+  /**
+   * Shortest outbound frame, in JSON text characters, the Host compresses when
+   * `websocketCompression` is `'deflate'`. Context takeover lets even small
+   * frames such as Assistant chunks compress to a few bytes. @default 1024
+   */
+  readonly websocketCompressionThreshold?: number
 }
 
 interface ResolvedConfig extends Config {
   readonly websocketHeartbeatIntervalMs: number
   readonly streamInboxBytes: number
   readonly websocketCompression: 'none' | 'deflate'
+  readonly websocketCompressionThreshold: number
 }
 
 /**
@@ -218,6 +227,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
       .default(DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS),
     streamInboxBytes: z.number().step(1).min(1).default(DEFAULT_STREAM_INBOX_BYTES),
     websocketCompression: z.union([z.const('none'), z.const('deflate')]).default('deflate'),
+    websocketCompressionThreshold: z.natural().default(DEFAULT_WEBSOCKET_COMPRESSION_THRESHOLD),
   })
 
   /** Carrier adapter shared by the WebSocket mux and local Host transports. */
@@ -262,6 +272,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
             heartbeatIntervalMs: resolved.websocketHeartbeatIntervalMs,
             streamInboxBytes: resolved.streamInboxBytes,
             compression: resolved.websocketCompression === 'deflate',
+            compressionThreshold: resolved.websocketCompressionThreshold,
           },
         )
         const releases = new Set<Promise<void>>()

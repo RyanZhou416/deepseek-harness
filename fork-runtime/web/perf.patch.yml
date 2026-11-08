@@ -16,8 +16,9 @@
     pollIntervalMs: 3600000
 
 # Catalog hints for unopened Sessions. Each key below is read only by a surface
-# of the opened Session (chat, composer, context meter), which receives complete
-# control/follow projections and on-demand `session.projections` reads. Keys the
+# of the opened Session (chat, composer, context meter), which receives them on
+# its follow stream (`projectionChanges`) and through on-demand
+# `session.projections` reads; the control stream omits them like the list. Keys the
 # list reads stay in the hints and are not excluded: `title`,
 # `sessionListMetadata`, `agentPreset`, `subagent`, `subagentCatalog`,
 # `subagentTiming`, and `tokenUsage` (subagent header rows of unopened children).
@@ -45,3 +46,12 @@
       - permissions
       - modelSelection
       - imageLimits
+
+# Compress every Remote stream frame. `permessage-deflate` keeps its window
+# across frames, so a ~290-byte Assistant chunk frame costs a few bytes on the
+# wire instead of going out raw below the 1 KiB default: one 4,000-character
+# streamed reply measured 320 KB on the wire at the default and about 17 KB
+# here, which matters on a relay link.
+- id: typert-gateway
+  config:
+    websocketCompressionThreshold: 0

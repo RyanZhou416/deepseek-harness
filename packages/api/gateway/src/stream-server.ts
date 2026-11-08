@@ -90,6 +90,8 @@ export interface RemoteStreamMuxServerOptions {
   readonly streamInboxBytes: number
   /** Whether accepted connections negotiate the `permessage-deflate` extension. */
   readonly compression: boolean
+  /** Shortest outbound frame, in JSON text characters, compressed on a connection that negotiated the extension. */
+  readonly compressionThreshold: number
 }
 
 /** Own the no-server WebSocket acceptor and every active logical stream. */
@@ -98,6 +100,7 @@ export class RemoteStreamMuxServer {
   private readonly heartbeatIntervalMs: number
   private readonly streamInboxBytes: number
   private readonly compression: boolean
+  private readonly compressionThreshold: number
   private readonly connections = new Set<Promise<void>>()
   private readonly heartbeats = new WeakMap<WebSocket, HeartbeatState>()
   private heartbeatTimer: NodeJS.Timeout | undefined
@@ -115,6 +118,7 @@ export class RemoteStreamMuxServer {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs
     this.streamInboxBytes = options.streamInboxBytes
     this.compression = options.compression
+    this.compressionThreshold = options.compressionThreshold
     this.server = new WebSocketServer({
       noServer: true,
       // `ws` ignores its own `threshold` option while context takeover is
@@ -145,7 +149,7 @@ export class RemoteStreamMuxServer {
       const bound: BoundStreamOpener = (endpoint, payload, uplink, control, window) =>
         this.open(endpoint, payload, uplink, peer, control, window)
       const connection = new RemoteStreamMuxConnection(
-        websocket, bound, this.failure, this.streamInboxBytes, this.compression, alive,
+        websocket, bound, this.failure, this.streamInboxBytes, this.compression ? this.compressionThreshold : undefined, alive,
       )
       const done = connection.run().catch((error: unknown) => {
         console.error('[api-gateway] Remote stream connection failed:', error)
@@ -228,7 +232,8 @@ class RemoteStreamMuxConnection {
     private readonly open: BoundStreamOpener,
     private readonly failure: RemoteStreamFailureMapper,
     private readonly streamInboxBytes: number,
-    private readonly compression: boolean,
+    /** Shortest frame compressed, or undefined when the server does not compress. */
+    private readonly compressionThreshold: number | undefined,
     private readonly alive: () => void,
   ) {}
 
@@ -389,7 +394,7 @@ class RemoteStreamMuxConnection {
       }
       let queued = false
       this.socket.send(text, {
-        compress: this.compression && text.length >= 1024,
+        compress: this.compressionThreshold !== undefined && text.length >= this.compressionThreshold,
       }, (error) => {
         if (error) {
           reject(error)

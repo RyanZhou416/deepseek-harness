@@ -4334,7 +4334,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'subscribe(listener: (enabled: boolean) => void): () => void',
-        description: 'Observe switch changes.',
+        description: 'Observe switch changes. The registration is an effect on the calling context\'s fiber, so it ends with that fiber.',
         parameters: [{ name: 'listener', description: 'called with the new state after a live configuration update changes it.' }],
         returns: 'disposer removing the listener; safe to call more than once.',
       },

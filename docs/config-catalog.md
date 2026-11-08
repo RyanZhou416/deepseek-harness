@@ -215,7 +215,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-gateway`
 
 - `inject`: `typert` · `remoteAccess`
-- `source`: [`packages/api/gateway/src/index.ts:158`](../packages/api/gateway/src/index.ts)
+- `source`: [`packages/api/gateway/src/index.ts:160`](../packages/api/gateway/src/index.ts)
 
 ```ts config-catalog
 /** Gateway transport configuration. */
@@ -226,6 +226,12 @@ export interface Config {
   readonly streamInboxBytes?: number
   /** Per-message compression for the Remote stream WebSocket; `'none'` disables the extension. @default 'deflate' */
   readonly websocketCompression?: 'none' | 'deflate'
+  /**
+   * Shortest outbound frame, in JSON text characters, the Host compresses when
+   * `websocketCompression` is `'deflate'`. Context takeover lets even small
+   * frames such as Assistant chunks compress to a few bytes. @default 1024
+   */
+  readonly websocketCompressionThreshold?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-gateway -->

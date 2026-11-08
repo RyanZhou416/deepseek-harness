@@ -2017,3 +2017,11 @@ The Host-wide `session/control` stream carries only Session summary keys (`sessi
 **Preservation rule.** Do not put detail keys back on the control stream or make a control block a whole-log cut. A new detail consumer for Sessions the client has not opened reads them on demand (as the dsh-context agent tree does through its head request), not through control.
 
 **Focused verification.** `node_modules/.bin/vitest run packages/api/session-controller` (`carries only summary keys on the control stream, minus deployment exclusions`, `streams every changed key to a follower that opts into projection changes`, `keeps an opened Session current from its follow projection frames and ends exactness when it closes`, `ends an earlier exact cut when a later opening serves no block`, `publishes opted-in projection changes after the opening snapshot`).
+
+### Compressed Remote stream frames
+
+`@deepseek-ai/dsh-api-gateway` has a `websocketCompressionThreshold` config field (default 1,024 JSON characters, the upstream behavior). [perf.patch.yml](fork-runtime/web/perf.patch.yml) sets it to `0` on the `typert-gateway` row, so every downlink frame is deflated with context takeover. Assistant chunk frames are about 290 bytes each and previously went out raw; one streamed 4,000-character reply measured 327 KB of WebSocket bytes at the default and 45 KB with the overlay.
+
+**Preservation rule.** Keep the threshold configurable in the gateway and the fork overlay at `0`; do not move the per-frame decision back into `ws`'s own `threshold` option, which `ws` ignores under context takeover.
+
+**Focused verification.** `node_modules/.bin/vitest run packages/api/gateway` (`compresses every frame at or above a lowered threshold`, `never compresses on a server with compression disabled, whatever the threshold`, and the Config range test).
