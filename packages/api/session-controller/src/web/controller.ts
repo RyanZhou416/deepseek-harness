@@ -10,7 +10,7 @@ import {
   addressId, isSmallStoredSource, paginateSlice, pageRecords, projectionBlock, readStoredWindow, rejectNotFound,
   tailTurnSettled, validateWindow, windowReadBounds, windowSessionId, wireHeader,
 } from '../history.ts'
-import { EventListener, ListenerBuffer } from '../history/listener.ts'
+import { EventListener, ListenerBuffer, ProjectionListener } from '../history/listener.ts'
 import { history, projections, resolveHistoryRequest, validateObservationAddress } from '../history/controller.ts'
 import type { SessionFollowFrame, SessionFollowRequest, SessionPageRequest } from '../types.ts'
 
@@ -33,8 +33,8 @@ export class WebController {
   ) {}
 
   /**
-   * Open a history snapshot and follow uncovered history and assistant notifications.
-   * @param request - Session identity, page budget, assistant output and optional activation (default false).
+   * Open a history snapshot and follow uncovered history, assistant notifications, and opted-in projection changes.
+   * @param request - Session identity, page budget, assistant output, projection changes and optional activation (default false).
    * @param signal - cancellation for opening and streaming.
    * @returns an opening snapshot followed by uncovered queued increments.
    */
@@ -55,6 +55,11 @@ export class WebController {
     const streams = this.historyController.streamsListener
     using assistantListener = request.assistantStream === true
       ? streams.bind(sessionId, signal, queue)
+      : undefined
+    // Changes are applied under the client's per-key seq rule, so a change at or
+    // before the opening cut needs no filtering here.
+    using _projectionListener = request.projectionChanges === true
+      ? new ProjectionListener(this.ctx, sessionId, signal, queue)
       : undefined
     let observation: SessionObservation | undefined
     let opening = await this.openWindow(request, spec, signal)

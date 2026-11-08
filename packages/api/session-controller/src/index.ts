@@ -227,7 +227,7 @@ export class SessionController extends TypertRemoteService {
       if ('error' in result) throw result.error
       return result.agent
     }), 'session-controller: file-upload Agent resolver')
-    this.controlState = new SessionControlController(ctx)
+    this.controlState = new SessionControlController(ctx, this.listProjectionExcludeKeys)
     // Registered before history so reverse-order teardown closes every
     // follower before waiting for already-admitted promotions.
     ctx.effect(() => async () => {

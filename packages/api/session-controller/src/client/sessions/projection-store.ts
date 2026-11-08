@@ -240,6 +240,30 @@ export class ProjectionValueStore {
   }
 
   /**
+   * Apply a control-stream block: the connected Session's summary keys at one
+   * cut. Cached rows hold only summary hints, so every one is discarded first,
+   * as {@link seed} does; each carried key then lands under the per-key seq
+   * rule. The block is not a whole-log cut, so sequenced rows it omits (detail
+   * keys from this Session's follow stream) stay, and availability is unchanged.
+   * @param baseline - the control block.
+   * @returns whether any row was replaced or removed.
+   */
+  applySummary(baseline: ProjectionsBaseline): boolean {
+    let changed = false
+    for (const [key, row] of this.rows) {
+      if (row.kind !== 'cached') continue
+      this.rows.delete(key)
+      this.changed(key)
+      changed = true
+    }
+    const values = baseline.values as Record<string, unknown>
+    for (const key of Object.keys(values)) {
+      if (this.apply(key, values[key], baseline.asOfSeq)) changed = true
+    }
+    return changed
+  }
+
+  /**
    * Seed from a history tail page's projections block. Every cached row is
    * discarded first, regardless of seq: the block comes from the connected
    * Session, and a value viewed from the persisted checkpoint never outranks

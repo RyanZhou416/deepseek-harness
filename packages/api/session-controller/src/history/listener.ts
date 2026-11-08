@@ -129,28 +129,33 @@ export function eventItem(item: EventItem, next?: number): {
 
 /** Projection changes of one Session, one change per committed event that changed a projection. */
 export class ProjectionListener implements Disposable {
-  private readonly buffer: ListenerBuffer<{ session: Session; change: SessionProjectionChange }>
+  private readonly buffer: ListenerBuffer<SessionProjectionChange> | undefined
+  private dispose: (() => void) | undefined
 
   /**
    * @param ctx - context owning projection notifications.
    * @param sessionId - Session whose notifications are emitted.
    * @param signal - cancellation that removes registrations and wakes consumers.
+   * @param queue - optional caller-owned buffer shared with other listeners; only an internally created buffer is disposed here.
    */
-  constructor(ctx: Context, sessionId: SessionId, signal: AbortSignal) {
-    this.buffer = new ListenerBuffer(ctx, signal)
-    const input = this.buffer.createInput<{ session: Session; change: SessionProjectionChange }>(item => [item])
+  constructor(ctx: Context, sessionId: SessionId, signal: AbortSignal,
+    queue?: Pick<ListenerBuffer<SessionProjectionChange>, 'createInput' | 'capture'>) {
+    signal.throwIfAborted()
+    const buffer = queue ?? new ListenerBuffer<SessionProjectionChange>(ctx, signal)
+    this.buffer = queue === undefined ? buffer as ListenerBuffer<SessionProjectionChange> : undefined
+    const input = buffer.createInput<SessionProjectionChange>(change => [change])
     const target = sessionId
     try {
-      this.buffer.own(ctx.sessionProjections.onEventChanged((session, changes, seq) => {
+      this.dispose = ctx.sessionProjections.onEventChanged((session, changes, seq) => {
         if (session.id !== target) return
-        this.buffer.capture(() => {
+        buffer.capture(() => {
           // Every projection definition validates its value before change publication.
-          const change: SessionProjectionChange = { type: 'projection', seq, changes: changes as SessionProjectionChange['changes'] }
-          input.append({ session, change })
+          input.append({ type: 'projection', seq, changes: changes as SessionProjectionChange['changes'] })
         })
-      }))
+      })
+      this.buffer?.own(() => { this[Symbol.dispose]() })
     } catch (error: unknown) {
-      this.buffer[Symbol.dispose]()
+      this[Symbol.dispose]()
       throw error
     }
   }
@@ -158,17 +163,19 @@ export class ProjectionListener implements Disposable {
   /** Consume per-event projection changes.
    * @returns validated change frames, one per committed event; projection seqs need not be contiguous. */
   async *changes(): AsyncIterable<SessionProjectionChange> {
+    if (this.buffer === undefined) throw new Error('Consume the externally owned projection buffer directly')
     try {
-      for await (const { change } of this.buffer.items()) {
-        yield change
-      }
+      yield* this.buffer.items()
     } finally {
       this[Symbol.dispose]()
     }
   }
 
   [Symbol.dispose](): void {
-    this.buffer[Symbol.dispose]()
+    const dispose = this.dispose
+    this.dispose = undefined
+    dispose?.()
+    this.buffer?.[Symbol.dispose]()
   }
 }
 

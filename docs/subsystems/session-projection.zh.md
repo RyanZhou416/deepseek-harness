@@ -160,7 +160,7 @@ Session 摘要包含每个已注册客户端视图，但排除 `SessionProjectio
 
 `summaryKeys()` 从实时注册派生该集合，并在注册或注销改变 key 表之前持续返回同一实例。摘要消费方把它传给既有的带 key 读取面 —— 实时 Session 用 `snapshot(session, keys)`，checkpoint 行用 `viewCheckpoint(rows, keys)`，两者都直接使用 Set、不做复制 —— 因此不存在摘要专用读取面，集合也只有一处定义。
 
-列表行携带的是这个摘要投影，绝不是全量投影：它只承诺摘要键集合，不承诺更多。`snapshot(session, keys)` 只计算它返回的单元。不传 key 子集时，`snapshot` 计算每个客户端可见单元、不计算 Host 专用单元，`viewCheckpoint` 返回每个 wire key，因此打开的 Session、其 follow 基线与控制基线携带每个投影值；`@` 引用只通过同一组带 key 的读取面读取其标签 key。注册表的 `cachedSnapshot(session, keys)` 已废弃：它只返回其他读取已经算好的值，可能缺少 key。
+列表行携带的是这个摘要投影，绝不是全量投影：它只承诺摘要键集合，不承诺更多。`snapshot(session, keys)` 只计算它返回的单元。不传 key 子集时，`snapshot` 计算每个客户端可见单元、不计算 Host 专用单元，`viewCheckpoint` 返回每个 wire key，因此打开的 Session 及其 follow 基线携带每个投影值，而 Session Controller 的控制流像列表行一样只携带摘要键集合；`@` 引用只通过同一组带 key 的读取面读取其标签 key。注册表的 `cachedSnapshot(session, keys)` 已废弃：它只返回其他读取已经算好的值，可能缺少 key。
 
 ### 摘要词汇
 

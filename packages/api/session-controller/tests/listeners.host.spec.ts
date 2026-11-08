@@ -5,7 +5,7 @@ import SessionStore, { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventListener, ListenerBuffer, ProjectionListener, eventItem } from '../src/history/listener.ts'
 import { SessionAssistantStreamsListener } from '../src/history/assistant-stream.ts'
-import type { SessionFollowFrame, SessionEventEntry } from '../src/types.ts'
+import type { SessionFollowFrame, SessionEventEntry, SessionProjectionChange } from '../src/types.ts'
 import { installSessionReadTestServices } from './test-remote.ts'
 
 const roots: Context[] = []
@@ -195,6 +195,24 @@ describe('ProjectionListener', () => {
     abort.abort()
     expect(await changes.next()).toMatchObject({ done: true })
     expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it('writes into an external buffer and leaves it open after disposal', async () => {
+    const { ctx, session, abort } = await fixture()
+    let receive!: Parameters<typeof ctx.sessionProjections.onEventChanged>[0]
+    const dispose = vi.fn()
+    vi.spyOn(ctx.sessionProjections, 'onEventChanged').mockImplementation((listener) => { receive = listener; return dispose })
+    using queue = new ListenerBuffer<SessionProjectionChange>(ctx, abort.signal)
+    const listener = new ProjectionListener(ctx, session.id, abort.signal, queue)
+    await expect(listener.changes()[Symbol.asyncIterator]().next()).rejects.toThrow('externally owned')
+    receive(session, [{ key: 'title', val: 'shared' }], SessionSeq(2))
+    const values = queue.items()[Symbol.asyncIterator]()
+    expect(await values.next()).toEqual({ done: false, value: { type: 'projection', seq: 2, changes: [{ key: 'title', val: 'shared' }] } })
+    listener[Symbol.dispose]()
+    expect(dispose).toHaveBeenCalledOnce()
+    const waiting = values.next()
+    abort.abort()
+    expect(await waiting).toMatchObject({ done: true })
   })
 
   it('releases its buffer when projection subscription fails', async () => {

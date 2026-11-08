@@ -45,7 +45,7 @@ Connection 拥有请求 URL 解析、request correlation、`/api` carrier、trus
 - `SessionManager` 拥有 list baseline、实时 list/control update、惰性 Session instance、projection store、subagent catalog，以及 pull 与后到 update 之间的冲突顺序。
 - 每个 `Session` 拥有一段由 `SessionEventLikeEntry` value 表示的连续逻辑 event window、pagination、follow、prompt/control state 与供 adapter 消费的 observable snapshot。
 
-持久 event 路径打开 `follow()`，其首帧包含当前 header、tail page、cursor 与完整 projection baseline。历史 record 带有显式 `event` 或 `chunks` 判别字段和字段对齐的内部 `event`；journal 先校验每条 record 的逻辑 seq 闭区间，Client 再直接把这些 record 保留为 `SessionEventLikeEntry`，无需逐 record 转换。每个物理 generation 都根据该 snapshot 原子替换保留窗口，随后按 seq append 标准实时 event。`page()` 只用于更早历史与 gap repair。瞬态 control stream 每代以完整 baseline 开始，随后应用 projection update。
+持久 event 路径打开 `follow()`，其首帧包含当前 header、tail page、cursor 与完整 projection baseline。历史 record 带有显式 `event` 或 `chunks` 判别字段和字段对齐的内部 `event`；journal 先校验每条 record 的逻辑 seq 闭区间，Client 再直接把这些 record 保留为 `SessionEventLikeEntry`，无需逐 record 转换。每个物理 generation 都根据该 snapshot 原子替换保留窗口，随后按 seq append 标准实时 event。`page()` 只用于更早历史与 gap repair。瞬态 control stream 每代以所有活 Session 的摘要 key baseline 开始，随后应用它们的更新；明细投影值只以已打开 Session 的 follow stream 上的 `projection` frame 到达。
 
 ### Workspaces
 

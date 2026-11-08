@@ -184,7 +184,8 @@ export class Session implements SessionFace {
    * Per-session projection value store (push model; see the session-projection
    * subsystem page, docs/subsystems/session-projection.md): finished whole
    * values computed on the Host, seeded by the tail page's
-   * projections block and updated by Session Controller control frames;
+   * projections block and updated by this Session's follow projection frames
+   * (every key) and the Session Controller control stream (summary keys);
    * Host-sequenced writes merge under higher-seq-wins and cached list blocks
    * yield to them (projection-store.ts). Keys are read via `projections.faceOf(key)`
    * (the useProjection resolution face); the conversation snapshot never
@@ -547,8 +548,8 @@ export class Session implements SessionFace {
   }
 
   /** Rebuild an opened history source after address replacement.
-   *  Invalidates any in-flight open first; projection state belongs to the independently
-   *  reconnecting control stream and remains untouched. */
+   *  Invalidates any in-flight open first; projection rows remain, and the new opening
+   *  either reseeds them or ends their exactness. */
   async resync(): Promise<void> {
     if (this.openState === 'cold') return // never opened: no window to rebuild (doOpen flips to 'loading' synchronously, so cold implies no in-flight open)
     this.openGeneration++
@@ -739,6 +740,15 @@ export class Session implements SessionFace {
         return
       case 'assistant-stream':
         this.publishAssistantEntry(this.assistantStream.acceptFrame(change.frame))
+        return
+      case 'projection': {
+        // Detail keys reach an opened Session only here; summary keys also
+        // arrive through the control stream, and the per-key seq rule keeps
+        // the newer of the two.
+        const seq = SessionSeq(change.change.seq)
+        for (const { key, val } of change.change.changes) this.projections.apply(key, val, seq)
+        return
+      }
     }
   }
 

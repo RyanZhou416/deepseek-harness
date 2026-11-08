@@ -47,7 +47,7 @@ Client journal 在发布 follow 快照、live entry 或历史页之前验证当�
 
 Host 仅在配置的工作时间片耗尽时，于完整条目之间让出事件循环；剩余工作较少时直接返回，不强制让出。每行及每次让出之后检查请求取消，取消时拒绝返回部分结果。每行同步计算；列表不承诺跨 Session 的统一快照。已经进入冷态队列的 Session 若在让出期间接入，仍返回缓存行：Client 对进行中请求的变更重放会纠正其可用性，带序号的投影会覆盖缓存提示。已接入 Session 的摘要通过 `sessionListMetadata` 投影句柄读取是否为空和最后一次提示词的最近活动时间，其投影提示携带通过 `snapshot` 计算的每个摘要 key。已接入 Session 的首次摘要在其完整内存日志上计算这些投影，之后的摘要增量推进；这次计算在单行的同步工作内进行，`listWorkSliceMs` 无法切分它。
 
-`listProjectionExcludeKeys` 默认为 `[]`，保留所有可用目录提示，包括其他插件贡献的 key。部署可以从 `session.list` 和 Session-added 摘要中排除 `contextHeaders`、`turnOutline` 等详情专用 key。配置校验拒绝排除 `sessionListMetadata`，因为空白状态和最近活动时间的推导依赖它。排除发生在投影视图构造与校验之前；其他提示继续提供冷标题、日程、子目录、用量及 Context 概览卡片所需的数据。排除规则也适用于 predecessor-title 回退。Follow opening、显式 `session.projections` 读取以及 control baseline 和更新仍然完整。列表提示是部分数据，不会清除从这些完整来源获得的投影 key。
+`listProjectionExcludeKeys` 默认为 `[]`，保留所有可用目录提示，包括其他插件贡献的 key。部署可以从 `session.list` 和 Session-added 摘要中排除 `contextHeaders`、`turnOutline` 等详情专用 key。配置校验拒绝排除 `sessionListMetadata`，因为空白状态和最近活动时间的推导依赖它。排除发生在投影视图构造与校验之前；其他提示继续提供冷标题、日程、子目录、用量及 Context 概览卡片所需的数据。排除规则也适用于 predecessor-title 回退。control stream 的 baseline 与更新携带同一摘要 key 集合，并应用同样的排除。Follow opening、follow `projection` frame 与显式 `session.projections` 读取仍然完整。列表提示是部分数据，不会清除从这些完整来源获得的投影 key。
 
 Client 列表行和驻留 Session 使用当前 `sessionListMetadata` 投影纠正过期的空白会话提示；最近活动时间取摘要时间戳与投影中最后一次用户提示词时间的较晚值。当 SessionManager 在列表行到达前创建实例时，会使用已保留的该 Session 元数据对账空白状态。因此，即使旧列表响应仍将已有对话标为空白，新会话操作也不会复用已经打开过的对话。
 
@@ -59,7 +59,7 @@ Client 列表刷新保留未变化的 manager 条目和 Client 目录行，并�
 
 后台 job 的名册行与观测流属于 [`dsh-api-job-controller`](../job-controller/README.zh.md)；控制流只承载投影。
 
-投影读取独立于其值保留加载与失败状态。重连会取消上一连接的读取，并重新加载已请求的投影；实时成员更新通过 control stream 到达。父 Agent 可用性来自 Host 摘要，在收到对应摘要或成功的列表 baseline 前保持未知。地址查找直接解析投影中的子项，不会选择它们或创建 scope。
+投影读取独立于其值保留加载与失败状态。重连会取消上一连接的读取，并重新加载已请求的投影；实时成员更新通过 control stream 到达。control stream 只携带 Session 摘要 key，因此明细 key（声明 `summary: false` 的单元，例如 `turnOutline`、`sessionStats` 与 `contextPressure`）只通过客户端已打开 Session 的 follow stream 到达：Client 请求 `projectionChanges` 后，Host 对每个改变了任一客户端可见 key 的已提交 event 发送一个 `projection` frame。因此 control block 不是全日志切面：它不会让 store 变为 exact，也不会清除它没有携带的 key。Session 的 follow stream 结束，或之后的 opening 没有投影块时，exact 状态随之失效，因为此时没有任何 stream 保持其明细 key 为最新；这些值仍可读取，之后的 opening 或显式请求会重新读取。父 Agent 可用性来自 Host 摘要，在收到对应摘要或成功的列表 baseline 前保持未知。地址查找直接解析投影中的子项，不会选择它们或创建 scope。
 
 已受理的提示词与已观察到的运行，会使客户端展示转换跨列表刷新、重连及 Session 对象替换保留。Manager 按 Session id 保留这些观察；它们不证明持久历史已经产生。草稿、投影存储和侧边栏展示规则保留原有行为。[blank 回退修复决策](../../../.agents/notes/implemented/bug-fix/2026-09-15-client-session-blank-reconciliation.zh.md) 定义保留期限及迟到响应处理。
 

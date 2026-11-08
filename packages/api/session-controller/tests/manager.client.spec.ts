@@ -432,9 +432,9 @@ describe('SessionManager query lifetime', () => {
     const initial = manager.getListSnapshot()
     const first = initial.projectionsBySession[S1]
     const second = initial.projectionsBySession[S2]
-    // An exact cut — even an empty one — makes the generation exact.
+    // A control block carries summary keys only, so it never makes the generation exact.
     expect(first).toEqual({
-      values: {}, state: 'idle', error: null, availability: { state: 'exact', asOfSeq: -1 },
+      values: {}, state: 'idle', error: null, availability: { state: 'unavailable', reason: 'opening-absent' },
     })
     expect(notify).toHaveBeenCalledOnce()
     manager.handleControlFrame(baseline)
@@ -497,8 +497,8 @@ describe('SessionManager query lifetime', () => {
   it('keeps stale control deliveries silent for every subscriber while accepted values remain immediately readable', async ({ mock, remote }) => {
     const manager = makeManager(mock, remote)
     onTestFinished(() => manager.dispose())
-    // The generation is already exact at 10, so no replayed or older delivery
-    // can change readiness or a value.
+    // The row is already at seq 10, so no replayed or older delivery can
+    // change it.
     manager.handleControlFrame({ type: 'baseline', value: { projections: {
       [S1]: { asOfSeq: 10, values: { title: 'latest' } },
     } } })
@@ -528,16 +528,17 @@ describe('SessionManager query lifetime', () => {
     expect(first).toHaveBeenCalledOnce()
     expect(second).toHaveBeenCalledOnce()
     stopFirst()
+    // A summary block is not a whole-log cut: a key it omits keeps its row.
     manager.handleControlFrame({ type: 'baseline', value: { projections: {
       [S1]: { asOfSeq: 12, values: {} },
     } } })
-    expect(manager.getListSnapshot().projectionsBySession[S1]?.values).toEqual({})
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.values).toEqual({ title: 'accepted' })
     await Promise.resolve()
     expect(first).toHaveBeenCalledOnce()
-    expect(second).toHaveBeenCalledTimes(2)
+    expect(second).toHaveBeenCalledOnce()
   })
 
-  it('establishes readiness from a stale-cut baseline without overwriting newer values', async ({ mock, remote }) => {
+  it('keeps newer values against a stale-cut control baseline without establishing readiness', async ({ mock, remote }) => {
     const manager = makeManager(mock, remote)
     onTestFinished(() => manager.dispose())
     manager.handleControlFrame({ type: 'projection', sessionId: S1, changes: [{ key: 'title', val: 'pushed' }], seq: 9 })
@@ -547,7 +548,7 @@ describe('SessionManager query lifetime', () => {
     } } })
 
     expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
-      values: { title: 'pushed' }, availability: { state: 'exact', asOfSeq: 8 },
+      values: { title: 'pushed' }, availability: { state: 'unavailable', reason: 'opening-absent' },
     })
   })
 
@@ -672,6 +673,52 @@ describe('on-demand exact projections', () => {
     expect(session.getSnapshot().projectionAvailability).toEqual({ state: 'exact', asOfSeq: 3 })
   })
 
+  it('keeps an opened Session current from its follow projection frames and ends exactness when it closes', async ({ mock, remote, start }) => {
+    mock.load(sessionWorld)
+    mock.stream(FOLLOW, async (args, stream) => {
+      await followScript(ok({
+        cursor: 4, records: [], hasMore: false, projections: { asOfSeq: 4, values: { turnOutline: [] } },
+      }))(args, stream)
+      stream.push({ type: 'projection', seq: 5, changes: [{ key: 'turnOutline', val: [{ turn: 1, seq: 5, prompt: '', response: '' }] }] })
+    })
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+    const session = manager.get(S1)
+    await session.open()
+
+    await vi.waitFor(() => { expect(session.projections.seqOf('turnOutline')).toBe(5) })
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      availability: { state: 'exact', asOfSeq: 4 },
+    })
+
+    // Without a follow stream no frame keeps detail keys current.
+    await manager.drop(S1, session)
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      values: { turnOutline: [{ turn: 1 }] }, availability: { state: 'unavailable', reason: 'opening-absent' },
+    })
+    remote.session.projections.mockResolvedValueOnce(ok({ kind: 'sequenced', asOfSeq: 6, values: { title: 'reread' } }))
+    await manager.refreshProjections(S1)
+    expect(remote.session.projections).toHaveBeenCalledOnce()
+  })
+
+  it('ends an earlier exact cut when a later opening serves no block', async ({ mock, remote, start }) => {
+    mock.load(sessionWorld)
+    mock.stream(FOLLOW, absentOpening)
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+    remote.session.projections.mockResolvedValueOnce(ok({ kind: 'sequenced', asOfSeq: 3, values: { title: 'read' } }))
+    await manager.refreshProjections(S1)
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.availability).toEqual({ state: 'exact', asOfSeq: 3 })
+
+    await manager.get(S1).open()
+
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'idle', values: { title: 'read' }, availability: { state: 'unavailable', reason: 'opening-absent' },
+    })
+  })
+
   it('does not read when the opening already served an exact cut', async ({ mock, remote, start }) => {
     mock.stream(FOLLOW, followScript(ok({
       cursor: 4, records: [], hasMore: false, projections: { asOfSeq: 4, values: { title: 'from opening' } },
@@ -689,7 +736,7 @@ describe('on-demand exact projections', () => {
     })
   })
 
-  it('refuses a cut older than an exact watermark that arrived while the read was in flight', async ({ mock, remote, start }) => {
+  it('keeps a newer control value when an older exact read settles', async ({ mock, remote, start }) => {
     mock.load(sessionWorld)
     mock.stream(FOLLOW, absentOpening)
     const client = await start()
@@ -700,7 +747,7 @@ describe('on-demand exact projections', () => {
     remote.session.projections.mockReturnValueOnce(pending.promise)
     const read = manager.refreshProjections(S1)
 
-    // A newer exact cut lands before the deferred read settles.
+    // A newer summary value lands before the deferred read settles.
     manager.handleControlFrame({ type: 'baseline', value: { projections: {
       [S1]: { asOfSeq: 20, values: { title: 'newer' } },
     } } })
@@ -708,7 +755,7 @@ describe('on-demand exact projections', () => {
     await read
 
     expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
-      state: 'ready', values: { title: 'newer' }, availability: { state: 'exact', asOfSeq: 20 },
+      state: 'ready', values: { title: 'newer' }, availability: { state: 'exact', asOfSeq: 12 },
     })
   })
 
@@ -1250,7 +1297,7 @@ describe('subagent catalogs', () => {
           childSessionId: S2,
           mode: 'continuable',
         },
-        activate: true, assistantStream: true,
+        activate: true, assistantStream: true, projectionChanges: true,
         maxMessages: 500,
         turnWindow: { minMessages: 50, minTurns: 2 },
       },

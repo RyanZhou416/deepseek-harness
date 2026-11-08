@@ -512,6 +512,13 @@ export interface SessionFollowRequest extends Pick<SessionPageRequest, 'maxMessa
   readonly activate?: boolean
   /** Include process-local assistant presentation frames for the Web client. */
   readonly assistantStream?: true
+  /**
+   * Include one `projection` frame per committed event that changed any
+   * client-visible projection of this Session, detail keys included. The
+   * Host-wide control stream carries only Session summary keys, so a client
+   * that shows an opened Session's detail projections opts in here.
+   */
+  readonly projectionChanges?: true
 }
 
 /** One active assistant attempt in a reconnect opening snapshot. */
@@ -572,7 +579,7 @@ export interface SessionPage {
   readonly hasMore: boolean
 }
 
-/** Complete opening window followed by ordered durable events and opted-in assistant frames. */
+/** Complete opening window followed by ordered durable events and opted-in assistant and projection frames. */
 export type SessionFollowFrame =
   | {
     readonly type: 'snapshot'
@@ -591,8 +598,14 @@ export type SessionFollowFrame =
   }
   | SessionEventEntry
   | { readonly type: 'assistant-stream'; readonly frame: SessionAssistantStreamFrame }
+  | SessionProjectionChange
 
-/** Complete live control baseline emitted once per control stream generation. */
+/**
+ * Complete live control baseline emitted once per control stream generation.
+ * Each block carries the Session summary keys of one live Session at its cut;
+ * detail keys (units declaring `summary: false`) reach only clients that follow
+ * the Session with `projectionChanges`, so a block is not a whole-log cut.
+ */
 export interface SessionControlBaseline {
   readonly projections: Readonly<Record<SessionId, SessionProjectionBaseline>>
 }
@@ -614,7 +627,7 @@ export interface SessionProjectionUpdate {
   readonly changes: readonly { readonly key: string; readonly val: SessionProjectionValue }[]
 }
 
-/** Host-wide live state stream. Each generation starts with exactly one baseline. */
+/** Host-wide live state stream of Session summary keys. Each generation starts with exactly one baseline. */
 export type SessionControlFrame =
   | { readonly type: 'baseline'; readonly value: SessionControlBaseline }
   | ({ readonly type: 'projection' } & SessionProjectionUpdate)

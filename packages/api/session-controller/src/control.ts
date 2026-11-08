@@ -1,10 +1,15 @@
-/** Live Session projection state with reconnect baselines. */
+/**
+ * Live Session summary projections with reconnect baselines. The stream
+ * carries the same keys as Session list summaries; detail keys travel only on
+ * the follow streams of clients that opened the Session.
+ */
 
 import type { Context } from '@deepseek-ai/cordis'
 import { Deque } from '@deepseek-ai/dsh-deque'
 import type {
   Session, SessionId,
 } from '@deepseek-ai/dsh-session'
+import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type {
   SessionControlBaseline,
   SessionControlFrame,
@@ -16,16 +21,25 @@ import type {
 /** Owns the Host-wide Session control stream. */
 export class SessionControlController {
   private readonly streams = new Set<ControlQueue>()
+  private summaryKeySource: ReadonlySet<string> | undefined
+  private summaryKeySet: ReadonlySet<string> = new Set()
 
-  /** @param ctx - Host context carrying live Agent and projection services. */
-  constructor(private readonly ctx: Context) {
+  /**
+   * @param ctx - Host context carrying live Agent and projection services.
+   * @param excludedKeys - deployment-selected keys that Session summaries omit (`listProjectionExcludeKeys`).
+   */
+  constructor(private readonly ctx: Context, private readonly excludedKeys: ReadonlySet<string> = new Set()) {
     ctx.sessionProjections.onEventChanged((session, changes, seq) => {
+      if (this.streams.size === 0) return
+      const keys = this.summaryKeys()
+      const summary = changes.filter(change => keys.has(change.key))
+      if (summary.length === 0) return
       this.broadcast({
         type: 'projection',
         sessionId: session.id,
         seq,
         // Every projection definition validates its value before change publication.
-        changes: changes as SessionProjectionUpdate['changes'],
+        changes: summary as SessionProjectionUpdate['changes'],
       })
     })
     ctx.effect(() => () => {
@@ -63,8 +77,9 @@ export class SessionControlController {
     sessions: readonly Session[],
   ): Readonly<Record<SessionId, SessionProjectionBaseline>> {
     const blocks = Object.create(null) as Record<SessionId, SessionProjectionBaseline>
+    const keys = this.summaryKeys() as ReadonlySet<Extract<keyof SessionProjectionMap, string>>
     for (const session of sessions) {
-      const snapshot = this.ctx.sessionProjections.snapshot(session)
+      const snapshot = this.ctx.sessionProjections.snapshot(session, keys)
       blocks[session.id] = {
         asOfSeq: snapshot.asOfSeq,
         // Every projection definition validates its value before snapshot publication.
@@ -72,6 +87,18 @@ export class SessionControlController {
       }
     }
     return blocks
+  }
+
+  /** Summary keys minus the deployment exclusions, rebuilt only when the registry's key table changes. */
+  private summaryKeys(): ReadonlySet<string> {
+    const source = this.ctx.sessionProjections.summaryKeys()
+    if (source !== this.summaryKeySource) {
+      this.summaryKeySource = source
+      this.summaryKeySet = this.excludedKeys.size === 0
+        ? source
+        : new Set([...source].filter(key => !this.excludedKeys.has(key)))
+    }
+    return this.summaryKeySet
   }
 
   private broadcast(frame: SessionControlFrame): void {

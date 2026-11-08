@@ -155,7 +155,9 @@ clientPath(id: string): string | undefined
  * Serve an advertised revisioned bundle, source map, chunk, or package asset
  * without a Web server. Unknown URLs return 404, unsupported methods return
  * 405, and `HEAD` returns the same immutable headers without materializing a
- * body. Each bundle body is built once on its first `GET`; script
+ * body. Each bundle body is built once on its first `GET`, and its Brotli
+ * encoding once on its first `GET` that accepts `br`; startup batch scripts
+ * are encoded in the background while a Web carrier serves the route. Script
  * construction never reads maps. A package asset is read on every request
  * and answers 304 without a body when `If-None-Match` equals its entity tag;
  * its body holds the file open until the caller consumes or cancels it. A

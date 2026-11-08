@@ -330,11 +330,31 @@ describe('Session Client stream adapters', () => {
     await stream.open({})
     await vi.waitFor(() => { expect(changes).toHaveLength(2) })
 
-    expect(remote.followRequests).toEqual([{ address: ADDRESS, activate: true, assistantStream: true }])
+    expect(remote.followRequests).toEqual([{ address: ADDRESS, activate: true, assistantStream: true, projectionChanges: true }])
     expect(changes).toMatchObject([
       { type: 'replace', page: { assistantStream: baseline } },
       { type: 'assistant-stream', frame },
     ])
+    await stream.dispose()
+  })
+
+  it('publishes opted-in projection changes after the opening snapshot', async () => {
+    const baseline: SessionAssistantStreamBaseline = { revision: 0 }
+    const projection = { type: 'projection' as const, seq: 1, changes: [{ key: 'turnOutline', val: [] }] }
+    const remote = new ScriptedSessionRemote(
+      [{ frames: [snapshot(0, [entry(0)], false, baseline), projection], hold: true }],
+      [],
+    )
+    const changes: SessionJournalChange[] = []
+    const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      publish: (change) => { changes.push(change) },
+      failed: vi.fn(),
+    })
+
+    await stream.open({})
+    await vi.waitFor(() => { expect(changes).toHaveLength(2) })
+
+    expect(changes[1]).toEqual({ type: 'projection', change: projection })
     await stream.dispose()
   })
 
@@ -386,7 +406,7 @@ describe('Session Client stream adapters', () => {
         code: 'gateway/internal',
         message: 'session event stream emitted an entry before its opening cursor',
       })
-      expect(remote.followRequests).toEqual([{ address: ADDRESS, activate: true, assistantStream: true }])
+      expect(remote.followRequests).toEqual([{ address: ADDRESS, activate: true, assistantStream: true, projectionChanges: true }])
     } finally {
       await stream.dispose()
     }
@@ -551,7 +571,8 @@ describe('Session Client stream adapters', () => {
     await stream.prepend({ beforeSeq: 2, maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 } })
 
     expect(remote.followRequests).toEqual([{
-      address: ADDRESS, activate: true, assistantStream: true, maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 },
+      address: ADDRESS, activate: true, assistantStream: true, projectionChanges: true,
+      maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 },
     }])
     expect(remote.pageRequests).toEqual([
       { address: ADDRESS, throughSeq: 4, beforeSeq: 2, maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 } },
@@ -589,8 +610,14 @@ describe('Session Client stream adapters', () => {
     await vi.waitFor(() => { expect(remote.followRequests).toHaveLength(2) })
 
     expect(remote.followRequests).toEqual([
-      { address: ADDRESS, activate: true, assistantStream: true, maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 } },
-      { address: ADDRESS, activate: true, assistantStream: true, maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 } },
+      {
+        address: ADDRESS, activate: true, assistantStream: true, projectionChanges: true,
+        maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 },
+      },
+      {
+        address: ADDRESS, activate: true, assistantStream: true, projectionChanges: true,
+        maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 },
+      },
     ])
     expect(remote.pageRequests).toEqual([])
     expect(changes.map(change => change.type)).toEqual(['replace', 'append', 'replace'])
@@ -620,8 +647,8 @@ describe('Session Client stream adapters', () => {
     finish.resolve(undefined)
     await vi.waitFor(() => { expect(remote.followRequests).toHaveLength(2) })
     expect(remote.followRequests).toEqual([
-      { address: ADDRESS, activate: true, assistantStream: true },
-      { address: ADDRESS, activate: true, assistantStream: true },
+      { address: ADDRESS, activate: true, assistantStream: true, projectionChanges: true },
+      { address: ADDRESS, activate: true, assistantStream: true, projectionChanges: true },
     ])
     expect(remote.pageRequests).toEqual([])
     await stream.dispose()

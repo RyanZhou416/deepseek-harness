@@ -261,6 +261,7 @@ export class SessionManager {
     this.sessions.delete(sessionId)
     this.addresses.delete(sessionId)
     this.cancelProjectionRead(sessionId)
+    this.lapseExactProjections(sessionId)
     this.pruneEngagement(sessionId, this.retainedIds(this.summaries))
     return this.startSessionDisposal(session)
   }
@@ -428,11 +429,28 @@ export class SessionManager {
    */
   noteOpeningProjectionsAbsent(sessionId: SessionId): void {
     if (this.disposed || this.projectionInflight.has(sessionId)) return
-    const store = this.projectionStore(sessionId)
-    const availability = store.availability()
-    // An exact cut is already the whole-log answer, and a refusal keeps the
-    // reason it cannot be retried in this generation.
-    if (availability.state !== 'unavailable' || availability.reason === 'refused') return
+    const availability = this.projectionStore(sessionId).availability()
+    // A refusal keeps the reason it cannot be retried in this generation.
+    if (availability.state === 'unavailable' && availability.reason === 'refused') return
+    // Detail keys stay current only while a follow stream carries this
+    // Session's changes, so a cut taken before this follow began may be stale.
+    this.lapseExactProjections(sessionId)
+    this.projectionStore(sessionId).markUnavailable('opening-absent')
+    this.notifier.markDirty()
+  }
+
+  /**
+   * End exactness for a Session no follow stream keeps current: the Host-wide
+   * control stream carries only summary keys, so its detail values can no
+   * longer be stated as whole-session values. Values stay readable, and a later
+   * opening or explicit request reads them again.
+   * @param sessionId - Session whose follow stream ended or has not started.
+   */
+  private lapseExactProjections(sessionId: SessionId): void {
+    const load = this.projectionLoads.get(sessionId)
+    if (load?.state === 'ready') this.projectionLoads.delete(sessionId)
+    const store = this.projectionStores.get(sessionId)
+    if (store?.availability().state !== 'exact') return
     store.markUnavailable('opening-absent')
     this.notifier.markDirty()
   }
@@ -852,12 +870,10 @@ export class SessionManager {
       if (this.titlePresentationFallbacks.delete(sessionId as SessionId)) changed = true
       const store = this.projectionStore(sessionId as SessionId)
       const asOfSeq = sessionSeqCursor(block.asOfSeq)
-      // A replayed or older baseline cannot regress a newer exact cut: every
-      // row it carries is at or before that cut, and the store's per-key
-      // watermark rule would reject each one anyway.
-      const availability = store.availability()
-      if (availability.state === 'exact' && asOfSeq < availability.asOfSeq) continue
-      if (store.seed({ ...block, asOfSeq })) changed = true
+      // A control block carries summary keys only, so it is not a whole-log
+      // cut; the per-key seq rule keeps a replayed or older baseline from
+      // regressing a newer value.
+      if (store.applySummary({ ...block, asOfSeq })) changed = true
     }
     if (changed || this.projectionStores.size !== previousSize) this.notifier.markDirty()
   }

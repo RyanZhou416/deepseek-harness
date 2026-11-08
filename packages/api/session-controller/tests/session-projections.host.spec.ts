@@ -985,4 +985,93 @@ describe('Session control projection frames', () => {
     abort.abort()
     expect(await changes.next()).toEqual({ done: true, value: undefined })
   })
+
+  const excludedUnit = () => ({
+    key: 'test/summary-excluded',
+    stateSchema: z.number().int().nonnegative(),
+    init: () => 0,
+    apply: (state: number, event: SessionEvent) => (event.type === 'user/message' ? state + 1 : state),
+    wire: { viewSchema: z.number().int().nonnegative(), view: (state: number) => state, summary: false },
+    stateVersion: 1,
+  }) satisfies ProjectionDefinition<'test/summary-excluded', number>
+
+  it('carries only summary keys on the control stream, minus deployment exclusions', async () => {
+    const { ctx, session } = await harness(true)
+    await ctx.sessionProjections.register(lastUserUnit())
+    await ctx.sessionProjections.register(excludedUnit())
+    const listeners: Parameters<typeof ctx.sessionProjections.onEventChanged>[0][] = []
+    const subscribe = ctx.sessionProjections.onEventChanged.bind(ctx.sessionProjections)
+    vi.spyOn(ctx.sessionProjections, 'onEventChanged').mockImplementation((listener) => {
+      listeners.push(listener)
+      return subscribe(listener)
+    })
+    const proxy = await remote(ctx, ['test/last-user'])
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const abort = new AbortController()
+    const iterator = proxy.control(abort.signal)[Symbol.asyncIterator]()
+    const baseline = await iterator.next()
+    if (baseline.done || baseline.value.type !== 'baseline') throw new Error('control stream ended before its baseline')
+    const keys = Object.keys(baseline.value.value.projections[session.id]?.values ?? {})
+    expect(keys).toContain('sessionListMetadata')
+    expect(keys).not.toContain('test/summary-excluded')
+    expect(keys).not.toContain('test/last-user')
+
+    const now = vi.spyOn(Date, 'now').mockReturnValue(100)
+    seedMessages(session, 1)
+    now.mockRestore()
+    expect(await iterator.next()).toEqual({
+      done: false,
+      value: {
+        type: 'projection', sessionId: session.id, seq: 0,
+        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 100 } }],
+      },
+    })
+    // An event that changes only detail or excluded keys sends no control frame.
+    const next = iterator.next()
+    for (const listener of listeners) {
+      listener(session, [{ key: 'test/summary-excluded', val: 9 }, { key: 'test/last-user', val: null }], SessionSeq(5))
+    }
+    const quiet = Symbol('quiet')
+    expect(await Promise.race([next, new Promise<typeof quiet>(resolve => setTimeout(() => { resolve(quiet) }, 0))])).toBe(quiet)
+    abort.abort()
+    await iterator.return?.()
+  })
+
+  it('streams every changed key to a follower that opts into projection changes', async () => {
+    const { ctx, session } = await harness(true)
+    await ctx.sessionProjections.register(excludedUnit())
+    const proxy = await remote(ctx)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    seedMessages(session, 1)
+    const read = async (projectionChanges: boolean, openingValue: number): Promise<SessionFollowFrame> => {
+      const abort = new AbortController()
+      const iterator = proxy.follow({
+        address: { kind: 'session', sessionId: session.id },
+        ...projectionChanges ? { projectionChanges: true as const } : {},
+      }, abort.signal)[Symbol.asyncIterator]()
+      const first = await iterator.next()
+      if (first.done || first.value.type !== 'snapshot') throw new Error('follow did not open with a snapshot')
+      expect(first.value.projections?.values['test/summary-excluded']).toBe(openingValue)
+      const now = vi.spyOn(Date, 'now').mockReturnValue(200)
+      seedMessages(session, 1)
+      now.mockRestore()
+      const frames: SessionFollowFrame[] = []
+      for (let index = 0; index < 2; index += 1) {
+        const next = await iterator.next()
+        if (next.done) break
+        frames.push(next.value)
+        if (!projectionChanges) break
+      }
+      abort.abort()
+      await iterator.return?.()
+      return frames.find(frame => frame.type === 'projection') ?? frames[0] as SessionFollowFrame
+    }
+    expect(await read(true, 1)).toEqual({
+      type: 'projection', seq: 1, changes: [
+        { key: 'test/summary-excluded', val: 2 },
+        { key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 200 } },
+      ],
+    })
+    expect((await read(false, 2)).type).not.toBe('projection')
+  })
 })
