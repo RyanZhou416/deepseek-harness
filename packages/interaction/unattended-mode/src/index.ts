@@ -55,13 +55,17 @@ export default class UnattendedModeService extends Service {
   }
 
   /**
-   * Observe switch changes.
+   * Observe switch changes. The registration is an effect on the calling
+   * context's fiber, so it ends with that fiber.
    * @param listener - called with the new state after a live configuration update changes it.
    * @returns disposer removing the listener; safe to call more than once.
    */
   subscribe(listener: (enabled: boolean) => void): () => void {
-    this.listeners.add(listener)
-    return () => { this.listeners.delete(listener) }
+    const dispose = this.ctx.effect(() => {
+      this.listeners.add(listener)
+      return () => { this.listeners.delete(listener) }
+    }, 'unattendedMode.subscribe()')
+    return () => void dispose()
   }
 
   private refresh(): void {

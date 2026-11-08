@@ -39,7 +39,7 @@ import type { RelayDraft } from './state.ts'
 const styles: Record<string, CSSProperties> = {
   section: { display: 'flex', flexDirection: 'column', gap: 10, width: '100%', maxWidth: 640 },
   title: { margin: 0, fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'var(--dsw-alias-label-primary)' },
-  description: { margin: '0 0 4px', fontSize: 13, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary)' },
+  description: { margin: 0, marginBottom: 4, fontSize: 13, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary)' },
   form: { display: 'flex', flexDirection: 'column', gap: 12 },
   field: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
   label: { fontSize: 12, fontWeight: 500, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary)' },
