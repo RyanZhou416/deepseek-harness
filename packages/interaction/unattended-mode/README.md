@@ -74,7 +74,7 @@ The service reads `Config.enabled` through its stable volatile reference on ever
 
 ### Configuration surface
 
-The `enabled` field is declared `.volatile()`, so the Settings service projects it into a live form for this profile entry. No shipped client renders Config-driven pages, so deployments currently change the value through the profile patch or another settings client; the plugin inventory lists the plugin from the package locale metadata.
+The `enabled` field is declared `.volatile()`, so the Settings service projects it into a live form for this profile entry. The shipped Web client's Settings → General section renders the switch from `@deepseek-ai/dsh-client-ui-settings-general` while the Host serves the `unattended-mode` entry; changing it writes through the profile settings document and applies live.
 
 </details>
 
@@ -86,6 +86,7 @@ The `enabled` field is declared `.volatile()`, so the Settings service projects 
 - [User interaction subsystem reference](../../../docs/subsystems/user-questions.md) — the question seam behind the only current consumer.
 - [tool-ask-user package](../tool-ask-user/README.md) — the `USER_AWAY` refusal and the model-facing text.
 - [Settings package](../../settings/settings/README.md) — live Config forms and the `autoGenerate` policy.
+- [ui-settings-general package](../../client/ui-settings-general/README.md) — the Settings → General row that exposes the switch.
 - [Interaction group map](../README.md) — adjacent approval, command, and question surfaces.
 
 -----
@@ -105,7 +106,7 @@ No request-prefix change: the switch adds no prompt section, tool schema, or Ses
 
 These limits define the switch's reach. They are current package constraints, not a UI backlog.
 
-- **No rendered settings switch** — the shipped Web Client renders no page from a Config schema, so deployments edit `enabled` in their profile patch; any client reading `settings.describe()` still sees the volatile field.
+- **The switch follows deployment composition** — a Host that does not compose this plugin serves no settings entry, so the Web General row is absent rather than disabled.
 - **Only `ask_user_question` reads the switch** — approval prompts, plan review, computer use, and other `ctx.userQuestions` callers keep waiting; each consumer needs its own explicit check.
 - **The switch is not Session state** — a recorded Session carries no switch value, so replay and resume follow the current deployment configuration.
 

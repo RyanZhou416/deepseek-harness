@@ -15,6 +15,7 @@ import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import { LOCALE_SETTINGS_NAMESPACE, LocaleSettingsSchema } from '@deepseek-ai/dsh-client-locale/src/locale-settings.ts'
 import { inject } from '../src/client/index.ts'
 import type { DeveloperToolsRowInjected } from '../src/client/DeveloperToolsRow.tsx'
+import type { UnattendedModeRowInjected } from '../src/client/UnattendedModeRow.tsx'
 import { HostReleasePrompt, type HostReleasePromptInjected } from '../src/client/HostReleasePrompt.tsx'
 import { CloseLabel, HeaderContent, TriggerContent } from '../src/client/chrome.tsx'
 import { GeneralSection } from '../src/client/GeneralSection.tsx'
@@ -48,6 +49,19 @@ function localeView(preference: string, revision = 0): SettingsNamespaceView {
     autoGenerate: true, applies: 'live',
     secrets: [],
     revision,
+  }
+}
+
+function unattendedModeView(enabled = false, revision = 0): SettingsNamespaceView {
+  return {
+    ns: 'unattended-mode',
+    schema: {
+      type: 'object',
+      properties: { enabled: { type: 'boolean' } },
+    },
+    value: { enabled },
+    autoGenerate: true, applies: 'live',
+    secrets: [], revision,
   }
 }
 
@@ -101,6 +115,10 @@ function generalLabel(c: TestClient): string | undefined {
   return resolveSlotLabel(generalEntry(c).options.label)
 }
 
+function generalRowIds(c: TestClient): string[] {
+  return c.ctx.slots.entries('settings.general.item').filter(row => row.locale === NS).map(row => row.options.id ?? '')
+}
+
 function developerToolsRowOf(c: TestClient): DeveloperToolsRowInjected {
   const developerRow = c.ctx.slots.entries('settings.general.item').find(row => row.options.id === 'developer-tools')!
   return (developerRow.inject as unknown as () => DeveloperToolsRowInjected)()
@@ -137,6 +155,35 @@ describe('ui-settings-general apply', () => {
     await c.ctx.configForms.describe().ensure()
     expect(c.ctx.slots.entries('settings.general.item').filter(row => row.locale === NS).map(row => row.options.id))
       .toEqual(['developer-tools', 'session-create-model-override', 'current-version'])
+  }, COLD_BOOT_TIMEOUT_MS)
+
+  it('registers the unattended-mode row only while its Host namespace is served and writes through its form', async ({ mock, start }) => {
+    mock.remote.settings.describe.mockResolvedValue(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: [localeView('zh')],
+    }))
+    const c = await start()
+    await c.ctx.configForms.describe().ensure()
+    expect(generalRowIds(c)).not.toContain('unattended-mode')
+
+    c.ctx.configForms.describe().acceptView(unattendedModeView())
+    await vi.waitFor(() => {
+      expect(generalRowIds(c)).toEqual(['developer-tools', 'unattended-mode', 'current-version'])
+    })
+    const row = c.ctx.slots.entries('settings.general.item').find(entry => entry.options.id === 'unattended-mode')!
+    expect(row.options.order).toBe(15.5)
+    const injected = (row.inject as (() => UnattendedModeRowInjected) | undefined)?.()
+    if (injected === undefined) throw new Error('unattended-mode row did not expose its settings face')
+    expect(injected.hooks.unattendedMode.getSnapshot()).toMatchObject({
+      status: 'ready', value: { enabled: false }, revision: 0,
+    })
+
+    mock.remote.settings.mutate.mockResolvedValueOnce(ok(unattendedModeView(true, 1)))
+    await expect(injected.setEnabled(true, 0)).resolves.toBe(true)
+    expect(mock.remote.settings.mutate).toHaveBeenCalledExactlyOnceWith(
+      'unattended-mode', [{ op: 'set', path: ['enabled'], value: true }], 0,
+    )
   }, COLD_BOOT_TIMEOUT_MS)
 
   it('fills the five seats of the shell it declares, with the locale-following General label', async ({ mock, start }) => {

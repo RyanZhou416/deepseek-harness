@@ -49,7 +49,9 @@ The current release version appears at the bottom of General Settings in Web and
 
 The Coding Tools switch controls the shared `ui-settings.enabled` preference described by [ui-settings](../ui-settings/README.md#use-this-package). It is available in both Web and desktop, follows accepted changes immediately, and disables duplicate input while a write settles. A failed write displays localized retry guidance. On Desktop, a change made with this switch reports `code_work_view_toggle` with the new value through the optional [product analytics](../product-analytics/README.md) service, timestamped at the click. Only a write that changes a known value and leaves the preference at the requested value reports; requesting the current value, an unknown previous value, a failed write, and preference updates made elsewhere report nothing.
 
-The General section holds the built-in Coding Tools and Current version rows alongside rows registered into `settings.general.item` by feature packages. Each registrant owns its row copy and behavior. The Appearance row, for example, lives in ui-theme.
+The **Unattended mode** switch appears only while the Host serves the `unattended-mode` settings entry. It reads the accepted `enabled` field and writes it through the shared settings form against the revision it displayed, so a concurrent edit refuses rather than overwrites. The switch stays disabled until a ready, writable snapshot arrives; a refused or failed write shows the same localized retry guidance as the other rows.
+
+The General section holds the built-in Coding Tools and Current version rows, the conditional Unattended mode row, and rows registered into `settings.general.item` by feature packages. Each registrant owns its row copy and behavior. The Appearance row, for example, lives in ui-theme.
 
 ### Opening the configuration file
 
@@ -127,7 +129,8 @@ None; this package neither assembles nor sends a provider request.
 These limits define what the shell itself provides versus what features must supply; they are current package constraints.
 
 - **Mobile software keyboards require device validation** — browser regression tests cover layout and focus, but native Safari keyboard panning and installed-PWA behavior remain unverified.
-- **Additional General rows require their feature plugins** — the shell supplies Coding Tools and Current version; feature plugins supply the remaining preferences.
+- **Additional General rows require their feature plugins** — the shell supplies Coding Tools, Current version, and the conditional Unattended mode row; feature plugins supply the remaining preferences.
+- **The Unattended mode row follows its Host plugin** — a deployment that does not compose `@deepseek-ai/dsh-unattended-mode` serves no such entry, so the row is absent rather than disabled.
 - **The Windows caption badge keeps a side-opening bubble** — `DesktopUpdateBadge` occupies `sidebar.toggle.badge` in the caption and requests `side="right"`, so the Desktop-owned menu text can cover its bubble while the sidebar is collapsed on Windows; the sidebar toggle and New Session bubbles open below the caption instead (#4688).
 
 <a id="dev-note"></a>

@@ -55,6 +55,9 @@ export const zh = {
   'sessionCreateOverride.loading': '正在加载模型…',
   'sessionCreateOverride.retry': '重试',
   'sessionCreateOverride.empty': '当前没有可用模型',
+  'unattendedMode.title': '无人模式',
+  'unattendedMode.description': '开启后智能体不能向你提问，会读取工作区 AGENTS.md 后自行决定。',
+  'unattendedMode.error': '保存失败，请重试',
   'readOnly': '此部署以只读方式存储设置。',
 } satisfies Record<string, string>
 
@@ -116,6 +119,9 @@ export const en = {
   'sessionCreateOverride.loading': 'Loading models…',
   'sessionCreateOverride.retry': 'Retry',
   'sessionCreateOverride.empty': 'No model is currently available.',
+  'unattendedMode.title': 'Unattended mode',
+  'unattendedMode.description': 'While on, the agent cannot ask you questions; it reads the workspace AGENTS.md and decides on its own.',
+  'unattendedMode.error': 'Could not save. Please try again.',
   'readOnly': 'This deployment stores settings read-only.',
 } satisfies Record<SettingsKey, string>
 
@@ -174,6 +180,9 @@ export const ja = {
   'sessionCreateOverride.loading': 'モデルを読み込み中…',
   'sessionCreateOverride.retry': '再試行',
   'sessionCreateOverride.empty': '利用できるモデルがありません。',
+  'unattendedMode.title': '無人モード',
+  'unattendedMode.description': 'オンの間、エージェントは質問できません。ワークスペースの AGENTS.md を読んで自分で判断します。',
+  'unattendedMode.error': '保存できませんでした。再試行してください。',
   'readOnly': 'このデプロイは設定を読み取り専用で保存します。',
 } satisfies Record<keyof typeof en, string>
 
@@ -232,6 +241,9 @@ export const es = {
   'sessionCreateOverride.loading': 'Cargando modelos…',
   'sessionCreateOverride.retry': 'Reintentar',
   'sessionCreateOverride.empty': 'No hay ningún modelo disponible.',
+  'unattendedMode.title': 'Modo desatendido',
+  'unattendedMode.description': 'Mientras está activo, el agente no puede hacerte preguntas; lee el AGENTS.md del espacio de trabajo y decide por su cuenta.',
+  'unattendedMode.error': 'No se pudo guardar. Inténtalo de nuevo.',
   'readOnly': 'Esta implementación guarda los ajustes como solo lectura.',
 } satisfies Record<keyof typeof en, string>
 
@@ -290,6 +302,9 @@ export const fr = {
   'sessionCreateOverride.loading': 'Chargement des modèles…',
   'sessionCreateOverride.retry': 'Réessayer',
   'sessionCreateOverride.empty': 'Aucun modèle disponible.',
+  'unattendedMode.title': 'Mode sans surveillance',
+  'unattendedMode.description': "Lorsqu'il est activé, l'agent ne peut pas vous poser de questions ; il lit le AGENTS.md de l'espace de travail et décide seul.",
+  'unattendedMode.error': 'Enregistrement impossible. Réessayez.',
   'readOnly': 'Ce déploiement stocke les réglages en lecture seule.',
 } satisfies Record<keyof typeof en, string>
 
@@ -348,6 +363,9 @@ export const de = {
   'sessionCreateOverride.loading': 'Modelle werden geladen…',
   'sessionCreateOverride.retry': 'Erneut versuchen',
   'sessionCreateOverride.empty': 'Kein Modell verfügbar.',
+  'unattendedMode.title': 'Unbeaufsichtigter Modus',
+  'unattendedMode.description': 'Wenn er aktiviert ist, kann der Agent Ihnen keine Fragen stellen; er liest die AGENTS.md im Arbeitsbereich und entscheidet selbst.',
+  'unattendedMode.error': 'Speichern fehlgeschlagen. Bitte erneut versuchen.',
   'readOnly': 'Diese Bereitstellung speichert Einstellungen schreibgeschützt.',
 } satisfies Record<keyof typeof en, string>
 
@@ -406,6 +424,9 @@ export const ru = {
   'sessionCreateOverride.loading': 'Загрузка моделей…',
   'sessionCreateOverride.retry': 'Повторить',
   'sessionCreateOverride.empty': 'Нет доступных моделей.',
+  'unattendedMode.title': 'Автономный режим',
+  'unattendedMode.description': 'Когда он включён, агент не может задавать вопросы; он читает AGENTS.md рабочей области и решает сам.',
+  'unattendedMode.error': 'Не удалось сохранить. Повторите попытку.',
   'readOnly': 'Эта установка хранит настройки только для чтения.',
 } satisfies Record<keyof typeof en, string>
 
@@ -464,5 +485,8 @@ export const pt = {
   'sessionCreateOverride.loading': 'Carregando modelos…',
   'sessionCreateOverride.retry': 'Tentar novamente',
   'sessionCreateOverride.empty': 'Nenhum modelo disponível.',
+  'unattendedMode.title': 'Modo autônomo',
+  'unattendedMode.description': 'Quando ativado, o agente não pode fazer perguntas; ele lê o AGENTS.md do espaço de trabalho e decide sozinho.',
+  'unattendedMode.error': 'Não foi possível salvar. Tente novamente.',
   'readOnly': 'Esta implantação armazena as configurações somente leitura.',
 } satisfies Record<keyof typeof en, string>

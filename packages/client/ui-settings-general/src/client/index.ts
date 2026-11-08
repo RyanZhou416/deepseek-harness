@@ -40,6 +40,10 @@ import { CloseLabel, HeaderContent, TriggerContent } from './chrome.tsx'
 import { GeneralSection } from './GeneralSection.tsx'
 import { CurrentVersionRow } from './CurrentVersionRow.tsx'
 import { DeveloperToolsRow, type DeveloperToolsRowInjected } from './DeveloperToolsRow.tsx'
+import {
+  saveUnattendedMode, UnattendedModeRow,
+  type UnattendedModeRowInjected, type UnattendedModeSettings,
+} from './UnattendedModeRow.tsx'
 import { SessionCreateOverrideRow, type SessionCreateOverrideRowInjected } from './SessionCreateOverrideRow.tsx'
 import type { SessionCreateOverrideSettings } from './SessionCreateOverrideRow.tsx'
 import { SessionCreateOverrideCatalogStore } from './session-create-override-store.ts'
@@ -98,6 +102,17 @@ export function apply(ctx: ClientContext): void {
       },
     }),
   }, DeveloperToolsRow))
+  const unattendedModeForm = ctx.configForms.get<UnattendedModeSettings>('unattended-mode')
+  ctx.effect(() => ctx.configForms.whileServed(['unattended-mode'], () => ctx.slots.inject(
+    'settings.general.item',
+    () => ctx.slots.register({
+      name: 'settings.general.item', id: 'unattended-mode', order: 15.5, locale: NS,
+      inject: (): UnattendedModeRowInjected => ({
+        hooks: { unattendedMode: unattendedModeForm },
+        setEnabled: (enabled, revision) => saveUnattendedMode(unattendedModeForm, enabled, revision),
+      }),
+    }, UnattendedModeRow),
+  )), 'ui-settings-general: unattended mode')
   // Version information follows the core preferences.
   ctx.slots.inject('settings.general.item', () => ctx.slots.register({
     name: 'settings.general.item', id: 'current-version', order: 100, locale: NS,

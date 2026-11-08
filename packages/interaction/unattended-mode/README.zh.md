@@ -74,7 +74,7 @@ kind: "package-reference"
 
 ### 配置界面
 
-`enabled` 声明为 `.volatile()`，因此 Settings 服务会把它投影为该 profile 条目的实时表单。已发布的客户端不会渲染由 Config 驱动的页面，所以部署目前通过 profile patch 或其他设置客户端修改该值；插件清单会从包的 locale 元数据列出此插件。
+`enabled` 声明为 `.volatile()`，因此 Settings 服务会把它投影为该 profile 条目的实时表单。在 Host 提供 `unattended-mode` 条目时，已发布的 Web 客户端会由 `@deepseek-ai/dsh-client-ui-settings-general` 在“设置 → 通用”中渲染该开关；修改会通过 profile 设置文档写入并实时生效。
 
 </details>
 
@@ -86,6 +86,7 @@ kind: "package-reference"
 - [用户交互子系统参考](../../../docs/subsystems/user-questions.zh.md)——唯一现有消费方背后的问答 seam。
 - [tool-ask-user 包](../tool-ask-user/README.zh.md)——`USER_AWAY` 拒绝与模型侧文本。
 - [Settings 包](../../settings/settings/README.zh.md)——实时 Config 表单与 `autoGenerate` 策略。
+- [ui-settings-general 包](../../client/ui-settings-general/README.zh.md)——在“设置 → 通用”中暴露该开关的行。
 - [交互组映射](../README.zh.md)——相邻的审批、命令与问答表面。
 
 -----
@@ -105,7 +106,7 @@ kind: "package-reference"
 
 这些限制说明该开关的作用范围。它们是当前的包约束，不是 UI 积压事项。
 
-- **没有渲染出来的设置开关**：已发布的 Web 客户端不会从 Config schema 渲染页面，因此部署需在 profile patch 中修改 `enabled`；任何读取 `settings.describe()` 的客户端仍能看到该 volatile 字段。
+- **开关跟随部署组合**：未组合此插件的 Host 不提供设置条目，因此 Web“通用”页中的该行不出现，而不是显示为禁用。
 - **只有 `ask_user_question` 读取该开关**：审批提示、计划评审、computer use 以及其他 `ctx.userQuestions` 调用方仍会等待；每个消费方都需要自己的显式检查。
 - **该开关不是会话状态**：已记录的会话不携带开关值，因此回放与恢复遵循当前部署配置。
 
