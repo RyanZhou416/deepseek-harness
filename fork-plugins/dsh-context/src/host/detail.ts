@@ -5,7 +5,7 @@ import { type ConnectionHostFace, registerPostRoute } from './connection'
 import { applyTimeline } from './fold'
 import { createTimelineState } from './foldState'
 import { buildTimelineDetail, buildTimelineHead } from './foldWire'
-import { PRESSURE_KEYS, pressureViewsOf, registryReaderOf, type TimelineReader } from './projectionHandle'
+import { HEAD_VIEW_KEYS, headViewsOf, headViewsOfValues, registryReaderOf, type HeadViews, type TimelineReader } from './projectionHandle'
 import { TIMELINE_STATE_VERSION, timelineStateSchema } from './timeline'
 import type { ContextTimelineDetail, Snapshot } from '../shared/types'
 import type { TimelineState } from './foldState'
@@ -98,14 +98,9 @@ function cachedHeadOf(metadata: unknown): Record<string, unknown> | undefined {
   return values === null ? undefined : asRecord(values[CACHE_KEY]) ?? undefined
 }
 
-/** The context-pressure values the same metadata observation serves, when the host has them. */
-function cachedPressureOf(metadata: unknown): { pressure?: unknown; breakdown?: unknown } {
-  const values = asRecord(asRecord(asRecord(metadata)?.projections)?.values)
-  if (values === null) return {}
-  return {
-    ...(values.contextPressure === undefined ? {} : { pressure: values.contextPressure }),
-    ...(values.contextBreakdown === undefined ? {} : { breakdown: values.contextBreakdown }),
-  }
+/** The head views the same metadata observation serves, when the host has them. */
+function cachedHeadViewsOf(metadata: unknown): HeadViews {
+  return headViewsOfValues(asRecord(asRecord(asRecord(metadata)?.projections)?.values))
 }
 
 /** The persisted projection state bound to this exact session lifecycle, read with no log I/O. */
@@ -216,7 +211,7 @@ export function watchDetailChannel(
           return reply({
             ok: true,
             value: headOnly
-              ? { ...headPayloadOf(state), ...pressureViewsOf(ctx, session) }
+              ? { ...headPayloadOf(state), ...headViewsOf(ctx, session) }
               : buildTimelineDetail(state, bounds),
           })
         }
@@ -265,7 +260,7 @@ async function serveCold(
   let metadata: unknown
   if (typeof query.observeSessionMetadata === 'function') {
     try {
-      metadata = await query.observeSessionMetadata(sessionId, { signal, projectionKeys: [CACHE_KEY, ...PRESSURE_KEYS] })
+      metadata = await query.observeSessionMetadata(sessionId, { signal, projectionKeys: [CACHE_KEY, ...HEAD_VIEW_KEYS] })
     } catch {
       if (signal.aborted) return null
       metadata = undefined
@@ -273,8 +268,8 @@ async function serveCold(
   }
   const header = headerOf(metadata)
   const cachedHead = cachedHeadOf(metadata)
-  const cachedPressure = cachedPressureOf(metadata)
-  if (headOnly) return cachedHead === undefined ? null : { ...headPayloadOfValue(cachedHead), ...cachedPressure }
+  const cachedViews = cachedHeadViewsOf(metadata)
+  if (headOnly) return cachedHead === undefined ? null : { ...headPayloadOfValue(cachedHead), ...cachedViews }
   if (full) return serveFullDetail(ctx, query, sessionId, bounds, coldReads, payloads, signal)
   if (header !== undefined) {
     const state = checkpointStateOf(ctx, sessionId, header)

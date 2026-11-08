@@ -183,6 +183,7 @@ function fetchedValuesOf(head: unknown): Record<string, unknown> {
     ...(timelineOf(values?.timeline) === null ? {} : { contextTimeline: values?.timeline }),
     ...(contextPressureOf(values?.pressure) === null ? {} : { contextPressure: values?.pressure }),
     ...(contextBreakdownOf(values?.breakdown) === null ? {} : { contextBreakdown: values?.breakdown }),
+    ...(tokenUsageOf(values?.usage) === null ? {} : { tokenUsage: values?.usage }),
   }
 }
 

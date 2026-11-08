@@ -663,7 +663,7 @@ describe('the detail route', () => {
     assert.equal(head.value.rev, 2)
     assert.deepEqual(head.value.pressure, { projectedTokens: 900, contextWindow: 1000 })
     assert.deepEqual(head.value.breakdown, { systemTokens: 10, toolsTokens: 20, messageTokens: 30 })
-    assert.deepEqual(asked, [['contextPressure', 'contextBreakdown']], 'the key-subset read asks for the excluded keys only')
+    assert.deepEqual(asked, [['contextPressure', 'contextBreakdown', 'tokenUsage']], 'the key-subset read asks for the excluded keys only')
     const detail = await call(live.captured, { sessionId: 's1' }) as { ok: true; value: { requests: unknown[] } }
     assert.equal(detail.value.requests.length, 1, 'the handle reader serves the live fold')
 
@@ -681,7 +681,7 @@ describe('the detail route', () => {
     }
     assert.deepEqual(coldHead.value.pressure, { projectedTokens: 900, contextWindow: 1000 })
     assert.deepEqual(coldHead.value.breakdown, { systemTokens: 10, toolsTokens: 20, messageTokens: 30 })
-    assert.deepEqual(seenKeys, ['contextTimeline', 'contextPressure', 'contextBreakdown'], 'one stat asks for the excluded keys')
+    assert.deepEqual(seenKeys, ['contextTimeline', 'contextPressure', 'contextBreakdown', 'tokenUsage'], 'one stat asks for the excluded keys')
     assert.deepEqual(cold.counts, { observe: 0, metadata: 1, window: 0 })
   })
 

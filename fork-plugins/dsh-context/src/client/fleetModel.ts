@@ -58,9 +58,12 @@ export function useFleetModel(
         if (head !== null) setLanded(prev => prev.get(id) === head ? prev : new Map(prev).set(id, head))
       }).catch(() => {})
     }
+    // Detail projections of Sessions this client has not opened are not
+    // streamed, so each other agent's head is read again when its row's
+    // activity time moves.
     for (const n of forest.nodes) {
-      if (n.isCurrent || (n.head !== null && n.head.parts.length > 0 && n.pressureKnown === true)) continue
-      attach(heads.headOf(n.id), n.id)
+      if (n.isCurrent) continue
+      attach(heads.headOf(n.id, n.updatedAt), n.id)
     }
   }, [forest, heads])
 

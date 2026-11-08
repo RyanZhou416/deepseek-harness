@@ -60,6 +60,20 @@ describe('makeHeadFetcher', () => {
 describe('makeAgentHeads', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
+  test('reads a head again when the row activity time moves', async () => {
+    const bodies: unknown[] = []
+    vi.stubGlobal('fetch', async (_url: unknown, init: { body: string }) => {
+      bodies.push(JSON.parse(init.body))
+      return headResponse()
+    })
+    const heads = makeAgentHeads()
+    const first = heads.headOf('s1', 10)
+    assert.ok(heads.headOf('s1', 10) === first, 'the same activity time replays')
+    await first
+    await heads.headOf('s1', 11)
+    assert.equal(bodies.length, 2, 'a newer activity time reads again')
+  })
+
   test('one read per id replays the cached promise; the map is bounded; a rejected read still caches', async () => {
     const bodies: unknown[] = []
     vi.stubGlobal('fetch', async (_url: unknown, init: { body: string }) => {

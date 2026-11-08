@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import { PRESSURE_KEYS, pressureViewsOf, registryReaderOf, TIMELINE_KEY, timelineReaderOf } from '../../src/host/projectionHandle'
+import { HEAD_VIEW_KEYS, headViewsOf, registryReaderOf, TIMELINE_KEY, timelineReaderOf } from '../../src/host/projectionHandle'
 import type { TimelineState } from '../../src/host/foldState'
 
 const SESSION = { id: 's1' }
@@ -46,7 +46,7 @@ describe('registryReaderOf', () => {
   })
 })
 
-describe('pressureViewsOf', () => {
+describe('headViewsOf', () => {
   test('serves the summary-excluded keys through the key-subset read', () => {
     const asked: unknown[] = []
     const registry = {
@@ -57,26 +57,28 @@ describe('pressureViewsOf', () => {
           values: {
             contextPressure: { projectedTokens: 10 },
             contextBreakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 3 },
+            tokenUsage: { outputTokens: 4 },
           },
         }
       },
     }
-    const views = pressureViewsOf(ctxWith(registry), SESSION)
+    const views = headViewsOf(ctxWith(registry), SESSION)
     assert.deepEqual(views, {
       pressure: { projectedTokens: 10 },
       breakdown: { systemTokens: 1, toolsTokens: 2, messageTokens: 3 },
+      usage: { outputTokens: 4 },
     })
-    assert.deepEqual(asked, [[SESSION, PRESSURE_KEYS]], 'the read asks for exactly the excluded keys')
+    assert.deepEqual(asked, [[SESSION, HEAD_VIEW_KEYS]], 'the read asks for exactly the excluded keys')
   })
 
   test('an absent or hostile read face serves no values', () => {
-    assert.deepEqual(pressureViewsOf(ctxWith({}), SESSION), {})
-    assert.deepEqual(pressureViewsOf(ctxWith(7), SESSION), {})
-    assert.deepEqual(pressureViewsOf(ctxWith({ snapshot: () => 42 }), SESSION), {})
-    assert.deepEqual(pressureViewsOf(ctxWith({ snapshot: () => ({ values: null }) }), SESSION), {})
-    const partial = pressureViewsOf(ctxWith({ snapshot: () => ({ values: { contextPressure: { projectedTokens: 1 } } }) }), SESSION)
+    assert.deepEqual(headViewsOf(ctxWith({}), SESSION), {})
+    assert.deepEqual(headViewsOf(ctxWith(7), SESSION), {})
+    assert.deepEqual(headViewsOf(ctxWith({ snapshot: () => 42 }), SESSION), {})
+    assert.deepEqual(headViewsOf(ctxWith({ snapshot: () => ({ values: null }) }), SESSION), {})
+    const partial = headViewsOf(ctxWith({ snapshot: () => ({ values: { contextPressure: { projectedTokens: 1 } } }) }), SESSION)
     assert.deepEqual(partial, { pressure: { projectedTokens: 1 } }, 'a missing key stays absent')
-    const breakdownOnly = pressureViewsOf(ctxWith({
+    const breakdownOnly = headViewsOf(ctxWith({
       snapshot: () => ({ values: { contextBreakdown: { systemTokens: 1, toolsTokens: 0, messageTokens: 0 } } }),
     }), SESSION)
     assert.deepEqual(breakdownOnly, { breakdown: { systemTokens: 1, toolsTokens: 0, messageTokens: 0 } }, 'either key may be absent')

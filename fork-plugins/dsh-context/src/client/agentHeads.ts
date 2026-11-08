@@ -1,18 +1,27 @@
 import { useCallback, useSyncExternalStore } from 'react'
-import type { ContextBreakdown, ContextPressure, ContextTimeline } from '../shared/types'
+import type { ContextBreakdown, ContextPressure, ContextTimeline, TokenUsage } from '../shared/types'
 import type { SessionsFaceLike } from './agentTree'
 import { DETAIL_ROUTE } from './apiRoutes'
 import { lruTouch, lruTrim } from './lru'
-import { asRecord, contextBreakdownOf, contextPressureOf, timelineOf } from './services'
+import { asRecord, contextBreakdownOf, contextPressureOf, timelineOf, tokenUsageOf } from './services'
 
 export interface AgentHead {
   timeline: ContextTimeline
   pressure: ContextPressure | null
   breakdown: ContextBreakdown | null
+  usage?: TokenUsage | null
 }
 
 export interface AgentHeads {
-  headOf(id: string): Promise<AgentHead | null>
+  /**
+   * Read one agent's head, cached per activity time: the control stream
+   * carries no detail projections for Sessions this client has not opened,
+   * so a newer `updatedAt` reads the head again.
+   * @param id - Session id.
+   * @param updatedAt - the row's activity time; omitted reuses any cached head.
+   * @returns the head, or null when the Host has none.
+   */
+  headOf(id: string, updatedAt?: number): Promise<AgentHead | null>
 }
 
 export function makeHeadFetcher(sessionId: string): (() => Promise<AgentHead | null>) | undefined {
@@ -34,6 +43,7 @@ export function makeHeadFetcher(sessionId: string): (() => Promise<AgentHead | n
       timeline: head,
       pressure: contextPressureOf(value?.pressure),
       breakdown: contextBreakdownOf(value?.breakdown),
+      usage: tokenUsageOf(value?.usage),
     }
   }
 }
@@ -43,15 +53,16 @@ const HEADS_MAX = 128
 export function makeAgentHeads(): AgentHeads {
   const heads = new Map<string, Promise<AgentHead | null>>()
   return {
-    headOf(id: string): Promise<AgentHead | null> {
-      const cached = heads.get(id)
+    headOf(id: string, updatedAt?: number): Promise<AgentHead | null> {
+      const key = updatedAt === undefined ? id : `${id}@${String(updatedAt)}`
+      const cached = heads.get(key)
       if (cached !== undefined) {
-        lruTouch(heads, id)
+        lruTouch(heads, key)
         return cached
       }
       const fetcher = makeHeadFetcher(id)
       const pending = fetcher !== undefined ? fetcher() : Promise.resolve(null)
-      heads.set(id, pending)
+      heads.set(key, pending)
       lruTrim(heads, HEADS_MAX)
       return pending
     },

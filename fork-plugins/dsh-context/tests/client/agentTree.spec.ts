@@ -357,6 +357,15 @@ describe('agentForestOf', () => {
     assert.equal(solo.nodes[0].pressureKnown, true, 'the fetched pressure is known')
   })
 
+  test('a fetched head supplies the billed total the row no longer carries', () => {
+    const forest = agentForestOf(snap({ s1: row({}) }), 's1', undefined, new Map([['s1', {
+      timeline: timeline(5), pressure: null, breakdown: null,
+      usage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
+    }]]))
+    assert.ok(forest !== null)
+    assert.equal(forest.nodes[0].billed, 10)
+  })
+
   test('a fetched breakdown refines the composition parts', () => {
     const forest = agentForestOf(snap({
       s1: row({}),

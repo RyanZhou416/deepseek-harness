@@ -30,6 +30,8 @@ Two earlier fork behaviors are retired because upstream now owns them:
 
 The fork pins `zod` to the exact version the registry's typings were built against (`4.4.3` at the time of writing). Its `_zod.version` participates in type identity, so a newer minor makes `ctx.sessionProjections.register()` reject every unit at type-check time. The plugin's development dependencies stay on the lowest supported Harness floor (`0.2.0-rc.2`) as `tests/compat/manifest.spec.ts` requires; the runtime works on all three declared releases and degrades to the legacy detail fold where the newer read faces are absent.
 
+- **Agent heads carry detail views.** The Session control stream carries no detail projections for Sessions this client has not opened, so the agent tree reads every other agent's `contextPressure`, `contextBreakdown`, and `tokenUsage` through the head request (`HEAD_VIEW_KEYS`), cached per row activity time (`headOf(id, updatedAt)`). Keep the head request as the only source of those values for unopened agents.
+
 ## Verification and packaging
 
 ### Tool attribution lifetime
