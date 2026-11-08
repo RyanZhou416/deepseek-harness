@@ -243,7 +243,8 @@ Tracks whether a human is available and notifies subscribers after a live config
 enabled(): boolean
 
 /**
- * Observe switch changes.
+ * Observe switch changes. The registration is an effect on the calling
+ * context's fiber, so it ends with that fiber.
  * @param listener - called with the new state after a live configuration update changes it.
  * @returns disposer removing the listener; safe to call more than once.
  */
