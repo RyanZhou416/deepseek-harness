@@ -94,6 +94,15 @@ interface ProjectionDefinition<K extends string, S> {
      * @default true
      */
     summary?: boolean
+    /**
+     * Whether Session Controller change streams (the control stream and follow
+     * `projectionChanges`) publish this unit's changes; omitted means `true`.
+     * Declare `false` when every consumer derives live changes from the
+     * Session events it already follows and needs this value only at an
+     * opening or an explicit read. The registry change feeds still fire.
+     * @default true
+     */
+    live?: boolean
   } : never
   /**
    * Persisted-cache invalidation version: bump whenever the serialized state fields or the
@@ -156,7 +165,7 @@ type ProjectionEventChangeListener = (
 
 ## 摘要读取
 
-Session 摘要包含每个已注册客户端视图，但排除 `SessionProjectionMap` 条目带 `SessionProjectionSummaryExcluded<T>` 标记的 key。标记没有运行时表示：它决定客户端视图类型，`wire.summary` 决定运行时键集合，省略即 `true`。map 条目带标记的 key 应声明 `wire.summary: false` 以保持一致；该字段是普通布尔值，类型层不做强制。
+Session 摘要包含每个已注册客户端视图，但排除 `SessionProjectionMap` 条目带 `SessionProjectionSummaryExcluded<T>` 标记的 key。标记没有运行时表示：它决定客户端视图类型，`wire.summary` 决定运行时键集合，省略即 `true`。map 条目带标记的 key 应声明 `wire.summary: false` 以保持一致；该字段是普通布尔值，类型层不做强制。`wire.live: false` 另把单元移出 `liveKeys()`，即 Session Controller 变更流发布的集合；opening、显式读取与注册表变更回调仍携带它。
 
 `summaryKeys()` 从实时注册派生该集合，并在注册或注销改变 key 表之前持续返回同一实例。摘要消费方把它传给既有的带 key 读取面 —— 实时 Session 用 `snapshot(session, keys)`，checkpoint 行用 `viewCheckpoint(rows, keys)`，两者都直接使用 Set、不做复制 —— 因此不存在摘要专用读取面，集合也只有一处定义。
 
@@ -412,6 +421,14 @@ wireKeys(): readonly Extract<keyof SessionProjectionMap, string>[]
  * @returns the current summary key set; do not mutate it.
  */
 summaryKeys(): ReadonlySet<Extract<keyof SessionProjectionMap, string>>
+
+/**
+ * The keys Session Controller change streams publish: every registered
+ * client-visible key whose unit does not declare `live: false`. Stable like
+ * {@link summaryKeys} until the key table changes.
+ * @returns the current live key set; do not mutate it.
+ */
+liveKeys(): ReadonlySet<Extract<keyof SessionProjectionMap, string>>
 
 /**
  * State-level checkpoint of every persisted unit for one session, read

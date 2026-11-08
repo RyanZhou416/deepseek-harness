@@ -215,4 +215,25 @@ describe('session projection summary keys', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('derives the live set from units that do not declare live: false, and refuses a mismatched re-registration', async () => {
+    const { ctx, registry } = await mount()
+    try {
+      await registry.register(keptUnit())
+      await registry.register({ ...excludedUnit(), wire: { ...excludedUnit().wire, live: false } })
+      const keys = registry.liveKeys()
+      expect([...keys]).toEqual(['test/summary-kept'])
+      expect(registry.liveKeys()).toBe(keys)
+      await expect(Promise.resolve(registry.register(excludedUnit())))
+        .rejects.toThrow(/test\/summary-excluded.*already registered with live=false/)
+      const fiber = await ctx.plugin(Object.assign(async (hostCtx: Context) => {
+        await hostCtx.sessionProjections.register(excludedNullableUnit())
+      }, { inject: ['sessionProjections'] }))
+      expect([...registry.liveKeys()]).toEqual(['test/summary-kept', 'test/summary-excluded-nullable'])
+      await fiber.dispose()
+      expect([...registry.liveKeys()]).toEqual(['test/summary-kept'])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })

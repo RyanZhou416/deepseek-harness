@@ -134,5 +134,10 @@ export const turnOutlineProjectionDefinition = {
     viewSchema: turnOutlineEntriesSchema,
     view: state => state.turns,
     summary: false,
+    // The rail reads loaded turns before the outline, and a followed Session
+    // receives every new turn as events, so the value is needed only at an
+    // opening or explicit read; streaming it would resend the whole log
+    // outline up to three times per turn.
+    live: false,
   },
 } satisfies ProjectionDefinition<'turnOutline', TurnOutlineState>

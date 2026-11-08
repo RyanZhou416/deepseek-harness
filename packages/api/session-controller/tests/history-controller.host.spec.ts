@@ -49,6 +49,7 @@ describe('HistoryController passive reads', () => {
       receive = callback
       return dispose
     })
+    vi.spyOn(f.ctx.sessionProjections, 'liveKeys').mockReturnValue(new Set(['title', 'goal']))
     const stream = f.history.observeProjections({ sessionId: f.session.id }, f.abort.signal)[Symbol.asyncIterator]()
     expect(await stream.next()).toMatchObject({ value: { type: 'ready' } })
     receive?.(f.session, [{ key: 'title', val: 'new title' }, { key: 'goal', val: null }], SessionSeq(0))

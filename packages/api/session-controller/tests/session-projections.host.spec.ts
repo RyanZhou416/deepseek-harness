@@ -1074,4 +1074,33 @@ describe('Session control projection frames', () => {
     })
     expect((await read(false, 2)).type).not.toBe('projection')
   })
+
+  it('keeps a unit declaring live: false out of follow frames while its opening value stays complete', async () => {
+    const { ctx, session } = await harness(true)
+    await ctx.sessionProjections.register({ ...excludedUnit(), wire: { ...excludedUnit().wire, live: false } })
+    const proxy = await remote(ctx)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    seedMessages(session, 1)
+    const abort = new AbortController()
+    const iterator = proxy.follow({ address: { kind: 'session', sessionId: session.id }, projectionChanges: true }, abort.signal)[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    if (first.done || first.value.type !== 'snapshot') throw new Error('follow did not open with a snapshot')
+    expect(first.value.projections?.values['test/summary-excluded']).toBe(1)
+    // A distinct prompt time guarantees a live change beside the non-live one.
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 1_000)
+    seedMessages(session, 1)
+    now.mockRestore()
+    const frames: SessionFollowFrame[] = []
+    for (let index = 0; index < 2; index += 1) {
+      const next = await iterator.next()
+      if (next.done) break
+      frames.push(next.value)
+      if (next.value.type === 'projection') break
+    }
+    abort.abort()
+    await iterator.return?.()
+    const projection = frames.find(frame => frame.type === 'projection')
+    expect(projection).toBeDefined()
+    expect(JSON.stringify(projection)).not.toContain('test/summary-excluded')
+  })
 })

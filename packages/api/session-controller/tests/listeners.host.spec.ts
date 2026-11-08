@@ -183,6 +183,7 @@ describe('ProjectionListener', () => {
     let receive!: Parameters<typeof ctx.sessionProjections.onEventChanged>[0]
     const dispose = vi.fn()
     vi.spyOn(ctx.sessionProjections, 'onEventChanged').mockImplementation((listener) => { receive = listener; return dispose })
+    vi.spyOn(ctx.sessionProjections, 'liveKeys').mockReturnValue(new Set(['subagent', 'title']))
     using listener = new ProjectionListener(ctx, session.id, abort.signal)
     const other = ctx.sessions.create(SessionId('other'))
     receive(other, [{ key: 'subagent', val: null }], SessionSeq(0))
@@ -197,11 +198,26 @@ describe('ProjectionListener', () => {
     expect(dispose).toHaveBeenCalledOnce()
   })
 
+  it('drops changes of units that are not live and skips an event left with none', async () => {
+    const { ctx, session, abort } = await fixture()
+    let receive!: Parameters<typeof ctx.sessionProjections.onEventChanged>[0]
+    vi.spyOn(ctx.sessionProjections, 'onEventChanged').mockImplementation((listener) => { receive = listener; return () => {} })
+    vi.spyOn(ctx.sessionProjections, 'liveKeys').mockReturnValue(new Set(['title']))
+    using listener = new ProjectionListener(ctx, session.id, abort.signal)
+    receive(session, [{ key: 'turnOutline', val: [] }], SessionSeq(1))
+    receive(session, [{ key: 'turnOutline', val: [] }, { key: 'title', val: 'kept' }], SessionSeq(2))
+    const changes = listener.changes()[Symbol.asyncIterator]()
+    expect(await changes.next()).toEqual({ done: false, value: { type: 'projection', seq: 2, changes: [{ key: 'title', val: 'kept' }] } })
+    abort.abort()
+    expect(await changes.next()).toMatchObject({ done: true })
+  })
+
   it('writes into an external buffer and leaves it open after disposal', async () => {
     const { ctx, session, abort } = await fixture()
     let receive!: Parameters<typeof ctx.sessionProjections.onEventChanged>[0]
     const dispose = vi.fn()
     vi.spyOn(ctx.sessionProjections, 'onEventChanged').mockImplementation((listener) => { receive = listener; return dispose })
+    vi.spyOn(ctx.sessionProjections, 'liveKeys').mockReturnValue(new Set(['title']))
     using queue = new ListenerBuffer<SessionProjectionChange>(ctx, abort.signal)
     const listener = new ProjectionListener(ctx, session.id, abort.signal, queue)
     await expect(listener.changes()[Symbol.asyncIterator]().next()).rejects.toThrow('externally owned')

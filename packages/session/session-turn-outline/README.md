@@ -74,7 +74,7 @@ The unit is a pure fold over committed session events. `turn/start` — not the 
 
 ### Fold rules
 
-- Uninteresting events return the same state reference, and draft-only changes keep the `turns` array's identity; the registry's two `Object.is` gates then hold the feed to at most three pushes per turn.
+- Uninteresting events return the same state reference, and draft-only changes keep the `turns` array's identity; the registry's two `Object.is` gates then hold the feed to at most three changes per turn. The unit declares `wire.live: false`: the rail reads loaded turns before the outline, and a followed Session receives each new turn as events, so Session Controller change streams never carry the outline; it arrives with each opening and explicit read.
 - A `turn/start` that does not advance the turn number is skipped, keeping the outline sorted; a retried boundary's previews then land on the standing entry.
 - The wire view projects `state.turns`; the persisted-cache state schema wraps the wire schema with the draft field.
 
@@ -109,7 +109,7 @@ None; the package never assembles or sends provider requests.
 
 These limits define what the outline describes and when the unit is absent. They are current package constraints.
 
-- **The wire value grows with the session** — every push carries the complete outline (whole-value rule), up to ~600 bytes per turn at full CJK budgets and typically far less; splitting previews into an on-demand read is deferred until sessions with many thousands of turns need it.
+- **The wire value grows with the session** — every opening and explicit read carries the complete outline (whole-value rule), up to ~600 bytes per turn at full CJK budgets and typically far less; splitting previews into an on-demand read is deferred until sessions with many thousands of turns need it.
 - **The response previews only settled turns** — it commits at `turn/end`, so an open turn (or one whose end never logged) shows a prompt-only preview until the boundary lands.
 - **A turn without eligible text keeps `''`** — images-only and command-only turns are navigable but labeled by number, and a turn whose steps emit no text gets no response preview.
 - **Mounted only where the projection registry is composed** — other assemblies serve no `turnOutline` key, and their consumers fall back to loaded-window navigation.

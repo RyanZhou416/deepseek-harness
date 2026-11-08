@@ -94,6 +94,15 @@ interface ProjectionDefinition<K extends string, S> {
      * @default true
      */
     summary?: boolean
+    /**
+     * Whether Session Controller change streams (the control stream and follow
+     * `projectionChanges`) publish this unit's changes; omitted means `true`.
+     * Declare `false` when every consumer derives live changes from the
+     * Session events it already follows and needs this value only at an
+     * opening or an explicit read. The registry change feeds still fire.
+     * @default true
+     */
+    live?: boolean
   } : never
   /**
    * Persisted-cache invalidation version: bump whenever the serialized state fields or the
@@ -156,7 +165,7 @@ type ProjectionEventChangeListener = (
 
 ## Summary reads
 
-A Session summary carries every registered client view except the keys whose `SessionProjectionMap` entry carries the `SessionProjectionSummaryExcluded<T>` mark. The mark has no runtime representation: it decides the client view type, while `wire.summary` decides the runtime key set, with omission meaning `true`. A key whose entry carries the mark declares `wire.summary: false` so the two agree; the field is a plain boolean, so the type does not enforce it.
+A Session summary carries every registered client view except the keys whose `SessionProjectionMap` entry carries the `SessionProjectionSummaryExcluded<T>` mark. The mark has no runtime representation: it decides the client view type, while `wire.summary` decides the runtime key set, with omission meaning `true`. A key whose entry carries the mark declares `wire.summary: false` so the two agree; the field is a plain boolean, so the type does not enforce it. `wire.live: false` separately removes a unit from `liveKeys()`, the set Session Controller change streams publish; openings, explicit reads, and the registry change feeds still carry it.
 
 `summaryKeys()` derives the key set from the live registrations and keeps returning the same instance until a registration or its disposal changes the key table. A summary consumer passes it to the existing key-taking faces — `snapshot(session, keys)` for live Sessions and `viewCheckpoint(rows, keys)` for checkpoint rows, both using a set without copying — so there is no summary-specific read face and no second definition of the set.
 
@@ -412,6 +421,14 @@ wireKeys(): readonly Extract<keyof SessionProjectionMap, string>[]
  * @returns the current summary key set; do not mutate it.
  */
 summaryKeys(): ReadonlySet<Extract<keyof SessionProjectionMap, string>>
+
+/**
+ * The keys Session Controller change streams publish: every registered
+ * client-visible key whose unit does not declare `live: false`. Stable like
+ * {@link summaryKeys} until the key table changes.
+ * @returns the current live key set; do not mutate it.
+ */
+liveKeys(): ReadonlySet<Extract<keyof SessionProjectionMap, string>>
 
 /**
  * State-level checkpoint of every persisted unit for one session, read

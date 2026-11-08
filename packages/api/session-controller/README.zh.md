@@ -59,7 +59,7 @@ Client 列表刷新保留未变化的 manager 条目和 Client 目录行，并�
 
 后台 job 的名册行与观测流属于 [`dsh-api-job-controller`](../job-controller/README.zh.md)；控制流只承载投影。
 
-投影读取独立于其值保留加载与失败状态。重连会取消上一连接的读取，并重新加载已请求的投影；实时成员更新通过 control stream 到达。control stream 只携带 Session 摘要 key，因此明细 key（声明 `summary: false` 的单元，例如 `turnOutline`、`sessionStats` 与 `contextPressure`）只通过客户端已打开 Session 的 follow stream 到达：Client 请求 `projectionChanges` 后，Host 对每个改变了任一客户端可见 key 的已提交 event 发送一个 `projection` frame。因此 control block 不是全日志切面：它不会让 store 变为 exact，也不会清除它没有携带的 key。Session 的 follow stream 结束，或之后的 opening 没有投影块时，exact 状态随之失效，因为此时没有任何 stream 保持其明细 key 为最新；这些值仍可读取，之后的 opening 或显式请求会重新读取。父 Agent 可用性来自 Host 摘要，在收到对应摘要或成功的列表 baseline 前保持未知。地址查找直接解析投影中的子项，不会选择它们或创建 scope。
+投影读取独立于其值保留加载与失败状态。重连会取消上一连接的读取，并重新加载已请求的投影；实时成员更新通过 control stream 到达。control stream 只携带 Session 摘要 key，因此明细 key（声明 `summary: false` 的单元，例如 `turnOutline`、`sessionStats` 与 `contextPressure`）只通过客户端已打开 Session 的 follow stream 到达：Client 请求 `projectionChanges` 后，Host 对每个改变了 `sessionProjections.liveKeys()` 中任一客户端可见 key 的已提交 event 发送一个 `projection` frame。声明 `wire.live: false` 的单元（例如 `turnOutline`）只随 opening 与显式读取到达，control stream 同样只携带实时摘要 key。因此 control block 不是全日志切面：它不会让 store 变为 exact，也不会清除它没有携带的 key。Session 的 follow stream 结束，或之后的 opening 没有投影块时，exact 状态随之失效，因为此时没有任何 stream 保持其明细 key 为最新；这些值仍可读取，之后的 opening 或显式请求会重新读取。父 Agent 可用性来自 Host 摘要，在收到对应摘要或成功的列表 baseline 前保持未知。地址查找直接解析投影中的子项，不会选择它们或创建 scope。
 
 已受理的提示词与已观察到的运行，会使客户端展示转换跨列表刷新、重连及 Session 对象替换保留。Manager 按 Session id 保留这些观察；它们不证明持久历史已经产生。草稿、投影存储和侧边栏展示规则保留原有行为。[blank 回退修复决策](../../../.agents/notes/implemented/bug-fix/2026-09-15-client-session-blank-reconciliation.zh.md) 定义保留期限及迟到响应处理。
 

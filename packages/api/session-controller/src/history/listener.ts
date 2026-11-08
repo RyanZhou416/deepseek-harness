@@ -148,9 +148,12 @@ export class ProjectionListener implements Disposable {
     try {
       this.dispose = ctx.sessionProjections.onEventChanged((session, changes, seq) => {
         if (session.id !== target) return
+        const live = ctx.sessionProjections.liveKeys()
+        const published = changes.filter(change => live.has(change.key))
+        if (published.length === 0) return
         buffer.capture(() => {
           // Every projection definition validates its value before change publication.
-          input.append({ type: 'projection', seq, changes: changes as SessionProjectionChange['changes'] })
+          input.append({ type: 'projection', seq, changes: published as SessionProjectionChange['changes'] })
         })
       })
       this.buffer?.own(() => { this[Symbol.dispose]() })

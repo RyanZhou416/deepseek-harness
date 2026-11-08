@@ -88,6 +88,8 @@ describe('real Loader composition', () => {
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     expect(loaded.sessionProjections.snapshot(session).values.turnOutline)
       .toEqual([{ turn: 1, seq: boundary, prompt: 'composed prompt', response: 'composed answer' }])
+    // Followers derive new turns from events, so change streams never carry the outline.
+    expect(loaded.sessionProjections.liveKeys().has('turnOutline')).toBe(false)
   })
 
   it('keeps the function-plugin namespace free of a default export', () => {

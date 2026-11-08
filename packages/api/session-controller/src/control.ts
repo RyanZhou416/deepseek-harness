@@ -89,14 +89,13 @@ export class SessionControlController {
     return blocks
   }
 
-  /** Summary keys minus the deployment exclusions, rebuilt only when the registry's key table changes. */
+  /** Live summary keys minus the deployment exclusions, rebuilt only when the registry's key table changes. */
   private summaryKeys(): ReadonlySet<string> {
     const source = this.ctx.sessionProjections.summaryKeys()
     if (source !== this.summaryKeySource) {
       this.summaryKeySource = source
-      this.summaryKeySet = this.excludedKeys.size === 0
-        ? source
-        : new Set([...source].filter(key => !this.excludedKeys.has(key)))
+      const live = this.ctx.sessionProjections.liveKeys()
+      this.summaryKeySet = new Set([...source].filter(key => live.has(key) && !this.excludedKeys.has(key)))
     }
     return this.summaryKeySet
   }

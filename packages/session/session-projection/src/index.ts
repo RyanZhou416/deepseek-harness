@@ -122,6 +122,15 @@ export interface ProjectionDefinition<K extends string, S> {
      * @default true
      */
     summary?: boolean
+    /**
+     * Whether Session Controller change streams (the control stream and follow
+     * `projectionChanges`) publish this unit's changes; omitted means `true`.
+     * Declare `false` when every consumer derives live changes from the
+     * Session events it already follows and needs this value only at an
+     * opening or an explicit read. The registry change feeds still fire.
+     * @default true
+     */
+    live?: boolean
   } : never
   /**
    * Persisted-cache invalidation version: bump whenever the serialized state fields or the
@@ -221,6 +230,8 @@ interface ErasedDefinition {
     view(state: unknown): unknown
     /** Whether a Session summary carries this unit (false when the unit declared `summary: false`). */
     summary: boolean
+    /** Whether change streams publish this unit (false when the unit declared `live: false`). */
+    live: boolean
   } | undefined
   stateVersion: number
 }
@@ -283,6 +294,8 @@ export class SessionProjectionRegistry extends Service {
   private readonly registrations = new Map<string, Registration>()
   /** Stable summary key set; dropped whenever the key table changes. */
   private summaryKeySet: ReadonlySet<Extract<keyof SessionProjectionMap, string>> | undefined
+  /** Stable live key set; dropped whenever the key table changes. */
+  private liveKeySet: ReadonlySet<Extract<keyof SessionProjectionMap, string>> | undefined
   private readonly listeners = new Set<ProjectionChangeListener>()
   private readonly eventListeners = new Set<ProjectionEventChangeListener>()
   /** Keys whose deprecated registry-level read has already been reported. */
@@ -384,6 +397,7 @@ export class SessionProjectionRegistry extends Service {
       viewSchema: ZodType
       view(state: S): unknown
       summary?: boolean
+      live?: boolean
     } | undefined
     const erased: ErasedDefinition = {
       key: definition.key,
@@ -396,7 +410,7 @@ export class SessionProjectionRegistry extends Service {
       // into the erased unit, where the key set reads it.
       wire: wire === undefined
         ? undefined
-        : { viewSchema: wire.viewSchema, view: state => wire.view(state as S), summary: wire.summary !== false },
+        : { viewSchema: wire.viewSchema, view: state => wire.view(state as S), summary: wire.summary !== false, live: wire.live !== false },
       stateVersion: definition.stateVersion,
     }
     if (!Number.isSafeInteger(definition.stateVersion) || definition.stateVersion < 0) {
@@ -410,12 +424,16 @@ export class SessionProjectionRegistry extends Service {
         registration = { def: erased, cells: new WeakMap(), refs: 1 }
         this.registrations.set(key, registration)
         this.summaryKeySet = undefined
+        this.liveKeySet = undefined
       } else {
         if (existing.def.stateVersion !== erased.stateVersion) {
           throw new Error(`session projection key ${JSON.stringify(key)} is already registered at stateVersion ${String(existing.def.stateVersion)}; refusing to share it with stateVersion ${String(erased.stateVersion)}`)
         }
         if (existing.def.wire?.summary !== erased.wire?.summary) {
           throw new Error(`session projection key ${JSON.stringify(key)} is already registered with summary=${String(existing.def.wire?.summary)}; refusing to share it with summary=${String(erased.wire?.summary)}`)
+        }
+        if (existing.def.wire?.live !== erased.wire?.live) {
+          throw new Error(`session projection key ${JSON.stringify(key)} is already registered with live=${String(existing.def.wire?.live)}; refusing to share it with live=${String(erased.wire?.live)}`)
         }
         existing.refs += 1
         registration = existing
@@ -424,6 +442,7 @@ export class SessionProjectionRegistry extends Service {
         registration.refs -= 1
         if (registration.refs === 0) {
           this.summaryKeySet = undefined
+          this.liveKeySet = undefined
         }
       }
     }, 'sessionProjections.register()')
@@ -590,16 +609,31 @@ export class SessionProjectionRegistry extends Service {
    * @returns the current summary key set; do not mutate it.
    */
   summaryKeys(): ReadonlySet<Extract<keyof SessionProjectionMap, string>> {
-    this.summaryKeySet ??= this.deriveSummaryKeys()
+    this.summaryKeySet ??= this.deriveKeys(wire => wire.summary)
     return this.summaryKeySet
   }
 
-  /** Rebuild the summary key set from the current registrations. */
-  private deriveSummaryKeys(): ReadonlySet<Extract<keyof SessionProjectionMap, string>> {
+  /**
+   * The keys Session Controller change streams publish: every registered
+   * client-visible key whose unit does not declare `live: false`. Stable like
+   * {@link summaryKeys} until the key table changes.
+   * @returns the current live key set; do not mutate it.
+   */
+  liveKeys(): ReadonlySet<Extract<keyof SessionProjectionMap, string>> {
+    this.liveKeySet ??= this.deriveKeys(wire => wire.live)
+    return this.liveKeySet
+  }
+
+  /**
+   * Rebuild one key set from the current registrations.
+   * @param member - whether a client-visible unit belongs to the set.
+   * @returns the keys of every live registration whose wire view qualifies.
+   */
+  private deriveKeys(member: (wire: NonNullable<ErasedDefinition['wire']>) => boolean): ReadonlySet<Extract<keyof SessionProjectionMap, string>> {
     const keys = new Set<Extract<keyof SessionProjectionMap, string>>()
     for (const registration of this.registrations.values()) {
       if (registration.refs === 0) continue
-      if (registration.def.wire === undefined || !registration.def.wire.summary) continue
+      if (registration.def.wire === undefined || !member(registration.def.wire)) continue
       keys.add(registration.def.key as Extract<keyof SessionProjectionMap, string>)
     }
     return keys
