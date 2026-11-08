@@ -73,6 +73,8 @@ For a finite timed call, `{ "pending": true, "callId": "…" }` means the foregr
 
 Legacy and `timeout: -1` calls wait for an answer or cancellation; without an accepting answerer, they return an error. A finite timed call without an answerer returns pending at its deadline. Cancellation and a caller that is not the exact live runtime root also return errors. A live child agent is rejected with `DELEGATED_CALLER` and must include the unresolved decision in its final result.
 
+While `ctx.unattendedMode` reports that no human can answer, both modes fail with `USER_AWAY` before any answerer runs. The text tells the model that the user is away, to read `AGENTS.md` (or `AGENT.md`) at the workspace root for standing guidance, and to decide and continue. The tool schema stays visible, so the catalog does not change when the switch toggles.
+
 -----
 
 <a id="understand-the-implementation"></a>

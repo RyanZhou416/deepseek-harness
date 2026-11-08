@@ -637,6 +637,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Registers capabilities and scoped executors. Native and PTC providers own descriptions and complete raw call batches; their optional shared pipeline handles tool policy and dispatch.',
   },
   {
+    key: 'unattendedMode',
+    pkg: 'unattended-mode',
+    title: 'Unattended-mode switch',
+    mode: 'service',
+    consumers: ['tool-ask-user'],
+    note: 'A live deployment switch reporting that no human can answer; the ask-user tool refuses with USER_AWAY instead of waiting while it is on.',
+  },
+  {
     key: 'userQuestions',
     pkg: 'user-questions',
     title: 'Human question/answer seam',

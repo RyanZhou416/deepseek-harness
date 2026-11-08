@@ -108,6 +108,13 @@ The fork-owned [AetherShell bundle](fork-plugins/dsh-plugin-aether-shell/README.
 
 **Focused verification.** From the plugin directory run `pwsh -NoProfile -File scripts/run-local.ps1 typecheck`, `pwsh -NoProfile -File scripts/run-local.ps1 test` and `pwsh -NoProfile -File scripts/run-local.ps1 build`. The [recorded native-tools scenario](snapshots/session/aether-shell-native/snapshot.yml), [typed-data scenario](snapshots/session/aether-shell-typed-data/snapshot.yml) and [unified session scenario](snapshots/session/aether-shell-session/snapshot.yml) replay through the shipped headless profile; real-binary and Windows ACL tests verify the external interpreter and refused write effects separately from their protocol fixtures.
 
+### Unattended mode switch
+
+Host 侧包 `@deepseek-ai/dsh-unattended-mode` 提供 `ctx.unattendedMode`，作为“当前无人可回答”的实时开关；base bundle 默认以 `enabled: false` 挂载它。`enabled()` 读取当前值，`subscribe(listener)` 只在 `loader/volatile-update` 后值确实变化时通知并返回 disposer。`dsh-tool-ask-user` 的 legacy 与 `timed` 两种工具定义都在 `execute` 开头可选读取该服务：开关打开时不调用 `ctx.userQuestions`，直接以 `UserQuestionError` 的稳定 code `USER_AWAY` 返回模型可见错误，提示用户不在、要求模型读取工作区根 `AGENTS.md`（不存在则 `AGENT.md`）获取长期指引后自行决定并继续。工具 schema 保持可见以稳定工具目录；只有提问工具读取该开关，审批、plan-mode、computer use 等其他 `ctx.userQuestions` 调用方不变。该功能不新增 Session 事件，也不改 `SESSION_FORMAT_VERSION` 或持久化格式。
+
+**Preservation rule.** 合并上游时必须保留 base bundle 的 `unattended-mode` 行及其默认关闭、`Config.enabled` 的 volatile 声明、`enabled()`/`subscribe()` 契约，以及两种工具定义开头的检查、`USER_AWAY` code 与模型可见文本；服务缺席时工具行为必须与上游完全一致，`tool-ask-user` 对 `@deepseek-ai/dsh-unattended-mode` 的依赖保持 optional peer。不得以隐藏工具 schema 或过滤工具列表代替执行期拒绝。
+
+**Focused verification.** `node_modules/.bin/vitest run packages/interaction/unattended-mode/tests packages/interaction/tool-ask-user/tests`，其中 `tool-ask-user/tests/loader-composition.spec.ts` 经真实 Loader 组合验证该行配置到达工具；`verify-config-catalog`、`verify-locale-metadata`、`verify-package-readme-model-experience`、`verify-product-use`、`verify-cordis-config`、`test:docs` 与 `build:check`。
 ### Stable prompt boundary for the subscription wire
 
 `@deepseek-ai/dsh-system-prompt` gained an opt-in `stable` flag on section registrations and

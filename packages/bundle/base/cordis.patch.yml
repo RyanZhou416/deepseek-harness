@@ -79,6 +79,11 @@
     - id: user-questions
       name: '@deepseek-ai/dsh-user-questions'
 
+    # Host-wide switch that interaction consumers read before involving a
+    # human. Off by default; the ask-user tool refuses a call while it is on.
+    - id: unattended-mode
+      name: '@deepseek-ai/dsh-unattended-mode'
+
     - id: agent
       name: '@deepseek-ai/dsh-agent'
 

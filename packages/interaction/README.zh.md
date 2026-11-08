@@ -30,6 +30,7 @@ kind: "package-group"
 | [`user-approval/`](user-approval/README.zh.md) | 向组合后的应答者征求一次性允许／拒绝决定；若未获得决定，则默认拒绝 | `ctx.approval` |
 | [`permission-presets/`](permission-presets/README.zh.md) | 把沙箱模式与审批策略捆绑为一个面向用户的权限选择器 | `ctx.permissionPresets` |
 | [`user-questions/`](user-questions/README.zh.md) | 定义经过校验的问题 schema 与作用域 answerer waterfall，agent 可暂停等待 | `ctx.userQuestions` |
+| [`unattended-mode/`](unattended-mode/README.zh.md) | 报告无人可以回答，让交互消费方自行决定而不是继续等待 | `ctx.unattendedMode` |
 | [`tool-ask-user/`](tool-ask-user/README.zh.md) | 暴露 `ask_user_question` 工具，让模型可以向用户提问并请求其作出决定 | 注册到 `ctx.tools` |
 
 -----

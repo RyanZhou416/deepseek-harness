@@ -10,6 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import { registerTimedAskUser, skippedAnswerGuidance } from './timed.ts'
+import { refuseWhenUnattended } from './unattended.ts'
 import '@deepseek-ai/dsh-user-questions'
 
 /** Cordis row selecting the tool schema and its default foreground wait. */
@@ -97,6 +98,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(args, exec) {
+      refuseWhenUnattended(ctx)
       const result = await ctx.userQuestions.ask({
         questions: args.questions.map(question => ({
           id: question.id,

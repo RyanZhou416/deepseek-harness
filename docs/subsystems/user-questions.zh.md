@@ -229,6 +229,29 @@ class UserQuestionError extends HarnessError {
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
+<a id="ctxunattendedmode--unattendedmodeservice"></a>
+
+### `ctx.unattendedMode` — `UnattendedModeService`
+
+Tracks whether a human is available and notifies subscribers after a live configuration update changes that answer.
+
+```ts cordis-catalog
+/**
+ * Read the current switch state.
+ * @returns whether interaction consumers must assume no human can answer.
+ */
+enabled(): boolean
+
+/**
+ * Observe switch changes.
+ * @param listener - called with the new state after a live configuration update changes it.
+ * @returns disposer removing the listener; safe to call more than once.
+ */
+subscribe(listener: (enabled: boolean) => void): () => void
+```
+
+Source: [`packages/interaction/unattended-mode/src/index.ts`](../../packages/interaction/unattended-mode/src/index.ts)
+
 <a id="ctxuserquestions--userquestionservice"></a>
 
 ### `ctx.userQuestions` — `UserQuestionService`

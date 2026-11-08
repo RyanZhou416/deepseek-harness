@@ -4322,6 +4322,25 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'unattendedMode',
+    summary: 'Tracks whether a human is available and notifies subscribers after a live configuration update changes that answer.',
+    description: 'Tracks whether a human is available and notifies subscribers after a live configuration update changes that answer.',
+    methods: [
+      {
+        signature: 'enabled(): boolean',
+        description: 'Read the current switch state.',
+        parameters: [],
+        returns: 'whether interaction consumers must assume no human can answer.',
+      },
+      {
+        signature: 'subscribe(listener: (enabled: boolean) => void): () => void',
+        description: 'Observe switch changes.',
+        parameters: [{ name: 'listener', description: 'called with the new state after a live configuration update changes it.' }],
+        returns: 'disposer removing the listener; safe to call more than once.',
+      },
+    ],
+  },
+  {
     key: 'userQuestions',
     summary: '`ctx.userQuestions`: validation plus the scoped answerer waterfall.',
     description: '`ctx.userQuestions`: validation plus the scoped answerer waterfall.',

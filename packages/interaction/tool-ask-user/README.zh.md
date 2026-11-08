@@ -73,6 +73,8 @@ kind: "package-reference"
 
 Legacy 调用和 `timeout: -1` 调用会等待回答或取消；没有 answerer 接受时返回错误。有限时长的 timed 调用若没有 answerer，则在到期后返回 pending。取消调用，或调用方不是确切的存活运行时根时，也会返回错误。存活的子 agent 会以 `DELEGATED_CALLER` 被拒绝，必须在最终结果中包含尚未解决的决定。
 
+当 `ctx.unattendedMode` 报告无人可以回答时，两种模式都会在任何 answerer 运行之前以 `USER_AWAY` 失败。文本告诉模型用户不在、应阅读工作区根目录的 `AGENTS.md`（或 `AGENT.md`）获取长期指引，然后自行决定并继续。工具 schema 保持可见，因此切换该开关不会改变目录。
+
 -----
 
 <a id="understand-the-implementation"></a>

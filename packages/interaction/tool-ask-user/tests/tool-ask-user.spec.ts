@@ -16,6 +16,9 @@ import UserQuestionService, {
 } from '@deepseek-ai/dsh-user-questions'
 // The fold is the projection's own reader of a recorded result, not a service method.
 import { foldUserQuestions } from '@deepseek-ai/dsh-user-questions/src/projection.ts'
+import UnattendedModeService, { type Config as UnattendedModeConfig } from '@deepseek-ai/dsh-unattended-mode'
+import { createVolatile, updateVolatile } from '../../../../vendor/cosmokit/src/volatile.ts'
+import { userAwayMessage } from '@deepseek-ai/dsh-tool-ask-user/src/unattended.ts'
 import * as toolAskUser from '@deepseek-ai/dsh-tool-ask-user'
 
 const testToolSignal = new AbortController().signal
@@ -659,6 +662,100 @@ describe('ask_user_question tool', () => {
       }],
     })
     expect(seen).toHaveLength(0)
+  })
+
+  it('returns USER_AWAY without asking while unattended mode is on', async () => {
+    const ctx = await setup({ mode: 'legacy' })
+    await ctx.plugin(UnattendedModeService, { enabled: true })
+    const answerer = vi.fn(async (): Promise<AskUserQuestionAnswer> => ({ answers: [] }))
+    registerQuestionAnswerer(ctx, { ask: answerer })
+
+    const result = await executeToolFixture(ctx, {
+      signal: testToolSignal,
+      callId: ToolCallId('ask-unattended-legacy'),
+      name: 'ask_user_question',
+      arguments: { questions: [{ id: 'continue', question: 'Continue?' }] },
+    })
+
+    expect(result).toMatchObject({
+      isError: true,
+      error: { info: { name: 'UserQuestionError', code: 'USER_AWAY' } },
+      content: [{ type: 'text', text: `Error: ${userAwayMessage}` }],
+    })
+    expect(answerer).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('returns USER_AWAY instead of a pending timed call while unattended mode is on', async () => {
+    const ctx = await setup({ mode: 'timed', timeout: 5 })
+    await ctx.plugin(UnattendedModeService, { enabled: true })
+    const answerer = vi.fn(async (): Promise<AskUserQuestionAnswer> => ({ answers: [] }))
+    registerQuestionAnswerer(ctx, { ask: answerer })
+
+    const result = await executeToolFixture(ctx, {
+      signal: testToolSignal,
+      callId: ToolCallId('ask-unattended-timed'),
+      name: 'ask_user_question',
+      arguments: { questions: [{ id: 'continue', question: 'Continue?' }], timeout: 5 },
+    })
+
+    expect(result).toMatchObject({
+      isError: true,
+      error: { info: { name: 'UserQuestionError', code: 'USER_AWAY' } },
+      content: [{ type: 'text', text: `Error: ${userAwayMessage}` }],
+    })
+    expect(answerer).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('asks normally when unattended mode is off', async () => {
+    const ctx = await setup({ mode: 'legacy' })
+    await ctx.plugin(UnattendedModeService, { enabled: false })
+    const answerer = vi.fn(async (): Promise<AskUserQuestionAnswer> => ({
+      answers: [{ id: 'continue', selected: ['yes'] }],
+    }))
+    registerQuestionAnswerer(ctx, { ask: answerer })
+
+    const result = await executeToolFixture(ctx, {
+      signal: testToolSignal,
+      callId: ToolCallId('ask-attended'),
+      name: 'ask_user_question',
+      arguments: { questions: [{ id: 'continue', question: 'Continue?' }] },
+    })
+
+    expect(result).toMatchObject({
+      isError: false,
+      content: [{ type: 'text', text: '{"answers":[{"id":"continue","selected":["yes"]}]}' }],
+    })
+    expect(answerer).toHaveBeenCalledTimes(1)
+    await ctx.fiber.dispose()
+  })
+
+  it('asks again after a live update turns unattended mode off', async () => {
+    const ctx = await setup({ mode: 'legacy' })
+    const fiber = await ctx.plugin(UnattendedModeService, { enabled: true })
+    const answerer = vi.fn(async (): Promise<AskUserQuestionAnswer> => ({
+      answers: [{ id: 'continue', selected: ['yes'] }],
+    }))
+    registerQuestionAnswerer(ctx, { ask: answerer })
+    const call = (callId: string) => executeToolFixture(ctx, {
+      signal: testToolSignal,
+      callId: ToolCallId(callId),
+      name: 'ask_user_question',
+      arguments: { questions: [{ id: 'continue', question: 'Continue?' }] },
+    })
+
+    expect(await call('ask-away')).toMatchObject({ isError: true })
+    const config = fiber.effectiveConfig as UnattendedModeConfig
+    updateVolatile(config.enabled, createVolatile(false))
+    fiber.ctx.emit('loader/volatile-update', [['enabled']])
+
+    expect(await call('ask-back')).toMatchObject({
+      isError: false,
+      content: [{ type: 'text', text: '{"answers":[{"id":"continue","selected":["yes"]}]}' }],
+    })
+    expect(answerer).toHaveBeenCalledTimes(1)
+    await ctx.fiber.dispose()
   })
 
   it('returns a structured error for empty question batches', async () => {

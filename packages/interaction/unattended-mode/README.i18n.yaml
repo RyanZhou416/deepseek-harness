@@ -1,0 +1,55 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/interaction/unattended-mode/README.md
+/:
+  en: 4d8b0fdec8f4c601
+  zh: 840e8ac5ec83551c
+/deepseek-ai-dsh-unattended-mode:
+  en: 12fcf67cfc9b3c68
+  zh: 96e2a8041b3e1fdf
+/deepseek-ai-dsh-unattended-mode/summary:
+  en: 42ad460f19227be8
+  zh: e1781e4c72946496
+/deepseek-ai-dsh-unattended-mode/table-of-contents:
+  en: eadb5cdbf3e39c75
+  zh: 02bcbb8487094269
+/deepseek-ai-dsh-unattended-mode/use-this-package:
+  en: 569e37dd86f1591f
+  zh: fd24e873903aa289
+/deepseek-ai-dsh-unattended-mode/use-this-package/when-to-choose-it:
+  en: 0463cd8bf5a34733
+  zh: 0563bdebf175cfa6
+/deepseek-ai-dsh-unattended-mode/use-this-package/minimal-configuration:
+  en: e96a64aa8711cf22
+  zh: c931c125c2bd5318
+/deepseek-ai-dsh-unattended-mode/service-contract:
+  en: fed1eb28cf675ae6
+  zh: f49a8bca193c40db
+/deepseek-ai-dsh-unattended-mode/understand-the-implementation:
+  en: 42b15ac6321706aa
+  zh: 4ed0861911abaf5d
+/deepseek-ai-dsh-unattended-mode/understand-the-implementation/source-map:
+  en: a5e8fb69c200bee5
+  zh: 5e833a97ff1e1574
+/deepseek-ai-dsh-unattended-mode/understand-the-implementation/change-detection:
+  en: b00ee1435f3d66b2
+  zh: c8b4b037406bdf30
+/deepseek-ai-dsh-unattended-mode/understand-the-implementation/configuration-surface:
+  en: eec5bed9d96205f3
+  zh: 217d44f3c070c2ef
+/deepseek-ai-dsh-unattended-mode/further-exploration:
+  en: 15033b37bae6ff21
+  zh: fbe87c36ca4bee89
+/deepseek-ai-dsh-unattended-mode/model-experience:
+  en: 027807e0ca9341d9
+  zh: f2ce01d090332231
+/deepseek-ai-dsh-unattended-mode/model-experience/kv-cache-effect:
+  en: d89ff01ddfb71606
+  zh: a19b4d43c4a40956
+/deepseek-ai-dsh-unattended-mode/known-limitations-and-deferred-work:
+  en: a9dd56460f8df3fd
+  zh: 42be298ab0b951dd
+/deepseek-ai-dsh-unattended-mode/known-limitations-and-deferred-work/dev-note:
+  en: cd500370207fa308
+  zh: 7882da18c0c7ce22

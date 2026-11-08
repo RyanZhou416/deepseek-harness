@@ -149,6 +149,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   typert: 'typert.md',
   typertGateway: 'typert.md',
   remoteAccess: 'typert.md',
+  unattendedMode: 'user-questions.md',
   userQuestions: 'user-questions.md',
   web: 'web.md',
   workflowEngine: 'workflow.md',

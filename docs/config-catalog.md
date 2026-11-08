@@ -1782,7 +1782,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-host-frontend-static`
 
 - `inject`: `webServer` · `connection`
-- `source`: [`packages/host/frontend-static/src/index.ts:39`](../packages/host/frontend-static/src/index.ts)
+- `source`: [`packages/host/frontend-static/src/index.ts:43`](../packages/host/frontend-static/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the dist anchor. */
@@ -4320,7 +4320,7 @@ export type TokenMeterConfig = Record<string, never>
 ## `@deepseek-ai/dsh-tool-ask-user`
 
 - `inject`: `tools` · `userQuestions`
-- `source`: [`packages/interaction/tool-ask-user/src/index.ts:16`](../packages/interaction/tool-ask-user/src/index.ts)
+- `source`: [`packages/interaction/tool-ask-user/src/index.ts:17`](../packages/interaction/tool-ask-user/src/index.ts)
 
 ```ts config-catalog
 /** Cordis row selecting the tool schema and its default foreground wait. */
@@ -4901,6 +4901,23 @@ export interface Config {
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-typert-loader -->
+
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-unattended-mode -->
+<a id="deepseek-aidsh-unattended-mode"></a>
+
+## `@deepseek-ai/dsh-unattended-mode`
+
+- `refs`: `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/interaction/unattended-mode/src/index.ts:20`](../packages/interaction/unattended-mode/src/index.ts)
+
+```ts config-catalog
+/** Deployment configuration for the switch. */
+export interface Config {
+  /** Whether no human is available to answer. Defaults to false. */
+  enabled: Volatile<boolean>
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-unattended-mode -->
 
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-user-approval -->
 <a id="deepseek-aidsh-user-approval"></a>

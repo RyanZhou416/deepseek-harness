@@ -5,6 +5,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
 import { TIMED_WAIT_PARAMETER } from '@deepseek-ai/dsh-user-questions'
+import { refuseWhenUnattended } from './unattended.ts'
 import type {
   AskUserQuestionAnswer, AskUserQuestionRequestEvent,
 } from '@deepseek-ai/dsh-user-questions/types'
@@ -193,6 +194,7 @@ export function registerTimedAskUser(ctx: Context, timeout = 120): void {
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(args, exec) {
+      refuseWhenUnattended(ctx)
       const timeout = validateTimeout(args.timeout ?? defaultTimeout)
       validateQuestionIds(args.questions)
       const request = questionRequest(args.questions, exec)
