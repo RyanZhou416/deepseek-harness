@@ -145,6 +145,30 @@ describe('relay settings section', () => {
     expect(await screen.findByText('Not connected')).toBeTruthy()
   })
 
+  it('saves an edited password before connecting so the relay receives it', async () => {
+    const host = createFakeHost({ phase: 'disconnected', account: CONFIGURED })
+    render(<RelaySection rpc={host.rpc} t={translate} />)
+    await screen.findByText('Not connected')
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'a-longer-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(await screen.findByText('Connected')).toBeTruthy()
+    expect(host.calls.save).toHaveLength(1)
+    expect(host.calls.save[0]?.password).toBe('a-longer-password')
+    expect(host.calls.endpoints.indexOf('relay.save')).toBeLessThan(host.calls.endpoints.indexOf('relay.connect'))
+  })
+
+  it('names the relay-reported minimum when the relay refuses a short password', async () => {
+    const host = createFakeHost({ phase: 'disconnected', account: CONFIGURED })
+    const base = host.rpc.call
+    host.rpc.call = async (channel, endpoint, payload) => (endpoint === 'relay.connect'
+      ? { ok: false, error: { code: 'password-too-short', message: '密码太短', details: { minPassword: 10 } } }
+      : base(channel, endpoint, payload))
+    render(<RelaySection rpc={host.rpc} t={translate} />)
+    await screen.findByText('Not connected')
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(await screen.findByText('The relay requires at least 10 characters')).toBeTruthy()
+  })
+
   it('validates and submits a password change', async () => {
     const host = createFakeHost({ phase: 'disconnected', account: CONFIGURED })
     render(<RelaySection rpc={host.rpc} t={translate} />)

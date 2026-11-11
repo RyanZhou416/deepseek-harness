@@ -9,7 +9,7 @@ import {
 } from '../../src/client/relay-rpc.ts'
 import type { RelayRpcCaller } from '../../src/client/relay-rpc.ts'
 
-function caller(result: { ok: boolean; value?: unknown; error?: { code: string; message: string } } | Error): {
+function caller(result: { ok: boolean; value?: unknown; error?: { code: string; message: string; details?: Record<string, unknown> } } | Error): {
   rpc: RelayRpcCaller
   calls: { channel: string; endpoint: string; payload: unknown }[]
 } {
@@ -44,6 +44,13 @@ describe('relay RPC caller', () => {
   it('turns a host failure envelope into a typed error', async () => {
     const { rpc } = caller({ ok: false, error: { code: 'credentials-invalid', message: 'wrong password' } })
     await expect(readRelayStatus(rpc)).rejects.toMatchObject({ code: 'credentials-invalid' })
+  })
+
+  it('passes the relay-reported minimum password length through the failure envelope', async () => {
+    const { rpc } = caller({ ok: false, error: { code: 'password-too-short', message: 'too short', details: { minPassword: 10 } } })
+    await expect(readRelayStatus(rpc)).rejects.toMatchObject({ code: 'password-too-short', minPassword: 10 })
+    const absent = caller({ ok: false, error: { code: 'password-too-short', message: 'too short' } })
+    await expect(readRelayStatus(absent.rpc)).rejects.toMatchObject({ code: 'password-too-short', minPassword: undefined })
   })
 
   it('turns a transport rejection into a network failure', async () => {

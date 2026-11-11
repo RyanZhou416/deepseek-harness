@@ -145,7 +145,7 @@ function failure(rpcId: string, error: unknown, logger: Context['logger']): Resp
     error: {
       code: relay.code,
       message: relay.detail ?? relay.code,
-      details: {},
+      details: relay.minPassword === undefined ? {} : { minPassword: relay.minPassword },
     },
   })
 }

@@ -43,15 +43,24 @@ export class RelayError extends Error {
   readonly detail: string | undefined
 
   /**
+   * Minimum password length the relay reported with a `password-too-short`
+   * failure. The relay owns this policy, so the settings page shows the
+   * reported number instead of hardcoding one.
+   */
+  readonly minPassword: number | undefined
+
+  /**
    * @param code - stable failure code.
    * @param detail - safe context, or undefined.
    * @param cause - underlying failure for logging.
+   * @param minPassword - minimum password length reported by the relay, if any.
    */
-  constructor(code: RelayErrorCode, detail?: string, cause?: unknown) {
+  constructor(code: RelayErrorCode, detail?: string, cause?: unknown, minPassword?: number) {
     super(detail === undefined ? code : `${code}: ${detail}`, cause === undefined ? undefined : { cause })
     this.name = 'RelayError'
     this.code = code
     this.detail = detail
+    this.minPassword = minPassword
   }
 }
 
@@ -60,10 +69,11 @@ export class RelayError extends Error {
  * @param code - stable failure code.
  * @param detail - safe context, or undefined.
  * @param cause - underlying failure for logging.
+ * @param minPassword - minimum password length reported by the relay, if any.
  * @returns the failure.
  */
-export function relayError(code: RelayErrorCode, detail?: string, cause?: unknown): RelayError {
-  return new RelayError(code, detail, cause)
+export function relayError(code: RelayErrorCode, detail?: string, cause?: unknown, minPassword?: number): RelayError {
+  return new RelayError(code, detail, cause, minPassword)
 }
 
 /**

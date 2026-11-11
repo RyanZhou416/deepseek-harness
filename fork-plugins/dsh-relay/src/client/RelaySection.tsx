@@ -96,6 +96,8 @@ export interface RelaySectionProps {
 interface ActionFailure {
   readonly code: string
   readonly detail?: string
+  /** Relay-reported minimum password length, when the failure carries one. */
+  readonly minPassword?: number
 }
 
 function fallbackTranslate(key: RelayKey, params?: Record<string, string | number>): string {
@@ -108,6 +110,7 @@ function toActionFailure(error: unknown): ActionFailure {
   if (error instanceof RelayRpcError) {
     return {
       code: error.code,
+      ...error.minPassword === undefined ? {} : { minPassword: error.minPassword },
       ...error.message === error.code || error.message === '' ? {} : { detail: error.message },
     }
   }
@@ -185,18 +188,24 @@ export function RelaySection(props: RelaySectionProps): ReactElement {
     setDraft(draftFromStatus(next))
   }
 
+  /** Persist the visible draft so the next action uses what the form shows. */
+  const saveDraft = async (caller: RelayRpcCaller): Promise<RelayStatus> => {
+    const next = await saveRelayAccount(caller, {
+      domain: draft.domain,
+      username: draft.username,
+      autoConnect: draft.autoConnect,
+      ...draft.password === '' ? {} : { password: draft.password },
+      ...draft.clientKey === '' ? {} : { clientKey: draft.clientKey },
+    })
+    if (mounted.current) applyStatus(next)
+    return next
+  }
+
   const onSave = (): void => {
     void run(async () => {
       if (rpc === undefined) throw new RelayRpcError('network-unreachable')
-      const next = await saveRelayAccount(rpc, {
-        domain: draft.domain,
-        username: draft.username,
-        autoConnect: draft.autoConnect,
-        ...draft.password === '' ? {} : { password: draft.password },
-        ...draft.clientKey === '' ? {} : { clientKey: draft.clientKey },
-      })
+      await saveDraft(rpc)
       if (!mounted.current) return
-      applyStatus(next)
       setNotice('savedNotice')
     })
   }
@@ -204,6 +213,11 @@ export function RelaySection(props: RelaySectionProps): ReactElement {
   const onConnect = (): void => {
     void run(async () => {
       if (rpc === undefined) throw new RelayRpcError('network-unreachable')
+      // Connect reads the stored account, so a password or key typed into the
+      // form must reach the credential record first; otherwise a corrected
+      // value is ignored and the same failure repeats.
+      await saveDraft(rpc)
+      if (!mounted.current) return
       setStatus(current => current === undefined ? current : { ...current, phase: 'connecting' })
       const next = await startRelayConnection(rpc)
       if (!mounted.current) return
@@ -249,7 +263,9 @@ export function RelaySection(props: RelaySectionProps): ReactElement {
     ? undefined
     : failure.code === 'password-mismatch'
       ? t('passwordMismatch')
-      : t(errorKey(failure.code))
+      : failure.code === 'password-too-short' && failure.minPassword !== undefined
+        ? t('errorPasswordTooShortMinimum', { min: failure.minPassword })
+        : t(errorKey(failure.code))
   const statusFailure = status?.phase === 'failed' ? t(errorKey(status.errorCode)) : undefined
 
   return (

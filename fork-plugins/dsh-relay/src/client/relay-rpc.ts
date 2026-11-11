@@ -9,7 +9,7 @@ import type { RelayPasswordRequest, RelaySaveRequest, RelayStatus } from '../sha
 interface RpcResult {
   readonly ok: boolean
   readonly value?: unknown
-  readonly error?: { readonly code: string; readonly message: string }
+  readonly error?: { readonly code: string; readonly message: string; readonly details?: Record<string, unknown> }
 }
 
 /** The subset of the connection handle this plugin calls. */
@@ -22,14 +22,19 @@ export class RelayRpcError extends Error {
   /** Host failure code, for the localized message. */
   readonly code: string
 
+  /** Minimum password length the host relay reported with `password-too-short`. */
+  readonly minPassword: number | undefined
+
   /**
    * @param code - host failure code.
    * @param detail - host-provided safe detail, if any.
+   * @param minPassword - relay-reported minimum password length, if any.
    */
-  constructor(code: string, detail?: string) {
+  constructor(code: string, detail?: string, minPassword?: number) {
     super(detail ?? code)
     this.name = 'RelayRpcError'
     this.code = code
+    this.minPassword = minPassword
   }
 }
 
@@ -44,7 +49,11 @@ async function callEndpoint<T>(
   } catch (error) {
     throw new RelayRpcError('network-unreachable', error instanceof Error ? error.message : undefined)
   }
-  if (!result.ok) throw new RelayRpcError(result.error?.code ?? 'internal', result.error?.message)
+  if (!result.ok) {
+    const minimum = result.error?.details?.minPassword
+    throw new RelayRpcError(result.error?.code ?? 'internal', result.error?.message,
+      typeof minimum === 'number' ? minimum : undefined)
+  }
   return result.value as T
 }
 

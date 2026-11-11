@@ -261,7 +261,9 @@ export class RelayProtocolClient implements RelayApi {
     if (decoded.ok === false) {
       const code = decoded.code
       if (typeof code === 'string' && isProtocolErrorCode(code)) {
-        throw relayError(code as RelayErrorCode, `the relay refused ${endpoint}`)
+        const minimum = decoded.minPassword
+        throw relayError(code as RelayErrorCode, `the relay refused ${endpoint}`, undefined,
+          typeof minimum === 'number' && Number.isSafeInteger(minimum) && minimum > 0 ? minimum : undefined)
       }
       throw relayError('network-invalid-response', `the relay refused ${endpoint} with an unknown code`)
     }

@@ -116,6 +116,22 @@ describe('relay protocol client', () => {
     }
   })
 
+  it('carries the relay-reported minimum password length and ignores a malformed one', async () => {
+    const reported = await call((_request, response) => {
+      response.writeHead(400, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: false, code: 'password-too-short', message: 'too short', minPassword: 10 }))
+    })
+    expect(reported.error?.code).toBe('password-too-short')
+    expect(reported.error?.minPassword).toBe(10)
+    for (const minPassword of [0, -1, 1.5, '10', null]) {
+      const malformed = await call((_request, response) => {
+        response.writeHead(400, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ ok: false, code: 'password-too-short', message: 'x', minPassword }))
+      })
+      expect(malformed.error?.code).toBe('password-too-short')
+      expect(malformed.error?.minPassword).toBeUndefined()
+    }
+  })
   it('rejects an unknown error code and a non-JSON response', async () => {
     const unknown = await call((_request, response) => {
       response.writeHead(400, { 'content-type': 'application/json' })

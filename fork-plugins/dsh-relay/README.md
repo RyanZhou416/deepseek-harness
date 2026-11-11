@@ -31,7 +31,7 @@ Settings → **Remote access** takes four fields:
 
 - **Server domain** — the relay base domain, for example a hostname whose user subdomains serve the relay. Only `https` is accepted; a bare domain is the normal form.
 - **Username** — the account's subdomain label: lowercase letters, digits, and hyphens, following the relay protocol.
-- **Password** — the account password. A stored password shows a **Saved** placeholder; leaving the input empty keeps it.
+- **Password** — the account password. A stored password shows a **Saved** placeholder; leaving the input empty keeps it. **Connect** saves the visible fields first, so a corrected password or key reaches the credential record before the tunnel uses it. A short password is refused with the relay's own minimum, which the page prints.
 - **Client key** — the personal `dshk_…` key the administrator issued. It also shows **Saved** and is kept when the input is empty.
 
 The page shows the derived address `https://<username>.<domain>/` as soon as both fields form a valid address. **Save** stores the fields; **Connect** and **Disconnect** start and stop the tunnel; **Change password** asks for the current password plus the new one twice. The **Connect automatically when DSH starts** switch is saved in the same credential record.

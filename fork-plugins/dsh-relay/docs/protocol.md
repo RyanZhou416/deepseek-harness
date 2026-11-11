@@ -16,7 +16,7 @@ The `dsh-relay` plugin publishes the local DSH Web Host through a relay server u
 - Base URL: `https://<base domain>/__dsh/api/v1`.
 - Every request is `POST` with `content-type: application/json` and a body of at most 16 KiB; any other method gets `405 bad-request`.
 - Every request carries `authorization: Bearer <client key>`.
-- Every response is JSON. Success is `{ "ok": true, ... }`; failure is `{ "ok": false, "code": "<code>", "message": "<human text>" }` with the HTTP status listed below.
+- Every response is JSON. Success is `{ "ok": true, ... }`; failure is `{ "ok": false, "code": "<code>", "message": "<human text>" }` with the HTTP status listed below. A `password-too-short` failure also carries `"minPassword": <n>`, the relay's own minimum, so the client shows the relay's policy instead of hardcoding one.
 - `client-key-invalid`, `client-key-mismatch` and `credentials-invalid` responses are delayed by about 400 ms; validation errors are not.
 
 ## Client key binding
@@ -96,7 +96,7 @@ Request `{ "username", "password", "newPassword" }`. Errors: `401 client-key-inv
 | `client-key-mismatch` | 403 | The key is bound to another username. |
 | `credentials-invalid` | 401 | Wrong password for an existing account. |
 | `username-invalid` | 400 | The username cannot be a subdomain label or is reserved. |
-| `password-too-short` | 400 | A new password is shorter than the relay minimum. |
+| `password-too-short` | 400 | A new password is shorter than the relay minimum; the body adds `minPassword`. |
 | `password-unchanged` | 400 | `newPassword` equals the current password. |
 | `dsh-invalid` | 400 | `dsh.authority` or `dsh.cookie` is missing or malformed. |
 | `port-pool-exhausted` | 503 | No remote port is free for a new account. |

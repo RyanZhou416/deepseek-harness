@@ -15,6 +15,7 @@ Behaviors that must survive any refactor:
 - **Run directory.** `<DSH_HOME>/dsh-relay/run/` is owner-only, and every file in it is written owner-only with an exclusive create. The configuration derives only from the returned tunnel.
 - **Process lifecycle.** One supervisor owns the child, the startup timeout, and the restart backoff. Teardown awaits the child's exit; a newer generation invalidates every in-flight step so a late response cannot move a later connection's state.
 - **Authenticated RPC.** The settings endpoints register only below the connection plugin's `/api` channel, which applies the Host/Origin fence and browser-session check. The plugin does not add its own authentication.
+- **Form before tunnel.** **Connect** saves the visible fields first, because `start()` reads the stored account: an unsaved password or client key would otherwise be ignored and the same failure would repeat. A `password-too-short` failure shows the relay-reported `minPassword`; the plugin never hardcodes a password policy of its own.
 
 ## Preservation rules
 
