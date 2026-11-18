@@ -35,12 +35,17 @@ interface Case {
   readonly name: string
   readonly code: string
   readonly action: PoolFailureAction['action']
+  /** Route-owned classifier context, when the effect depends on the accepted wait. */
+  readonly providerWaitMaxMs?: number
 }
 
 /** Assert one produced error's code and scheduling effect. */
 function expect(error: LlmError, testCase: Case): void {
   assert.equal(error.code, testCase.code, `${testCase.name}: code`)
-  assert.equal(classifyPoolFailure(error, 'claude').action, testCase.action, `${testCase.name}: effect`)
+  const context = testCase.providerWaitMaxMs === undefined
+    ? {}
+    : { providerWaitMaxMs: testCase.providerWaitMaxMs }
+  assert.equal(classifyPoolFailure(error, 'claude', context).action, testCase.action, `${testCase.name}: effect`)
 }
 
 /** A JSON body whose provider error object carries one message and type. */
@@ -67,6 +72,11 @@ test('HTTP statuses produce the taxonomy classes and their gate effects', async 
       headers: { 'x-should-retry': 'false', 'retry-after': '600' }, code: ENFORCEMENT_CODE, action: 'account-cooldown' },
     { name: '429 retry allowed', status: 429, headers: { 'x-should-retry': 'true', 'retry-after': '30' },
       code: 'RATE_LIMIT', action: 'session-backoff' },
+    { name: '429 reset beyond the accepted route wait', status: 429,
+      body: errorBody('usage_limit_reached: The usage limit has been reached', 'rate_limit_error'),
+      headers: { 'retry-after': '195200' }, code: 'RATE_LIMIT', action: 'account-cooldown', providerWaitMaxMs: 60_000 },
+    { name: '429 reset inside the accepted route wait', status: 429, headers: { 'retry-after': '30' },
+      code: 'RATE_LIMIT', action: 'session-backoff', providerWaitMaxMs: 60_000 },
     { name: '500', status: 500, code: 'SERVER', action: 'session-backoff' },
     { name: '502', status: 502, code: 'SERVER', action: 'session-backoff' },
     { name: '503', status: 503, code: 'SERVER', action: 'session-backoff' },
@@ -101,6 +111,29 @@ test('HTTP statuses produce the taxonomy classes and their gate effects', async 
     const error = await sharedResponse(testCase.status, testCase.body ?? '', testCase.headers)
     expect(error, testCase)
   }
+})
+
+test('a 429 reset beyond the route wait is an account allowance, not a session backoff', async () => {
+  const error = await sharedResponse(
+    429,
+    errorBody('usage_limit_reached: The usage limit has been reached', 'rate_limit_error'),
+    { 'retry-after': '195200' },
+  )
+  const wait = error.failure.providerRetryAfterMs
+  assert.ok(wait !== undefined && wait > 195_000_000, `disclosed wait ${String(wait)}`)
+  // The account is parked until the disclosed reset, and the reason is the spent
+  // allowance rather than the transport class, so the next turn rematches.
+  assert.deepEqual(classifyPoolFailure(error, 'codex', { providerWaitMaxMs: 60_000 }), {
+    action: 'account-cooldown',
+    cooldownMs: wait,
+    reason: 'QUOTA',
+  })
+  // Without a route policy the same failure keeps the historical session wait.
+  assert.deepEqual(classifyPoolFailure(error, 'codex'), {
+    action: 'session-backoff',
+    reason: 'RATE_LIMIT',
+    delayMs: wait,
+  })
 })
 
 test('the Claude route produces the same classes from its own envelope rules', async () => {

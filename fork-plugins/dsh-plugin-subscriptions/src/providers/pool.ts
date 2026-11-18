@@ -46,6 +46,8 @@ import {
   isRefusalCode,
   memberKey,
   PoolHealthRegistry,
+  type PoolFailureAction,
+  type PoolFailureContext,
 } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
 import { CONSUMABLE_QUOTA_FULL_PERCENT, QUOTA_FULL_PERCENT } from './pool-usage.js'
@@ -145,6 +147,21 @@ function pastClaudeFloor(
   scheduling: PoolSchedulingPolicy,
 ): boolean {
   return usageFloorBreaches(member.provider, quota, scheduling).length > 0
+}
+
+/**
+ * Whether a failure says the account's allowance is spent rather than that it
+ * refused this request.
+ *
+ * A spent allowance is account state: before any output the same request may be
+ * answered by another account of the pool. Every refusal — enforcement,
+ * credential, model-scoped, terminal — keeps the existing rule, because asking
+ * a sibling under another identity is the traffic the refusal exists to stop.
+ * @param classification - the effect the failure resolved to.
+ * @returns true when another member may take this request.
+ */
+function allowanceExhausted(classification: PoolFailureAction): boolean {
+  return classification.action === 'account-cooldown' && classification.reason === QUOTA_EXCEEDED_CODE
 }
 
 /**
@@ -489,21 +506,30 @@ export class PoolAdapter extends LlmAdapter {
     }
     const excluded = new Set<ConcretePoolMember>()
     const reasons: string[] = []
+    // The provider failure a spent allowance is being answered away from, so a
+    // pool with nowhere left to go still reports the provider's own refusal.
+    let failoverCause: unknown
     try {
       // A local account-policy refusal sends no request, so another member may
-      // take this request; every real failure below ends the turn on its account.
+      // take this request. A spent allowance may take another member too, before
+      // any output; every other real failure ends the turn on its account.
       for (let attempt = 0; attempt <= members.length; attempt += 1) {
         options.signal?.throwIfAborted()
-        const chosen = await this.bindTurn({
-          model: options.model,
-          members,
-          quotas,
-          excluded,
-          slotKey,
-          turn,
-          bindingKey,
-          signal: options.signal,
-        })
+        let chosen: { member: ConcretePoolMember; release: () => void }
+        try {
+          chosen = await this.bindTurn({
+            model: options.model,
+            members,
+            quotas,
+            excluded,
+            slotKey,
+            turn,
+            bindingKey,
+            signal: options.signal,
+          })
+        } catch (error: unknown) {
+          throw failoverCause ?? error
+        }
         const member = chosen.member
         const adapter = this.options.adapters[member.provider]
         if (adapter === undefined) {
@@ -537,11 +563,22 @@ export class PoolAdapter extends LlmAdapter {
           return
         } catch (error: unknown) {
           if (error instanceof PoolGateError) throw error
-          const classification = classifyPoolFailure(error, member.provider)
+          const classification = classifyPoolFailure(error, member.provider, this.failureContext(member.provider))
           if (classification.action === 'member-ineligible' && !committed) {
             excluded.add(member)
             this.dropBinding(bindingKey)
             this.gate.releaseTurn(slotKey)
+            continue
+          }
+          // A spent allowance before any output is account state, not a refusal
+          // of the request: park the account and answer from the next member.
+          // After the first chunk the request stays where it started.
+          if (!committed && allowanceExhausted(classification)) {
+            this.recordFailure(member, slotKey, classification, reasons, true)
+            excluded.add(member)
+            this.dropBinding(bindingKey)
+            this.gate.releaseTurn(slotKey)
+            failoverCause = error
             continue
           }
           this.recordFailure(member, slotKey, classification, reasons)
@@ -794,17 +831,38 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   /**
+   * The route-owned bounds the failure classifier reads.
+   *
+   * The retry plugin sits out at most this adapter's `providerWaitMaxMs`, so the
+   * same value decides whether a disclosed reset is a wait this session may take
+   * or an account that cannot serve until it reopens. A route that reports no
+   * policy keeps the disclosed wait as the session's own backoff.
+   * @param provider - the failing member's provider route.
+   * @returns the classifier context for that route.
+   */
+  private failureContext(provider: ProviderId): PoolFailureContext {
+    const policy = this.options.adapters[provider]?.providerRetryPolicy(provider)
+    return policy === undefined ? {} : { providerWaitMaxMs: policy.providerWaitMaxMs }
+  }
+
+  /**
    * Apply one failure's effect to the gate.
    *
-   * No branch switches accounts: the account is parked or the session backs off,
-   * and the turn fails with the provider's own error so retry policy decides
-   * whether the same account may be tried again.
+   * No branch switches accounts by itself: the account is parked or the session
+   * backs off, and the caller decides whether this request may still be
+   * answered. Only a spent allowance before any output may be.
+   * @param member - the failing member.
+   * @param slotKey - the session identity owning the request.
+   * @param classification - the effect the classifier resolved.
+   * @param reasons - reasons collected for the pool-exhausted report.
+   * @param answerElsewhere - whether the same request continues on another member.
    */
   private recordFailure(
     member: ConcretePoolMember,
     slotKey: string,
     classification: ReturnType<typeof classifyPoolFailure>,
     reasons: string[],
+    answerElsewhere = false,
   ): void {
     switch (classification.action) {
       case 'session-backoff': {
@@ -828,8 +886,11 @@ export class PoolAdapter extends LlmAdapter {
         }
         this.options.onWarn(
           `pool: ${memberLabel(member)} is parked for ${String(classification.cooldownMs)}ms`
-          + ` (${classification.reason}); this turn ends on that account`
-          + (isRefusalCode(classification.reason) ? ' and the next turn rematches' : ''),
+          + ` (${classification.reason}); `
+          + (answerElsewhere
+            ? 'this request continues on another account'
+            : 'this turn ends on that account'
+              + (isRefusalCode(classification.reason) ? ' and the next turn rematches' : '')),
         )
         return
       }
