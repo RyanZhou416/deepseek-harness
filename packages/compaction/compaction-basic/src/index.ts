@@ -271,18 +271,20 @@ export class BasicCompactionEngine extends CompactionEngine {
    * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
    * @param agent - supplies routed-model history, fallback model, and session id.
    * @param signal - optional cancellation forwarded to the adapter.
+   * @param attemptNonce - the transaction's durable identity, forwarded as the summary request's attempt identity.
    * @returns safe text summary blocks and the exact auxiliary call envelope and output.
    */
   protected async summarize(
     input: SummarizationInput,
     agent: Agent,
     signal?: AbortSignal,
+    attemptNonce?: string,
   ): Promise<SummaryResult> {
     const target = conversationTarget(agent)
     const config = target === undefined
       ? this.config
       : resolveTargetPolicy(this.config, target)
-    return summarizeWithLlm(this.ctx, config, input, agent, signal)
+    return summarizeWithLlm(this.ctx, config, input, agent, signal, attemptNonce)
   }
 
   /**
@@ -468,7 +470,7 @@ export class BasicCompactionEngine extends CompactionEngine {
   private regionDependencies(): Parameters<typeof compactSurfaceRegion>[0] {
     return {
       meter: this.ctx.tokenMeter,
-      summarize: (input, owner, abort) => this.summarize(input, owner, abort),
+      summarize: (input, owner, abort, attemptNonce) => this.summarize(input, owner, abort, attemptNonce),
       recover: (error, agent, sourceEventSeqs, signal) => this.ctx.waterfall('compaction/summary-error', {
         session: agent.session,
         sourceEventSeqs,

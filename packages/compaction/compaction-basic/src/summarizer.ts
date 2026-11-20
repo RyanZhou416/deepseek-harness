@@ -147,12 +147,16 @@ async function summarizationSections(
  * The request also carries the current assembled prompt sections, so a route
  * that reproduces the pinned Claude Code wire can drop the harness-describing
  * sections from the replayed prompt. The adapter applies that filter only when
- * the sections still join to the replay's own leading system text.
+ * the sections still join to the replay's own leading system text. It carries
+ * the owning transaction's durable identity as the attempt nonce, so retries
+ * inside that transaction keep one provider request identity while a later
+ * transaction presents a different one.
  * @param ctx - context providing the LLM service.
  * @param config - resolved backend configuration.
  * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
  * @param agent - supplies routed-model history, fallback model, and session id.
  * @param signal - optional cancellation forwarded to the adapter.
+ * @param attemptNonce - the owning transaction's durable identity, sent as the request's attempt identity.
  * @returns safe text-only summary blocks and the exact call envelope and output.
  */
 export async function summarizeWithLlm(
@@ -161,6 +165,7 @@ export async function summarizeWithLlm(
   input: SummarizationInput,
   agent: Agent,
   signal?: AbortSignal,
+  attemptNonce?: string,
 ): Promise<SummaryResult> {
   const latest = agent.session.requestHeader()?.config
   const configured = config.summarizationProvider.length === 0
@@ -198,6 +203,7 @@ export async function summarizeWithLlm(
     maxTokens: config.maxTokens,
     sessionId: agent.session.id,
     purpose: 'compaction',
+    ...attemptNonce === undefined ? {} : { attemptNonce },
     ...signal === undefined ? {} : { signal },
   }
   for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)

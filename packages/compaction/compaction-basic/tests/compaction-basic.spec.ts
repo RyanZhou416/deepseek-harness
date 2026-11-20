@@ -264,12 +264,13 @@ class TestCompactionEngine extends BasicCompactionEngine {
   summaryModel = 'summary-model'
   error: unknown
   mutateDuringSummary: (() => void) | undefined
-  calls: Array<{ input: SummarizationInput; signal: AbortSignal | undefined }> = []
+  calls: Array<{ input: SummarizationInput; signal: AbortSignal | undefined; attemptNonce: string | undefined }> = []
 
   override async summarize(
     input: SummarizationInput,
     _agent: Agent,
     signal?: AbortSignal,
+    attemptNonce?: string,
   ): Promise<{
     summary: ContentBlock[]
     rawOutput?: ContentBlock[]
@@ -278,7 +279,7 @@ class TestCompactionEngine extends BasicCompactionEngine {
     maxTokens?: number
     usage?: TokenUsage
   }> {
-    this.calls.push({ input, signal })
+    this.calls.push({ input, signal, attemptNonce })
     this.mutateDuringSummary?.()
     if (this.error !== undefined) throw this.error
     return {
@@ -1065,6 +1066,58 @@ describe('compaction region transaction', () => {
     expect(replay.deriveMessages()).toEqual(session.deriveMessages())
   })
 
+  it('gives a resubmitted transaction a new attempt identity over identical inputs', async () => {
+    const compact = service()
+    const session = conversation(4)
+    const nodes = [...session.surface.nodes]
+    const controller = new AbortController()
+    const abortReason = new Error('aborted summary request')
+    compact.error = abortReason
+    compact.mutateDuringSummary = () => { controller.abort(abortReason) }
+
+    await expect(compact.compactRegion(
+      nodes[1]!,
+      nodes[2]!,
+      agent(session, MODEL),
+      controller.signal,
+    )).rejects.toThrow('aborted summary request')
+
+    // The aborted transaction closed without replacing the surface, so the
+    // resubmission selects the identical range and summarization input; only
+    // its own durable id may distinguish the two summary requests.
+    const aborted = session.snapshotEvents().findLast(event => event.type === 'compaction/end')
+    const abortedCompactionId = aborted?.type === 'compaction/end' ? aborted.data.compactionId : undefined
+    expect(session.surface.nodes).toEqual(nodes)
+    compact.error = undefined
+    compact.mutateDuringSummary = undefined
+    const resubmitted = await compact.compactRegion(nodes[1]!, nodes[2]!, agent(session, MODEL), SIGNAL)
+
+    expect(compact.calls.map(call => call.attemptNonce))
+      .toEqual([abortedCompactionId, resubmitted.compactionId])
+    expect(resubmitted.compactionId).not.toBe(abortedCompactionId)
+    expect(compact.calls[0]?.input.messages).toEqual(compact.calls[1]?.input.messages)
+  })
+
+  it('keeps one attempt identity while a summary error is retried in its transaction', async () => {
+    const ctx = createContext()
+    const compact = service({ auto: false }, ctx)
+    const session = conversation(3)
+    const nodes = [...session.surface.nodes]
+    let recovered = false
+    ctx.on('compaction/summary-error', () => {
+      if (recovered) return false
+      recovered = true
+      compact.error = undefined
+      return true
+    })
+    compact.error = new Error('transient summary failure')
+
+    const result = await compact.compactRegion(nodes[0]!, nodes[1]!, agent(session, MODEL), SIGNAL)
+
+    expect(compact.calls.map(call => call.attemptNonce))
+      .toEqual([result.compactionId, result.compactionId])
+  })
+
   it('replays the system head and latest routed tools so the summarizer reuses the cache', async () => {
     const compact = service()
     const session = conversation(3, undefined, 'CONVERSATION SYSTEM')
@@ -1357,6 +1410,7 @@ class ExposedCompactionEngine extends BasicCompactionEngine {
     input: SummarizationInput,
     owner: Agent,
     signal?: AbortSignal,
+    attemptNonce?: string,
   ): Promise<{
     summary: ContentBlock[]
     rawOutput?: ContentBlock[]
@@ -1365,7 +1419,7 @@ class ExposedCompactionEngine extends BasicCompactionEngine {
     maxTokens?: number
     usage?: TokenUsage
   }> {
-    return this.summarize(input, owner, signal)
+    return this.summarize(input, owner, signal, attemptNonce)
   }
 }
 
@@ -1414,6 +1468,25 @@ describe('default one-shot summarizer', () => {
     expect(Object.isFrozen(instruction?.content[0])).toBe(true)
     expect(result.shadowedSeqs).toEqual(nodes.slice(start, start + 2))
     if (system !== undefined) expect(session.surface.nodes[0]).toBe(nodes[0])
+  })
+
+  it('forwards the transaction attempt identity into the summary request', async () => {
+    const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'summary' }])
+    await compact.runSummarize(
+      promptInput('history'),
+      agent(conversation(1), MODEL),
+      SIGNAL,
+      'transaction-1',
+    )
+
+    expect(adapter.lastOptions?.attemptNonce).toBe('transaction-1')
+  })
+
+  it('leaves the summary request attempt identity unset without a transaction identity', async () => {
+    const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'summary' }])
+    await compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL), SIGNAL)
+
+    expect(adapter.lastOptions).not.toHaveProperty('attemptNonce')
   })
 
   it('keeps summarizing when prompt re-assembly fails', async () => {

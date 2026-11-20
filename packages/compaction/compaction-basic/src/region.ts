@@ -25,7 +25,17 @@ import { frameSummary } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 interface RegionDependencies {
   readonly meter: TokenMeter
-  summarize(input: SummarizationInput, agent: Agent, signal?: AbortSignal): Promise<SummaryResult>
+  /**
+   * Summarize one replayed region for the transaction identified by
+   * `attemptNonce`, so a retry inside that transaction keeps one request
+   * identity while a later transaction presents a different one.
+   */
+  summarize(
+    input: SummarizationInput,
+    agent: Agent,
+    signal?: AbortSignal,
+    attemptNonce?: string,
+  ): Promise<SummaryResult>
   recover(error: unknown, agent: Agent, sourceEventSeqs: readonly SessionSeq[], signal?: AbortSignal): boolean
 }
 
@@ -397,7 +407,7 @@ async function summarizeCompaction(
   for (;;) {
     signal?.throwIfAborted()
     try {
-      summaryResult = await dependencies.summarize(prepared.input, agent, signal)
+      summaryResult = await dependencies.summarize(prepared.input, agent, signal, compactionId)
       break
     } catch (error: unknown) {
       if (signal?.aborted === true) throw error

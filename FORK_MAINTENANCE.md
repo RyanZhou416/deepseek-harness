@@ -191,6 +191,14 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 **Focused verification.** `pnpm exec vitest run packages/llm/llm-pi-ai/tests packages/llm/llm/tests packages/llm/llm-retry/tests` 覆盖 envelope、fetch 捕获、默认/显式重试策略、适配器分类与 retry executor；`pnpm run verify-config-catalog` 校验配置目录与 JSDoc 同步。
 
+### Compaction request identity on the pool route
+
+共享账号池按 `x-client-request-id` 记账，但压缩摘要是一次绕过 agent loop 的一次性 `ctx.llm.stream()` 调用，此前不携带任何 attempt 身份。`llm-pi-ai` 从会话 id、purpose、路由、模型与被压缩消息派生该 id（`logicalRequestId`），`attemptNonce` 缺席时返回值本身（`attemptRequestId`），因此同一会话位置的两次独立压缩事务会产生同一 id。一次被中止的压缩后（会话日志中 `compaction/end` 记录 `This operation was aborted`，surface 未被替换），后续每轮压力压缩重新选出同一范围与消息，池把重发视为中止尝试的 replay 并拒绝（`previous attempt outcome is unknown; it is not replayed automatically`），逐轮阻塞该会话。现在 `compactSurfaceRegion` 把本事务持久 `compaction/start` 的 `compactionId` 作为 `GenerateOptions.attemptNonce` 交给摘要请求，因此每个独立压缩事务获得新的提供方请求身份，而同一事务内的重试（如 `compaction/summary-error` 恢复）保持该身份。用户重启或重发不会产生新 id：会话 id、purpose、路由与压缩消息不变时派生结果不变。
+
+**Preservation rule.** 保留每次摘要调用的 attempt 身份来自 `compaction/start` 的 `compactionId`；不得改用随机值，否则同一事务的自动重试不再确定。不得让普通对话路由参与该派生，也不得因此放宽池的重复 ledger 守卫。`compactRegion`、`compactNow`、压力与溢出恢复都经 `compactSurfaceRegion`，新增入口必须同样传递该身份；覆盖 `BasicCompactionEngine.summarize()` 的子类若自行发起模型调用，必须把收到的第四个参数作为 `GenerateOptions.attemptNonce` 转发。
+
+**Focused verification.** `pnpm exec vitest run packages/compaction/compaction-basic/tests` 覆盖每个事务的 `attemptNonce` 等于其 `compactionId`、同一事务重试保持不变、以及默认摘要器把身份写入 `GenerateOptions`；`packages/llm/llm-pi-ai/tests/adapter.spec.ts` 的 "keeps one ledger id within an attempt and sends a new one for every deliberate retry" 覆盖同一 `attemptNonce` 稳定、不同 `attemptNonce` 产生不同 `x-client-request-id`。
+
 ### Claude proxy-only egress
 
 `DSH_CLAUDE_PROXY_URL` 为 `dsh-http-proxy` 的 Claude 域名提供不允许 `NO_PROXY` 绕过的专用代理路由，非法配置拒绝启动，代理连接失败不回退直连。域名范围和保护边界以[包说明](packages/util/http-proxy/README.md#protected-claude-destinations)为准；这是显式代理保护，不检查 TUN 或最终公网出口。该变量只允许启动环境和 DSH_HOME 的 `.env` 提供，项目 `.env` 不能改写它。保留 `policy.spec.ts`、`claude-egress.spec.ts` 和 app-boot 的来源校验测试。运行中 Host 的配置尚未启用该源码功能；须停机后构建并在本机配置代理地址，不能仅凭 TUN 网卡存在就放行。
