@@ -1,0 +1,14 @@
+# dsh-plugin-simflow-relay bundle patch: mounts the SimFlow relay ingress into
+# the host composition of a dsh profile.
+#
+# Install (user action, not automatic):
+#   dsh plugin --profile <name> add <this directory>
+# then set `tokenFile` to the absolute path of the shared secret that SimFlow
+# also reads (one line, at least 32 characters), and restart DSH.
+- insert:
+    - id: simflow-relay
+      name: dsh-plugin-simflow-relay
+      config:
+        path: /api/simflow/relay
+        tokenFile: D:\Ryan416_DESKTOP-LETT6RL_TheSunNeverSets\Tools\SimFlow\.data\relay-token
+        maxBodyBytes: 65536

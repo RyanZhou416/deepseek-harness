@@ -112,6 +112,15 @@ The private build keeps upstream multi-account providers, usage UI, Codex search
 
 The bundle keeps every `@deepseek-ai/*` peer external at the Harness cohort (`0.2.2-rc.1`) and is a pure Host plugin with no client assets. It requires the external AetherShell interpreter — legacy mode targets `12.0.2`, typed mode requires `12.0.2+ryan.2` — and the plugin does not redistribute it. See `fork-plugins/dsh-plugin-aether-shell/FORK_MAINTENANCE.md` for preservation and verification.
 
+## SimFlow relay
+
+- Source: `fork-plugins/dsh-plugin-simflow-relay`
+- Current private version: `0.1.0`
+- Profile target: DSH `0.2.2-rc.1`
+- Profile install: `link:` to `.build/fork-plugins/simflow-relay`
+
+A loopback-only `POST /api/simflow/relay` route that lets the external SimFlow tool wake the DSH Session bound to a slot. Delivery is the same `Agent.send(message, 'next-step', true)` path as the `session` tool's `send` (a stored Session is resumed through the Session Controller); the model sees `SimFlow 发来「<slot>」的消息：` and SimFlow's own text, with source kind `simflow`, never stacked with the session-send lead. Requests must carry `x-simflow-token` equal to the first line of the configured `tokenFile` (at least 32 characters). The source is plain JavaScript in `src/`; the `copy` builder stages it as `lib/` without a compile step. Tests: `node --import ./test/register.mjs --test test/relay.test.mjs` in the plugin directory.
+
 ## Relay
 
 - Source: `fork-plugins/dsh-relay`

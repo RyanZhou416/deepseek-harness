@@ -10,7 +10,7 @@ import {
   installAndSeedProfile, LAUNCHER_HOME_DIRECTORY,
   lockfileAutoInstallPeers, localDependencyPath, lockedDependencyVersion, lockedUndiciVersion, parseArguments, PLUGINS,
   pluginInstallArguments, privateDependencySpecs, registryPeerRange, resolveHome, sourceHash, sourcePaths,
-  stageBunRuntime, stagedManifest, stagedWorkspaceManifest, stageWorkspacePlugin, stagingIsCurrent,
+  stageBunRuntime, stageCopySource, stagedManifest, stagedWorkspaceManifest, stageWorkspacePlugin, stagingIsCurrent,
   subscriptionsRuntimeArtifacts, SUBSCRIPTIONS_TRANSPORT_MODULES, WIRE_COMPAT_DIRECTORY, WIRE_COMPAT_PACKAGE,
   wireCompatSourceHash, wireCompatSourcePaths, WORKSPACE_PLUGINS, writeStagedManifest,
   type BuildState, type PluginCommandRunner, type PluginDefinition, type PluginManifest,
@@ -221,8 +221,8 @@ describe('fork plugin staging manifests', () => {
 })
 
 describe('fork plugin build recipe', () => {
-  it('builds all five fork plugins from source', () => {
-    expect(PLUGINS.map(entry => entry.id)).toEqual(['subscriptions', 'aether-shell', 'agent-teams', 'context', 'relay'])
+  it('builds all six fork plugins from source', () => {
+    expect(PLUGINS.map(entry => entry.id)).toEqual(['subscriptions', 'aether-shell', 'agent-teams', 'context', 'relay', 'simflow-relay'])
     for (const entry of PLUGINS) {
       expect(entry.mode).toBe('build')
       expect(entry.outputs.length).toBeGreaterThan(0)
@@ -232,6 +232,29 @@ describe('fork plugin build recipe', () => {
     expect(PLUGINS.filter(entry => entry.builder === 'relay').map(entry => entry.id)).toEqual(['relay'])
     expect(plugin('relay').outputs).toEqual(['lib/index.js', 'lib/client.js'])
     expect(plugin('relay').workCopy).toEqual([])
+    expect(PLUGINS.filter(entry => entry.builder === 'copy').map(entry => entry.id)).toEqual(['simflow-relay'])
+  })
+
+  it('stages the simflow relay plain-JavaScript source as lib with cohort peers', async () => {
+    const entry = plugin('simflow-relay')
+    const source = JSON.parse(await readFile(join(entry.directory, 'package.json'), 'utf8')) as PluginManifest
+    const staged = stagedManifest(source, 'simflow-relay')
+    expect(staged.dependencies).toBeUndefined()
+    expect(staged.scripts).toBeUndefined()
+    expect(staged.main).toBe('lib/index.js')
+    expect(staged.exports).toEqual({
+      '.': { types: './lib/index.d.ts', default: './lib/index.js' },
+      './package.json': './package.json',
+    })
+    const cohort = await harnessCohort()
+    expect(() => { assertStagedManifest(staged, 'simflow-relay', cohort) }).not.toThrow()
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-simflow-relay-'))
+    try {
+      await stageCopySource(entry, root)
+      assertStagedArtifacts(entry, root)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('never treats a prebuilt lib directory as a build input', () => {

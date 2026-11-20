@@ -82,10 +82,13 @@ const WORK_MARKER_FILE = '.fork-plugin-build.json'
 const DEPENDENCY_MARKER_FILE = '.fork-plugin-deps.json'
 
 /** Plugin ids this script stages or copies from the workspace, in installation order. */
-export type PluginId = 'subscriptions' | 'aether-shell' | 'agent-teams' | 'context' | 'relay' | 'llm-cc-pool'
+export type PluginId = 'subscriptions' | 'aether-shell' | 'agent-teams' | 'context' | 'relay' | 'simflow-relay' | 'llm-cc-pool'
 
-/** How a plugin's staged package obtains its runtime files. */
-export type PluginBuilder = 'subscriptions' | 'aether-shell' | 'isolated' | 'relay' | 'workspace'
+/**
+ * How a plugin's staged package obtains its runtime files. `copy` stages a
+ * plain-JavaScript `src/` as `lib/` without a compile step.
+ */
+export type PluginBuilder = 'subscriptions' | 'aether-shell' | 'isolated' | 'relay' | 'copy' | 'workspace'
 
 /** One fork plugin, its build recipe, and the files staging copies. */
 export interface PluginDefinition {
@@ -167,6 +170,17 @@ const PLUGIN_DEFINITIONS = [
     builder: 'relay',
     outputs: ['lib/index.js', 'lib/client.js'],
     stage: ['cordis.patch.yml'],
+    workCopy: [],
+    installDependencies: false,
+  },
+  {
+    id: 'simflow-relay',
+    name: 'dsh-plugin-simflow-relay',
+    directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-plugin-simflow-relay'),
+    mode: 'build',
+    builder: 'copy',
+    outputs: ['lib/index.js', 'lib/index.d.ts'],
+    stage: ['cordis.patch.yml', 'README.md'],
     workCopy: [],
     installDependencies: false,
   },
@@ -649,6 +663,7 @@ export function sourcePaths(plugin: PluginDefinition): string[] {
   if (plugin.builder === 'relay') {
     return ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts', 'tsdown.client.options.mjs']
   }
+  if (plugin.builder === 'copy') return ['src', 'package.json', 'cordis.patch.yml', 'README.md']
   return ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts']
 }
 
@@ -791,6 +806,17 @@ export function stagedManifest(source: PluginManifest, pluginId: PluginId): Plug
       './package.json': './package.json',
     }
     manifest.files = ['lib/**/*.js', 'cordis.patch.yml']
+  } else if (pluginId === 'simflow-relay') {
+    // Plain-JavaScript source staged as `lib/`; harness services are peers.
+    delete manifest.dependencies
+    delete manifest.peerDependenciesMeta
+    manifest.main = 'lib/index.js'
+    manifest.types = 'lib/index.d.ts'
+    manifest.exports = {
+      '.': { types: './lib/index.d.ts', default: './lib/index.js' },
+      './package.json': './package.json',
+    }
+    manifest.files = ['lib/index.js', 'lib/index.d.ts', 'cordis.patch.yml', 'README.md']
   } else if (pluginId === 'context') {
     // zod is a real runtime dependency of the context host half; the profile
     // link resolves it from the repository install.
@@ -1466,6 +1492,17 @@ export async function copyStagedEntries(
   }
 }
 
+/**
+ * Copy a `copy`-builder plugin's `src/` into the staged `lib/`.
+ * @param plugin - plugin whose source is runnable JavaScript.
+ * @param stagingDirectory - staged package root.
+ */
+export async function stageCopySource(plugin: PluginDefinition, stagingDirectory: string): Promise<void> {
+  const source = join(plugin.directory, 'src')
+  if (!existsSync(source)) fail(`${plugin.name} has no src/ in ${plugin.directory}`)
+  await cp(source, join(stagingDirectory, 'lib'), { recursive: true, filter: path => !path.endsWith('.map') })
+}
+
 /** Stage the plugin manifest and the subscriptions-only runtime extras. */
 async function stagePackage(
   plugin: PluginDefinition,
@@ -1720,6 +1757,10 @@ async function buildPlugin(
     if (plugin.builder === 'isolated') {
       const workDirectory = await ensureIsolatedBuild(plugin, key, force)
       await copyStagedEntries(plugin, workDirectory, temporary)
+    } else if (plugin.builder === 'copy') {
+      log(`staging ${plugin.name} from its plain-JavaScript source`)
+      await stageCopySource(plugin, temporary)
+      await copyStagedEntries(plugin, plugin.directory, temporary)
     } else {
       const config = plugin.builder === 'subscriptions'
         ? await subscriptionsConfig(temporary, dependencies.wireEntry, dependencies.undiciEntry)
