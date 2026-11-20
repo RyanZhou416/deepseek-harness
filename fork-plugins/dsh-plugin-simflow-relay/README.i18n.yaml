@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write fork-plugins/dsh-plugin-simflow-relay/README.md
+/dsh-plugin-simflow-relay:
+  en: 793e587e8edb2096
+  zh: 43d24ac54996b464
+/dsh-plugin-simflow-relay/behavior:
+  en: fd7c4ce39daf52a0
+  zh: 572c53b38afebb40
+/dsh-plugin-simflow-relay/installation-user-action:
+  en: eff20a809a7206c8
+  zh: 45b7b84f77fd0143
+/dsh-plugin-simflow-relay/tests:
+  en: 3636eecb7dd6d7f6
+  zh: ec735958543f9f57

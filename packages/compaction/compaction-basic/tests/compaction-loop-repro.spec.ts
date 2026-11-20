@@ -150,11 +150,14 @@ async function harness(toolSteps: number): Promise<{ ctx: Context; compact: Repr
     },
   }))
   // Small window so several tool steps cross the threshold and compaction
-  // fires within the runaway turn after enough history can shrink.
+  // fires within the runaway turn after enough history can shrink. The
+  // threshold must clear the retained tail plus the fixed checkpoint framing
+  // (roughly 100 tokens), or the replacement cannot be smaller than the span
+  // it shadows and the pre-step listener ends the turn instead.
   const compact = new ReproCompactionEngine(ctx, {
     auto: true,
     headroomTokens: 0,
-    thresholdRatio: 0.5,
+    thresholdRatio: 0.6,
     retainTokens: 50,
     maxTokens: 8192,
     compactionRetries: 1,

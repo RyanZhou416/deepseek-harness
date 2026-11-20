@@ -112,6 +112,15 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 
 该 bundle 保持所有 `@deepseek-ai/*` peer 为外部依赖，版本等于 Harness cohort（`0.2.2-rc.1`），且是纯 Host 插件，不含客户端资源。它需要外部 AetherShell 解释器——legacy 模式目标 `12.0.2`，typed 模式要求 `12.0.2+ryan.2`——插件不分发该解释器。保留与验证要求见 `fork-plugins/dsh-plugin-aether-shell/FORK_MAINTENANCE.md`。
 
+## SimFlow 中继
+
+- 源码：`fork-plugins/dsh-plugin-simflow-relay`
+- 当前私有版本：`0.1.0`
+- profile 目标：DSH `0.2.2-rc.1`
+- profile 安装：`link:` 指向 `.build/fork-plugins/simflow-relay`
+
+仅监听回环连接的 `POST /api/simflow/relay` 让外部 SimFlow 唤醒槽位绑定的 DSH 会话。投递沿用 `session` 工具 `send` 的 `Agent.send(message, 'next-step', true)` 路径，已落盘的会话通过 Session Controller 恢复。模型看到 `SimFlow 发来「<slot>」的消息：` 与 SimFlow 正文，来源为 `simflow`，不叠加会话互发前缀。请求必须携带 `x-simflow-token`，与配置的 `tokenFile` 首行一致且不少于 32 字符。插件源码是 `src/` 中的普通 JavaScript；`copy` 构建器无需编译即可将其暂存到 `lib/`。在插件目录运行 `node --import ./test/register.mjs --test test/relay.test.mjs` 验证投递。
+
 ## Relay
 
 - 源码：`fork-plugins/dsh-relay`
