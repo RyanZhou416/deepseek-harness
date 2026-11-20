@@ -1,7 +1,7 @@
 name: Policy
 on:
   push:
-    branches: [master]
+    branches: [main, master]
   workflow_dispatch:
 permissions: {}
 concurrency:

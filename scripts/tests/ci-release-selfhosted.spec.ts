@@ -84,6 +84,9 @@ const fallbackCases: Array<[string, Record<string, string | boolean>]> = [
   ['Dependabot PR actor', { ...trustedPr, 'github.actor': 'dependabot[bot]' }],
   ['Dependabot push actor', { ...trustedPush, 'github.actor': 'dependabot[bot]' }],
   ['non-master push', { ...trustedPush, 'github.ref': 'refs/heads/topic' }],
+  // The pool stays bound to the official master push; a fork's main default
+  // branch is a branch push like any other and must not reach it.
+  ['main-branch push', { ...trustedPush, 'github.ref': 'refs/heads/main' }],
   ['tag push', { ...trustedPush, 'github.ref': 'refs/tags/dsh-v1.0.0' }],
   ['push in another repository', { ...trustedPush, 'github.repository': 'outsider/fork' }],
   ['dispatch on master', { ...trustedPush, 'github.event_name': 'workflow_dispatch' }],
@@ -98,7 +101,7 @@ for (const [file, jobIds] of [['release.yml', ['dependencies', 'pack']], ['relea
     const release = workflow(file)
     it('preserves the logical jobs, rehearsal events and read-only permission', () => {
       expect(Object.keys(release.jobs)).toEqual(jobIds)
-      expect(release.on).toEqual({ pull_request: null, push: { branches: ['master'] }, workflow_dispatch: null })
+      expect(release.on).toEqual({ pull_request: null, push: { branches: ['main', 'master'] }, workflow_dispatch: null })
       expect(release.permissions).toEqual({ contents: 'read' })
       expect(release.concurrency).toEqual({ group: '${{ github.workflow }}-${{ github.ref }}', 'cancel-in-progress': true })
     })

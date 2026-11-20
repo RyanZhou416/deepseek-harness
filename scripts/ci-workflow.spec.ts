@@ -222,6 +222,26 @@ describe('CI workflow', () => {
     },
   )
 
+  it('keeps every default-branch trigger active on both main and master', () => {
+    // Fork default branches move between these names; the official repository
+    // keeps master. Every regular (non-publication) trigger must fire for both
+    // so a fork PR or push is not silently skipped after the rename.
+    for (const [file, event] of [
+      ['ci-master.yml', 'push'],
+      ['e2e.yml', 'push'],
+      ['node-addon-system.yml', 'push'],
+      ['pr-check-on-base-branch.yml', 'push'],
+      ['release.yml', 'push'],
+      ['release-vendor.yml', 'push'],
+      ['sandbox.yml', 'push'],
+    ] as const) {
+      expect(workflowEvent(loadWorkflow('.github/workflows/' + file), event).branches).toEqual(['main', 'master'])
+    }
+    for (const file of ['pr-check-on-head-branch.yml', 'pr-check-after-approve.yml'] as const) {
+      expect(workflowEvent(loadWorkflow('.github/workflows/' + file), 'pull_request_target').branches).toEqual(['main', 'master'])
+    }
+  })
+
   it('cancels reusable CI builds without cancelling release-owned builds', () => {
     const workflow = loadWorkflow('.github/workflows/build-exe-for-python-sdk.yml')
     expect(workflow.concurrency).toEqual({
@@ -504,8 +524,8 @@ describe('CI workflow', () => {
     expect(report?.run).toContain('::warning::')
     expect(report?.run).toContain('Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append')
 
-    // serial-windows: master-only standby, self-hosted, non-blocking, lives in ci-master.
-    expect(serialWindows.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master'")
+    // serial-windows: default-branch standby, self-hosted, non-blocking, lives in ci-master.
+    expect(serialWindows.if).toBe("github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')")
     expect(serialWindows['runs-on']).toEqual(['self-hosted', 'dsh-win-ci', 'windows'])
     expect(serialWindows.name).toBe('serial / windows (self-hosted standby)')
     // Its store must share the ReFS workspace volume for clone; the install
@@ -765,7 +785,7 @@ describe('CI workflow', () => {
     expect(wineGates).toContain('  "$scratch/logs/client-references.log" \\')
   })
 
-  it('runs only Wine for its manual suite and retains master-push scheduling', () => {
+  it('runs only Wine for its manual suite and retains default-branch push scheduling', () => {
     const master = loadWorkflow('.github/workflows/ci-master.yml')
     if (!isRecord(master.on) || !isRecord(master.on.workflow_dispatch)
       || !isRecord(master.on.workflow_dispatch.inputs) || !isRecord(master.on.workflow_dispatch.inputs.suite)
@@ -777,6 +797,7 @@ describe('CI workflow', () => {
     if (typeof wine.if !== 'string') throw new TypeError('Wine must define a trigger condition')
     for (const [event, ref, suite, expected] of [
       ['push', 'refs/heads/master', '', true],
+      ['push', 'refs/heads/main', '', true],
       ['push', 'refs/heads/topic', '', false],
       ['pull_request', 'refs/pull/42/merge', 'wine', false],
       ['workflow_dispatch', 'refs/heads/topic', 'wine', true],
@@ -796,7 +817,7 @@ describe('CI workflow', () => {
     expect(enabled).toEqual(['windows'])
   })
 
-  it('cancels superseded master runs without changing the post-merge job inventory', () => {
+  it('cancels superseded default-branch runs without changing the post-merge job inventory', () => {
     const workflow = loadWorkflow('.github/workflows/ci-master.yml')
     const prWorkflow = loadWorkflow('.github/workflows/ci.yml')
     if (!isRecord(workflow.jobs) || !isRecord(workflow.concurrency)) {
@@ -812,8 +833,8 @@ describe('CI workflow', () => {
     })
     expect(prWorkflow.concurrency).toEqual(workflow.concurrency)
 
-    // The exact event sets are what keep master-only jobs out of the PR check
-    // panel: ci-master triggers only on push(master) + workflow_dispatch and
+    // The exact event sets are what keep post-merge-only jobs out of the PR check
+    // panel: ci-master triggers only on push(main|master) + workflow_dispatch and
     // never on pull_request; ci.yml is exactly pull_request-only. Assert the
     // full sets so losing the wrong event, or gaining an extra one, fails.
     if (!isRecord(workflow.on) || !isRecord(prWorkflow.on)) {
@@ -840,7 +861,7 @@ describe('CI workflow', () => {
       if (!isRecord(job)) throw new TypeError(`${name} must be defined`)
       expect(job.concurrency).toBeUndefined()
       // Standby drills remain post-merge work, but share run cancellation.
-      expect(job.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master'")
+      expect(job.if).toBe("github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')")
     }
 
     // Pin the post-merge runtime, Wine, and standby inventory.

@@ -3,14 +3,14 @@
 # separate sequences with their own workflows and version lines.
 #
 # Pack and dependency-layout verification run without credentials on every pull
-# request and master push. Publication is a manual workflow_dispatch of
-# release-publish.yml from a dsh-v* tag.
+# request and default-branch push (main or master). Publication is a manual
+# workflow_dispatch of release-publish.yml from a dsh-v* tag.
 name: Release (dsh)
 
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:

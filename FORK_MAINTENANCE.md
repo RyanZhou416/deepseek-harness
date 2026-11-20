@@ -4,7 +4,7 @@
 
 本文是 `RyanZhou416/deepseek-harness` 的 fork 维护真源，记录官方仓库之外仍需保留的源码行为、启动脚本、外置 DSH_HOME、插件补丁、会话数据红线、合并流程和验证入口。上游合并或插件升级不得只按文件覆盖；维护者必须逐项证明某个 fork 行为已由上游等价实现，才能删除对应代码、配置和测试。
 
-本文描述本 fork 的已提交源码行为与仓库外运行层；真实 profile 的版本须以其 `package.json` 和安装目录核对。具体发布 SHA 以 `git rev-parse origin/master` 为准；尚未推送的分支不属于同事可取得的发布基线。
+本文描述本 fork 的已提交源码行为与仓库外运行层；真实 profile 的版本须以其 `package.json` 和安装目录核对。具体发布 SHA 以 `git rev-parse origin/main` 为准；尚未推送的分支不属于同事可取得的发布基线。
 
 ## Contents
 
@@ -28,7 +28,7 @@
 |---|---|---|
 | Fork remote | `origin = https://github.com/RyanZhou416/deepseek-harness.git` | 唯一常规推送目标 |
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
-| Published fork | `master` after local integration | `dsh-v0.2.2-rc.1` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
+| Published fork | `main` after local integration | `dsh-v0.2.2-rc.1` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
 | Current official target | `dsh-v0.2.2-rc.1` on 2026-11-07 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 | AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.24`（main，含 0.2.1 适配）+ 本 fork `0.1.24-dsh022rc1.1` 私有发布通道（0.2.2-rc.1 适配）与有界未读邮箱缓存 |
 | Context subtree | `fork-plugins/dsh-context` | 上游 `v0.78.2` + 本 fork 参照价/长上下文计费、视图期边界裁剪、已存会话 detail 的投影缓存优先读取，以及 0.2.2 投影句柄与摘要外压力按需读取 |
@@ -70,6 +70,10 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 -----
 
 ## Source deltas
+
+### SimFlow relay
+
+The [SimFlow relay](fork-plugins/dsh-plugin-simflow-relay/README.md) accepts authenticated loopback requests and wakes the Session identified by the caller. Preserve the local token check, archived-session refusal and mail-ID deduplication. Verify delivery with `node --import ./test/register.mjs --test test/relay.test.mjs` in the plugin directory, and packaging with `scripts/fork-plugins-build.spec.ts`.
 
 ### Shutdown cancellation after inbox unload
 
@@ -942,7 +946,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 1. Stop DSH and confirm no Host instance owns the real profile or sessions.
 2. Run `git status --short --branch` and review every path. Commit all in-flight work to `backup/wip-before-<tag>-<date>`, then push that branch to `origin`; do not rely on stash.
 3. Create and push `backup/pre-upstream-<tag>-<date>` from a clean master.
-4. Run `git fetch --tags --prune upstream` and record `master`, `origin/master`, `upstream/master` and the exact release-tag SHAs.
+4. Run `git fetch --tags --prune upstream` and record `main`, `origin/main`, `upstream/master` and the exact release-tag SHAs.
 5. Create `integrate/upstream-<tag>` in a separate worktree from clean master. Merge the exact official release tag with `--no-ff`; do not merge rolling `upstream/master` directly.
 6. Resolve Session/core/API/schema/package layout/generated catalogs/lockfile with official structure first. Resolve conflict files individually; do not apply repository-wide `-X theirs` and do not wholesale cherry-pick old fork commits.
 7. Commit the official-first merge before porting fork behavior. Re-implement only the still-missing rows in [Preservation matrix](#preservation-matrix), using the target tag's APIs and focused tests.
