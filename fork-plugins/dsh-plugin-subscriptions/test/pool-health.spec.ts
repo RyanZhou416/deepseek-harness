@@ -56,6 +56,51 @@ test('classifyPoolFailure: an ordinary rate limit backs off only its session', (
   })
 })
 
+test('classifyPoolFailure: a reset beyond the route wait parks the account instead of the session', () => {
+  // A weekly window days out is not waited for by the route's retry policy, so
+  // it must not become the session's own backoff: the account is what cannot
+  // serve until the disclosed reset, and every session has to see that.
+  const weekly = new LlmError('usage limit reached', 'RATE_LIMIT', {
+    status: 429,
+    providerRetryAfterMs: 195_200_210,
+  })
+  assert.deepEqual(classifyPoolFailure(weekly, 'codex', { providerWaitMaxMs: 60_000 }), {
+    action: 'account-cooldown',
+    cooldownMs: 195_200_210,
+    reason: 'QUOTA',
+  })
+  // Inside the accepted wait the same failure stays this session's backoff.
+  assert.deepEqual(classifyPoolFailure(
+    new LlmError('slow down', 'RATE_LIMIT', { providerRetryAfterMs: 5_000 }), 'codex',
+    { providerWaitMaxMs: 60_000 }), {
+    action: 'session-backoff',
+    reason: 'RATE_LIMIT',
+    delayMs: 5_000,
+  })
+  // A route reporting no policy keeps the historical session backoff.
+  assert.deepEqual(classifyPoolFailure(weekly, 'codex'), {
+    action: 'session-backoff',
+    reason: 'RATE_LIMIT',
+    delayMs: 195_200_210,
+  })
+})
+
+test('classifyPoolFailure: a disclosed transient wait is bounded by the route wait', () => {
+  // The retry policy sits out no wait beyond its ceiling, so the session must
+  // not stay refused for longer than the wait the policy declined.
+  const shedding = new LlmError('busy', 'SERVER', { status: 503, providerRetryAfterMs: 300_000 })
+  assert.deepEqual(classifyPoolFailure(shedding, 'codex', { providerWaitMaxMs: 60_000 }), {
+    action: 'session-backoff',
+    reason: 'SERVER',
+    delayMs: 60_000,
+  })
+  assert.deepEqual(classifyPoolFailure(shedding, 'codex'), {
+    action: 'session-backoff',
+    reason: 'SERVER',
+    delayMs: 300_000,
+  })
+})
+
 test('classifyPoolFailure: 401 and revoked 403 refresh before they park', () => {
   // Both arrive as AUTH; the gate bounds the refresh cycles and parks afterwards.
   for (const status of [401, 403]) {

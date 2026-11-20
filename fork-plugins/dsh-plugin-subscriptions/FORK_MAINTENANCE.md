@@ -128,12 +128,16 @@ owns those shared facts and `pool.ts` owns the session-to-account affinity; toge
   session sends one request at a time, and the next session waits in FIFO order for a slot;
 - one shared account request limiter (token bucket `requestsPerMinute` = 20 with `burst` = 2, plus
   `minGapMs` = 1500 ms) applies to every session of the account and is active by default;
-- an ordinary 429 backs off only the session that received it, using the provider's disclosed wait
-  when it sent one, and never moves the request to a sibling account; `backoff.maxRetries` = 10
+- an ordinary 429 backs off only the session that received it, using the provider's disclosed wait when it sent one and its retry policy will sit it out, and never moves the request to a sibling account; `backoff.maxRetries` = 10
   consecutive backoffs end the turn's retry budget (a hard-stopped `rate_limited`), and the next
   turn starts a fresh one;
-- a window/quota 429, an account-level refusal and a revoked credential park the account until
-  the disclosed reset, which every session sees;
+- a window/quota 429, any 429 whose disclosed reset is beyond the route's accepted provider wait
+  (`providerRetryPolicy().providerWaitMaxMs`, clamped by `rateLimit.wait`/`maxWaitMs`), an
+  account-level refusal and a revoked credential park the account until the disclosed reset, which
+  every session sees; a parked window records no session backoff of its own, so the next turn's
+  rematch is not held back. Before any output, a spent allowance (`QUOTA`) continues the same
+  request on the next member — the only pre-output failover the pool performs; every refusal ends
+  the turn on its own account;
 - a session keeps its bound account across turns; a rematch happens only at a `turn/start`
   boundary, only because the bound account is exhausted or parked, and at most once per turn;
   with no healthy account the pool reports `NO_AVAILABLE_ACCOUNT` and contacts nothing.
@@ -143,8 +147,8 @@ The gate consumes the taxonomy classified in `pool-health.ts`; producers live in
 
 | Class | Producer | Effect |
 |---|---|---|
-| Transient | 408, 409 (`CONFLICT`), ordinary 429, 500/502/503/504/529, `TRANSPORT`, `TIMEOUT`, pre-delivery `MALFORMED_RESPONSE` | `session-backoff` |
-| Account cooldown | 429 window/quota (`ENFORCEMENT` on a 429), account-shaped 403 (`ENFORCEMENT` on a 403: stated-final, billing/credits, disabled account), `QUOTA` | `account-cooldown` |
+| Transient | 408, 409 (`CONFLICT`), ordinary 429 inside the accepted provider wait, 500/502/503/504/529, `TRANSPORT`, `TIMEOUT`, pre-delivery `MALFORMED_RESPONSE` | `session-backoff` |
+| Account cooldown | 429 window/quota (`ENFORCEMENT` on a 429), any 429 whose disclosed reset exceeds the accepted provider wait (`QUOTA`), account-shaped 403 (`ENFORCEMENT` on a 403: stated-final, billing/credits, disabled account), `QUOTA` | `account-cooldown`; a spent allowance before any output continues on the next member |
 | Refresh | 401 `AUTH`, revoked-wording 403 `AUTH` | `refresh` (parked after `maxRefreshAttempts` = 2) |
 | Model-scoped | model-wording 403/404 (`MODEL_DENIED`), unnamed 404 (`HTTP_404`) | `model-scoped` |
 | Terminal | 400 `INVALID_REQUEST`, 413, version/policy/content refusals, `ABORTED`, post-delivery malformed, non-403/429 `x-should-retry: false` | `throw` |
@@ -156,22 +160,34 @@ classifies as `MODEL_DENIED`, and the Claude route does the same for an in-band 
 model. A plain 403 that staffs no revoked wording stays `PERMISSION_DENIED` (terminal); a 403
 naming a revoked credential/account becomes `AUTH` (refresh).
 
-**Preservation rule.** Do not reintroduce pre-output failover for provider failures, an account
-switch inside a turn, or a per-request-only concurrency limit. Keep `switchMargin` out of the
-pool config and out of selection: proactive re-ranking across turns spreads one conversation over
-several accounts. Keep the gate's account cooldowns in the shared `PoolHealthRegistry`, because
-the Settings card and the scheduler must state the same fact. `SessionTurns` must key each
-`turn/start` afresh: the session log's turn counter restarts on resume. Keep the 429 rule absolute:
-no class may replay a 429 on a sibling account; `dsh-llm-retry` only retries the same account.
+**Preservation rule.** Keep the one pre-output failover scoped to a spent allowance (`QUOTA`):
+`allowanceExhausted` in `pool.ts` is the only predicate that may move a request, it must require no
+delivered chunk, and no refusal — enforcement, credential, model-scoped or terminal — may be asked
+of a sibling. Do not reintroduce failover for transient, server or transport failures, an account
+switch after the first chunk, or a per-request-only concurrency limit. Keep `switchMargin` out of
+the pool config and out of selection: proactive re-ranking across turns spreads one conversation
+over several accounts. Keep the gate's account cooldowns in the shared `PoolHealthRegistry`,
+because the Settings card and the scheduler must state the same fact. `SessionTurns` must key each
+`turn/start` afresh: the session log's turn counter restarts on resume. `dsh-llm-retry` only
+retries the same account; the pool's own allowance failover is the one move that may answer a
+spent allowance from a sibling before any output, and a pool with no member left reports the
+provider's own refusal rather than a pool-level exhaustion. Keep the accepted-wait boundary
+account-scoped: `classifyPoolFailure` turns a disclosed reset beyond the route's
+`providerWaitMaxMs` into an account cooldown, never a session backoff, and `PoolAdapter.failureContext`
+is the only source of that bound. A session backoff recorded from a weekly window refused every
+later turn of that session for the length of the window, which is what this boundary prevents.
 
 **Focused verification.** `test/pool-failure-table.spec.ts` is the table-driven producer × class ×
 effect matrix (shared HTTP, Claude HTTP, in-band `error.type`, network/TLS/timeout/abort, malformed
-before/after delivery). `test/pool-gate.spec.ts` covers slots, serialization, the shared limiter
-and its defaults, per-session backoff and retry budget, refresh accounting, cooldowns, the bound
-turn identity and the bounded queues. `test/pool.spec.ts` covers two concurrent sessions, the
-queued third session, one request per session, ordinary-429 isolation, window-429 cooldown plus
-one-rematch-per-turn, refresh-then-park behaviour, the typed `no_available_account`, and the
-local-exclusion yield. `test/pool-health.spec.ts` pins the failure effects.
+before/after delivery, and the accepted-wait boundary). `test/pool-gate.spec.ts` covers slots,
+serialization, the shared limiter and its defaults, per-session backoff and retry budget, refresh
+accounting, cooldowns, the bound turn identity and the bounded queues. `test/pool.spec.ts` covers
+two concurrent sessions, the queued third session, one request per session, ordinary-429 isolation,
+window-429 cooldown plus one-rematch-per-turn, a disclosed reset beyond the route wait parking the
+account and moving the request to a sibling, a post-chunk quota failure staying on its account, a
+pool with no sibling left reporting the provider's refusal, refresh-then-park behaviour, the typed
+`no_available_account`, and the local-exclusion yield. `test/pool-health.spec.ts` pins the failure
+effects, including the boundary and the bounded transient wait.
 
 ### Wire fidelity, stream errors, and the store lock
 

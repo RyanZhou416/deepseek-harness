@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { PoolAdapter, usagePoolState } from '../src/providers/pool.js'
 import type { PoolAdapterOptions } from '../src/providers/pool.js'
 import { PoolGateError } from '../src/providers/pool-gate.js'
@@ -22,6 +22,7 @@ import type { PoolDefinition, PoolMemberRef, ProviderPoolSource } from '../src/p
 import { accountKey, memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import { ENFORCEMENT_CODE, OAuthEndpointError } from '../src/providers/common.js'
+import { DEFAULT_RETRY, resolveRateLimitWait, subscriptionRetryPolicy } from '../src/providers/rate-limit.js'
 import type { ProviderUsage, UsagePoolState } from '../src/providers/common.js'
 import type { ProviderId } from '../src/auth/store.js'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
@@ -116,6 +117,13 @@ class FakeAdapter extends LlmAdapter implements AccountAwareAdapter {
   }
 
   clearAccountCatalog(): void {}
+
+  /** Retry policy this member reports; the pool reads its accepted provider wait. */
+  policy?: ResolvedRetryPolicy
+
+  override providerRetryPolicy(): ResolvedRetryPolicy | undefined {
+    return this.policy
+  }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     yield* this.streamCore(options, 'default')
@@ -744,7 +752,7 @@ test('stream: a 401 refreshes on the same account instead of walking the pool', 
   assert.equal(health.isMemberAvailable('codex', 'a2', 'm'), true, 'the sibling account is untouched')
 })
 
-test('stream: a pre-chunk quota failure parks the whole account and ends the turn', async () => {
+test('stream: a pre-chunk quota failure parks the account and answers from a sibling', async () => {
   const quota = new LlmError('limited', 'QUOTA', { providerRetryAfterMs: 42_000 })
   const usageCalls: string[] = []
   const codex = new FakeAdapter((_options, account) =>
@@ -761,17 +769,43 @@ test('stream: a pre-chunk quota failure parks the whole account and ends the tur
   const member = { provider: 'codex' as const, account: 'a1', model: 'm' }
   await usage.ensureForUse(member)
   assert.equal(usageCalls.length, 1)
-  // The sibling is not asked: a 429 is answered by waiting, not by moving the
-  // conversation to another account.
-  await assert.rejects(collect(pool.stream(OPTIONS)), error => error === quota)
-  assert.deepEqual(codex.accounts, ['a1'])
+  // A spent allowance is account state, not a refusal of this request, and
+  // nothing was delivered before the failure: the sibling answers it.
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
+  assert.deepEqual(codex.accounts, ['a1', 'a2'])
   assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), false)
   assert.equal(health.isMemberAvailable('codex', 'a1', 'other-model'), false)
   assert.equal(health.isMemberAvailable('codex', 'a2', 'm'), true)
-  assert.equal(warnings.some(message => message.includes('this turn ends on that account')), true)
-  // A spent allowance invalidates the reading, so the next turn reads it again.
+  assert.equal(warnings.some(message => message.includes('continues on another account')), true)
+  // A spent allowance invalidates the reading, so the next use reads it again.
   await usage.ensureForUse(member)
   assert.equal(usageCalls.length, 2)
+})
+
+test('stream: a post-chunk quota failure stays on the account that started the stream', async () => {
+  const quota = new LlmError('limited', 'QUOTA', { providerRetryAfterMs: 42_000 })
+  const codex = new FakeAdapter((_options, account) =>
+    account === 'a1' ? servePartial(quota) : serveOk('a2'))
+  const { pool, health, warnings } = makePool({ codex })
+  await assert.rejects(collect(pool.stream(OPTIONS)), error => error === quota)
+  // A visible stream is never replayed elsewhere, whatever the failure is.
+  assert.deepEqual(codex.accounts, ['a1'])
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), false)
+  assert.equal(health.isMemberAvailable('codex', 'a2', 'm'), true)
+  assert.equal(warnings.some(message => message.includes('continues on another account')), false)
+})
+
+test('a spent allowance with no sibling left reports the provider\'s own refusal', async () => {
+  const quota = new LlmError('limited', 'QUOTA', { providerRetryAfterMs: 42_000 })
+  const codex = new FakeAdapter(() => serveFail(quota))
+  const family = new Map([[poolKey('codex', 'm'), { members: [
+    { provider: 'codex' as const, account: 'a1', model: 'm' },
+  ] }]])
+  const { pool, health } = makePool({ codex }, { families: family })
+  await assert.rejects(collect(pool.stream(OPTIONS)), error => error === quota)
+  assert.deepEqual(codex.accounts, ['a1'])
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), false, 'the spent account is still parked')
 })
 
 test('stream: a claude quota failure parks the whole account, not just the model lane', async () => {
@@ -786,7 +820,8 @@ test('stream: a claude quota failure parks the whole account, not just the model
     }],
   ])
   const { pool, health } = makePool({ claude }, { families: family })
-  await assert.rejects(collect(pool.stream({ provider: 'claude', model: 'claude-opus-5', messages: [] })))
+  const chunks = await collect(pool.stream({ provider: 'claude', model: 'claude-opus-5', messages: [] }))
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
   assert.equal(health.isMemberAvailable('claude', 'a1', 'claude-opus-5'), false)
   // The account-level policy meters the subscription account as a whole.
   assert.equal(health.isMemberAvailable('claude', 'a1', 'claude-sonnet-5'), false)
@@ -1680,6 +1715,43 @@ test('a window 429 parks the account and the next turn rematches exactly once', 
   assert.deepEqual(adapter.accounts, ['a1', 'a2'])
   // The rest of that turn keeps the rematched account.
   await collect(pool.stream(options))
+  assert.deepEqual(adapter.accounts, ['a1', 'a2', 'a2'])
+})
+
+test('a 429 whose reset outlives the route wait parks the account instead of locking the session', async () => {
+  // The cause this guards: a weekly Codex window disclosed as ~54 h was recorded
+  // as a *session* backoff, so every later turn failed before sending anything,
+  // even though another account of the pool could serve.
+  const weekly = new LlmError('usage limit reached', 'RATE_LIMIT', {
+    status: 429,
+    providerRetryAfterMs: 195_200_210,
+  })
+  const adapter = new FakeAdapter((_options, account) => account === 'a1' ? serveFail(weekly) : serveOk('a2'))
+  // `rateLimit.wait: false` resolves the accepted provider wait to the route's
+  // own 60 s local ceiling.
+  adapter.policy = subscriptionRetryPolicy(DEFAULT_RETRY, resolveRateLimitWait({ wait: false }, 'test'), 'test')
+  const family = new Map([[poolKey('codex', 'm'), { members: ['a1', 'a2'].map(account => ({
+    provider: 'codex' as const, account, model: 'm',
+  })) }]])
+  const { pool, health, warnings } = makePool({ codex: adapter }, { families: family })
+  const options = { ...OPTIONS, sessionId: SessionId('weekly-window') }
+
+  pool.noteTurnStart('weekly-window', 1)
+  // The spent account is parked and the same request is answered by the sibling.
+  // Nothing of the response had been delivered, so the turn is not lost.
+  const chunks = await collect(pool.stream(options))
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
+  assert.deepEqual(adapter.accounts, ['a1', 'a2'])
+  // The account is what cannot serve: it is parked for the whole account.
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), false)
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'other-model'), false)
+  assert.equal(health.isMemberAvailable('codex', 'a2', 'm'), true)
+  assert.equal(warnings.some(message => message.includes('continues on another account')), true)
+  // The session itself carries no backoff, so the next turn starts at once on the
+  // account it moved to instead of being refused for 54 hours.
+  pool.noteTurnStart('weekly-window', 2)
+  const next = await collect(pool.stream(options))
+  assert.equal((next[0] as { text: string }).text, 'a2')
   assert.deepEqual(adapter.accounts, ['a1', 'a2', 'a2'])
 })
 

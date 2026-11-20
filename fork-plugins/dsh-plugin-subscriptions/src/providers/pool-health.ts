@@ -131,15 +131,37 @@ function retryAfterMs(error: LlmError): number | undefined {
 }
 
 /**
+ * Route-owned facts the classifier reads beside the failure itself.
+ *
+ * They belong to the adapter, not to one failure: the same 429 is a session
+ * backoff for a route that will sit the reset out and an exhausted account for
+ * one that will not.
+ */
+export interface PoolFailureContext {
+  /**
+   * The longest provider-disclosed wait this route's retry policy will sit out
+   * (`providerWaitMaxMs`). A reset beyond it fails the turn, so waiting it in
+   * this session would only lock the session out for the whole window; the
+   * account is what the failure is evidence about instead.
+   */
+  readonly providerWaitMaxMs?: number
+}
+
+/**
  * Classify a member failure into the effect the pool applies.
  *
  * The table is the subscription account's error taxonomy:
  *
  * - transient statuses (408, 409, 500/502/503/504/529), an ordinary 429, and
  *   network, TLS or timeout failures back only their session off, so the same
- *   account may retry after the disclosed or local delay;
- * - a window/quota 429, a spent allowance, or an exhausted refresh budget parks
- *   the account until it can serve again, which every session sees;
+ *   account may retry after the disclosed or local delay. A disclosed delay is
+ *   bounded by the route's accepted provider wait, because the retry policy
+ *   sits out no longer one: a longer backoff would only hold the session out of
+ *   a retry that will not happen;
+ * - a 429 whose disclosed reset is beyond that accepted wait is an exhausted
+ *   account, not a session to park: it parks the account until the reset, like
+ *   a window/quota 429, a spent allowance, or an exhausted refresh budget,
+ *   which every session sees;
  * - 401 and a revoked 403 refresh the credential on the same account first;
  * - a 403 or 404 that names one model is model-scoped and never changes the
  *   account;
@@ -150,9 +172,14 @@ function retryAfterMs(error: LlmError): number | undefined {
  * its code is read: the route stated the logical request may not be repeated.
  * @param error - the failure thrown by a member adapter's stream.
  * @param _provider - the failing member's provider (kept for the classifier's stable call shape).
+ * @param context - route-owned bounds; omitted keeps every disclosed wait a session backoff.
  * @returns the effect the pool should apply.
  */
-export function classifyPoolFailure(error: unknown, _provider: ProviderId): PoolFailureAction {
+export function classifyPoolFailure(
+  error: unknown,
+  _provider: ProviderId,
+  context: PoolFailureContext = {},
+): PoolFailureAction {
   if (!(error instanceof LlmError)) return { action: 'throw' }
   const status = error.failure.status
   if (error.failure.retryDisposition === 'forbid') {
@@ -178,7 +205,23 @@ export function classifyPoolFailure(error: unknown, _provider: ProviderId): Pool
     }
   }
   switch (error.code) {
-    case 'RATE_LIMIT':
+    case 'RATE_LIMIT': {
+      const delayMs = retryAfterMs(error)
+      // A reset the route will not wait out is not this session's to sit out:
+      // the account cannot serve until it reopens, so park the whole account
+      // and let the next turn rematch. Keeping it as a session backoff is what
+      // holds one session out for a whole weekly window.
+      if (delayMs !== undefined
+        && context.providerWaitMaxMs !== undefined
+        && delayMs > context.providerWaitMaxMs) {
+        return { action: 'account-cooldown', cooldownMs: delayMs, reason: QUOTA_EXCEEDED_CODE }
+      }
+      return {
+        action: 'session-backoff',
+        reason: error.code,
+        ...delayMs === undefined ? {} : { delayMs },
+      }
+    }
     case 'SERVER':
     case 'TIMEOUT':
     case 'TRANSPORT':
@@ -186,10 +229,16 @@ export function classifyPoolFailure(error: unknown, _provider: ProviderId): Pool
     case 'MALFORMED_RESPONSE':
     case CONFLICT_CODE: {
       const delayMs = retryAfterMs(error)
+      // The retry policy sits out no disclosed wait beyond the route ceiling,
+      // so neither may this session's own backoff: a longer one only refuses
+      // the next turn a retry the policy already declined.
+      const bounded = delayMs === undefined ? undefined
+        : context.providerWaitMaxMs === undefined ? delayMs
+          : Math.min(delayMs, context.providerWaitMaxMs)
       return {
         action: 'session-backoff',
         reason: error.code,
-        ...delayMs === undefined ? {} : { delayMs },
+        ...bounded === undefined ? {} : { delayMs: bounded },
       }
     }
     case QUOTA_EXCEEDED_CODE:

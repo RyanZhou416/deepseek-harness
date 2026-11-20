@@ -263,11 +263,11 @@ Claude Messages 的 `retry-after-ms` 优先于 `retry-after`，429 的账号重�
 
 ### Subscription pool scheduling
 
-订阅插件的账号池并发与失败调度由 `pool.concurrency` 控制：每个账号默认 2 个并发会话、每会话 1 个 in-flight 请求，账号级 token bucket 默认 20 RPM、burst 2、minGap 1500ms；session backoff 1s 起、60s 封顶、最多 10 次；refresh 预算 2 次。普通 429 只退避当前会话、不换号；窗口/额度 429 冷却账号到 reset；rematch 只在 turn 边界且每 turn 最多一次。403 model permission/404 model 走 model-scoped，403 revoked 走 refresh；无健康账号返回 `NO_AVAILABLE_ACCOUNT`，不遍历池。`pool.switchMargin` 主动换号已移除，sticky 只保留会话-账号亲和。错误分类与默认值表见插件 README/FORK_MAINTENANCE；429 永不跨账号重放。
+The subscription plugin separates ordinary 429 session backoff from account cooldown. An explicit 429 reset beyond the route's `providerWaitMaxMs`, or a classified spent allowance, cools down the account. A spent allowance may yield to a sibling only before the first stream chunk and when the adapter did not prohibit resending. If no sibling can take the request, keep the provider's refusal. The [subscription plugin maintenance notes](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#subscription-pool-scheduling) own the defaults and classification. These rules do not govern the Mac Pool `cc-pool` route.
 
-**Preservation rule.** 保留 `pool.concurrency` 默认值、账号级 limiter、会话单 in-flight、普通 429 不换号、额度 429 账号冷却与 turn 边界 rematch；不得恢复 `switchMargin` 或跨账号重放 429。
+**Preservation rule.** Keep account-level rate limiting and one in-flight request per Session. Do not rematch an ordinary 429, a failure after output, or a failure that forbids resending. Do not restore proactive switching through `pool.switchMargin`.
 
-**Focused verification.** `fork-plugins/dsh-plugin-subscriptions` 的 `test/pool-gate.spec.ts`、`test/pool-failure-table.spec.ts`、`test/pool.spec.ts`、`test/pool-health.spec.ts`，以及 `pnpm test` 和两个 `tsc --noEmit`。
+**Focused verification.** Compile `tsconfig.test.json` from the subscription plugin and run its `pool.spec`, `pool-health.spec`, `pool-failure-table.spec`, and `claude-reliability-stream.spec` together under the plugin's isolated test home. They cover the disclosed-wait bound, account cooldown, pre- and post-chunk outcomes, and retention of the original refusal.
 
 ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅账号管理。当前账号额度耗尽且其可用卡在所有已登录 ChatGPT 账号中最早到期时才自动用卡，不要求其他账号也耗尽。保留全账号最新卡列表比较、使用前最新额度复核、手动/自动串行与落盘防重复记录；开关不能被模型编辑器的旧副本覆盖。验证入口为 `codex-auto-reset.spec.ts`、设置/RPC 与池测试、`account-manager-browser.mjs` 和上述无密钥会话回放。`0.9.4-dsh017rc1.14` 包含该功能，默认关闭，禁止在 Host 运行时替换安装目录；具体规则以[插件 README](fork-plugins/dsh-plugin-subscriptions/README.md)为准。
 

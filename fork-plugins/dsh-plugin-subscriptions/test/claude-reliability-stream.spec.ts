@@ -731,6 +731,8 @@ test('a pool never answers a forbidden failure from another account, whatever it
           attempted.push(account ?? '')
           throw forbidden
         })(),
+      /** No route policy: every disclosed wait stays a session backoff. */
+      providerRetryPolicy: () => undefined,
     }
     const health = new PoolHealthRegistry()
     const pool = new PoolAdapter({
@@ -768,6 +770,8 @@ test('the pool keeps the same account for a transient failure when nothing forbi
         yield { type: 'text-delta', index: 0, text: 'ok' } as StreamChunk
         yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
       })(),
+    /** No route policy: every disclosed wait stays a session backoff. */
+    providerRetryPolicy: () => undefined,
   }
   const pool = new PoolAdapter({
     scheduling: resolvePoolScheduling(),
