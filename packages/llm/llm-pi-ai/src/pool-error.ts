@@ -55,27 +55,6 @@ export const POOL_ERROR_MESSAGE_MAX_LENGTH = 1_024
 /** Generic display fallback when the pool supplies no safe message. */
 export const POOL_ERROR_FALLBACK_MESSAGE = 'The provider pool rejected this request'
 
-/**
- * Diagnostic reason for a pool-origin error envelope that did not name a
- * sub-cause. It marks the missing detail explicitly instead of silently
- * presenting a classified failure as if it had one. Diagnostic only.
- */
-export const UNPARSED_POOL_REASON = 'unparsed_pool_error'
-
-/**
- * Diagnostic reason for a failure text that carried no parseable pool error
- * envelope, or an envelope whose non-catalog code named no sub-cause. It is a
- * visible "unknown sub-cause" marker, never a routing input.
- */
-export const UNPARSED_ERROR_REASON = 'unparsed_error'
-
-/**
- * The pool's stable sub-cause token grammar: a bounded lowercase ASCII word
- * (`[a-z0-9][a-z0-9_.-]*`, at most 64 characters). It subdivides a failure code
- * for display only; every other value is rejected rather than shown.
- */
-const POOL_REASON_TOKEN = /^[a-z0-9][a-z0-9_.-]{0,63}$/u
-
 /** Retryable pool codes this adapter's classifier can emit for a normal policy. */
 export const POOL_RETRYABLE_CODES: readonly string[] = Object.freeze([
   POOL_CAPACITY_CODE,
@@ -120,15 +99,8 @@ export interface ProviderErrorEnvelope {
   readonly clientAction?: string
   /** Pool-declared HTTP status, used only when no response or status prefix supplies one. */
   readonly status?: number
-  /** Provider-authored human-readable detail. */
+  /** Provider-authored human-readable message. */
   readonly message?: string
-  /** Stable pool sub-cause token; diagnostic only, never a routing input. */
-  readonly reason?: string
-  /**
-   * Pool-authored single-line detail for {@link reason}. Untrusted until the
-   * display path sanitizes it; diagnostic only, never a routing input.
-   */
-  readonly detail?: string
 }
 
 /** Response facts retained from one failed provider HTTP request. */
@@ -184,18 +156,6 @@ const POOL_REQUEST_ID_FIELD = 'pool_request_id'
 const POOL_READINESS_DETAIL = /the egress path is not verified for this lease|capability_not_ready/i
 
 /**
- * Read the optional sub-cause token, rejecting every value outside the pool's
- * stable grammar: control characters, whitespace, markup, and overlong tokens
- * never become part of an envelope.
- * @param record - the envelope's `error` object.
- * @returns the validated token, or undefined when absent or outside the grammar.
- */
-function reasonOf(record: Record<string, unknown>): string | undefined {
-  const value = record['reason']
-  return typeof value === 'string' && POOL_REASON_TOKEN.test(value) ? value : undefined
-}
-
-/**
  * Parse the JSON error envelope carried by a pi-ai failure message.
  *
  * pi-ai flattens the SDK error to `<status> <body>`, so the body is located by
@@ -229,9 +189,7 @@ export function parseProviderErrorEnvelope(message: string): ProviderErrorEnvelo
   const origin = text(fields, 'origin')
   const scope = text(fields, 'scope')
   const clientAction = text(fields, 'client_action')
-  const reason = reasonOf(fields)
   const messageText = text(fields, 'message')
-  const detailText = text(fields, 'detail')
   const retryable = fields['retryable']
   const terminal = fields['terminal']
   const declaredStatus = fields['status']
@@ -249,8 +207,6 @@ export function parseProviderErrorEnvelope(message: string): ProviderErrorEnvelo
       && declaredStatus >= 100 && declaredStatus <= 599
       ? { status: declaredStatus } : {},
     ...messageText === undefined ? {} : { message: messageText },
-    ...reason === undefined ? {} : { reason },
-    ...detailText === undefined ? {} : { detail: detailText },
   }
 }
 
@@ -263,75 +219,27 @@ function identityOf(envelope: ProviderErrorEnvelope): string | undefined {
   return envelope.code ?? envelope.type ?? envelope.kind
 }
 
-/**
- * Append the diagnostic suffix to a display message.
- *
- * This only changes what a human reads: the suffix names the sub-cause token
- * and, when it is not already part of the message, the detail. The final text
- * stays within {@link POOL_ERROR_MESSAGE_MAX_LENGTH}; the stable token is kept
- * whole and only the provider message is shortened.
- * @param message - the sanitized display message, or the generic fallback.
- * @param reason - the validated sub-cause token, when one was present.
- * @param detail - the sanitized sub-cause detail, when one was present.
- * @returns the bounded display message with its diagnostic suffix.
- */
-function withDiagnosticSuffix(
-  message: string,
-  reason: string | undefined,
-  detail: string | undefined,
-): string {
-  const visibleDetail = detail !== undefined && !message.includes(detail) ? detail : undefined
-  const token = reason === undefined ? '' : ` [${reason}]`
-  const suffix = visibleDetail === undefined ? token : `${token}: ${visibleDetail}`
-  if (suffix === '') return message
-  const candidate = `${message}${suffix}`
-  if (candidate.length <= POOL_ERROR_MESSAGE_MAX_LENGTH) return candidate
-  const room = POOL_ERROR_MESSAGE_MAX_LENGTH - suffix.length
-  return room > 0 ? `${message.slice(0, room)}${suffix}` : suffix.slice(0, POOL_ERROR_MESSAGE_MAX_LENGTH)
-}
-
 /** Display facts read from a JSON error envelope carried in a failure text. */
 export interface ProviderErrorDisplay {
-  /** Sanitized envelope message with its diagnostic suffix, when one is displayable. */
+  /** Sanitized pool `error.message`, displayed verbatim, when one is displayable. */
   readonly message?: string
-  /** Validated sub-cause token; diagnostic only, never a routing input. */
-  readonly reason?: string
-  /** Sanitized single-line sub-cause detail; diagnostic only, never a routing input. */
-  readonly detail?: string
 }
 
 /**
- * Read the display facts of an error envelope embedded in a failure text.
+ * Read the display message of an error envelope embedded in a failure text.
  *
  * The caller classifies and retries on its own copy of the text; this helper
  * only lets a raw JSON body render as its sanitized `error.message` instead of
- * the whole JSON. It never influences a failure code or disposition.
+ * the whole JSON. It never composes a message, appends a sub-cause, or invents
+ * a fallback marker; the pool owns the final display text.
  * @param message - the original failure text.
- * @returns the sanitized display message, reason, and detail; empty when no
- *   JSON error envelope is present.
+ * @returns the sanitized pool message; empty when no JSON error envelope is present.
  */
 export function describeProviderError(message: string): ProviderErrorDisplay {
   const envelope = parseProviderErrorEnvelope(message)
   if (envelope === undefined) return {}
-  const identity = identityOf(envelope)
-  const knownCatalog = identity === undefined ? false : catalogEntryFor(identity) !== undefined
-  const poolLike = envelope.origin === 'pool'
-    || (envelope.origin !== 'claude'
-      && identity !== undefined
-      && identity.startsWith(POOL_CODE_PREFIX))
-  // A missing pool sub-cause is itself a fact: expose it as a stable marker
-  // rather than silently rendering a classified failure with no detail. Known
-  // catalog entries need no marker: their canonical code already names them.
-  const reason = envelope.reason ?? (knownCatalog
-    ? undefined
-    : poolLike ? UNPARSED_POOL_REASON : UNPARSED_ERROR_REASON)
-  const detail = sanitizeProviderMessage(envelope.detail)
   const visible = sanitizeProviderMessage(envelope.message)
-  return {
-    ...visible === undefined ? {} : { message: withDiagnosticSuffix(visible, reason, detail) },
-    ...reason === undefined ? {} : { reason },
-    ...detail === undefined ? {} : { detail },
-  }
+  return visible === undefined ? {} : { message: visible }
 }
 
 /** Markup, entities, and executable URL schemes that never belong in a plain-text error row. */
@@ -401,11 +309,10 @@ function fallbackMessage(code: string): string {
  * pool codes follow an explicit `terminal` marker, then `client_action`,
  * `retryable`, and finally the HTTP status; `error.status` supplies the status
  * when neither the captured response nor the message prefix does. The failure
- * message is the pool's sanitized `message` — with the envelope's `reason` and
- * `detail` appended for display when present — or a generic refusal when that
- * detail is missing or unsafe. `reason` and `detail` are diagnostic-only: they
- * never select a code, a retry, or a terminal decision. A body without a pool
- * code or `origin: pool`
+ * message is the pool's sanitized `message` verbatim, or a generic refusal when
+ * the pool supplied no safe message. This classifier never appends a sub-cause
+ * or invents an unparsed marker; the pool is the single display authority. A
+ * body without a pool code or `origin: pool`
  * keeps the text classification unless the pool itself decided otherwise: an
  * explicit `retryable: false` together with a pool marker — its body
  * `pool_request_id` or `origin: pool` — becomes a non-retryable `POOL_ERROR`
@@ -431,20 +338,12 @@ export function classifyPoolFailure(
   const envelope = parseProviderErrorEnvelope(message)
   const status = response?.status ?? statusOf(message) ?? envelope?.status
   const retryAfterMs = response?.providerRetryAfterMs
-  // The sub-cause fields are display-only: they ride the failure and its message
-  // but never select the code, the retry, or the terminal decision below.
-  const reason = envelope?.reason
-  const detail = sanitizeProviderMessage(envelope?.detail)
+  // The pool's message is the final display text; this classifier must not append
+  // sub-cause text or invent a marker. It only selects the client code/disposition.
   const providerMessage = sanitizeProviderMessage(envelope?.message)
-  const failure = (
-    code: string, diagnosticReason: string | undefined = reason,
-  ): LlmFailure => ({
-    message: withDiagnosticSuffix(
-      providerMessage ?? fallbackMessage(code), diagnosticReason, detail,
-    ),
+  const failure = (code: string): LlmFailure => ({
+    message: providerMessage ?? fallbackMessage(code),
     code,
-    ...diagnosticReason === undefined ? {} : { reason: diagnosticReason },
-    ...detail === undefined ? {} : { detail },
     ...status === undefined ? {} : { status },
     ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
   })
@@ -497,13 +396,9 @@ export function classifyPoolFailure(
   }
 
   const retry = retryDecision(envelope, status)
-  // An internal code outside the catalog is still a pool failure; when it names
-  // no sub-cause, mark that fact explicitly. The marker is display-only and
-  // never changes the retry/forbid decision below.
-  const fallbackReason = reason ?? UNPARSED_POOL_REASON
-  if (retry) return failure(POOL_TRANSIENT_CODE, fallbackReason)
+  if (retry) return failure(POOL_TRANSIENT_CODE)
   return {
-    ...failure(POOL_ERROR_CODE, fallbackReason),
+    ...failure(POOL_ERROR_CODE),
     retryDisposition: 'forbid',
   }
 }

@@ -245,21 +245,6 @@ interface LlmFailure {
   readonly message: string
   /** Stable provider-neutral machine-routing code. */
   readonly code: string
-  /**
-   * Stable provider sub-cause token that subdivides {@link code} for display.
-   *
-   * Diagnostic-only: routing, retry policy, and failure disposition read
-   * {@link code} and the retry facts, never this field. Producers validate the
-   * token before setting it, and a failure that carries none leaves it absent.
-   */
-  readonly reason?: string
-  /**
-   * Bounded single-line human detail for {@link reason}, for display only.
-   *
-   * Diagnostic-only: it never selects a code or a retry decision. Producers
-   * sanitize it (one line, no markup, no credentials) before setting it.
-   */
-  readonly detail?: string
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
   /** Provider-requested delay in milliseconds, when valid and available. */
@@ -289,6 +274,8 @@ interface LlmFailure {
   readonly retryDisposition?: 'forbid'
 }
 ```
+
+For a pool-backed adapter, the pool owns the final display text. `LlmFailure.message` is exactly the pool's `error.message` (after display safety); the adapter must not append a sub-cause token or detail, maintain a reason display table, or synthesize an `unparsed_*` marker when an envelope lacks one. A pool's structured `reason`/`detail` fields are diagnostics at the pool boundary; they do not become part of this failure contract. Without a parseable envelope, the adapter keeps the original failure text. Unknown pool codes keep the pool message and are classified only from the catalog or the envelope's retry facts.
 
 ## Request-image pricing
 

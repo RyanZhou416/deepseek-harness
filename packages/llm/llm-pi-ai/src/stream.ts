@@ -13,11 +13,7 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExcee
 import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
-import {
-  classifyPoolFailure,
-  describeProviderError,
-  UNPARSED_ERROR_REASON,
-} from './pool-error.ts'
+import { classifyPoolFailure, describeProviderError } from './pool-error.ts'
 import type { ProviderErrorCapture, ProviderErrorResponse } from './pool-error.ts'
 import { toPiReplayState } from './replay.ts'
 
@@ -146,22 +142,15 @@ export function mapStopReason(
     case 'error': {
       const text = message.errorMessage ?? 'pi-ai stream error'
       // The code and every retry decision read the original text exactly as
-      // before. The embedded envelope supplies display facts only: its
-      // sanitized message and diagnostic sub-cause replace the raw JSON body
-      // the user would otherwise see.
+      // before. Only the display text is replaced: a raw JSON body renders as
+      // the pool's already-composed `error.message`; this adapter appends
+      // nothing and invents no fallback marker.
       const display = describeProviderError(text)
-      // A failure text with no parseable envelope has no sub-cause by
-      // construction; expose that as a stable marker instead of leaving the
-      // field silently absent. The code still comes from the original text and
-      // no retry decision reads this field.
-      const reason = display.reason ?? UNPARSED_ERROR_REASON
       return {
         kind: 'error',
         failure: {
           message: display.message ?? text,
           code: classifyPiAiError(text),
-          reason,
-          ...display.detail === undefined ? {} : { detail: display.detail },
         },
       }
     }

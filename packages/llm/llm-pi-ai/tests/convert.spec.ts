@@ -831,13 +831,7 @@ describe('toStreamChunks', () => {
     )))
     expect(chunks).toEqual([
       { type: 'usage', usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1 } },
-      {
-        type: 'finish',
-        reason: {
-          kind: 'error',
-          failure: { message: 'boom', code: 'PI_AI_ERROR', reason: 'unparsed_error' },
-        },
-      },
+      { type: 'finish', reason: { kind: 'error', failure: { message: 'boom', code: 'PI_AI_ERROR' } } },
     ])
   })
 
@@ -900,14 +894,7 @@ describe('mapStopReason / mapUsage', () => {
 
   it('defaults the error message when pi-ai omits it', () => {
     expect(mapStopReason(assistant({ stopReason: 'error' })))
-      .toEqual({
-        kind: 'error',
-        failure: {
-          message: 'pi-ai stream error',
-          code: 'PI_AI_ERROR',
-          reason: 'unparsed_error',
-        },
-      })
+      .toEqual({ kind: 'error', failure: { message: 'pi-ai stream error', code: 'PI_AI_ERROR' } })
   })
 
   it('maps routable HTTP-ish error messages to stable codes', () => {
@@ -949,50 +936,6 @@ describe('mapStopReason / mapUsage', () => {
       stopReason: 'error',
       errorMessage: 'vector length limit exceeded',
     }))).toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
-  })
-
-  it('keeps the in-band text classification while displaying the embedded envelope', () => {
-    const body = JSON.stringify({
-      type: 'error',
-      error: {
-        type: 'api_error',
-        message: 'upstream overloaded',
-        reason: 'upstream_overloaded',
-        detail: 'the selected worker is draining',
-      },
-    })
-    const before = mapStopReason(assistant({ stopReason: 'error', errorMessage: 'upstream overloaded' }))
-    const inBand = mapStopReason(assistant({ stopReason: 'error', errorMessage: body }))
-    const classified = mapStopReason(assistant({ stopReason: 'error', errorMessage: `429 ${body}` }))
-
-    expect(before).toEqual({
-      kind: 'error',
-      failure: {
-        message: 'upstream overloaded',
-        code: 'PI_AI_ERROR',
-        reason: 'unparsed_error',
-      },
-    })
-    expect(inBand).toEqual({
-      kind: 'error',
-      failure: {
-        message: 'upstream overloaded [upstream_overloaded]: the selected worker is draining',
-        code: 'PI_AI_ERROR',
-        reason: 'upstream_overloaded',
-        detail: 'the selected worker is draining',
-      },
-    })
-    // A text prefix that already classifies the failure still decides the code;
-    // the envelope only changes what is displayed.
-    expect(classified).toEqual({
-      kind: 'error',
-      failure: {
-        message: 'upstream overloaded [upstream_overloaded]: the selected worker is draining',
-        code: 'RATE_LIMIT',
-        reason: 'upstream_overloaded',
-        detail: 'the selected worker is draining',
-      },
-    })
   })
 
   it.each([
@@ -1076,5 +1019,25 @@ describe('toStreamChunks defensive branches', () => {
       { type: 'done', reason: 'stop', message: assistant() },
     )))
     expect(chunks[0]).toEqual({ type: 'tool-call-delta', index: 0, id: '', argumentsDelta: '{}' })
+  })
+})
+
+describe('pool display authority', () => {
+  it('displays the in-band pool message without appending its reason', () => {
+    const finalMessage = 'pool final [worker_booting]: exact detail'
+    const body = JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'api_error',
+        message: finalMessage,
+        reason: 'worker_booting',
+        detail: 'exact detail',
+      },
+    })
+
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: body }))).toEqual({
+      kind: 'error',
+      failure: { message: finalMessage, code: 'PI_AI_ERROR' },
+    })
   })
 })
