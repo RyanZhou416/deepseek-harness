@@ -831,7 +831,13 @@ describe('toStreamChunks', () => {
     )))
     expect(chunks).toEqual([
       { type: 'usage', usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1 } },
-      { type: 'finish', reason: { kind: 'error', failure: { message: 'boom', code: 'PI_AI_ERROR' } } },
+      {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: { message: 'boom', code: 'PI_AI_ERROR', reason: 'unparsed_error' },
+        },
+      },
     ])
   })
 
@@ -894,7 +900,14 @@ describe('mapStopReason / mapUsage', () => {
 
   it('defaults the error message when pi-ai omits it', () => {
     expect(mapStopReason(assistant({ stopReason: 'error' })))
-      .toEqual({ kind: 'error', failure: { message: 'pi-ai stream error', code: 'PI_AI_ERROR' } })
+      .toEqual({
+        kind: 'error',
+        failure: {
+          message: 'pi-ai stream error',
+          code: 'PI_AI_ERROR',
+          reason: 'unparsed_error',
+        },
+      })
   })
 
   it('maps routable HTTP-ish error messages to stable codes', () => {
@@ -952,7 +965,14 @@ describe('mapStopReason / mapUsage', () => {
     const inBand = mapStopReason(assistant({ stopReason: 'error', errorMessage: body }))
     const classified = mapStopReason(assistant({ stopReason: 'error', errorMessage: `429 ${body}` }))
 
-    expect(before).toEqual({ kind: 'error', failure: { message: 'upstream overloaded', code: 'PI_AI_ERROR' } })
+    expect(before).toEqual({
+      kind: 'error',
+      failure: {
+        message: 'upstream overloaded',
+        code: 'PI_AI_ERROR',
+        reason: 'unparsed_error',
+      },
+    })
     expect(inBand).toEqual({
       kind: 'error',
       failure: {

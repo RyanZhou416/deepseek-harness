@@ -56,6 +56,20 @@ export const POOL_ERROR_MESSAGE_MAX_LENGTH = 1_024
 export const POOL_ERROR_FALLBACK_MESSAGE = 'The provider pool rejected this request'
 
 /**
+ * Diagnostic reason for a pool-origin error envelope that did not name a
+ * sub-cause. It marks the missing detail explicitly instead of silently
+ * presenting a classified failure as if it had one. Diagnostic only.
+ */
+export const UNPARSED_POOL_REASON = 'unparsed_pool_error'
+
+/**
+ * Diagnostic reason for a failure text that carried no parseable pool error
+ * envelope, or an envelope whose non-catalog code named no sub-cause. It is a
+ * visible "unknown sub-cause" marker, never a routing input.
+ */
+export const UNPARSED_ERROR_REASON = 'unparsed_error'
+
+/**
  * The pool's stable sub-cause token grammar: a bounded lowercase ASCII word
  * (`[a-z0-9][a-z0-9_.-]*`, at most 64 characters). It subdivides a failure code
  * for display only; every other value is rejected rather than shown.
@@ -299,7 +313,18 @@ export interface ProviderErrorDisplay {
 export function describeProviderError(message: string): ProviderErrorDisplay {
   const envelope = parseProviderErrorEnvelope(message)
   if (envelope === undefined) return {}
-  const reason = envelope.reason
+  const identity = identityOf(envelope)
+  const knownCatalog = identity === undefined ? false : catalogEntryFor(identity) !== undefined
+  const poolLike = envelope.origin === 'pool'
+    || (envelope.origin !== 'claude'
+      && identity !== undefined
+      && identity.startsWith(POOL_CODE_PREFIX))
+  // A missing pool sub-cause is itself a fact: expose it as a stable marker
+  // rather than silently rendering a classified failure with no detail. Known
+  // catalog entries need no marker: their canonical code already names them.
+  const reason = envelope.reason ?? (knownCatalog
+    ? undefined
+    : poolLike ? UNPARSED_POOL_REASON : UNPARSED_ERROR_REASON)
   const detail = sanitizeProviderMessage(envelope.detail)
   const visible = sanitizeProviderMessage(envelope.message)
   return {
@@ -411,10 +436,14 @@ export function classifyPoolFailure(
   const reason = envelope?.reason
   const detail = sanitizeProviderMessage(envelope?.detail)
   const providerMessage = sanitizeProviderMessage(envelope?.message)
-  const failure = (code: string): LlmFailure => ({
-    message: withDiagnosticSuffix(providerMessage ?? fallbackMessage(code), reason, detail),
+  const failure = (
+    code: string, diagnosticReason: string | undefined = reason,
+  ): LlmFailure => ({
+    message: withDiagnosticSuffix(
+      providerMessage ?? fallbackMessage(code), diagnosticReason, detail,
+    ),
     code,
-    ...reason === undefined ? {} : { reason },
+    ...diagnosticReason === undefined ? {} : { reason: diagnosticReason },
     ...detail === undefined ? {} : { detail },
     ...status === undefined ? {} : { status },
     ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
@@ -468,9 +497,13 @@ export function classifyPoolFailure(
   }
 
   const retry = retryDecision(envelope, status)
-  if (retry) return failure(POOL_TRANSIENT_CODE)
+  // An internal code outside the catalog is still a pool failure; when it names
+  // no sub-cause, mark that fact explicitly. The marker is display-only and
+  // never changes the retry/forbid decision below.
+  const fallbackReason = reason ?? UNPARSED_POOL_REASON
+  if (retry) return failure(POOL_TRANSIENT_CODE, fallbackReason)
   return {
-    ...failure(POOL_ERROR_CODE),
+    ...failure(POOL_ERROR_CODE, fallbackReason),
     retryDisposition: 'forbid',
   }
 }

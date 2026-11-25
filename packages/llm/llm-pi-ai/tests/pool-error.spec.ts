@@ -20,6 +20,8 @@ import {
   POOL_ERROR_FALLBACK_MESSAGE,
   POOL_ERROR_MESSAGE_MAX_LENGTH,
   ProviderErrorCapture,
+  UNPARSED_ERROR_REASON,
+  UNPARSED_POOL_REASON,
 } from '../src/pool-error.ts'
 
 /** The pool envelope as the online gateway writes it: `<status> <body>`. */
@@ -362,8 +364,8 @@ describe('pool message display', () => {
       type: 'cc_pool_bad_route',
     }, 400))
 
-    expect(retryable?.message).toBe(fallback(POOL_TRANSIENT_CODE))
-    expect(terminal?.message).toBe(fallback(POOL_ERROR_CODE))
+    expect(retryable?.message).toBe(`${fallback(POOL_TRANSIENT_CODE)} [unparsed_pool_error]`)
+    expect(terminal?.message).toBe(`${fallback(POOL_ERROR_CODE)} [unparsed_pool_error]`)
   })
 })
 
@@ -688,7 +690,7 @@ describe('pool failure classification', () => {
     }, 429))
 
     expect(unknown).toMatchObject({
-      message: 'the pool gave up',
+      message: 'the pool gave up [unparsed_pool_error]',
       code: POOL_ERROR_CODE,
       retryDisposition: 'forbid',
     })
@@ -744,7 +746,10 @@ describe('pool failure classification', () => {
       error: { type: 'rate_limit_error', origin: 'pool', retryable: true, message: 'pool slow down' },
     })}`)
 
-    expect(failure).toMatchObject({ code: POOL_TRANSIENT_CODE, message: 'pool slow down' })
+    expect(failure).toMatchObject({
+      code: POOL_TRANSIENT_CODE,
+      message: 'pool slow down [unparsed_pool_error]',
+    })
   })
 
   it('recognizes the online envelope, which carries a pool code but no origin', () => {
@@ -767,8 +772,15 @@ describe('pool failure classification', () => {
       error: { type: 'cc_pool_account_unavailable', origin: 'pool', client_action: 'refresh', message: 'sign in again' },
     })}`)
 
-    expect(retry).toMatchObject({ code: POOL_TRANSIENT_CODE, message: fallback(POOL_TRANSIENT_CODE) })
-    expect(refresh).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid', message: 'sign in again' })
+    expect(retry).toMatchObject({
+      code: POOL_TRANSIENT_CODE,
+      message: `${fallback(POOL_TRANSIENT_CODE)} [unparsed_pool_error]`,
+    })
+    expect(refresh).toMatchObject({
+      code: POOL_ERROR_CODE,
+      retryDisposition: 'forbid',
+      message: 'sign in again [unparsed_pool_error]',
+    })
   })
 
   it('falls back to the HTTP status only when the envelope states no retry decision', () => {
@@ -813,7 +825,11 @@ describe('pool failure classification', () => {
       error: { origin: 'pool', retryable: false, message: 'no route' },
     }))
 
-    expect(failure).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid', message: 'no route' })
+    expect(failure).toMatchObject({
+      code: POOL_ERROR_CODE,
+      retryDisposition: 'forbid',
+      message: 'no route [unparsed_pool_error]',
+    })
   })
 
   it('omits an out-of-range status prefix instead of reporting it', () => {
@@ -1161,5 +1177,73 @@ describe('provider error capture', () => {
     const connected = new ProviderErrorCapture(async () => new Response('ok'))
     await connected.fetch('http://127.0.0.1/unused', {})
     expect(connected.readTransportError()).toBeUndefined()
+  })
+})
+
+describe('unknown pool subreason fallback', () => {
+  it('marks an unrecognized pool code without a reason as unparsed_pool_error', () => {
+    const withoutReason = classifyPoolFailure(poolEnvelope({
+      code: 'cc_pool_direct_future_code',
+      retryable: true,
+      message: 'a future pool failure',
+    }, 503))
+    const withReason = classifyPoolFailure(poolEnvelope({
+      code: 'cc_pool_direct_future_code',
+      reason: 'future_subcause',
+      retryable: true,
+      message: 'a future pool failure',
+    }, 503))
+
+    expect(withoutReason).toMatchObject({
+      code: POOL_TRANSIENT_CODE,
+      message: 'a future pool failure [unparsed_pool_error]',
+      reason: UNPARSED_POOL_REASON,
+    })
+    expect(withReason).toMatchObject({
+      code: POOL_TRANSIENT_CODE,
+      message: 'a future pool failure [future_subcause]',
+      reason: 'future_subcause',
+    })
+    // The fallback marker is diagnostic only: both unknown codes keep the same
+    // retry disposition they had before the marker existed.
+    expect(withoutReason?.retryDisposition).toBeUndefined()
+    expect(withReason?.retryDisposition).toBeUndefined()
+  })
+
+  it('does not label a known catalog code as unparsed', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_capacity_exhausted',
+      retryable: true,
+      message: 'all accounts are at their 2-session limit',
+    }, 429))
+    expect(failure).toMatchObject({ code: POOL_CAPACITY_CODE })
+    expect(failure?.reason).toBeUndefined()
+  })
+
+  it('describes a pool envelope without a reason as unparsed_pool_error', () => {
+    const poolText = `503 ${JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'cc_pool_direct_future_code',
+        code: 'cc_pool_direct_future_code',
+        origin: 'pool',
+        message: 'future pool failure',
+      },
+    })}`
+    expect(describeProviderError(poolText)).toEqual({
+      message: 'future pool failure [unparsed_pool_error]',
+      reason: UNPARSED_POOL_REASON,
+    })
+  })
+
+  it('describes a non-pool error envelope without a reason as unparsed_error', () => {
+    const providerText = `500 ${JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', message: 'provider failed' },
+    })}`
+    expect(describeProviderError(providerText)).toEqual({
+      message: 'provider failed [unparsed_error]',
+      reason: UNPARSED_ERROR_REASON,
+    })
   })
 })

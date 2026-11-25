@@ -13,7 +13,11 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExcee
 import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
-import { classifyPoolFailure, describeProviderError } from './pool-error.ts'
+import {
+  classifyPoolFailure,
+  describeProviderError,
+  UNPARSED_ERROR_REASON,
+} from './pool-error.ts'
 import type { ProviderErrorCapture, ProviderErrorResponse } from './pool-error.ts'
 import { toPiReplayState } from './replay.ts'
 
@@ -146,12 +150,17 @@ export function mapStopReason(
       // sanitized message and diagnostic sub-cause replace the raw JSON body
       // the user would otherwise see.
       const display = describeProviderError(text)
+      // A failure text with no parseable envelope has no sub-cause by
+      // construction; expose that as a stable marker instead of leaving the
+      // field silently absent. The code still comes from the original text and
+      // no retry decision reads this field.
+      const reason = display.reason ?? UNPARSED_ERROR_REASON
       return {
         kind: 'error',
         failure: {
           message: display.message ?? text,
           code: classifyPiAiError(text),
-          ...display.reason === undefined ? {} : { reason: display.reason },
+          reason,
           ...display.detail === undefined ? {} : { detail: display.detail },
         },
       }
