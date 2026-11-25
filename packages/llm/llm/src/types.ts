@@ -50,6 +50,21 @@ export interface LlmFailure {
   readonly message: string
   /** Stable provider-neutral machine-routing code. */
   readonly code: string
+  /**
+   * Stable provider sub-cause token that subdivides {@link code} for display.
+   *
+   * Diagnostic-only: routing, retry policy, and failure disposition read
+   * {@link code} and the retry facts, never this field. Producers validate the
+   * token before setting it, and a failure that carries none leaves it absent.
+   */
+  readonly reason?: string
+  /**
+   * Bounded single-line human detail for {@link reason}, for display only.
+   *
+   * Diagnostic-only: it never selects a code or a retry decision. Producers
+   * sanitize it (one line, no markup, no credentials) before setting it.
+   */
+  readonly detail?: string
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
   /** Provider-requested delay in milliseconds, when valid and available. */

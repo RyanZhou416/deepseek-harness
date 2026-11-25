@@ -13,7 +13,7 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExcee
 import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
-import { classifyPoolFailure } from './pool-error.ts'
+import { classifyPoolFailure, describeProviderError } from './pool-error.ts'
 import type { ProviderErrorCapture, ProviderErrorResponse } from './pool-error.ts'
 import { toPiReplayState } from './replay.ts'
 
@@ -79,7 +79,10 @@ function classifyPiAiError(message: string): string {
  *   and zero-output `length` usage that fills the window map to
  *   `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
  *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
- *   to non-retryable `PI_AI_ERROR` failures.
+ *   to non-retryable `PI_AI_ERROR` failures. An in-band `error` whose text
+ *   embeds a JSON envelope keeps its text-derived code but displays the
+ *   envelope's sanitized message and diagnostic `reason`/`detail`, which are
+ *   never routing inputs.
  */
 export function mapStopReason(
   message: AssistantMessage,
@@ -138,7 +141,20 @@ export function mapStopReason(
     }
     case 'error': {
       const text = message.errorMessage ?? 'pi-ai stream error'
-      return { kind: 'error', failure: { message: text, code: classifyPiAiError(text) } }
+      // The code and every retry decision read the original text exactly as
+      // before. The embedded envelope supplies display facts only: its
+      // sanitized message and diagnostic sub-cause replace the raw JSON body
+      // the user would otherwise see.
+      const display = describeProviderError(text)
+      return {
+        kind: 'error',
+        failure: {
+          message: display.message ?? text,
+          code: classifyPiAiError(text),
+          ...display.reason === undefined ? {} : { reason: display.reason },
+          ...display.detail === undefined ? {} : { detail: display.detail },
+        },
+      }
     }
   }
 }

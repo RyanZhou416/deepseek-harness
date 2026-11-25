@@ -15,6 +15,7 @@ import {
 } from '../src/pool-error-catalog.generated.ts'
 import {
   classifyPoolFailure,
+  describeProviderError,
   parseProviderErrorEnvelope,
   POOL_ERROR_FALLBACK_MESSAGE,
   POOL_ERROR_MESSAGE_MAX_LENGTH,
@@ -146,6 +147,47 @@ describe('pool error envelope', () => {
       clientAction: 'retry_after',
       message: 'all accounts are at their 2-session limit',
     })
+  })
+
+  it('reads the diagnostic reason and detail as display facts only', () => {
+    const parsed = parseProviderErrorEnvelope(poolEnvelope({
+      type: 'cc_pool_capacity_exhausted',
+      message: 'all accounts are at their 2-session limit',
+      reason: 'session_slots',
+      detail: 'worker-7 holds both session slots',
+    }))
+
+    expect(parsed).toEqual({
+      type: 'cc_pool_capacity_exhausted',
+      origin: 'pool',
+      scope: 'pool',
+      message: 'all accounts are at their 2-session limit',
+      reason: 'session_slots',
+      detail: 'worker-7 holds both session slots',
+    })
+  })
+
+  it('accepts a reason token at the grammar boundary and ignores out-of-grammar values', () => {
+    expect(parseProviderErrorEnvelope(poolEnvelope({ reason: 'a'.repeat(64) })))
+      .toEqual({ origin: 'pool', scope: 'pool', reason: 'a'.repeat(64) })
+
+    for (const reason of [
+      'a'.repeat(65),
+      'Session_Slots',
+      '-session_slots',
+      'session slots',
+      'session\tslots',
+      'session\0slots',
+      '<b>session</b>',
+      '',
+    ]) {
+      expect(parseProviderErrorEnvelope(poolEnvelope({ reason }))).toEqual({ origin: 'pool', scope: 'pool' })
+    }
+  })
+
+  it('ignores a non-string detail', () => {
+    expect(parseProviderErrorEnvelope(poolEnvelope({ detail: 7 }))).toEqual({ origin: 'pool', scope: 'pool' })
+    expect(parseProviderErrorEnvelope(poolEnvelope({ detail: '' }))).toEqual({ origin: 'pool', scope: 'pool' })
   })
 
   it('ignores non-boolean retry facts and returns undefined for a message without a JSON object', () => {
@@ -322,6 +364,121 @@ describe('pool message display', () => {
 
     expect(retryable?.message).toBe(fallback(POOL_TRANSIENT_CODE))
     expect(terminal?.message).toBe(fallback(POOL_ERROR_CODE))
+  })
+})
+
+describe('pool diagnostic sub-cause', () => {
+  it('keeps the code, status, and retry facts while displaying the reason and detail', () => {
+    const error = {
+      type: 'cc_pool_capacity_exhausted',
+      message: 'all accounts are at their 2-session limit',
+    }
+    const without = classifyPoolFailure(poolEnvelope(error), { status: 429, providerRetryAfterMs: 30_000 })
+    const withDiagnostic = classifyPoolFailure(poolEnvelope({
+      ...error,
+      reason: 'session_slots',
+      detail: 'worker-7 holds both session slots',
+    }), { status: 429, providerRetryAfterMs: 30_000 })
+
+    expect(without).toMatchObject({ code: POOL_CAPACITY_CODE, status: 429 })
+    expect(withDiagnostic).toEqual({
+      message: 'all accounts are at their 2-session limit [session_slots]: worker-7 holds both session slots',
+      code: POOL_CAPACITY_CODE,
+      reason: 'session_slots',
+      detail: 'worker-7 holds both session slots',
+      status: 429,
+      providerRetryAfterMs: 30_000,
+    })
+    expect(withDiagnostic?.retryDisposition).toBe(without?.retryDisposition)
+  })
+
+  it('keeps an unknown pool code and its retry decision when a reason is present', () => {
+    const error = {
+      type: 'cc_pool_engine_starting',
+      message: 'the pool is warming up',
+    }
+    const without = classifyPoolFailure(poolEnvelope(error, 503))
+    const withDiagnostic = classifyPoolFailure(poolEnvelope({
+      ...error,
+      reason: 'worker_starting',
+      detail: 'worker-3 is booting',
+    }, 503))
+
+    expect(without).toMatchObject({ code: POOL_TRANSIENT_CODE })
+    expect(withDiagnostic).toMatchObject({
+      code: POOL_TRANSIENT_CODE,
+      message: 'the pool is warming up [worker_starting]: worker-3 is booting',
+      reason: 'worker_starting',
+      detail: 'worker-3 is booting',
+      status: 503,
+    })
+    expect(withDiagnostic?.retryDisposition).toBe(without?.retryDisposition)
+  })
+
+  it('sanitizes the detail into one display line', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_rate_limited',
+      message: 'account token bucket is empty',
+      reason: 'token_bucket',
+      detail: 'first line\n\tsecond   line',
+    }))
+
+    expect(failure?.detail).toBe('first line second line')
+    expect(failure?.message).toBe('account token bucket is empty [token_bucket]: first line second line')
+  })
+
+  it('never displays an unsafe detail and does not set it', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_rate_limited',
+      message: 'account token bucket is empty',
+      reason: 'token_bucket',
+      detail: 'the pool echoed <script>alert(1)</script>',
+    }))
+
+    expect(failure?.message).toBe('account token bucket is empty [token_bucket]')
+    expect(failure).not.toHaveProperty('detail')
+  })
+
+  it('omits a detail that already appears in the message', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_rate_limited',
+      message: 'account token bucket is empty',
+      reason: 'token_bucket',
+      detail: 'account token bucket is empty',
+    }))
+
+    expect(failure?.message).toBe('account token bucket is empty [token_bucket]')
+  })
+
+  it('bounds the display message and keeps the stable suffix', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_rate_limited',
+      message: 'a'.repeat(POOL_ERROR_MESSAGE_MAX_LENGTH),
+      reason: 'token_bucket',
+      detail: 'the bucket is empty',
+    }))
+
+    expect(failure?.message).toHaveLength(POOL_ERROR_MESSAGE_MAX_LENGTH)
+    expect(failure?.message.endsWith('[token_bucket]: the bucket is empty')).toBe(true)
+  })
+
+  it('describes an embedded envelope for display without classification input', () => {
+    const text = JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'api_error',
+        message: 'upstream overloaded',
+        reason: 'upstream_overloaded',
+        detail: 'the worker is draining',
+      },
+    })
+
+    expect(describeProviderError(text)).toEqual({
+      message: 'upstream overloaded [upstream_overloaded]: the worker is draining',
+      reason: 'upstream_overloaded',
+      detail: 'the worker is draining',
+    })
+    expect(describeProviderError('provider timed out')).toEqual({})
   })
 })
 

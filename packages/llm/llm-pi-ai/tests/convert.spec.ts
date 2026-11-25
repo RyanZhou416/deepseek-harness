@@ -938,6 +938,43 @@ describe('mapStopReason / mapUsage', () => {
     }))).toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
   })
 
+  it('keeps the in-band text classification while displaying the embedded envelope', () => {
+    const body = JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'api_error',
+        message: 'upstream overloaded',
+        reason: 'upstream_overloaded',
+        detail: 'the selected worker is draining',
+      },
+    })
+    const before = mapStopReason(assistant({ stopReason: 'error', errorMessage: 'upstream overloaded' }))
+    const inBand = mapStopReason(assistant({ stopReason: 'error', errorMessage: body }))
+    const classified = mapStopReason(assistant({ stopReason: 'error', errorMessage: `429 ${body}` }))
+
+    expect(before).toEqual({ kind: 'error', failure: { message: 'upstream overloaded', code: 'PI_AI_ERROR' } })
+    expect(inBand).toEqual({
+      kind: 'error',
+      failure: {
+        message: 'upstream overloaded [upstream_overloaded]: the selected worker is draining',
+        code: 'PI_AI_ERROR',
+        reason: 'upstream_overloaded',
+        detail: 'the selected worker is draining',
+      },
+    })
+    // A text prefix that already classifies the failure still decides the code;
+    // the envelope only changes what is displayed.
+    expect(classified).toEqual({
+      kind: 'error',
+      failure: {
+        message: 'upstream overloaded [upstream_overloaded]: the selected worker is draining',
+        code: 'RATE_LIMIT',
+        reason: 'upstream_overloaded',
+        detail: 'the selected worker is draining',
+      },
+    })
+  })
+
   it.each([
     'other side closed',
     'HTTP2 request did not get a response',
