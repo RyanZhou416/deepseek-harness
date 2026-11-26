@@ -27,24 +27,24 @@ id: 2026-09-28-user-message-revisions
 baseline: false
 changes:
   - root: "event:agent/inbox/spliced"
-    previous: "2026-10-13-liveshare-share-viewer-principal"
-    after: "b509f1946336b63750c4062b08452921fb5492c786c08bd78185f796ac8193e8"
+    previous: "2026-11-19-cua-input-notices"
+    after: "d14b0c68498e095d27b2c9fa67f1638fcffd9cfc534870d5ce1cfd152ba28ca5"
     decision: same-version
   - root: "event:developer/message"
-    previous: "2026-10-13-liveshare-share-viewer-principal"
-    after: "e44ff2e5d8364e80f289b7341918fa8b956e2c6358147b8a5495e9ddeeb84ff6"
+    previous: "2026-11-19-cua-input-notices"
+    after: "86470b16c479a8ff37a95ebbf37e4d17b395816f0edb8f7b55e8d6a9d0360b7c"
     decision: same-version
   - root: "event:llm/request-record"
     previous: "2026-10-15-claude-request-record-and-retry-disposition"
-    after: "26627befdc3416d1c40b749a2373c05343d25b33bc31d8cb2caab2599633116a"
+    after: "07a2d3cebb38b31956542cb5da3004c8ee5965bde94558a4a3b160882c753ea5"
     decision: same-version
   - root: "event:session/title-llm-request"
-    previous: "2026-10-13-liveshare-share-viewer-principal"
-    after: "bf4857d0cfa5ddea785005c837f8f2ac6210ef4784982a3fc2a4d98e4aba2c7f"
+    previous: "2026-11-19-cua-input-notices"
+    after: "377033e3dd28f5c13db68f547465a5a233691fd2acb8042f0bc4a5ef0b6fd2cf"
     decision: same-version
   - root: "event:user/message"
-    previous: "2026-10-13-liveshare-share-viewer-principal"
-    after: "c89af8ad48d00590b490a885e927b0c3adea1f9163dbd3924bbb6a22e3b3857d"
+    previous: "2026-11-19-cua-input-notices"
+    after: "9eb4b800ca2efd80c05f75bf6e7a89dc4fde4103235322ba95123cb6f5e51476"
     decision: same-version
 ```
 
