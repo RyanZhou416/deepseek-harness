@@ -3666,6 +3666,9 @@ importers:
       '@deepseek-ai/dsh-tool-session-control':
         specifier: workspace:*
         version: link:../../session/tool-session-control
+      '@deepseek-ai/dsh-tool-session-message':
+        specifier: workspace:*
+        version: link:../../api/tool-session-message
       '@deepseek-ai/dsh-tool-skill':
         specifier: workspace:*
         version: link:../../skill/tool-skill
