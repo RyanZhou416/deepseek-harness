@@ -1701,7 +1701,7 @@ describe('UiWorkspaceService', () => {
       b.workspaces.list.set(workspaceState([workspace('a', [saved])]))
 
       await vi.waitFor(() => {
-        expect(b.sessions.retain).toHaveBeenLastCalledWith(saved, { source: 'mainView' })
+        expect(b.sessions.retain).toHaveBeenLastCalledWith(saved, { source: 'mainView', facets: { conversation: true } })
       })
       expect(b.sessions.retain).toHaveBeenCalledTimes(2)
       expect(b.sessions.retained).toHaveLength(2)

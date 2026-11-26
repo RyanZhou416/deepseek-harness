@@ -129,7 +129,7 @@ it('recovers a browser while eight continuable children stream without losing th
     await page.goto(world.authenticatedUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await connectFreshWorkspace(page, world.workspaceCwd)
-    const parent = world.ctx.agents.roots()[0]
+    const parent = world.ctx.agents.list().find(agent => agent.session.header.origin !== 'subagent')
     if (parent === undefined) throw new Error('Workspace did not create a parent Agent')
     const composer = page.locator('[data-composer-input][contenteditable="true"]').first()
     const initialSettled = world.whenTurnSettled()
@@ -142,10 +142,8 @@ it('recovers a browser while eight continuable children stream without losing th
 
     const children = await Promise.all(Array.from({ length: CHILDREN }, (_, index) => world.ctx.subagents.startActivation({
       provider: 'spawn', label: `Concurrent child ${String(index)}`, signal: adapter.stopped.signal, delivery: 'parent',
-      request: {
-        parent, prompt: [{ type: 'text', text: `Generate the fixed child ${String(index)} stream.` }],
-        agentOptions: { provider: PROVIDER, model: `reconnect-child-${String(index)}` },
-      },
+      parent, prompt: [{ type: 'text', text: `Generate the fixed child ${String(index)} stream.` }],
+      agentOptions: { provider: PROVIDER, model: `reconnect-child-${String(index)}` },
     })))
     const childIds = children.map(child => child.childId)
     expect(new Set(childIds).size).toBe(CHILDREN)

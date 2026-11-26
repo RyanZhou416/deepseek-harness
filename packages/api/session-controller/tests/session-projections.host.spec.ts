@@ -17,7 +17,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SESSION_FORMAT_VERSION, type SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
@@ -1033,7 +1033,10 @@ describe('Session control projection frames', () => {
       done: false,
       value: {
         type: 'projection', sessionId: session.id, seq: 0,
-        changes: [{ key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 100 } }],
+        changes: [
+          { key: 'sessionListMetadata', val: { blank: true, lastPromptAt: 100 } },
+          { key: 'conversationContinuation', val: null },
+        ],
       },
     })
     // An event that changes only detail or excluded keys sends no control frame.

@@ -264,8 +264,8 @@ describe('Client Session contracts', () => {
     const published = feed.getSnapshot()
     listener.mockClear()
 
-    feed.settleAssistant(LlmAttemptId('absent-attempt'))
-    feed.settleAssistant(LlmAttemptId('absent-attempt'), settlement)
+    feed.settleAssistant(brandString<LlmAttemptId>('absent-attempt'))
+    feed.settleAssistant(brandString<LlmAttemptId>('absent-attempt'), settlement)
 
     expect(feed.getSnapshot()).toBe(published)
     expect(listener).not.toHaveBeenCalled()

@@ -54,7 +54,7 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 A first read or write open decodes the selected JSONL generation through its version migration chain, then imports the current logical history into SQLite. Import preserves metadata, event order, source coordinates and the inheritance marker. It creates an independent root Segment and retains the JSONL source bytes. The imported Session and its later events reopen through SQLite.
 
-An active JSONL writer retains ownership until it closes. A SQLite read open waits for that ownership; a competing write open rejects. Cancellation or provider disposal stops the wait. After import, readers can open while the SQLite writer remains active. `stat()` and `list()` observe metadata without importing history.
+An active JSONL writer retains ownership until it closes. A SQLite read open waits for that ownership; a competing write open rejects. Cancellation or provider disposal stops the wait. After import, readers can open while the SQLite writer remains active. `stat()` and `list()` observe metadata without importing history. `list()` applies the seam's listing exclusions to SQLite rows and to created-but-unappended Sessions alike: `excludeSessionIds` skips those ids before their stored header is decoded, and `excludeSubagentSessions` drops subagent-origin rows after a header check.
 
 ### Durability and shutdown
 

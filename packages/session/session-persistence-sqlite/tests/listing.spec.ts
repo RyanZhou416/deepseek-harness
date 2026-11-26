@@ -8,6 +8,7 @@ import { expect, it, onTestFinished, vi } from 'vitest'
 import { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { SessionFormatUnsupportedError, SessionPersistenceCorruptionError } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionPersistenceListOptions } from '@deepseek-ai/dsh-session-persistence'
 import * as persistence from '../src/index.ts'
 import { SqliteStore } from '../src/sqlite.ts'
 
@@ -70,6 +71,36 @@ it.each(['corrupt', 'unsupported'] as const)('omits %s headers whose first commi
   await expect(ctx.sessionPersistence.list()).resolves.toEqual([])
   await expect(ctx.sessionPersistence.stat(id)).rejects.toBeInstanceOf(kind === 'corrupt'
     ? SessionPersistenceCorruptionError : SessionFormatUnsupportedError)
+})
+
+it('applies the listing exclusions to segmented and pending Sessions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-session-list-exclusions-'))
+  const ctx = new Context()
+  onTestFinished(async () => { try { await ctx.fiber.dispose() } finally { await rm(root, { recursive: true, force: true }) } })
+  await ctx.plugin(persistence, { root, compression: 'none' })
+  const header = (id: string, extra?: Pick<SessionHeader, 'origin'>): SessionHeader =>
+    ({ version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt: 0, isSeeded: false, ...extra })
+  const turn = [{ type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } }] as const
+  const durable = await ctx.sessionPersistence.create(header('durable'))
+  await durable.append([...turn])
+  const durableSubagent = await ctx.sessionPersistence.create(header('durable-subagent', { origin: 'subagent' }))
+  await durableSubagent.append([...turn])
+  const pending = await ctx.sessionPersistence.create(header('pending'))
+  const pendingSubagent = await ctx.sessionPersistence.create(header('pending-subagent', { origin: 'subagent' }))
+  const ids = async (options?: SessionPersistenceListOptions) =>
+    (await ctx.sessionPersistence.list(options)).map(entry => entry.header.id).sort()
+  try {
+    // Subagent rows drop from the stored scan and from the pending creations alike.
+    expect(await ids({ excludeSubagentSessions: true })).toEqual(['durable', 'pending'])
+    // An explicitly excluded id costs no listing row, pending creation included.
+    expect(await ids({ excludeSessionIds: new Set([SessionId('pending')]) }))
+      .toEqual(['durable', 'durable-subagent', 'pending-subagent'])
+  } finally {
+    await pending.close()
+    await pendingSubagent.close()
+    await durableSubagent.close()
+    await durable.close()
+  }
 })
 
 it('lists 201 durable SQLite sessions with one metadata query and no event payload reads', async () => {

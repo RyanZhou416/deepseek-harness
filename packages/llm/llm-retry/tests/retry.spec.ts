@@ -1079,7 +1079,7 @@ describe('provider-routed retry policy', () => {
   })
 
   describe('producer-forbidden resends', () => {
-    const forbidden = () => new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', {
+    const forbidden = () => new LlmError('client protocol version refused', 'CLIENT_UPGRADE_REQUIRED', {
       status: 400,
       retryDisposition: 'forbid',
     })
@@ -1099,7 +1099,7 @@ describe('provider-routed retry policy', () => {
           : undefined
         ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({ initialDelayMs: 1, maxDelayMs: 1 }) }, beforeRetry))
         if (position === 'downstream') context.on('agent/request-error', maliciousRetry)
-        const agent = await context.agentLoop.create(SessionId(`retry-forbid-${position}`), {
+        const agent = await context.agentLoop.create(brandString<SessionId>(`retry-forbid-${position}`), {
           provider: 'mock',
           model: 'mock',
         })
@@ -1116,7 +1116,7 @@ describe('provider-routed retry policy', () => {
           data: {
             reason: {
               kind: 'error',
-              error: { code: 'CLIENT_VERSION_UNSUPPORTED', retryDisposition: 'forbid' },
+              error: { code: 'CLIENT_UPGRADE_REQUIRED', retryDisposition: 'forbid' },
             },
           },
         })
@@ -1127,7 +1127,7 @@ describe('provider-routed retry policy', () => {
           type: 'finish',
           reason: {
             kind: 'error',
-            failure: { code: 'CLIENT_VERSION_UNSUPPORTED', retryDisposition: 'forbid' },
+            failure: { code: 'CLIENT_UPGRADE_REQUIRED', retryDisposition: 'forbid' },
           },
         })
       },
@@ -1136,7 +1136,7 @@ describe('provider-routed retry policy', () => {
     it('delegates instead of scheduling when a forbidden failure reaches the waterfall directly', async () => {
       const adapter = new ScriptedAdapter([textResponse('unused')])
       ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({ initialDelayMs: 1, maxDelayMs: 1 }) }))
-      const agent = await context.agentLoop.create(SessionId('retry-forbid-direct'), {
+      const agent = await context.agentLoop.create(brandString<SessionId>('retry-forbid-direct'), {
         provider: 'mock',
         model: 'mock',
       })
@@ -1149,7 +1149,7 @@ describe('provider-routed retry policy', () => {
         provider: 'mock',
         failure: {
           message: 'client protocol version refused',
-          code: 'CLIENT_VERSION_UNSUPPORTED',
+          code: 'CLIENT_UPGRADE_REQUIRED',
           retryDisposition: 'forbid',
         },
         retryPolicy: adapter.providerRetryPolicy('mock'),
@@ -1173,7 +1173,7 @@ describe('provider-routed retry policy', () => {
       }
       const adapter = new CancellingAdapter([])
       ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig() }))
-      const agent = await context.agentLoop.create(SessionId('retry-forbid-cancel'), {
+      const agent = await context.agentLoop.create(brandString<SessionId>('retry-forbid-cancel'), {
         provider: 'mock',
         model: 'mock',
       })
@@ -1193,11 +1193,11 @@ describe('provider-routed retry policy', () => {
     it('still retries the same code when the failure carries no disposition', async () => {
       vi.useFakeTimers()
       const adapter = new ScriptedAdapter([
-        new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', { status: 400 }),
+        new LlmError('client protocol version refused', 'CLIENT_UPGRADE_REQUIRED', { status: 400 }),
         textResponse('recovered'),
       ])
       ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({ initialDelayMs: 1, maxDelayMs: 1 }) }))
-      const agent = await context.agentLoop.create(SessionId('retry-no-forbid'), { provider: 'mock', model: 'mock' })
+      const agent = await context.agentLoop.create(brandString<SessionId>('retry-no-forbid'), { provider: 'mock', model: 'mock' })
       const scheduled = waitForRetry(context, agent, 1)
 
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))

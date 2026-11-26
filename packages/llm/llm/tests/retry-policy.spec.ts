@@ -145,12 +145,9 @@ describe('provider retry policy', () => {
     expect(() => RetryPolicySchema(config)).toThrow()
   })
 
-  it('accepts the smallest values inside the schema bounds and still defaults the codes', () => {
+  it('accepts the smallest values inside the schema bounds', () => {
     expect(RetryPolicySchema({ mode: 'normal', retryableCodes: ['X'], backoff: { initialDelayMs: Number.MIN_VALUE } }))
       .toMatchObject({ retryableCodes: ['X'], backoff: { initialDelayMs: Number.MIN_VALUE } })
-    expect(RetryPolicySchema({ mode: 'normal' })).toMatchObject({
-      retryableCodes: ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
-    })
   })
 
   it('publishes the retry choices through the serialized schema and still admits other codes', () => {

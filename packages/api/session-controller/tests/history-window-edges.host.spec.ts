@@ -224,7 +224,11 @@ describe('Session history window tail ending mid-turn', () => {
   it('balances the opened window with interrupted closers and reports the closer cursor', async () => {
     const events = interruptedTurn()
     const balancedEvents = balanced(events)
-    const checkpoint: ProjectionSnapshot = { asOfSeq: SessionSeq(6), values: { title: 'checkpointed' } }
+    const checkpoint: ProjectionSnapshot = {
+      asOfSeq: SessionSeq(6),
+      // A stored block seeds clients only when it carries every registered client-visible key.
+      values: { title: 'checkpointed', sessionListMetadata: { blank: true, lastPromptAt: null } },
+    }
     const readWindow = vi.fn(windowBackend(events))
     const windowed = await fixture({ readWindow, checkpoint })
     const complete = await fixture({

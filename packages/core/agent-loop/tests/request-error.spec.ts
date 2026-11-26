@@ -6,7 +6,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LlmRuntime, { createUserMessage, LlmError  } from '@deepseek-ai/dsh-llm'
 import type { LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
-import SessionStore, { type SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
@@ -153,7 +153,7 @@ describe('agent/request-error', () => {
 
   it('refuses a retry action for a failure that forbids resending', async () => {
     const adapter = new MockAdapter([
-      () => { throw new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', { retryDisposition: 'forbid' }) },
+      () => { throw new LlmError('client protocol version refused', 'CLIENT_UPGRADE_REQUIRED', { retryDisposition: 'forbid' }) },
       textResponse('must not run'),
     ])
     const ctx = await harness(adapter)
@@ -177,7 +177,7 @@ describe('agent/request-error', () => {
       data: {
         reason: {
           kind: 'error',
-          error: { code: 'CLIENT_VERSION_UNSUPPORTED', retryDisposition: 'forbid' },
+          error: { code: 'CLIENT_UPGRADE_REQUIRED', retryDisposition: 'forbid' },
         },
       },
     })

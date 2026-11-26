@@ -145,7 +145,9 @@ describe('editing the latest user message', () => {
     const request = JSON.stringify(adapter.requests[1]!.messages)
     expect(request).toContain('updated system rules')
     expect(request).toContain('current workspace constraints')
-    expect(request).not.toContain('original system rules')
+    // The merged source admits a superseding system message through upstream's
+    // system-prompt admission instead of rewriting the first prompt's node.
+    expect(request).toContain('The following replaces the earlier instructions from edit-system-policy.')
     expect(request).not.toContain('old prompt')
     expect(request).not.toContain('old answer')
     expect(adapter.requests[1]!.messages.filter(entry => entry.role === 'user' && entry.source?.kind === 'user'))

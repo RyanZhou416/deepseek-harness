@@ -185,12 +185,12 @@ export class SqliteSessionPersistence extends SessionPersistence {
       options?.signal?.throwIfAborted()
       return readdir(this.directory)
     }) } catch (error: unknown) { if (!isAbsent(error)) throw error }
-    const [{ entries: segmented, omitted }, entries] = await Promise.all([
-      this.sqlite.scan(options?.signal),
+    const [{ entries: segmented, omitted, stored }, entries] = await Promise.all([
+      this.sqlite.scan(options),
       this.jsonl.list(options),
     ])
     // A row omitted for its header is still stored; only a routing record without a row is lost state.
-    const known = new Set([...segmented.map(entry => entry.header.id), ...omitted])
+    const known = new Set([...stored, ...omitted])
     // Routing records are named by their Session hash, so membership needs no record reads.
     const routed = new Set([...known].map(id => basename(this.markerPath(id))))
     for (const name of names) {

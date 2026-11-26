@@ -3269,7 +3269,7 @@ describe('JsonlSessionPersistence listing concurrency', () => {
 
     // Growing a live log changes only this entry's identity, which a listing
     // must record in process but never write back on the read path.
-    const handle = await listingCtx.sessionPersistence.open(SessionId('catalog-grown'), 'write')
+    const handle = await listingCtx.sessionPersistence.open(brandString<SessionId>('catalog-grown'), 'write')
     await handle.append([{ type: 'turn/start', seq: SessionSeq(6), time: 9, data: { turn: 2 } }])
     await handle.close()
     const listed = await listingCtx.sessionPersistence.list({ excludeSubagentSessions: true })
@@ -3367,11 +3367,11 @@ describe('JsonlSessionPersistence listing concurrency', () => {
     await seed('/work', ['keep-one', 'archived-one'])
     listingProbe.active = true
     listingProbe.failures.set(
-      dirname(rawLogPath(listingRoot, '/work', SessionId('archived-one'))),
+      dirname(rawLogPath(listingRoot, '/work', brandString<SessionId>('archived-one'))),
       Object.assign(new Error('must not read an archived Session directory'), { code: 'EACCES' }),
     )
     const listed = await listingCtx.sessionPersistence.list({
-      excludeSessionIds: new Set([SessionId('archived-one')]),
+      excludeSessionIds: new Set([brandString<SessionId>('archived-one')]),
     })
     listingProbe.active = false
     expect(listed.map(item => item.header.id)).toEqual(['keep-one'])
@@ -3382,7 +3382,7 @@ describe('JsonlSessionPersistence listing concurrency', () => {
     await writeLog(listingCtx.sessionPersistence, {
       ...meta('catalog-child', '/work'),
       origin: 'subagent',
-      parentSession: SessionId('catalog-parent'),
+      parentSession: brandString<SessionId>('catalog-parent'),
     }, oneTurnLog())
     await listingCtx.sessionPersistence.list()
 
@@ -3398,7 +3398,7 @@ describe('JsonlSessionPersistence listing concurrency', () => {
     try {
       listingProbe.active = true
       listingProbe.failures.set(
-        dirname(rawLogPath(listingRoot, '/work', SessionId('catalog-child'))),
+        dirname(rawLogPath(listingRoot, '/work', brandString<SessionId>('catalog-child'))),
         Object.assign(new Error('must not read a subagent Session directory'), { code: 'EACCES' }),
       )
       const listed = await freshCtx.sessionPersistence.list({ excludeSubagentSessions: true })

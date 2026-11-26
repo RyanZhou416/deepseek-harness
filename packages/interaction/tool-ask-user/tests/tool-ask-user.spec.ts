@@ -679,7 +679,7 @@ describe('ask_user_question tool', () => {
 
     const result = await executeToolFixture(ctx, {
       signal: testToolSignal,
-      callId: ToolCallId('ask-unattended-legacy'),
+      callId: brandString<ToolCallId>('ask-unattended-legacy'),
       name: 'ask_user_question',
       arguments: { questions: [{ id: 'continue', question: 'Continue?' }] },
     })
@@ -701,7 +701,7 @@ describe('ask_user_question tool', () => {
 
     const result = await executeToolFixture(ctx, {
       signal: testToolSignal,
-      callId: ToolCallId('ask-unattended-timed'),
+      callId: brandString<ToolCallId>('ask-unattended-timed'),
       name: 'ask_user_question',
       arguments: { questions: [{ id: 'continue', question: 'Continue?' }], timeout: 5 },
     })
@@ -725,7 +725,7 @@ describe('ask_user_question tool', () => {
 
     const result = await executeToolFixture(ctx, {
       signal: testToolSignal,
-      callId: ToolCallId('ask-attended'),
+      callId: brandString<ToolCallId>('ask-attended'),
       name: 'ask_user_question',
       arguments: { questions: [{ id: 'continue', question: 'Continue?' }] },
     })
@@ -747,7 +747,7 @@ describe('ask_user_question tool', () => {
     registerQuestionAnswerer(ctx, { ask: answerer })
     const call = (callId: string) => executeToolFixture(ctx, {
       signal: testToolSignal,
-      callId: ToolCallId(callId),
+      callId: brandString<ToolCallId>(callId),
       name: 'ask_user_question',
       arguments: { questions: [{ id: 'continue', question: 'Continue?' }] },
     })

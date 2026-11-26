@@ -895,7 +895,7 @@ describe('SessionObservationReader metadata path', () => {
   it('serves a live Session projection cut without persistence', async () => {
     const ctx = await readerContext()
     await ctx.plugin(SessionProjectionRegistry)
-    const session = ctx.sessions.create(SessionId('metadata-live'))
+    const session = ctx.sessions.create(brandString<SessionId>('metadata-live'))
     const reader = new SessionObservationReader(ctx)
 
     const observed = await reader.metadata(session.id)
@@ -909,7 +909,7 @@ describe('SessionObservationReader metadata path', () => {
 
   it('serves a live header without projections when no registry is mounted', async () => {
     const ctx = await readerContext()
-    const session = ctx.sessions.create(SessionId('metadata-live-plain'))
+    const session = ctx.sessions.create(brandString<SessionId>('metadata-live-plain'))
 
     const observed = await new SessionObservationReader(ctx).metadata(session.id)
 
@@ -943,7 +943,7 @@ describe('SessionObservationReader metadata path', () => {
 
   it('reports a missing Session when no persistence is mounted', async () => {
     const ctx = await readerContext()
-    await expect(new SessionObservationReader(ctx).metadata(SessionId('absent'))).rejects.toMatchObject({
+    await expect(new SessionObservationReader(ctx).metadata(brandString<SessionId>('absent'))).rejects.toMatchObject({
       code: 'SESSION_QUERY_SESSION_NOT_FOUND',
     })
     await ctx.fiber.dispose()
@@ -975,7 +975,7 @@ describe('SessionObservationReader metadata path', () => {
   it('wraps a live projection failure as a corrupt-session failure', async () => {
     const ctx = await readerContext()
     await ctx.plugin(SessionProjectionRegistry)
-    const session = ctx.sessions.create(SessionId('metadata-live-projection-failure'))
+    const session = ctx.sessions.create(brandString<SessionId>('metadata-live-projection-failure'))
     vi.spyOn(ctx.sessionProjections, 'snapshot').mockImplementation(() => { throw new Error('projection failed') })
 
     await expect(new SessionObservationReader(ctx).metadata(session.id)).rejects.toMatchObject({

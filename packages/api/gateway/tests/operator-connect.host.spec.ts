@@ -123,6 +123,9 @@ describe('operator connect through Loader composition', () => {
     expect(peer.signal.aborted).toBe(false)
     expect(await refusedMux(host, cookie)).toBe(409)
     await close(api)
+    // The Host revokes the API Peer from the socket's close event, which can
+    // trail the Client-observed close; await that revocation before the RPC.
+    await vi.waitFor(() => { expect(peer.signal.aborted).toBe(true) })
     expect((await rpc(host, cookie, 'fixture/identity', { label: 'after-mux-close' })).status).toBe(401)
   })
 

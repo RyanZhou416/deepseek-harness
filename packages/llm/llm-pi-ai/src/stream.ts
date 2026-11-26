@@ -150,14 +150,16 @@ export function mapStopReason(
     case 'error': {
       const text = message.errorMessage ?? 'pi-ai stream error'
       // The code and every retry decision read the original text exactly as
-      // before. Only the display text is replaced: a raw JSON body renders as
-      // the pool's already-composed `error.message`; this adapter appends
-      // nothing and invents no fallback marker.
-      const display = describeProviderError(text)
+      // before. Only the display text is replaced, and only for a body pi-ai
+      // did not precede with its response status: such a body is the pool's
+      // in-band message, shown as the pool composed it with no appended reason
+      // and no invented fallback marker. A status-led dump stays verbatim so
+      // the status this adapter reports for it survives in the failure row.
+      const display = LEADING_HTTP_STATUS.test(text) ? undefined : describeProviderError(text).message
       return {
         kind: 'error',
         failure: {
-          message: display.message ?? text,
+          message: display ?? text,
           code: classifyPiAiError(text),
         },
       }

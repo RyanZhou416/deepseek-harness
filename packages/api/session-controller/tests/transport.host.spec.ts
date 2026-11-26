@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import SessionStore, { SESSION_FORMAT_VERSION, type SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, SurfaceIntent } from '@deepseek-ai/dsh-session'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'

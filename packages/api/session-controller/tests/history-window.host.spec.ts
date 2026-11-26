@@ -221,7 +221,11 @@ describe('Session history follow from a stored window', () => {
     { name: 'two aligned Turns', request: { maxMessages: 50, turnWindow: { minMessages: 2, minTurns: 2 } } },
   ])('opens the same $name frame as the complete observation', async ({ request }) => {
     const events = conversation()
-    const checkpoint: ProjectionSnapshot = { asOfSeq: SessionSeq(1), values: { title: 'checkpointed' } }
+    const checkpoint: ProjectionSnapshot = {
+      asOfSeq: SessionSeq(1),
+      // A stored block seeds clients only when it carries every registered client-visible key.
+      values: { title: 'checkpointed', sessionListMetadata: { blank: true, lastPromptAt: null } },
+    }
     const readWindow = vi.fn(windowBackend(header(), events))
     const windowed = await fixture({ readWindow, checkpoint })
     const complete = await fixture({

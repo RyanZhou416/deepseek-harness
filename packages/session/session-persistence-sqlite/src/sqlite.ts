@@ -17,7 +17,8 @@ import { assertContiguous, materializeAppendBatch, validateStoredEvents, Session
   SessionPersistenceNotFoundError, SessionPersistenceRevision, SessionReadOnlyError,
   sessionFormatVersionRefusal } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionAccess, SessionHandle, SessionHandleAppendOptions, SessionHandleFlushOptions,
-  SessionHandleReadOptions, SessionPersistenceCreateOptions, SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
+  SessionHandleReadOptions, SessionPersistenceCreateOptions, SessionPersistenceListOptions,
+  SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
 import { decodeHeader, decodeEvent, materializeHeader } from './codec.ts'
 import { SessionWriteLease } from './lease.ts'
 import { ensureDurableDirectoryWin32 } from './win32.ts'
@@ -940,11 +941,16 @@ export class SqliteStore {
    * List Sessions, omitting rows whose stored header is corrupt or of an unsupported version.
    * Matching an unreadable JSONL generation header, an omitted row still rejects direct
    * `open` and `stat`. Invalid row metadata and an identity mismatch reject the listing.
-   * @param signal - optional cancellation.
-   * @returns listed snapshots and the ids of stored rows omitted for their header.
+   * @param options - optional cancellation and the listing exclusions shared with `list`.
+   * @returns listed snapshots, the ids of stored rows omitted for their header, and
+   *   every stored row id the scan observed (excluded ids included).
    */
-  async scan(signal?: AbortSignal): Promise<{ entries: SessionPersistenceSnapshot[]; omitted: Set<SessionId> }> {
-    this.check(); signal?.throwIfAborted()
+  async scan(options?: SessionPersistenceListOptions): Promise<{
+    entries: SessionPersistenceSnapshot[]
+    omitted: Set<SessionId>
+    stored: Set<SessionId>
+  }> {
+    this.check(); options?.signal?.throwIfAborted()
     const pending = [...this.pendingCreates.keys()]
     const entries: SessionPersistenceSnapshot[] = [], omitted = new Set<SessionId>(), seen = new Set<SessionId>()
     if (await this.exists()) {
@@ -952,9 +958,11 @@ export class SqliteStore {
       // One joined query observes all durable metadata in the same read snapshot.
       this.transaction(db, () => {
         for (const trace of this.statement(db, `${TRACE_METADATA_SQL} ORDER BY t.trace_uuid`).all()) {
-          signal?.throwIfAborted()
+          options?.signal?.throwIfAborted()
           const id = traceIdentity.parse(trace).trace_uuid
           seen.add(id)
+          // An excluded id costs no header decode; its row still counts as stored.
+          if (options?.excludeSessionIds?.has(id) === true) continue
           const row = this.parseMetadata(trace, id)
           let header: SessionHeader
           try { header = this.parseHeader(id, row.header) }
@@ -964,16 +972,19 @@ export class SqliteStore {
             omitted.add(id)
             continue
           }
+          if (options?.excludeSubagentSessions === true && header.origin === 'subagent') continue
           entries.push(this.snapshot(id, row, header))
         }
       }, 'DEFERRED')
     }
     for (const id of pending) {
-      if (seen.has(id)) continue
-      const entry = await this.stat(id, signal)
-      if (entry !== undefined) entries.push(entry)
+      if (seen.has(id) || options?.excludeSessionIds?.has(id) === true) continue
+      const entry = await this.stat(id, options?.signal)
+      if (entry === undefined) continue
+      if (options?.excludeSubagentSessions === true && entry.header.origin === 'subagent') continue
+      entries.push(entry)
     }
-    return { entries, omitted }
+    return { entries, omitted, stored: seen }
   }
 
   /**

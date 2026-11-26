@@ -67,7 +67,8 @@ it('routes only notification APIs to Harness while account APIs and pages stay o
 
 it('keeps private grants and embedded pages on Platform while allowing a notification origin override', async () => {
   const rejected = await fixture('https://platform.deepseek.com', { platformOrigin: 'https://private.example' })
-  expect(await rejected.getState()).toMatchObject({ status: 'signed-out' })
+  // A grant from another Platform origin is parked for reauthentication, not deleted.
+  expect(await rejected.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'issuer-mismatch' })
   const account = await fixture('https://private.example', {
     platformOrigin: 'https://private.example', harnessOrigin: 'https://notifications.example',
     requestHeaders: { 'x-deployment': 'base' }, accountRequestHeaders: { 'x-account': 'account' },

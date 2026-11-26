@@ -11,10 +11,11 @@ import LlmRuntime, { createAssistantMessage, createSystemMessage, createUserMess
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
+import DeepSeekAuth from '@deepseek-ai/dsh-deepseek-auth'
 import { resolveProfiles } from '../src/config.ts'
 import { assemble } from './assemble.ts'
 import { memoryAuth } from './auth-double.ts'
-import { anthropicTextEvents, closeMockServers, mockServer } from './mock-server.ts'
+import { anthropicFrame, anthropicTextEvents, closeMockServers, mockServer } from './mock-server.ts'
 
 /** The Anthropic beta a one-hour prompt-cache lifetime declares. */
 const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
@@ -231,6 +232,7 @@ describe('Anthropic extended cache TTL beta', () => {
         },
       },
     })
+    await ctx.plugin(DeepSeekAuth)
     await ctx.plugin(DeepSeek, {
       baseURL: deepseekServer.url,
       apiKeyEnv: 'DEEPSEEK_ROUTE_KEY',
@@ -277,32 +279,24 @@ function assistantToolCall(provider: string) {
   })
 }
 
-/** An assistant turn whose trailing block is reasoning, so it cannot carry a marker. */
-function assistantThinking(provider: string) {
-  // Replay metadata restores the native thinking signature, so the assistant
-  // turn reaches the wire with a trailing thinking block.
-  return createAssistantMessage({
-    content: [{ type: 'text', text: 'hi' }, { type: 'reasoning', text: 'hmm' }],
-    source: {
-      provider,
-      model: 'model',
-      replayState: {
-        response: {
-          kind: 'pi-ai',
-          version: 2,
-          api: 'anthropic-messages',
-          provider,
-          model: 'model',
-          stopReason: 'stop',
-        },
-        blocks: [
-          { type: 'text' },
-          { type: 'reasoning', thinkingSignature: 'sig' },
-        ],
-      },
-    },
-  })
-}
+/**
+ * One Anthropic response whose trailing block is signed thinking, so a replay
+ * of it reaches the wire with a thinking tail. The transport records the
+ * request prefix the thinking is bound to, which such a replay must match.
+ */
+const anthropicThinkingTailEvents = [
+  anthropicFrame({ type: 'message_start', message: {
+    id: 'msg_thinking_tail', type: 'message', role: 'assistant', model: 'model', content: [],
+    stop_reason: null, stop_sequence: null, usage: { input_tokens: 3, output_tokens: 1 },
+  } }),
+  anthropicFrame({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+  anthropicFrame({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } }),
+  anthropicFrame({ type: 'content_block_stop', index: 0 }),
+  anthropicFrame({ type: 'content_block_start', index: 1, content_block: { type: 'thinking', thinking: 'hmm', signature: 'sig' } }),
+  anthropicFrame({ type: 'content_block_stop', index: 1 }),
+  anthropicFrame({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } }),
+  anthropicFrame({ type: 'message_stop' }),
+]
 
 /** The pinned Claude Code identity line a `cc3` route forwards. */
 const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -481,7 +475,7 @@ describe('Anthropic cc3 marker policy', () => {
 
   it('leaves a thinking-tailed assistant turn unmarked', async () => {
     vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
-    const server = await mockServer([{ events: anthropicTextEvents }])
+    const server = await mockServer([{ events: anthropicThinkingTailEvents }, { events: anthropicTextEvents }])
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(LlmRuntime)
@@ -497,15 +491,20 @@ describe('Anthropic cc3 marker policy', () => {
       },
     })
 
+    // A live response records the request prefix its signed thinking is bound
+    // to, so replaying the durable message keeps the thinking block; a
+    // hand-written replay state would predate that digest and be omitted.
+    const first = await assemble(ctx, { ...PROBE, provider: 'cache-cc3', messages: [userText('hello')] })
+    const replay = JSON.parse(JSON.stringify(first.message)) as typeof first.message
     await assemble(ctx, {
       ...PROBE,
       provider: 'cache-cc3',
-      messages: [userText('hello'), assistantThinking('cache-cc3'), userText('continue')],
+      messages: [userText('hello'), replay, userText('continue')],
     })
 
-    const body = server.requests[0] as Record<string, unknown>
+    const body = server.requests[1] as Record<string, unknown>
     const messages = body['messages'] as { role: string; content: { type: string }[] }[]
-    // The setup is real: the assistant message ends with the thinking block.
+    // The setup is real: the replayed assistant message ends with the thinking block.
     expect(messages[1]?.content.at(-1)?.type).toBe('thinking')
     // The policy marks only the last user turn, so the thinking-tailed assistant
     // turn stays unmarked; the identity, harness, and continue turn carry the
@@ -663,6 +662,7 @@ describe('Anthropic cc3 marker policy', () => {
         },
       },
     })
+    await ctx.plugin(DeepSeekAuth)
     await ctx.plugin(DeepSeek, {
       baseURL: deepseekServer.url,
       apiKeyEnv: 'DEEPSEEK_ROUTE_KEY',

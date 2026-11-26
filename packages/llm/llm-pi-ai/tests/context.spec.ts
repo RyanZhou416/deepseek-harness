@@ -89,27 +89,27 @@ describe('pi-ai request context conversion', () => {
       Promise.resolve({ ...requestImage(value, Uint8Array.of(1)), width: target.width, height: target.height }))
     const context = await toPiContext(request([user(Array.from({ length: 21 }, () => ({ type: 'image' as const, attachment: source })))]),
       imageContext(projectionStore(readImageRequest), {
-        requestImagePolicy: { maxPixels: 640_000, maxBytes: 100, maxDimension: count => count > 20 ? 2000 : 8000 },
+        requestImagePolicy: { maxPixels: 640_000, maxImageBytes: 100, maxDimension: count => count > 20 ? 2000 : 8000 },
       }))
-    expect(readImageRequest).toHaveBeenCalledExactlyOnceWith(source, { width: 2000, height: 4, maxBytes: 100 }, undefined)
+    expect(readImageRequest).toHaveBeenCalledExactlyOnceWith(source, { width: 2000, height: 4, maxImageBytes: 100, imageTargetBytes: 100 }, undefined)
     expect(JSON.stringify(context)).toContain('request preview 2000x4px')
   })
 
   it.each([
-    { images: 20, target: { width: 8000, height: 16, maxBytes: 100 } },
-    { images: 21, target: { width: 2000, height: 4, maxBytes: 100 } },
+    { images: 20, target: { width: 8000, height: 16, maxImageBytes: 100, imageTargetBytes: 100 } },
+    { images: 21, target: { width: 2000, height: 4, maxImageBytes: 100, imageTargetBytes: 100 } },
   ])('uses the request-wide image count for $images distinct images', async ({ images, target }) => {
     const source = { ...ref, width: 8192, height: 16 }
     const distinct = Array.from({ length: images }, (_, index) => ({
       ...source,
-      attachmentId: AttachmentId(`sha256:${String(index).padStart(64, '0')}`),
+      attachmentId: brandString<AttachmentId>(`sha256:${String(index).padStart(64, '0')}`),
     }))
     const readImageRequest = vi.fn((value: ImageAttachmentRef, target: ImageRequestTarget) =>
       Promise.resolve({ ...requestImage(value, Uint8Array.of(1)), width: target.width, height: target.height }))
     const context = await toPiContext(
       request([user(distinct.map(attachment => ({ type: 'image' as const, attachment })))]),
       imageContext(projectionStore(readImageRequest), {
-        requestImagePolicy: { maxPixels: 640_000, maxBytes: 100, maxDimension: count => count > 20 ? 2000 : 8000 },
+        requestImagePolicy: { maxPixels: 640_000, maxImageBytes: 100, maxDimension: count => count > 20 ? 2000 : 8000 },
       }),
     )
 

@@ -86,7 +86,7 @@ describe('Client reference sources', () => {
     expect(selection.binding).toBe(binding)
     expect(mock.log.requests(FOLLOW)).toHaveLength(1)
     preload.release()
-    expect(source.getSnapshot()).toEqual({ referenceCount: 1, retainedBy: { referenceTestWork: 1 } })
+    expect(source.getSnapshot()).toEqual({ referenceCount: 1, connectionCount: 1, retainedBy: { referenceTestWork: 1 } })
     expect(selection.binding.session.getSnapshot().openState).toBe('open')
   })
 

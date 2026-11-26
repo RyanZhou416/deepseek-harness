@@ -594,7 +594,7 @@ describe('ui-workspace apply', () => {
   it('loads archived rows once when the archived filter is shown', async () => {
     const b = await bench()
     declare(b.slots, 'sidebar.workspaces', 'shell.overlay')
-    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    await b.ctx.plugin({ inject: [...inject], apply }, syncedConfig({ recentViewLimit: 10 })).await()
     const view = viewInstance(b.slots)
     const toast = faceOf(entry(b.slots, 'shell.overlay', 'workspace.row-toast')) as RowToastInjected
     expect(b.refreshArchived).not.toHaveBeenCalled()

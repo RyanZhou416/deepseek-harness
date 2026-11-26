@@ -600,7 +600,7 @@ describe('session-query exact reads', () => {
 
   it('omits subagent-origin persisted and live sessions when requested', async () => {
     const parent = header('subagent-parent', 1)
-    const child = header('subagent-child', 2, { origin: 'subagent', parentSession: SessionId('subagent-parent') })
+    const child = header('subagent-child', 2, { origin: 'subagent', parentSession: brandString<SessionId>('subagent-parent') })
     TestPersistence.reset([
       { meta: parent, events: eventLog() },
       { meta: child, events: eventLog() },
@@ -1227,7 +1227,7 @@ describe('session-query exact reads', () => {
 
   it('reads one live event window without detaching the complete live log', async () => {
     const ctx = await liveContext({ readWindowMax: 2 })
-    const session = ctx.sessions.create(SessionId('bounded-live-window'), { meta: { cwd: '/work' } })
+    const session = ctx.sessions.create(brandString<SessionId>('bounded-live-window'), { meta: { cwd: '/work' } })
     session.append('turn/start', { turn: 1 })
     const total = 2_000
     for (let index = 0; index < total; index += 1) {

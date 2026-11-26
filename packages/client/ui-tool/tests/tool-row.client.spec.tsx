@@ -1,5 +1,4 @@
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { AttachmentId } from '@deepseek-ai/dsh-attachment'
 // @vitest-environment jsdom
 import { contextMenuHook } from '@deepseek-ai/dsh-client-test-runtime'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -623,6 +622,18 @@ describe('GenericToolCard', () => {
     useDisclosure, callId: 'c1', toolName, ...('kind' in block ? { phase: 'result' as const, block: block } : { phase: block.phase, block: block }), openFile: vi.fn(), t,
   })
 
+  it('keeps generic result serialization off the collapsed path', () => {
+    let serializations = 0
+    const file = { type: 'file' as const, attachment: {
+      attachmentId: AttachmentId('sha256:report'), name: 'report.txt', bytes: 1,
+    }, toJSON: () => {
+      serializations++
+      return { type: 'file', name: 'report.txt' }
+    } }
+    const settled = result({ call: { name: 'mystery', argsRaw: '{"note":"x"}' }, content: [file] })
+    const model = toolRowModel('mystery', settled)
+    expect(serializations).toBe(0)
+    expect(model.output).toContain('report.txt')
     expect(serializations, 'the row model memoizes an explicitly requested output').toBe(1)
 
     serializations = 0

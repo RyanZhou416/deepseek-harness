@@ -6,7 +6,6 @@ import type {
   SessionListState,
   SessionReference,
   SessionRetainInfo,
-  SessionProjectionSnapshot,
   SessionSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import { MutableSessionEventSource } from '@deepseek-ai/dsh-api-session-controller/client'

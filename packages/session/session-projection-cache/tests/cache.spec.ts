@@ -448,7 +448,7 @@ describe('SessionProjectionCache write policy', () => {
       },
       stateVersion: 1,
     })
-    const id = SessionId('captured-before-flush')
+    const id = brandString<SessionId>('captured-before-flush')
     const created = whenWritten(ctx, id)
     const session = ctx.sessions.create(id)
     await created
@@ -481,7 +481,7 @@ describe('SessionProjectionCache write policy', () => {
 
   it('detaches cold write-back before returning control to the log owner', async () => {
     const { ctx, root, cache } = await harness()
-    const header = headerOf(SessionId('cold-owned-input'), 20)
+    const header = headerOf(brandString<SessionId>('cold-owned-input'), 20)
     const marks = ['captured']
     const events: SessionEvent[] = [{
       type: 'cache-test/mark', seq: SessionSeq(0), time: 20, data: { marks },
@@ -505,7 +505,7 @@ describe('SessionProjectionCache write policy', () => {
       stateVersion: 1,
     })
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
-    const header = headerOf(SessionId('invalid-cold-checkpoint'), 30)
+    const header = headerOf(brandString<SessionId>('invalid-cold-checkpoint'), 30)
     expect(cache.coldSnapshot(header, SessionLogOffset(0), [])).toBeDefined()
     await vi.waitFor(() => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('not losslessly JSON-serializable'))
@@ -767,7 +767,7 @@ describe('SessionProjectionCache listing read', () => {
     })
     const { ctx, cache } = await harness({ root })
     void ctx.sessionProjections.register(marks3Unit)
-    const header = headerOf(SessionId('filtered-hints'))
+    const header = headerOf(brandString<SessionId>('filtered-hints'))
     const excluded = new Set(['cache-test/marks'])
     expect(cache.cachedSnapshot(header, undefined, excluded)).toEqual({
       asOfSeq: 7, values: { 'cache-test/marks3': { marks: ['summary'] } },
@@ -899,7 +899,7 @@ describe('SessionProjectionCache listing read', () => {
 
   it('serves a window header the last checkpoint cut, never the live log end', async () => {
     const { ctx, cache } = await harness()
-    const id = SessionId('window-opening-cut')
+    const id = brandString<SessionId>('window-opening-cut')
     const created = whenWritten(ctx, id)
     const session = ctx.sessions.create(id)
     await created
@@ -939,7 +939,7 @@ describe('SessionProjectionCache listing read', () => {
     // A row written under another unit stateVersion is not served, and the
     // returned watermark covers only served rows. A consumer that reads an
     // omitted key as absence at the cut misreads this block.
-    expect(cache.cachedSnapshot(headerOf(SessionId('window-partial')))).toEqual({
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('window-partial')))).toEqual({
       asOfSeq: 2,
       values: { 'cache-test/marks': { marks: ['usable'] } },
     })
@@ -1139,12 +1139,12 @@ describe('SessionProjectionCache retained-byte budget', () => {
     // Room for the two newest records and nothing else.
     const { cache, info } = await budgetHarness(root, rowBytes(newest) + rowBytes(middle) + 16)
     await vi.waitFor(async () => {
-      expect(await storedRecord(root, SessionId('oldest'))).toBeUndefined()
+      expect(await storedRecord(root, brandString<SessionId>('oldest'))).toBeUndefined()
     }, { timeout: 5_000 })
     // Retained records are complete: no wire row was dropped, including the heavy one.
-    expect(await storedRows(root, SessionId('newest'))).toEqual(newest)
-    expect(await storedRows(root, SessionId('middle'))).toEqual(middle)
-    expect(cache.cachedSnapshot(headerOf(SessionId('newest')))?.values['cache-test/marks'])
+    expect(await storedRows(root, brandString<SessionId>('newest'))).toEqual(newest)
+    expect(await storedRows(root, brandString<SessionId>('middle'))).toEqual(middle)
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('newest')))?.values['cache-test/marks'])
       .toEqual({ marks: ['newest'] })
     // Bytes accounting: the pass reports exactly what it retained and pruned.
     await vi.waitFor(() => {
@@ -1164,8 +1164,8 @@ describe('SessionProjectionCache retained-byte budget', () => {
     await seedRecord(root, 'huge', newest)
     const { cache } = await budgetHarness(root, 16)
     await new Promise<void>((resolve) => { setImmediate(resolve) })
-    expect(await storedRows(root, SessionId('huge'))).toEqual(newest)
-    expect(cache.cachedSnapshot(headerOf(SessionId('huge')))?.values['cache-test/marks'])
+    expect(await storedRows(root, brandString<SessionId>('huge'))).toEqual(newest)
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('huge')))?.values['cache-test/marks'])
       .toEqual({ marks: ['huge'] })
   })
 
@@ -1174,7 +1174,7 @@ describe('SessionProjectionCache retained-byte budget', () => {
     roots.push(root)
     const { cache, info, warn } = await budgetHarness(root, 1024)
     await new Promise<void>((resolve) => { setImmediate(resolve) })
-    expect(cache.cachedSnapshot(headerOf(SessionId('absent')))).toBeUndefined()
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('absent')))).toBeUndefined()
     expect(info).not.toHaveBeenCalled()
     expect(warn).not.toHaveBeenCalled()
   })
@@ -1188,11 +1188,11 @@ describe('SessionProjectionCache retained-byte budget', () => {
     const newest = rowsFor(70, 'chunk-69')
     const { cache } = await budgetHarness(root, rowBytes(newest) + 16)
     await vi.waitFor(async () => {
-      expect(await storedRecord(root, SessionId('chunk-0'))).toBeUndefined()
-      expect(await storedRecord(root, SessionId('chunk-68'))).toBeUndefined()
+      expect(await storedRecord(root, brandString<SessionId>('chunk-0'))).toBeUndefined()
+      expect(await storedRecord(root, brandString<SessionId>('chunk-68'))).toBeUndefined()
     }, { timeout: 5_000 })
-    expect(await storedRows(root, SessionId('chunk-69'))).toEqual(newest)
-    expect(cache.cachedSnapshot(headerOf(SessionId('chunk-69')))?.values['cache-test/marks'])
+    expect(await storedRows(root, brandString<SessionId>('chunk-69'))).toEqual(newest)
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('chunk-69')))?.values['cache-test/marks'])
       .toEqual({ marks: ['chunk-69'] })
   })
 
@@ -1216,15 +1216,15 @@ describe('SessionProjectionCache retained-byte budget', () => {
     const { cache, info } = await budgetHarness(root, rowBytes(newest) + 16)
     // Only the two cheap rows survive; the heavy fold state is gone.
     await vi.waitFor(async () => {
-      expect(await storedRows(root, SessionId('oldest'))).toEqual({
+      expect(await storedRows(root, brandString<SessionId>('oldest'))).toEqual({
         title: titleRow(4, 'Old title'),
         sessionListMetadata: listMetadataRow(4),
       })
     }, { timeout: 5_000 })
-    expect(await storedRows(root, SessionId('newest'))).toEqual(newest)
+    expect(await storedRows(root, brandString<SessionId>('newest'))).toEqual(newest)
     // The lifecycle identity survives, so the listing read still serves the hints.
-    expect((await storedRecord(root, SessionId('oldest')))?.identity).toEqual(identity)
-    const block = cache.cachedSnapshot(headerOf(SessionId('oldest'), 7, '/work'))
+    expect((await storedRecord(root, brandString<SessionId>('oldest')))?.identity).toEqual(identity)
+    const block = cache.cachedSnapshot(headerOf(brandString<SessionId>('oldest'), 7, '/work'))
     expect(block?.values).toEqual({
       title: 'Old title',
       sessionListMetadata: { blank: false, lastPromptAt: null },
@@ -1244,11 +1244,11 @@ describe('SessionProjectionCache retained-byte budget', () => {
     await seedRecord(root, 'heavy-only', { contextTimeline: heavyRow(2, 'heavy') })
     const { cache, info, warn } = await budgetHarness(root, rowBytes(newest) + 16)
     await vi.waitFor(async () => {
-      expect(await storedRecord(root, SessionId('empty'))).toBeUndefined()
-      expect(await storedRecord(root, SessionId('heavy-only'))).toBeUndefined()
+      expect(await storedRecord(root, brandString<SessionId>('empty'))).toBeUndefined()
+      expect(await storedRecord(root, brandString<SessionId>('heavy-only'))).toBeUndefined()
     }, { timeout: 5_000 })
-    expect(cache.cachedSnapshot(headerOf(SessionId('empty')))).toBeUndefined()
-    expect(cache.cachedSnapshot(headerOf(SessionId('heavy-only')))).toBeUndefined()
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('empty')))).toBeUndefined()
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('heavy-only')))).toBeUndefined()
     await vi.waitFor(() => {
       expect(info).toHaveBeenCalledWith(expect.stringContaining('pruned 2 records'))
     }, { timeout: 5_000 })
@@ -1266,8 +1266,8 @@ describe('SessionProjectionCache retained-byte budget', () => {
     await vi.waitFor(() => {
       expect(info).toHaveBeenCalledWith(expect.stringContaining('kept lightweight list rows for 1 records'))
     }, { timeout: 5_000 })
-    expect(await storedRows(root, SessionId('light'))).toEqual(light)
-    expect(cache.cachedSnapshot(headerOf(SessionId('light')))?.values.title).toBe('Kept title')
+    expect(await storedRows(root, brandString<SessionId>('light'))).toEqual(light)
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('light')))?.values.title).toBe('Kept title')
   })
 
   it('keeps listing hints across a scan larger than one chunk', async () => {
@@ -1288,17 +1288,17 @@ describe('SessionProjectionCache retained-byte budget', () => {
     }
     const { cache } = await budgetHarness(root, rowBytes(complete) + 16)
     await vi.waitFor(async () => {
-      expect(await storedRows(root, SessionId('hint-0'))).toEqual({
+      expect(await storedRows(root, brandString<SessionId>('hint-0'))).toEqual({
         title: titleRow(1, 'title-0'),
         sessionListMetadata: listMetadataRow(1),
       })
-      expect(await storedRows(root, SessionId('hint-68'))).toEqual({
+      expect(await storedRows(root, brandString<SessionId>('hint-68'))).toEqual({
         title: titleRow(69, 'title-68'),
         sessionListMetadata: listMetadataRow(69),
       })
     }, { timeout: 5_000 })
-    expect(await storedRows(root, SessionId('hint-69'))).toEqual(complete)
-    expect(cache.cachedSnapshot(headerOf(SessionId('hint-0')))?.values.title).toBe('title-0')
+    expect(await storedRows(root, brandString<SessionId>('hint-69'))).toEqual(complete)
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('hint-0')))?.values.title).toBe('title-0')
   })
 })
 

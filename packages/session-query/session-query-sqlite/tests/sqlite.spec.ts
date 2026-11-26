@@ -368,7 +368,7 @@ describe('SQLite session search', () => {
 
   it('indexes an unchanged live tail as a suffix and replaces after a surface rewrite', async () => {
     const ctx = await liveContext()
-    const session = ctx.sessions.create(SessionId('incremental-live-index'))
+    const session = ctx.sessions.create(brandString<SessionId>('incremental-live-index'))
     const first = session.append(
       'user/message',
       createUserMessage({
@@ -425,7 +425,7 @@ describe('SQLite session search', () => {
 
   it('reuses bounded exact-generation pages without exposing cached copies to callers', async () => {
     const ctx = await liveContext()
-    const session = ctx.sessions.create(SessionId('search-cache'), { seed: messageEvents('common marker') })
+    const session = ctx.sessions.create(brandString<SessionId>('search-cache'), { seed: messageEvents('common marker') })
     const engine = ctx.sessionQuery as SqliteSessionQueryEngine
     const queryProbe = engine as unknown as {
       _querySessions: (...args: unknown[]) => unknown[]
@@ -451,9 +451,9 @@ describe('SQLite session search', () => {
 
   it('retains adjacent cursor pages within the configured maxLimit item budget', async () => {
     const ctx = await liveContext({ path: ':memory:', defaultLimit: 1, maxLimit: 4 })
-    ctx.sessions.create(SessionId('cache-page-a'), { seed: messageEvents('common marker') })
-    ctx.sessions.create(SessionId('cache-page-b'), { seed: messageEvents('common marker') })
-    ctx.sessions.create(SessionId('cache-page-c'), { seed: messageEvents('common marker') })
+    ctx.sessions.create(brandString<SessionId>('cache-page-a'), { seed: messageEvents('common marker') })
+    ctx.sessions.create(brandString<SessionId>('cache-page-b'), { seed: messageEvents('common marker') })
+    ctx.sessions.create(brandString<SessionId>('cache-page-c'), { seed: messageEvents('common marker') })
     const engine = ctx.sessionQuery as SqliteSessionQueryEngine
     const queryProbe = engine as unknown as {
       _querySessions: (...args: unknown[]) => unknown[]

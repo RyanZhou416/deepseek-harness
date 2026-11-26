@@ -297,7 +297,11 @@ describe('Session history for a small stored source', () => {
 describe('Session history for a large stored source', () => {
   it('keeps serving pages and openings from the stored window', async () => {
     const events = conversation()
-    const checkpoint: ProjectionSnapshot = { asOfSeq: SessionSeq(1), values: { title: 'checkpointed' } }
+    const checkpoint: ProjectionSnapshot = {
+      asOfSeq: SessionSeq(1),
+      // A stored block seeds clients only when it carries every registered client-visible key.
+      values: { title: 'checkpointed', sessionListMetadata: { blank: true, lastPromptAt: null } },
+    }
     const readWindow = vi.fn(windowBackend(header(), events, { beforeSeq: true }))
     const large = await fixture({ sizeBytes: 8 * 1024 * 1024, readWindow, checkpoint })
 

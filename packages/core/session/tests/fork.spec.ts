@@ -68,7 +68,7 @@ describe('SessionStore.fork', () => {
       data: { value: 'borrowed' },
     } satisfies SessionEvent<'test/log-only'>
 
-    const session = Session.create(SessionId('borrowed-seed'), [event])
+    const session = Session.create(brandString<SessionId>('borrowed-seed'), [event])
 
     expect(session.eventAt(SessionSeq(0))).not.toBe(event)
     expect(session.eventAt(SessionSeq(0))?.data).not.toBe(event.data)

@@ -184,8 +184,11 @@ describe('quote selection', () => {
     const paragraphs = sourceRoot.querySelectorAll('p')
     expect(paragraphs[0]!.nextSibling?.textContent).toBe('\n')
     const range = document.createRange()
+    // The renderer wraps trimmed text in a stable inline span (translation
+    // protection), so the offset addresses that span's text node.
+    const end = paragraphs[1]!.firstChild!.firstChild ?? paragraphs[1]!.firstChild!
     range.setStart(paragraphs[0]!.firstChild!, 0)
-    range.setEnd(paragraphs[1]!.firstChild!, 'second'.length)
+    range.setEnd(end, 'second'.length)
     range.getBoundingClientRect = () => (
       { left: 50, top: 60, width: 20, height: 10 } as DOMRect
     )

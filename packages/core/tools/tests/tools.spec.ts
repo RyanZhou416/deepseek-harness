@@ -237,7 +237,7 @@ describe('ToolRuntime', () => {
       name: 'conditional-meta',
       output: { ...echoTool.output, presentationMeta: () => projected },
     })
-    const result = await executeToolFixture(ctx, { signal: testToolSignal, callId: ToolCallId('conditional-meta'), name: 'conditional-meta', arguments: { text: 'ok' } })
+    const result = await executeToolFixture(ctx, { signal: testToolSignal, callId: brandString<ToolCallId>('conditional-meta'), name: 'conditional-meta', arguments: { text: 'ok' } })
     expect(result.isError).toBe(false)
     expect(result.value).toBe('ok')
     expect('meta' in result).toBe(projected !== undefined)

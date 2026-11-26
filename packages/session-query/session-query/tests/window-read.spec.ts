@@ -17,7 +17,7 @@ import type { SessionWindow, SessionWindowRequest } from '@deepseek-ai/dsh-sessi
 import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import { SessionQueryError } from '@deepseek-ai/dsh-session-query'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { TestSessionQueryEngine } from './test-service.ts'
+import { TestSessionQueryEngine, projectionRegistryStandIn } from './test-service.ts'
 
 const SESSION = SessionId('window-read')
 
@@ -56,9 +56,14 @@ function storedWindow(meta: SessionHeader = header(), firstSeq = 0, count = 2): 
   }
 }
 
-async function queryContext(): Promise<Context> {
+/**
+ * @param wireKeys - client-visible projection keys the stand-in registry reports.
+ * @returns a context with the store, the stand-in registry, and the query service.
+ */
+async function queryContext(wireKeys: readonly string[] = []): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
+  ctx.provide('sessionProjections', projectionRegistryStandIn(wireKeys) as never)
   await ctx.plugin(TestSessionQueryEngine)
   onTestFinished(() => ctx.fiber.dispose())
   return ctx
@@ -160,7 +165,7 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
 
     const result = await ctx.sessionQuery.readWindow(SESSION)
 
-    // No registry is mounted, so no client-visible key set exists to prove
+    // No client-visible key is registered, so there is no key set to prove
     // completeness against: the watermark rule alone decides.
     expect(cachedSnapshot).toHaveBeenCalledExactlyOnceWith(expected.header)
     expect(result?.projections).toEqual(baseline)
@@ -170,7 +175,7 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
   })
 
   it('keeps a baseline that carries every registered client-visible key', async () => {
-    const ctx = await queryContext()
+    const ctx = await queryContext(['title'])
     const expected = storedWindow(header(), 5, 2)
     ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
     const baseline: ProjectionSnapshot = {
@@ -178,7 +183,6 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
       values: { title: 'checkpointed' },
     }
     ctx.provide('sessionProjectionCache', { cachedSnapshot: () => baseline } as never)
-    ctx.provide('sessionProjections', { wireKeys: () => ['title'] } as never)
 
     const result = await ctx.sessionQuery.readWindow(SESSION)
 
@@ -186,7 +190,7 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
   })
 
   it('keeps a baseline whose watermark ends exactly at the window cursor', async () => {
-    const ctx = await queryContext()
+    const ctx = await queryContext(['title'])
     const expected = storedWindow(header(), 5, 2)
     ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
     const baseline: ProjectionSnapshot = {
@@ -194,7 +198,6 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
       values: { title: 'checkpointed' },
     }
     ctx.provide('sessionProjectionCache', { cachedSnapshot: () => baseline } as never)
-    ctx.provide('sessionProjections', { wireKeys: () => ['title'] } as never)
 
     const result = await ctx.sessionQuery.readWindow(SESSION)
 
@@ -202,7 +205,7 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
   })
 
   it('drops a partial baseline that omits a registered client-visible key', async () => {
-    const ctx = await queryContext()
+    const ctx = await queryContext(['title', 'sessionListMetadata'])
     const expected = storedWindow(header(), 5, 2)
     ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
     const cachedSnapshot = vi.fn((): ProjectionSnapshot => ({
@@ -210,10 +213,6 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
       values: { title: 'checkpointed' },
     }))
     ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
-    // The composition carries another client-visible key whose stored row is
-    // unusable, so the block is only a per-key hint: adopting it as the opening
-    // baseline would leave that key's client value cleared.
-    ctx.provide('sessionProjections', { wireKeys: () => ['title', 'sessionListMetadata'] } as never)
 
     const result = await ctx.sessionQuery.readWindow(SESSION)
 
@@ -223,7 +222,7 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
   })
 
   it('drops a complete baseline whose watermark leads the window cursor', async () => {
-    const ctx = await queryContext()
+    const ctx = await queryContext(['title'])
     const expected = storedWindow(header(), 5, 2)
     ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
     const baseline: ProjectionSnapshot = {
@@ -231,7 +230,6 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
       values: { title: 'ahead' },
     }
     ctx.provide('sessionProjectionCache', { cachedSnapshot: () => baseline } as never)
-    ctx.provide('sessionProjections', { wireKeys: () => ['title'] } as never)
 
     const result = await ctx.sessionQuery.readWindow(SESSION)
 
@@ -240,13 +238,12 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
   })
 
   it('does not consult the registry when the cache holds no checkpoint', async () => {
-    const ctx = await queryContext()
+    const ctx = await queryContext(['title'])
     const expected = storedWindow(header())
     ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
     const cachedSnapshot = vi.fn().mockReturnValue(undefined)
-    const wireKeys = vi.fn(() => ['title'])
+    const wireKeys = vi.spyOn(ctx.sessionProjections, 'wireKeys')
     ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
-    ctx.provide('sessionProjections', { wireKeys } as never)
 
     const result = await ctx.sessionQuery.readWindow(SESSION)
 

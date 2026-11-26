@@ -54,7 +54,7 @@ fork 创建先排空本进程中的父写者，再在一个事务内引用已持
 
 首次 read 或 write open 通过版本迁移链解码选定的 JSONL 代次，然后将当前逻辑历史导入 SQLite。导入保留元数据、事件顺序、来源坐标和继承标记。它创建独立根 Segment，并保留 JSONL 源文件字节。导入后的 Session 及其后续事件通过 SQLite 重新打开。
 
-活跃的 JSONL 写者保持所有权，直到关闭。SQLite read open 等待该所有权释放；竞争的 write open 会被拒绝。取消或提供者卸载会停止等待。导入后，读者可以在 SQLite 写者仍活跃时打开。`stat()` 和 `list()` 只观察元数据，不导入历史。
+活跃的 JSONL 写者保持所有权，直到关闭。SQLite read open 等待该所有权释放；竞争的 write open 会被拒绝。取消或提供者卸载会停止等待。导入后，读者可以在 SQLite 写者仍活跃时打开。`stat()` 和 `list()` 只观察元数据，不导入历史。`list()` 对 SQLite 行和已创建但未追加的 Session 同样应用该接缝的清单排除项：`excludeSessionIds` 在解码其存储头部之前跳过这些 id，`excludeSubagentSessions` 在头部检查之后丢弃子智能体来源的行。
 
 ### 持久化与关闭
 

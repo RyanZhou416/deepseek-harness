@@ -67,7 +67,7 @@ describe('sessionStats projection unit (registry drive)', () => {
       ctx.sessionProjections.onChanged((_session, key, value) => { if (key === 'sessionStats') values.push(value) })
       session.append('step/start', { turn: 1, step: 1 })
       expect(values).toEqual([totals()])
-      session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('cold-call'), name: 'synthetic', arguments: '{}' })
+      session.append('tool/call', { turn: 1, step: 1, callId: brandString<ToolCallId>('cold-call'), name: 'synthetic', arguments: '{}' })
       expect(values).toEqual([totals()])
       session.append('step/end', { turn: 1, step: 1 })
       expect(values).toEqual([totals(), totals({ turns: 1, steps: 1 })])
@@ -88,7 +88,7 @@ describe('sessionStats projection unit (registry drive)', () => {
     expect(firstToken.openStep?.firstTokenTime).toBe(15)
     expect(unit.wire.view(firstToken)).toBe(initialView)
     const pending = unit.apply(firstToken, at(25, 'tool/call', {
-      turn: 1, step: 1, callId: ToolCallId('synthetic-call'), name: 'synthetic', arguments: '{}',
+      turn: 1, step: 1, callId: brandString<ToolCallId>('synthetic-call'), name: 'synthetic', arguments: '{}',
     }))
     expect(unit.wire.view(pending)).toBe(initialView)
     const pruned = unit.apply(pending, at(30, 'turn/end', { turn: 1, reason: { kind: 'completed' } }))

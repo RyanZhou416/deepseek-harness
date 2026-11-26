@@ -70,11 +70,11 @@ describe('JSONL retry-event persistence', () => {
   it('round-trips a producer-forbidden failure through the durable attempt and turn close', async () => {
     const ctx = await backend()
     try {
-      const session = ctx.sessions.create(SessionId('retry-jsonl-forbid'))
+      const session = ctx.sessions.create(brandString<SessionId>('retry-jsonl-forbid'))
       const handle = await ctx.sessionPersistence.create(session.header)
       const failure = {
         message: 'client protocol version refused',
-        code: 'CLIENT_VERSION_UNSUPPORTED',
+        code: 'CLIENT_UPGRADE_REQUIRED',
         status: 400,
         retryDisposition: 'forbid',
       } as const

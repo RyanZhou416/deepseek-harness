@@ -137,7 +137,7 @@ describe('PiAiAdapter provider routing', () => {
       claude: { ...common, api: 'anthropic-messages' }, other: { ...common, api: 'openai-completions' },
     })
     const readImageRequest = vi.fn(async (ref: ImageAttachmentRef, target: ImageRequestTarget): Promise<RequestImageAttachment> => ({
-      attachment: ref, variantId: ImageVariantId(`sha256:${'b'.repeat(64)}`), data: Uint8Array.of(1),
+      attachment: ref, variantId: brandString<ImageVariantId>(`sha256:${'b'.repeat(64)}`), data: Uint8Array.of(1),
       mediaType: ref.mediaType, bytes: 1, width: target.width, height: target.height, depth: 'uchar', space: 'srgb', hasAlpha: false,
     }))
     const store: Pick<AttachmentStore, 'readImageRequest'> = { readImageRequest }

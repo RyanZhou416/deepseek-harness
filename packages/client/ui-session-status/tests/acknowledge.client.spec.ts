@@ -39,6 +39,7 @@ function harness({ manual = false, completedTurn = 1, selected = true, ready = t
     openState: 'open', openError: null, hasMore: false, loadingOlder: false, promptError: null,
     historyLoadStatus: 'idle', historyWasPartial: false,
     blank: false, lastAgentError: null, promptAttempted: false, awaitingFirstTurn: false,
+    projectionAvailability: { state: 'unavailable', reason: 'opening-absent' },
   }, { flush: 'sync' })
   const session = new FixtureSession(id, lifecycle, {})
   const body = (turn: number) => { session.eventSource.append({ type: 'event', event: {

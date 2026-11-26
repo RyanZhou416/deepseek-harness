@@ -53,6 +53,11 @@ export interface ToolRowProps {
   output?: string | null | undefined
   /** Settled generic result flattened only when its Output section opens. */
   outputNode?: ToolResultNode | null | undefined
+  /**
+   * Formatter for one image attachment inside {@link outputNode}; omission or
+   * an undefined result keeps the attachment's JSON.
+   */
+  formatImage?: ((image: unknown) => string | undefined) | undefined
   /** Ask-user transcript card; card fields are mutually exclusive and replace text sections. */
   askQuestion?: AskQuestionCardModel | null | undefined
   /**
@@ -177,6 +182,7 @@ export const ToolRow = memo(function ToolRow({
   bodyRaw,
   output,
   outputNode,
+  formatImage,
   askQuestion,
   errorSummary,
   terminal,
@@ -224,8 +230,8 @@ export const ToolRow = memo(function ToolRow({
   const outputText = useMemo(() => {
     if (!open) return null
     if (output !== undefined) return output
-    return outputNode === undefined || outputNode === null ? null : resultText(outputNode) || null
-  }, [open, output, outputNode])
+    return outputNode === undefined || outputNode === null ? null : resultText(outputNode, formatImage) || null
+  }, [open, output, outputNode, formatImage])
   const bodyText = useMemo(
     () => open && card === null && inputRaw !== null ? formatToolBody(variant, inputRaw) : null,
     [card, inputRaw, open, variant],

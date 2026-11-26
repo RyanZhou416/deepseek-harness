@@ -26,7 +26,8 @@ describe('prepareRequestImages', () => {
     ]
     const before = structuredClone(messages)
     const target = vi.fn((attachment: ImageAttachmentRef, count: number) => ({
-      width: count > 20 ? 2000 : attachment.width, height: count > 20 ? 1000 : attachment.height, maxBytes: 2,
+      width: count > 20 ? 2000 : attachment.width, height: count > 20 ? 1000 : attachment.height,
+      maxImageBytes: 2, imageTargetBytes: 2,
     }))
     const readImageRequest = vi.fn(async (attachment: ImageAttachmentRef, selected: ImageRequestTarget) => version(attachment, selected))
     const result = await prepareRequestImages(messages, { readImageRequest }, target)
@@ -34,7 +35,8 @@ describe('prepareRequestImages', () => {
     expect(readImageRequest).toHaveBeenCalledTimes(1)
     expect(result.get(ref.attachmentId)).toMatchObject({ width: 2000, height: 1000 })
     expect(messages).toEqual(before)
-    const next = await prepareRequestImages(messages, { readImageRequest }, source => ({ ...source, maxBytes: source.bytes }))
+    const next = await prepareRequestImages(messages, { readImageRequest },
+      source => ({ ...source, maxImageBytes: source.bytes, imageTargetBytes: source.bytes }))
     expect(next.get(ref.attachmentId)).toMatchObject({ width: 2800, height: 1400 })
   })
 
@@ -51,7 +53,7 @@ describe('prepareRequestImages', () => {
     const messages: RequestMessage[] = [{ role: 'user', content: [image, {
       ...image, attachment: { ...ref, attachmentId: AttachmentId(`sha256:${'c'.repeat(64)}`) },
     }] }]
-    const target = (source: ImageAttachmentRef) => ({ ...source, maxBytes: source.bytes })
+    const target = (source: ImageAttachmentRef) => ({ ...source, maxImageBytes: source.bytes, imageTargetBytes: source.bytes })
     const readImageRequest = vi.fn(async () => { throw new Error('read failed') })
     await expect(prepareRequestImages(messages, { readImageRequest }, target)).rejects.toThrow('read failed')
     expect(readImageRequest).toHaveBeenCalledTimes(1)

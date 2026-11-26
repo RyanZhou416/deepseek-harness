@@ -428,10 +428,15 @@ export function toolRowModel(
   // call with blank content has nothing to expand, and a blank first line
   // would erase the collapsed error row's summary slot.
   // Result text is materialized only when a reader asks for it: the collapsed
-  // row checks hasResultText and never flattens blocks.
+  // row checks hasResultText and never flattens blocks. Both derivations share
+  // one flattening so an image formatter runs once per model.
   let cachedOutput: string | null | undefined
+  const outputText = (): string | null => {
+    if (cachedOutput === undefined) cachedOutput = done ? resultText(block, formatImage) || null : null
+    return cachedOutput
+  }
   const errorSummary = state === 'error' && done && hasResultText(block)
-    ? firstLine(resultText(block, formatImage))
+    ? firstLine(outputText() ?? '')
     : null
   const bodyRaw = argsRaw === '' ? null : argsRaw
   return {
@@ -442,8 +447,7 @@ export function toolRowModel(
     fileTargets,
     bodyRaw,
     get output(): string | null {
-      if (cachedOutput === undefined) cachedOutput = done ? resultText(block, formatImage) || null : null
-      return cachedOutput
+      return outputText()
     },
     errorSummary,
     autoReviewDenial: deriveAutoReviewDenial(block),

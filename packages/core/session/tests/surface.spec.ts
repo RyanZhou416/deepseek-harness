@@ -1053,7 +1053,7 @@ describe('developer message history', () => {
 
 describe('pending human revisions', () => {
   it('keeps a saved draft out of model history until processed input replaces it', () => {
-    const session = Session.create(SessionId('pending-revision'))
+    const session = Session.create(brandString<SessionId>('pending-revision'))
     const original = session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'original' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
     const draft = session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'draft' }], source: { kind: 'user', replacesUserMessage: original.seq, pendingRevision: true } }),
       { surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq }, sourceEventSeqs: [original.seq] })
@@ -1067,7 +1067,7 @@ describe('pending human revisions', () => {
   })
 
   it('rejects pending revisions that append or name a different original node', () => {
-    const session = Session.create(SessionId('invalid-pending-revision'))
+    const session = Session.create(brandString<SessionId>('invalid-pending-revision'))
     const original = session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'original' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
     const pending = createUserMessage({ content: [{ type: 'text', text: 'draft' }], source: { kind: 'user', replacesUserMessage: SessionSeq(99), pendingRevision: true } })
     expect(() => session.append('user/message', pending, { surfaceOp: 'append' })).toThrow('pending user revision')

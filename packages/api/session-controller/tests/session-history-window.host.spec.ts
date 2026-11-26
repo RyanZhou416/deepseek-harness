@@ -148,7 +148,11 @@ function seqs(page: SessionPage): number[] {
 describe('Session history stored window path', () => {
   it('opens follow from a bounded tail window and sends the checkpoint unchanged', async () => {
     const events = conversation()
-    const checkpoint: ProjectionSnapshot = { asOfSeq: SessionSeq(2), values: { title: 'checkpointed' } }
+    const checkpoint: ProjectionSnapshot = {
+      asOfSeq: SessionSeq(2),
+      // A stored block seeds clients only when it carries every registered client-visible key.
+      values: { title: 'checkpointed', sessionListMetadata: { blank: true, lastPromptAt: null } },
+    }
     const readWindow = vi.fn(storedWindowReader(header(), events))
     const windowed = await fixture({ readWindow, checkpoint })
     const full = await fixture()
@@ -164,7 +168,7 @@ describe('Session history stored window path', () => {
         .toEqual(complete.records.map(record => record.event.seq))
       expect(frame.hasMore).toBe(complete.hasMore)
       // The stored watermark is passed through, never rewritten to the window cursor.
-      expect(frame.projections).toEqual({ asOfSeq: 2, values: { title: 'checkpointed' } })
+      expect(frame.projections).toEqual({ asOfSeq: 2, values: { title: 'checkpointed', sessionListMetadata: { blank: true, lastPromptAt: null } } })
       expect(observe).not.toHaveBeenCalled()
       expect(readWindow).toHaveBeenCalledOnce()
       expect(readWindow.mock.calls[0]?.[1]).not.toHaveProperty('beforeSeq')

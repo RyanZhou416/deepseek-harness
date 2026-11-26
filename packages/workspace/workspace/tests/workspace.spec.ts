@@ -302,7 +302,7 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
         header('kept', dir, 100),
         header('gone', dir, 200),
         header('active', dir, 300),
-        { ...header('child', dir, 400), origin: 'subagent', parentSession: SessionId('active') },
+        { ...header('child', dir, 400), origin: 'subagent', parentSession: brandString<SessionId>('active') },
       ],
     })
 

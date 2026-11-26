@@ -530,7 +530,7 @@ describe('LlmRuntime', () => {
   })
 
   it('preserves a producer-forbidden resend decision in the terminal failure', async () => {
-    const failure = new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', {
+    const failure = new LlmError('client protocol version refused', 'CLIENT_UPGRADE_REQUIRED', {
       status: 400,
       retryDisposition: 'forbid',
     })
@@ -550,7 +550,7 @@ describe('LlmRuntime', () => {
         kind: 'error',
         failure: {
           message: 'client protocol version refused',
-          code: 'CLIENT_VERSION_UNSUPPORTED',
+          code: 'CLIENT_UPGRADE_REQUIRED',
           status: 400,
           retryDisposition: 'forbid',
         },

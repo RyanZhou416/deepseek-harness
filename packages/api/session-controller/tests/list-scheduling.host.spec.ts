@@ -2,7 +2,7 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
-import SessionStore, { type SessionId, type Session } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { SessionRecord } from '@deepseek-ai/dsh-session-query'
 import { resolve } from 'node:path'

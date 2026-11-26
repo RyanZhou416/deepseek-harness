@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { render } from '@testing-library/react'
-import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
+import type { MessageId } from '@deepseek-ai/dsh-llm/types'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AssistantBlock, AssistantMessageNode } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ChatNode } from '../src/client/contract/chat-nodes.ts'

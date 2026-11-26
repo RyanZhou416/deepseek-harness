@@ -10,6 +10,7 @@ import Include from '@deepseek-ai/cordis-plugin-include'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import * as sessionProjectionPlugin from '@deepseek-ai/dsh-session-projection'
 import * as systemPromptPlugin from '@deepseek-ai/dsh-system-prompt'
 import * as toolsPlugin from '@deepseek-ai/dsh-tools'
 import * as userQuestionsPlugin from '@deepseek-ai/dsh-user-questions'
@@ -32,6 +33,10 @@ describe('ask_user_question real Loader composition', () => {
     root = await mkdtemp(join(tmpdir(), 'ask-user-loader-'))
     const configPath = join(root, 'cordis.yml')
     await writeFile(configPath, [
+      // The system prompt registers as a projection provider over this seam,
+      // so the composition mounts it before the prompt and tool rows.
+      '- id: session-projection',
+      '  name: cordis:sessionProjections',
       '- id: system-prompt',
       '  name: cordis:systemPrompt',
       '- id: tools',
@@ -53,6 +58,7 @@ describe('ask_user_question real Loader composition', () => {
     await ctx.plugin(Loader)
     Object.assign(ctx.loader.builtins, {
       include: Include,
+      sessionProjections: sessionProjectionPlugin,
       systemPrompt: systemPromptPlugin,
       tools: toolsPlugin,
       nativeToolExecutor: NativeToolExecutor,

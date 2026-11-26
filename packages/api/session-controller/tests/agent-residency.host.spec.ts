@@ -89,7 +89,7 @@ async function harness(
   const detachSession = ctx.sessions.enter(session)
   ctx.sessions.announce(session)
   const agent = fakeAgent(ctx, session)
-  const detachAgent = ctx.agents.enter(agent, undefined)
+  const detachAgent = ctx.agents.enter(agent)
   await ctx.agents.announce(agent, 'startup')
   const disposeHandle = vi.fn<AgentHandle['dispose']>(async () => {
     if (disposeBarrier !== undefined) await disposeBarrier
@@ -143,7 +143,7 @@ describe('Session Controller idle Agent residency', () => {
       const detachSession = ctx.sessions.enter(session)
       ctx.sessions.announce(session)
       replacement = fakeAgent(ctx, session)
-      const detachAgent = ctx.agents.enter(replacement, undefined)
+      const detachAgent = ctx.agents.enter(replacement)
       await ctx.agents.announce(replacement, 'resume')
       return {
         agent: replacement,
@@ -201,7 +201,7 @@ describe('Session Controller idle Agent residency', () => {
     const detachSession = ctx.sessions.enter(session)
     ctx.sessions.announce(session)
     const agent = fakeAgent(ctx, session)
-    const detachAgent = ctx.agents.enter(agent, undefined)
+    const detachAgent = ctx.agents.enter(agent)
     await ctx.agents.announce(agent, 'startup')
     const dispose = vi.fn(async () => {
       detachAgent()
@@ -255,12 +255,20 @@ describe('Session Controller idle Agent residency', () => {
     const { ctx, controller, agent, disposeHandle } = await harness(100)
     const childId = SessionId('resident-child')
     const childSession = ctx.sessions.prepare(childId, {
-      meta: { version: SESSION_FORMAT_VERSION, id: childId, createdAt: 2, cwd: '/project', isSeeded: false },
+      meta: {
+        version: SESSION_FORMAT_VERSION,
+        id: childId,
+        createdAt: 2,
+        cwd: '/project',
+        isSeeded: false,
+        origin: 'subagent',
+        parentSession: agent.id,
+      },
     })
     const detachChildSession = ctx.sessions.enter(childSession)
     ctx.sessions.announce(childSession)
     const child = fakeAgent(ctx, childSession)
-    const detachChild = ctx.agents.enter(child, agent)
+    const detachChild = ctx.agents.enter(child)
     await ctx.agents.announce(child, 'startup')
 
     await vi.advanceTimersByTimeAsync(1_000)

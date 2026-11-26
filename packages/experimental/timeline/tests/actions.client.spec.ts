@@ -38,6 +38,7 @@ function fixture(running = false) {
     lastAgentError: null,
     promptAttempted: false,
     awaitingFirstTurn: false,
+    projectionAvailability: { state: 'unavailable', reason: 'opening-absent' },
   }
   const prompt = vi.fn<SessionFace['prompt']>().mockResolvedValue({ ok: true, value: { accepted: true } })
   const session: SessionFace = {
@@ -45,6 +46,7 @@ function fixture(running = false) {
     getSnapshot: () => snapshot,
     subscribe: () => () => undefined,
     projections: { faceOf: () => ({ getSnapshot: () => undefined, subscribe: () => () => undefined }) },
+    requestExactProjections: vi.fn(),
     prompt,
     beginSubmission: vi.fn(),
     readAttachment: vi.fn(),

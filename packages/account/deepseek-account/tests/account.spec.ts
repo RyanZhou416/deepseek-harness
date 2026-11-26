@@ -568,15 +568,14 @@ it('publishes sign-out only after local grant removal and refuses token resoluti
   expect((await f.account.getState()).status).toBe('signed-out')
 })
 
-it.each(['user sign-out', 'rejected token'] as const)('withdraws released request credentials at a %s, after its listeners ran', async (cause) => {
+it('withdraws released request credentials at a user sign-out, after its listeners ran', async () => {
   const f = await fixture(undefined, {}, false, {}, PRIVATE_INFERENCE)
   await storeAccount(f)
   const credential = await storedCredential(f)
   const observed: boolean[] = []
   f.ctx.on('deepseek-account/signed-out', () => { observed.push(credential.revoked.aborted) })
   expect(credential.revoked.aborted).toBe(false)
-  if (cause === 'user sign-out') await f.account.signOut(clientMetadata())
-  else await (await storedCredential(f)).reject()
+  await f.account.signOut(clientMetadata())
   expect(observed).toEqual([false])
   expect(credential.revoked.aborted).toBe(true)
   // The next sign-in releases its credentials on a signal of its own.
@@ -584,6 +583,21 @@ it.each(['user sign-out', 'rejected token'] as const)('withdraws released reques
   const next = await storedCredential(f)
   expect(next.revoked).not.toBe(credential.revoked)
   expect(next.revoked.aborted).toBe(false)
+})
+
+it('parks an inference-rejected token without withdrawing released request credentials', async () => {
+  const f = await fixture(undefined, {}, false, {}, PRIVATE_INFERENCE)
+  await storeAccount(f)
+  const credential = await storedCredential(f)
+  const published: string[] = []
+  f.ctx.on('deepseek-account/signed-out', () => { published.push('signed-out') })
+  f.ctx.on('deepseek-account/session-expired', () => { published.push('session-expired') })
+  await credential.reject()
+  // Parking is not a sign-out: the record is retained, so a request already
+  // holding this credential is not torn down mid-flight.
+  expect(published).toEqual(['session-expired'])
+  expect(credential.revoked.aborted).toBe(false)
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'needs-reauth' })
 })
 
 it('withdraws released request credentials when a sign-out listener throws', async () => {
@@ -1896,7 +1910,7 @@ it('ignores a 401 whose response cleanup overlaps a credential replacement', asy
 })
 
 it('parks an inference-rejected token once without another Platform request or a signed-out notification', async () => {
-  const f = await fixture()
+  const f = await fixture(undefined, {}, false, {}, PRIVATE_INFERENCE)
   await storeAccount(f)
   const credential = await storedCredential(f)
   const published: string[] = []

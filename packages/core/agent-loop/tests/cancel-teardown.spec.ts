@@ -109,7 +109,7 @@ describe('Agent.cancel() against an unwinding lifecycle', () => {
           modelSelection: () => ({ lastUsed: null, pending: null }),
           inbox: () => ({ 'next-turn': [], 'next-step': [] }),
           inboxRegistered: () => false,
-        }, 0)
+        }, 0, new AbortController().signal)
       }
     })
     cleanups.push(() => agent.scope.dispose())

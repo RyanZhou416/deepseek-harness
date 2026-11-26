@@ -1,5 +1,5 @@
 import type { ContextMenuTriggerProps } from '@deepseek-ai/dsh-client-ui-context-menu/client'
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import {
   IconApiOutlineRegular, IconBrowseOutlineRegular, IconCodeOutlineRegular, IconEditOutlineRegular, IconSearchOutlineRegular,
   IconSparkleRegular,
@@ -36,14 +36,17 @@ export type GenericToolCardProps = ToolCallOwnerProps & {
 export function GenericToolCard({
   toolName, block, cwd, home, openFile, getFileTriggerProps, inspect, useDisclosure, t,
 }: GenericToolCardProps) {
-  const model = toolRowModel(toolName, block, cwd, home, (image) => {
+  // One formatter for the row model and the expanded Output section: the
+  // attachment validates once, so a compact reference reads the same both ways.
+  const formatImage = useMemo(() => (image: unknown): string | undefined => {
     if (typeof image !== 'object' || image === null || Array.isArray(image)) return undefined
     const { attachmentId, name, width, height, bytes } = image as Record<string, unknown>
     if (typeof attachmentId !== 'string' || attachmentId === ''
       || name !== undefined && typeof name !== 'string'
       || ![width, height, bytes].every(value => typeof value === 'number' && Number.isInteger(value) && value > 0)) return undefined
     return `${name ?? attachmentId} (${t('row.imageSize', { width, height, bytes })})`
-  })
+  }, [t])
+  const model = toolRowModel(toolName, block, cwd, home, formatImage)
   const autoReview = model.autoReviewDenial === null
     ? null
     : localizeAutoReviewDenial(model.autoReviewDenial, t)
@@ -74,6 +77,7 @@ export function GenericToolCard({
       bodyRaw={singleFile || autoReview !== null ? null : model.bodyRaw}
       output={autoReview?.output}
       outputNode={'kind' in block ? block : undefined}
+      formatImage={formatImage}
       errorSummary={autoReview?.summary ?? model.errorSummary}
       terminal={terminal}
       diff={diff}

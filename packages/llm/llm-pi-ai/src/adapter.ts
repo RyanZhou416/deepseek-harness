@@ -1186,26 +1186,52 @@ function ccWireParitySystem(boundary: { readonly staticText: string; readonly dy
 }
 
 /**
- * Copy one wire-parity message without markers, expanding the final user text turn.
+ * Copy one wire-parity message without markers, restoring the pinned client's text forms.
  *
  * The worker marks the trailing content block of the last user message, and the
  * transport serializes a text-only user message as a bare string — which has no
  * block to mark. The pinned client's own message converter wraps a string user
  * message in the one-block array only for the message that carries the cache
- * marker, so wire parity expands exactly the final user-role message and leaves
+ * marker, so wire parity expands exactly the final user-role message and keeps
  * every earlier text-only turn as the bare string the client sends. Content that
- * is already a block array, or any other role, is only stripped of its markers.
+ * carries any other block shape, or any other role, is only stripped of its markers.
  * @param value - one message pi-ai built for the request.
  * @param expandText - whether this is the final user message that receives the worker's marker.
- * @returns the message with markers stripped and its text-only content expanded when it is last.
+ * @returns the message with markers stripped and its text-only content expanded when it is last, or collapsed to the bare string when it is earlier.
  */
 function ccWireParityMessage(value: unknown, expandText: boolean): unknown {
   /* v8 ignore next -- pi-ai builds every message as an object */
   if (!isRequestPayload(value)) return value
-  if (!expandText || value['role'] !== 'user') return stripMessage(value)
-  const content = value['content']
-  if (typeof content !== 'string' || content.length === 0) return stripMessage(value)
-  return { ...value, content: [{ type: 'text', text: content }] }
+  /* v8 ignore next -- stripping a message preserves its object form */
+  if (value['role'] !== 'user') return stripMessage(value)
+  const stripped = stripMessage(value)
+  /* v8 ignore next -- stripping a message preserves its object form */
+  if (!isRequestPayload(stripped)) return stripped
+  const content = stripped['content']
+  if (expandText) {
+    return typeof content === 'string' && content.length > 0
+      ? { ...stripped, content: [{ type: 'text', text: content }] }
+      : stripped
+  }
+  // The transport builds every user turn as a block array, so the earlier
+  // text-only turn the pinned client sends as a string collapses back to it.
+  const bare = bareTextContent(content)
+  return bare === undefined ? stripped : { ...stripped, content: bare }
+}
+
+/**
+ * The bare string an earlier text-only user turn carries on the pinned wire.
+ * @param content - one marker-stripped message's content.
+ * @returns its text when the content is exactly one plain text block, otherwise undefined.
+ */
+function bareTextContent(content: unknown): string | undefined {
+  /* v8 ignore next -- every user message the transport builds carries content */
+  if (!Array.isArray(content) || content.length !== 1) return undefined
+  const [block] = content
+  /* v8 ignore next -- an image, tool result, or signed text block keeps its array form */
+  if (!isRequestPayload(block) || block['type'] !== 'text') return undefined
+  const text = block['text']
+  return typeof text === 'string' && Object.keys(block).length === 2 ? text : undefined
 }
 
 /**
@@ -1221,8 +1247,8 @@ function ccWireParityMessage(value: unknown, expandText: boolean): unknown {
  * remove only the cache betas the worker plans, leaving context-window and
  * tool-streaming betas intact. The final text-only user message travels as a
  * content block array rather than a bare string, because the worker's marker
- * writer can only mark a block; earlier text-only turns keep the bare-string
- * form the pinned client sends. The edits finish by writing
+ * writer can only mark a block; earlier text-only turns collapse back to the
+ * bare-string form the pinned client sends. The edits finish by writing
  * the pinned client's top-level field order, whose `metadata` placeholder keeps
  * the pool's `user_id` splice in its canonical slot. A request whose decisions
  * declare cache intent `off` sends this same body: every marker and cache beta
@@ -1851,7 +1877,11 @@ export class PiAiAdapter extends LlmAdapter {
           imageOffloadCountQuantum: profile.imageOffloadCountQuantum,
           requestImagePolicy: {
             ...resolveImageRequestBudget(model, profile),
-            ...model.api === 'anthropic-messages'
+            // The count-aware long-edge cap replaces the catalog's flat limit
+            // for this route's unset dimension; an explicit
+            // `requestImageMaxDimension` is the deployment's own bound and
+            // wins, so coordinates and the wire request resolve one target.
+            ...model.api === 'anthropic-messages' && profile.requestImageMaxDimension === undefined
               ? { maxDimension: (count: number) => count > 20 ? 2000 : 8000 }
               : {},
           },

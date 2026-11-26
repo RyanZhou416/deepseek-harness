@@ -139,7 +139,7 @@ describe('real Loader composition', () => {
 
       async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
         this.requests += 1
-        throw new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', {
+        throw new LlmError('client protocol version refused', 'CLIENT_UPGRADE_REQUIRED', {
           status: 400,
           retryDisposition: 'forbid',
         })
@@ -158,7 +158,7 @@ describe('real Loader composition', () => {
       listenerRuns += 1
       return { kind: 'retry' }
     })
-    const agent = await loaded.agentLoop.create(SessionId('loader-forbid'), { provider: 'mock', model: 'mock' })
+    const agent = await loaded.agentLoop.create(brandString<SessionId>('loader-forbid'), { provider: 'mock', model: 'mock' })
 
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
     await agent.whenIdle()
@@ -170,7 +170,7 @@ describe('real Loader composition', () => {
       data: {
         reason: {
           kind: 'error',
-          error: { code: 'CLIENT_VERSION_UNSUPPORTED', retryDisposition: 'forbid' },
+          error: { code: 'CLIENT_UPGRADE_REQUIRED', retryDisposition: 'forbid' },
         },
       },
     })

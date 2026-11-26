@@ -5,7 +5,7 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionWindow } from '@deepseek-ai/dsh-session-persistence'
 import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import { describe, expect, it, vi } from 'vitest'
-import { TestSessionQueryEngine } from './test-service.ts'
+import { TestSessionQueryEngine, projectionRegistryStandIn } from './test-service.ts'
 
 function header(id: string): SessionHeader {
   return { version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt: 1, isSeeded: false, cwd: '/workspace' }
@@ -37,6 +37,7 @@ function storedWindow(meta: SessionHeader, count = 2): SessionWindow {
 async function queryContext(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
+  ctx.provide('sessionProjections', projectionRegistryStandIn() as never)
   await ctx.plugin(TestSessionQueryEngine)
   return ctx
 }
