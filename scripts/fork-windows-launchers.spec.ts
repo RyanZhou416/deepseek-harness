@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { constants, tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import semver from 'semver'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -138,6 +139,8 @@ describe('Windows fork launchers', () => {
       env: {
         ...process.env,
         PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
+        // Keep the fixture's command stubs ahead of the pinned private runtime.
+        DSH_NODE_DIR: bin,
         TEMP: root,
         TMP: root,
         COREPACK_HOME: join(root, 'broken-corepack-cache'),
@@ -274,6 +277,19 @@ describe('Windows fork launchers', () => {
     const invalid = run({ DSH_PROCESS_PRIORITY: 'realtime' })
     expect(invalid.status).not.toBe(0)
     expect(invalid.stderr).toContain('DSH_PROCESS_PRIORITY must be one of')
+  })
+
+  it('runs both launchers on the pinned Node.js release, which satisfies the engine range', () => {
+    const pinned = readFileSync(join(repositoryRoot, '.node-version'), 'utf8').trim()
+    const engines = (JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as { engines: { node: string } }).engines.node
+    expect(semver.valid(pinned), '.node-version holds one exact version').toBe(pinned)
+    expect(semver.satisfies(pinned, engines), `${pinned} satisfies ${engines}`).toBe(true)
+    for (const launcher of ['run.cmd', 'build.cmd']) {
+      const source = readFileSync(join(repositoryRoot, launcher), 'utf8')
+      expect(source).toContain('if not defined DSH_NODE_DIR for /f "delims=" %%D in (\'powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\fork-windows-node.ps1"\') do set "DSH_NODE_DIR=%%D"')
+      expect(source).toContain('set "PATH=%DSH_NODE_DIR%;%PATH%"')
+      expect(source.indexOf('set "PATH=%DSH_NODE_DIR%;%PATH%"')).toBeLessThan(source.indexOf('node '))
+    }
   })
 
   it.skipIf(process.platform !== 'win32')('keeps other processes of the same user from terminating the Host, which still exits by itself', async () => {

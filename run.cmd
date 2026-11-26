@@ -19,9 +19,13 @@ if defined NODE_OPTIONS (
   set "NODE_OPTIONS=%DSH_RUNTIME_NODE_OPTIONS%"
 )
 
-set "DSH_STEP=checking Node.js"
-where node >nul 2>&1
-if errorlevel 1 goto :missing_node
+set "DSH_STEP=preparing Node.js"
+rem The launchers run the Node.js version pinned in .node-version from a private
+rem per-user directory; see scripts\fork-windows-node.ps1. DSH_NODE_DIR, when set,
+rem names another Node.js directory to use instead.
+if not defined DSH_NODE_DIR for /f "delims=" %%D in ('powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\fork-windows-node.ps1"') do set "DSH_NODE_DIR=%%D"
+if not defined DSH_NODE_DIR goto :missing_node
+set "PATH=%DSH_NODE_DIR%;%PATH%"
 
 set "DSH_DIAGNOSTICS_PATCH_ARG=--patch "%~dp0fork-runtime\diagnostics\cordis.patch.yml""
 set "DSH_PERF_PATCH_ARG=--patch "%~dp0fork-runtime\web\perf.patch.yml""
@@ -67,8 +71,8 @@ exit /b 0
 
 :missing_node
 echo.
-echo ERROR: Node.js was not found in PATH.
-echo Install a supported Node.js version ^(22.19 or newer^) and try again.
+echo ERROR: The Node.js version pinned in .node-version could not be prepared.
+echo Check the network or set DSH_NODE_MIRROR to a reachable Node.js download mirror, then retry.
 goto :pause_and_exit
 
 :failed

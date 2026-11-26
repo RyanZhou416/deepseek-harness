@@ -4,9 +4,13 @@ cd /d "%~dp0"
 
 if not defined DSH_HOME for %%I in ("%~dp0..\deepseek-harness-data") do set "DSH_HOME=%%~fI"
 
-set "DSH_STEP=checking Node.js"
-where node >nul 2>&1
-if errorlevel 1 goto :missing_node
+set "DSH_STEP=preparing Node.js"
+rem The launchers run the Node.js version pinned in .node-version from a private
+rem per-user directory; see scripts\fork-windows-node.ps1. DSH_NODE_DIR, when set,
+rem names another Node.js directory to use instead.
+if not defined DSH_NODE_DIR for /f "delims=" %%D in ('powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\fork-windows-node.ps1"') do set "DSH_NODE_DIR=%%D"
+if not defined DSH_NODE_DIR goto :missing_node
+set "PATH=%DSH_NODE_DIR%;%PATH%"
 
 set "DSH_SUBSCRIPTIONS_PLAN=%~dp0fork-runtime\subscriptions-maintenance\plan.json"
 set "DSH_LOCAL_PNPM=%~dp0node_modules\pnpm\bin\pnpm.mjs"
@@ -76,8 +80,8 @@ exit /b 0
 
 :missing_node
 echo.
-echo ERROR: Node.js was not found in PATH.
-echo Install a supported Node.js version ^(22.19 or newer^) and try again.
+echo ERROR: The Node.js version pinned in .node-version could not be prepared.
+echo Check the network or set DSH_NODE_MIRROR to a reachable Node.js download mirror, then retry.
 goto :pause_and_exit
 
 :failed
