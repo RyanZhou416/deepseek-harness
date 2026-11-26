@@ -93,6 +93,17 @@ export type ApiSessionAgentResult =
   | { readonly error: ApiSessionAgentError }
 
 /**
+ * Whether a live Agent is a delegated child of one live parent Agent, read from
+ * the child's durable Session header (the core registry keeps no runtime owner).
+ * @param candidate - live Agent tested as the child.
+ * @param parent - live Agent tested as its parent.
+ * @returns true when the candidate is a subagent Session created under the parent.
+ */
+function isSubagentChildOf(candidate: Agent, parent: Agent): boolean {
+  return candidate.session.header.origin === 'subagent' && candidate.session.header.parentSession === parent.id
+}
+
+/**
  * Test whether generic Session routing must leave an identity to subagent routing.
  * @param session - Attached or live Session whose origin is tested.
  * @returns whether subagent routing owns the Session identity.
@@ -137,7 +148,7 @@ export class ApiSessionAgentController {
   ) {
     this.ctx.on('agent/created', ({ agent }) => {
       for (const { agent: parent } of this.ownedHandles.values()) {
-        if (!this.ctx.agents.isOwnedBy(agent.id, parent)) continue
+        if (!isSubagentChildOf(agent, parent)) continue
         this.runtimeParents.set(agent, parent)
         this.cancelIdleEviction(parent.id)
         break
@@ -351,7 +362,7 @@ export class ApiSessionAgentController {
     }
     this.ownedHandles.set(agent.id, handle)
     for (const candidate of this.ctx.agents.list()) {
-      if (candidate !== agent && this.ctx.agents.isOwnedBy(candidate.id, agent)) {
+      if (candidate !== agent && isSubagentChildOf(candidate, agent)) {
         this.runtimeParents.set(candidate, agent)
       }
     }
@@ -410,7 +421,7 @@ export class ApiSessionAgentController {
   private hasActiveOwnedWork(agent: Agent): boolean {
     if ((this.followerCounts.get(agent.id) ?? 0) > 0) return true
     if (agent.status !== 'idle' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) return true
-    if (this.ctx.agents.list().some(candidate => this.ctx.agents.isOwnedBy(candidate.id, agent))) return true
+    if (this.ctx.agents.list().some(candidate => isSubagentChildOf(candidate, agent))) return true
     const jobs = this.ctx.get('jobs')
     return jobs?.list(agent.id).some(job => job.status === 'running' || job.status === 'stopping') ?? false
   }

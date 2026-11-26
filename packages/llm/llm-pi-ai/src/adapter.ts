@@ -1936,7 +1936,7 @@ export class PiAiAdapter extends LlmAdapter {
           code: 'TIMEOUT',
         }
         reportResponse(failure, errorChain(error))
-        throw new LlmError(failure.message, failure.code, { cause: error })
+        throw LlmError.fromFailure(failure, { cause: error })
       }
       if (options.signal?.aborted) {
         throw new LlmError('pi-ai request aborted by caller', 'ABORTED', { cause: error })

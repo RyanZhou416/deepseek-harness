@@ -83,7 +83,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { assertUsableApiKey, LlmError, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
+import { INVALID_CREDENTIAL_CODE, LlmError, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
+import { normalizeApiKey } from '@deepseek-ai/dsh-credentials'
 import type { GenerateOptions, LlmModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import {
@@ -367,7 +368,14 @@ async function resolvePoolApiKey(ctx: Context, provider: string): Promise<string
   const hit = credentials !== undefined
     ? (await credentials.resolve(ref))?.value
     : launchEnvironmentOf(ctx).get(ref)?.value
-  if (hit !== undefined && hit.length > 0) return assertUsableApiKey(hit, 'llm-cc-pool', ref)
+  if (hit !== undefined && hit.length > 0) {
+    const checked = normalizeApiKey(hit)
+    if (checked.ok) return checked.value
+    throw new LlmError(checked.reason === 'empty'
+      ? `llm-cc-pool: the API key resolved from ${ref} is blank; set ${ref} to the raw key or export it in the launching environment`
+      : `llm-cc-pool: the API key resolved from ${ref} contains characters no HTTP header can carry; set ${ref} to the raw key alone`,
+    INVALID_CREDENTIAL_CODE)
+  }
   throw new LlmError(
     `llm-cc-pool: no credential for provider route "${provider}"; store ${ref} through the credentials`
     + ` service or export ${ref} in the launching environment`,
@@ -890,13 +898,13 @@ export function apply(ctx: Context, config: Config): void {
     // An expired lease is a failed refresh, not an absent answer: ask again now
     // instead of waiting for the recheck the old answer scheduled.
     requestAOffRevalidation(capabilityState?.aOffHipaaCacheExpiresAt !== undefined)
-    throw new LlmError(
-      'llm-cc-pool: refusing the request because the non-parity wire would send one-hour prompt-cache markers and'
-      + ` the pool at ${BASE_URL} has no live aOffHipaaCache: "downgrade" grant from /v1/capabilities;`
-      + ' install a pool build that advertises it, or set cacheTtl: none to disable prompt caching',
-      A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE,
-      { retryDisposition: 'forbid' },
-    )
+    throw LlmError.fromFailure({
+      message: 'llm-cc-pool: refusing the request because the non-parity wire would send one-hour prompt-cache markers and'
+        + ` the pool at ${BASE_URL} has no live aOffHipaaCache: "downgrade" grant from /v1/capabilities;`
+        + ' install a pool build that advertises it, or set cacheTtl: none to disable prompt caching',
+      code: A_OFF_HIPAA_CACHE_UNAVAILABLE_CODE,
+      retryDisposition: 'forbid',
+    })
   }
 
   const options: PiAiAdapterOptions = {

@@ -136,13 +136,10 @@ export class UiSessionStatus extends Service implements HostObservable<SessionSt
   private reconcileStatus(): void {
     const list = this.sessions.list.getSnapshot()
     const present = new Set(Object.keys(list.byId) as SessionId[])
+    // One list cut publishes at most once: a batch that changes many rows is compared into the
+    // status table below instead of notifying per row. Independent Remote events still publish at once.
     // Subagent catalog rows and retained subagent fallback rows do not establish Host running state.
-    for (const id of list.ids) {
-      const row = list.byId[id] as SessionSummary
-      const previous = this.running.get(id)
-      if (previous === undefined) this.running.set(id, row.running)
-      else if (previous !== row.running) this.observeRunning(id, row.running)
-    }
+    for (const id of list.ids) this.running.set(id, (list.byId[id] as SessionSummary).running)
     if (list.phase === 'ready') {
       for (const id of this.running.keys()) {
         if (present.has(id)) continue

@@ -13,7 +13,9 @@ getPlatformSession 仅在已存授权的 issuer 与 platformOrigin 一致时导�
 
 `desktopPlatform` 默认为 `null`，此时携带 `x-client-platform: web`；Desktop profile 提供 `darwin` 或 `win32`，改为 `desktop-mac` 或 `desktop-win`。五个请求头均由 provider 拥有，部署配置无法覆盖；`x-client-bundle-id` 有意保持为空，`x-client-locale` 将调用方语言归约为 `zh_CN` 或 `en_US`。PlatformSession 只携带部署请求头，内嵌客户端为自行打开的 Platform 文档和 API 请求组装同样的五个请求头，且仅在配置来源发送。
 
-资料和余额接口返回 HTTP 401 或顶层响应码 `40003`（鉴权失效）时清除被拒绝的本地凭据，并发送实时 `deepseek-account/session-expired` 通知。并发响应共用一次清除操作；已失效凭据代次的响应不能清除替换后的凭据。其他 HTTP 错误保留凭据。`resolveRequestCredential(url)` 把一个允许目标的凭据以请求头、`reject()` 和 `revoked` 信号的形式释放；`reject()` 在 HTTP 401 后、且存储的授权仍匹配该 token 时清除它并隔离存储失败；清除在 `reject()` 被调用时挂载的账号服务上执行，因此请求与目的地应答之间发生的重载仍会清除授权。[`ctx.deepseekAuth`](../deepseek-auth/README.zh.md) 代账号模型路由和 DeepSeek Web 提供方调用它，后两者在 `revoked` 中止时结束携带该 token 的请求。
+资料和余额接口返回 HTTP 401、顶层响应码 `40003`（鉴权失效），或推理调用方通过 `rejectToken` 报告被拒绝的 token 时，将匹配的本地凭据标记为需要重新认证，而不是删除：记录保留 token 字节并增加 `invalid` 标记。标记操作会合并执行；已失效凭据代次的响应不能标记替换后的凭据；被标记的凭据不再用于 Platform 或推理请求。只有显式退登才会移除它。其他 HTTP 错误保留凭据为有效状态。`resolveRequestCredential(url)` 把一个允许目标的凭据以请求头、`reject()` 和 `revoked` 信号的形式释放；`reject()` 在 HTTP 401 后、且存储的授权仍匹配该 token 时把它标记并隔离存储失败；标记在 `reject()` 被调用时挂载的账号服务上执行，因此请求与目的地应答之间发生的重载仍会标记该授权。
+
+被标记的凭据以 payload version 2 存储，`invalid.reason` 为 `needs-reauth` 或 `issuer-mismatch`，并带 ISO 格式的 `invalid.at` 时间戳；本 provider 不解释的字段会原样保留。没有该标记的 version 1 记录仍为有效状态，因此已有安装无需迁移。只要被标记的记录仍在存储中，`AccountView.status` 就报告 `needs-reauth`，并携带 `credentialIssue`。并发响应共用一次标记写入；实时 `deepseek-account/session-expired` 通知每次标记转换只发送一次，重复拒绝不会再次发送。[`ctx.deepseekAuth`](../deepseek-auth/README.zh.md) 代账号模型路由和 DeepSeek Web 提供方调用它，后两者在 `revoked` 中止时结束携带该 token 的请求。
 
 ## 概述
 
@@ -42,11 +44,11 @@ getPlatformSession 仅在已存授权的 issuer 与 platformOrigin 一致时导�
 
 账号资料投影将 `id_profile.picture` 映射为 `avatarUrl`，没有配置头像时返回 null。
 
-本地退出登录期间拒绝解析 token。本地授权成功删除后，先发布 `deepseek-account/signed-out`，接着中止为该次登录释放的请求凭据的 `revoked` 信号，再返回已退出的状态快照；token 被拒绝时的退登同样如此。远程撤销独立执行。
+本地退出登录期间拒绝解析 token。本地授权成功删除后，先发布 `deepseek-account/signed-out`，接着中止为该次登录释放的请求凭据的 `revoked` 信号，再返回已退出的状态快照；token 被拒绝时改为标记授权并发布 `deepseek-account/session-expired`，而不是退登。远程撤销独立执行。
 
 getProfile / getBalance 将保存的授权 token 通过 x-dsh-auth-token 请求头，向 platformOrigin 上的 GET /auth-api/v0/users/current 和 GET /api/v0/users/get_user_summary 发起请求。授权签发来源必须与该来源一致。Host 只投影账号 UID、资料名称、头像 URL、由 Platform 脱敏的手机号或邮箱（原样保留），以及 normal_wallets / bonus_wallets 的币种和余额字符串，丢弃响应 token 与其他字段。余额和赠金金额字符串只要符合 Platform Web 客户端交给 big.js 的数字文法即可通过，该文法和 big.js 一致，允许省略整数或小数部分以及十进制指数，因此 0E-16、5.0000000000000000 这类值仍然有效；原始字符串会保留，NaN、Infinity 和非法文本仍被拒绝。赠送钱包不计入充值余额。凭证变化和销毁会使进行中的查询失效。
 
-getNotifications 读取 `GET /api/v0/users/notifications/list`；getNotificationContent 读取 `GET /api/v0/users/notifications/content?id=<id>`，支持已消费通知。列表还会校验必填的正数 `next_poll_after` 不超出浏览器计时范围，并投影为 `nextPollAfterSeconds`。二者都通过 x-client-locale 指定语言。列表外层要求有效的轮询间隔和通知数组。每条通知单独解码；字段格式错误或操作不受支持时，记录诊断并跳过该条，保留其他有效通知及服务端顺序。被跳过的通知不会展示或上报。单条内容响应格式错误时仍拒绝请求，让客户端保留当前内容。reportNotificationEvent 向 `POST /api/v0/users/notifications/events` 发送 notification_id 和 type displayed、cta_clicked 或 dismissed。有效的 acked 响应表示服务端消费决策，不会关闭本地卡片。每项操作都捕获当前授权和取消生命周期，不前置查询当前用户；凭据变化会取消旧生命周期并丢弃迟到的响应，token 始终只留在 Host。其他 HTTP、业务和响应校验失败均拒绝；HTTP 401 或响应码 40003 仅使当前授权失效，并返回未登录结果。
+getNotifications 读取 `GET /api/v0/users/notifications/list`；getNotificationContent 读取 `GET /api/v0/users/notifications/content?id=<id>`，支持已消费通知。列表还会校验必填的正数 `next_poll_after` 不超出浏览器计时范围，并投影为 `nextPollAfterSeconds`。二者都通过 x-client-locale 指定语言。列表外层要求有效的轮询间隔和通知数组。每条通知单独解码；字段格式错误或操作不受支持时，记录诊断并跳过该条，保留其他有效通知及服务端顺序。被跳过的通知不会展示或上报。单条内容响应格式错误时仍拒绝请求，让客户端保留当前内容。reportNotificationEvent 向 `POST /api/v0/users/notifications/events` 发送 notification_id 和 type displayed、cta_clicked 或 dismissed。有效的 acked 响应表示服务端消费决策，不会关闭本地卡片。每项操作都捕获当前授权和取消生命周期，不前置查询当前用户；凭据变化会取消旧生命周期并丢弃迟到的响应，token 始终只留在 Host。其他 HTTP、业务和响应校验失败均拒绝；HTTP 401 或响应码 40003 只标记当前授权，并返回 null 结果。
 
 余额请求使用 balanceTimeoutMs（默认 30,000ms）；超时返回失败结果，不清除账号，也不制造零余额。在插件行配置 platformOrigin、allowLoopbackHttp、requestTimeoutMs、balanceTimeoutMs 和 attemptTimeoutMs。HTTP 仅用于显式启用的本机开发。服务先在现有 Host webServer 注册 /oauth/callback，再调用 auth_init；校验 state、使用 S256 PKCE 授权码兑换一次，并在跳转 auth_exchange.biz_data.authorized_url 前提交授权记录。浏览器地址默认要求匹配配置的平台来源，并始终要求固定的 /dsh/authorize 或 /dsh/authorized 路径。完成页地址将 `login_source` 设为发起登录的客户端类型（`web` 或 `desktop`），并保留平台返回的其他查询参数。设备标识是独立的随机 UUID 记录，由使用同一凭证存储的进程共享；device_model 报告操作系统和架构。
 
@@ -73,7 +75,7 @@ Host 诊断仅在请求、响应校验或登录失败时，通过 `console.error
 
 inferenceOrigin 默认为 `https://api.deepseek.com`。私有部署 patch 可将其替换为一个精确的 HTTP(S) 来源（含端口），让推理及文件请求通过 x-dsh-auth-token 认证。配置不得包含路径、URL 凭证、查询或片段。其他来源要求授权由配置的 platformOrigin 签发；仍拒绝 Mock token。本机授权不能认证官方生产 API。部署地址保存在私有 patch 中，不随默认配置发布。
 
-服务初始化时，若有效的已存授权 issuer 与 platformOrigin 不同，会在使用方读取账号状态前删除该本地授权，以未登录态继续启动，不发送远端退登请求；API Key 和设备标识保留。存储错误仍明确报错，账号 HTTP 或响应校验失败不会删除来源匹配的授权。
+服务初始化时，若有效的已存授权 issuer 与 platformOrigin 不同，会在使用方读取账号状态前将该本地授权标记为 `issuer-mismatch`；记录及其中本 provider 不解释的字段都会保留。随后启动以 `needs-reauth` 状态继续，不发送远端退登请求；API Key 和设备标识保留。存储错误仍明确报错，账号 HTTP 或响应校验失败不会删除来源匹配的授权。
 
 <a id="understand-the-implementation"></a>
 ## 理解实现
@@ -102,7 +104,7 @@ attemptTimeoutMs 包含初始化、等待浏览器和兑换的耗时。初始化
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- 浏览器登录需要 Host webServer，仅支持通过带显式端口的 HTTP localhost、127.0.0.1 或 [::1] 本机访问及 SSH 本地转发，不支持非本机域名的反向代理。账号 token 没有过期或刷新流程；用户主动在 DSH 退出登录时，先删除本地授权，再在后台调用 POST /auth-api/v0/users/logout。远程失败不会恢复本地登录态。默认仅针对捕获的旧 token 最多额外重试五次，指数退避间隔为 1、2、4、8、16 秒；logoutMaxRetries（0–5）和 logoutRetryDelayMs 可配置该策略。每次请求使用 requestTimeoutMs。服务关闭时取消请求和等待，不持久化待撤销任务。本地凭证删除失败仍向调用者报错。签发 token 前的授权尝试仍有有效期。初始化后的取消或超时会在后台发送一次 POST /auth-api/v0/dsh/auth_cancel，携带 auth_init.biz_data 中的 authorize_id 和原始 code_verifier，不附带账号授权。本地取消不等待该请求，也不会因失败而恢复；requestTimeoutMs 限制请求时间，服务关闭时中止请求。TODO(product-error-ui)：产品需定义已给定 biz code 的本地化文案和交互表现。在此之前，业务失败沿用现有“操作失败，请重试”兜底；其他 code 和 HTTP 错误也使用该兜底。开发授权不能认证生产请求。
+- 浏览器登录需要 Host webServer，仅支持通过带显式端口的 HTTP localhost、127.0.0.1 或 [::1] 本机访问及 SSH 本地转发，不支持非本机域名的反向代理。账号 token 没有过期或刷新流程；只有用户主动在 DSH 退出登录才会移除本地授权，并在移除后于后台调用 POST /auth-api/v0/users/logout。服务端拒绝和 issuer 漂移会标记授权而不是移除它，因此被标记的 token 不会再次使用，用户必须重新登录。显式退登会移除 issuer 不匹配的外来授权，但不会将其发送到已配置来源。远程失败不会恢复本地登录态。默认仅针对捕获的旧 token 最多额外重试五次，指数退避间隔为 1、2、4、8、16 秒；logoutMaxRetries（0–5）和 logoutRetryDelayMs 可配置该策略。每次请求使用 requestTimeoutMs。服务关闭时取消请求和等待，不持久化待撤销任务。本地凭证删除和标记失败仍向调用者报错。签发 token 前的授权尝试仍有有效期。初始化后的取消或超时会在后台发送一次 POST /auth-api/v0/dsh/auth_cancel，携带 auth_init.biz_data 中的 authorize_id 和原始 code_verifier，不附带账号授权。本地取消不等待该请求，也不会因失败而恢复；requestTimeoutMs 限制请求时间，服务关闭时中止请求。TODO(product-error-ui)：产品需定义已给定 biz code 的本地化文案和交互表现。在此之前，业务失败沿用现有“操作失败，请重试”兜底；其他 code 和 HTTP 错误也使用该兜底。开发授权不能认证生产请求。
 
 <a id="dev-note"></a>
 ### 开发备注

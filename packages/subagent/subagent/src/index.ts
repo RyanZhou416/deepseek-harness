@@ -479,7 +479,7 @@ export class SubagentRuntime extends TypertRemoteService {
    * @param delivery - Queue as a distinct turn or Steer at the nearest step.
    * @returns the accepted message's inbox id.
    */
-  private [deliverSubagentPrompt](
+  protected [deliverSubagentPrompt](
     parent: Agent,
     childId: SessionId,
     content: ContentBlock[],

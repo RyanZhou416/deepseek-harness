@@ -417,15 +417,15 @@ it.each([
     f.failAck(0, 401)
     return f.account.reportNotificationEvent(ORDER as AccountNotificationId, 'displayed', clientMetadata('en'))
   }, false],
-])('expires the rejected grant when %s returns HTTP 401', async (_name, run, signedOutOutcome) => {
+])('parks the rejected grant when %s returns HTTP 401', async (_name, run, signedOutOutcome) => {
   const f = await fixture()
   await f.grant('test-account-token')
   const expired = vi.fn()
   f.ctx.on('deepseek-account/session-expired', expired)
-  // A rejected authenticated request names an invalid credential, so the provider drops it locally
-  // exactly as the profile and balance reads do; the caller sees its signed-out outcome.
+  // A rejected authenticated request names an invalid credential, so the provider parks it locally
+  // exactly as the profile and balance reads do; the caller sees its null outcome.
   expect(await run(f)).toBe(signedOutOutcome)
-  expect(await f.account.getState()).toMatchObject({ status: 'signed-out' })
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth' })
   expect(expired).toHaveBeenCalledOnce()
 })
 
@@ -584,7 +584,7 @@ it.each([401, 500])('handles a content HTTP %s without discarding a usable grant
   const result = f.account.getNotificationContent(ORDER as AccountNotificationId, clientMetadata())
   if (status === 401) {
     expect(await result).toBeNull()
-    expect(await f.account.getState()).toMatchObject({ status: 'signed-out' })
+    expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth' })
   } else {
     await expect(result).rejects.toThrow('account: network')
     expect(await f.account.getState()).toMatchObject({ status: 'credential-stored' })

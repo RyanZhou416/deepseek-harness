@@ -18,7 +18,7 @@ import {
 import type { ProjectionHandle, ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SessionTitleSnapshot } from '@deepseek-ai/dsh-session-title'
-import type { SessionWindowRequest } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionWindow, SessionWindowRequest } from '@deepseek-ai/dsh-session-persistence'
 import type {
   SessionEventResultFilter,
   SessionEventSearchPage,
@@ -41,7 +41,6 @@ import type {
   SessionSurfaceSnapshot,
   SessionTitleObservation,
   SessionTitleObservationResult,
-  SessionWindowRead,
 } from './types.ts'
 import {
   SESSION_QUERY_DEFAULT_PERSISTED_INSPECT_CONCURRENCY,
@@ -95,6 +94,27 @@ export {
   materializeSessionResultFilters,
 } from './filters.ts'
 export { assertSessionHeadersCompatible } from './sources.ts'
+/**
+ * One bounded stored-history read: a validated durable window plus the stored
+ * projection checkpoint for the same Session, when the cache holds a complete
+ * baseline for the window. Declared on the Host entry because both fields are
+ * Host persistence types the client `types` entry must not import.
+ */
+export interface SessionWindowRead {
+  /** Validated contiguous durable window from the active persistence backend. */
+  window: SessionWindow
+  /**
+   * Complete stored projection checkpoint baseline for the window's Session.
+   *
+   * Present only when the checkpoint does not lead the window `cursor` and
+   * serves a value for every registered client-visible key; a checkpoint
+   * missing either condition is omitted, so consumers fall back to a complete
+   * observation. Not an exact cut at the window `cursor`: `asOfSeq` is the
+   * checkpoint's own stored watermark, which may lag the window, so consumers
+   * must let a later exact observation supersede these values.
+   */
+  projections?: ProjectionSnapshot
+}
 export type { SessionObservation, SessionObservationOptions } from './observation.ts'
 export type { SessionMetadataObservation, SessionMetadataOptions } from './observation.ts'
 

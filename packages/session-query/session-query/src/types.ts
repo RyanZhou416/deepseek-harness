@@ -15,8 +15,6 @@ import type {
   OptionalSessionSeq,
   SurfaceEvent,
 } from '@deepseek-ai/dsh-session/types'
-import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
-import type { SessionWindow } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionTitleSnapshot } from '@deepseek-ai/dsh-session-title/types'
 import type { SessionSearchCursor } from './cursor.ts'
 
@@ -175,27 +173,6 @@ export interface SessionEventWindow {
   startSeq: SessionSeq
   /** Last seq included in `events`. */
   endSeq: SessionSeq
-}
-
-/**
- * One bounded stored-history read: a validated durable window plus the stored
- * projection checkpoint for the same Session, when the cache holds a complete
- * baseline for the window.
- */
-export interface SessionWindowRead {
-  /** Validated contiguous durable window from the active persistence backend. */
-  window: SessionWindow
-  /**
-   * Complete stored projection checkpoint baseline for the window's Session.
-   *
-   * Present only when the checkpoint does not lead the window `cursor` and
-   * serves a value for every registered client-visible key; a checkpoint
-   * missing either condition is omitted, so consumers fall back to a complete
-   * observation. Not an exact cut at the window `cursor`: `asOfSeq` is the
-   * checkpoint's own stored watermark, which may lag the window, so consumers
-   * must let a later exact observation supersede these values.
-   */
-  projections?: ProjectionSnapshot
 }
 
 /** Latest folded title bound to the same session-header observation. */

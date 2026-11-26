@@ -591,7 +591,7 @@ export function sessionSearchIndex(
   previous?: TextSearchIndex<SessionSummary>,
 ): TextSearchIndex<SessionSummary> {
   const archived = new Set(archivedSessionIds)
-  const current = mainSessionId(list)
+  const current = mainSessionSelection(list.byId).id
   const labelOf = workspaceLabels(workspaces)
   const visible = list.ids.filter((id) => {
     const summary = list.byId[id]
@@ -631,7 +631,7 @@ export function deriveSearchResults(
 ): SearchResultSet {
   if (query.trim() === '') return { items: [], hasMore: false }
   const archived = new Set(archivedSessionIds)
-  const current = mainSessionId(list)
+  const current = mainSessionSelection(list.byId).id
   const labelOf = workspaceLabels(workspaces)
   const contentBySession = new Map<SessionId, SessionSearchResultItem>()
   for (const item of content.items) {

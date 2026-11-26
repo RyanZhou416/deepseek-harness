@@ -253,7 +253,7 @@ function CatalogRows({
           </button>
         </div>
       )}
-      {catalog.entries.map((entry) => {
+      {catalog.entries.map((entry, index) => {
         const external = entry.mode === 'external'
         const childCatalog = catalogs[entry.id]
         const isCurrent = entry.id === currentSessionId
@@ -332,6 +332,8 @@ function CatalogRows({
             tabIndex={external ? -1 : 0}
             aria-disabled={external || undefined}
             aria-level={level}
+            aria-setsize={catalog.entries.length}
+            aria-posinset={index + 1}
             aria-current={isCurrent || undefined}
             aria-label={[primaryLabel, secondary, metrics].filter(value => value !== '').join(' ')}
             {...canExpand ? { 'aria-expanded': isExpanded } : {}}
@@ -379,7 +381,7 @@ function CatalogRows({
                   </span>
                 )
                 : external ? <span className={css.sidebarSpace} /> : (
-                  <Tooltip label={t('open.sidebar')} delayMs={500} side="bottom" align="end">
+                  <Tooltip label={t('open.sidebar')} delayMs={500} side="bottom" align="end" portal>
                     <button
                       type="button"
                       className={css.sidebarButton}
@@ -468,7 +470,8 @@ export function deriveCatalogs(
     return [id, {
       state,
       error: snapshot.error,
-      entries: (projected ?? []).map(entry => ({
+      // Newest child first at every level; a stable sort keeps catalog order between equal creation times.
+      entries: [...(projected ?? [])].sort((left, right) => right.createdAt - left.createdAt).map(entry => ({
         ...entry,
         activity: (statuses.get(entry.id)?.running ?? summaries[entry.id]?.running) === true
           ? 'running' as const : 'inactive' as const,
