@@ -74,6 +74,7 @@ import {
   sessionUsageCall,
 } from './session-protocol.ts'
 import type { AetherSessionId } from './session-protocol.ts'
+import { sessionDirectory } from './workdir.ts'
 
 /** The exact live Agent object a session belongs to. */
 export type AetherSessionOwner = Agent
@@ -549,7 +550,7 @@ export class AetherSessions {
 
   /** Resolve the model's working directory against the owning session's workspace. */
   private resolveCwd(requested: string | undefined, owner: AetherSessionOwner): string {
-    const workspace = owner.session.header.cwd ?? process.cwd()
+    const workspace = sessionDirectory(this.dependencies.ctx.get('workingDirectory'), owner.session) ?? process.cwd()
     if (requested === undefined || requested.trim().length === 0) return workspace
     if (isAbsolute(requested)) return requested
     return resolvePath(workspace, requested)

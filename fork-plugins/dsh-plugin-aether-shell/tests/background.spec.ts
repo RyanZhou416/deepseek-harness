@@ -47,6 +47,7 @@ import type { Config as AetherConfig } from '../src/config.ts'
 import { AetherProcesses, createExecutableResolver } from '../src/exec.ts'
 import { executeToolCall } from './helpers/execute.ts'
 import { installedInterpreter } from './helpers/harness.ts'
+import { mountMovedWorkingDirectory } from './helpers/working-directory.ts'
 
 /** Absolute path of the background fixture every job in this suite spawns. */
 const BACKGROUND_FIXTURE = fileURLToPath(new URL('./fixtures/ae-background-fixture.mjs', import.meta.url))
@@ -94,6 +95,8 @@ interface BackgroundHarnessOptions {
   readonly executable?: string
   /** Trusted argv between the executable and the subcommand (default the background fixture). */
   readonly executableArgs?: readonly string[]
+  /** Mount a `workingDirectory` service whose committed directory is this one, not the Session header's. */
+  readonly workingDirectory?: string
 }
 
 /** A mounted background surface plus the observations a suite asserts on. */
@@ -243,6 +246,7 @@ async function createBackgroundHarness(options: BackgroundHarnessOptions = {}): 
   await ctx.plugin(RecordingSandboxProvider)
   await ctx.plugin(LocalSubprocessRuntime)
   await ctx.plugin(AgentRegistry)
+  if (options.workingDirectory !== undefined) await mountMovedWorkingDirectory(ctx, options.workingDirectory)
   await ctx.plugin(LocalJobRegistry, options.jobsConfig ?? {})
   // The controller a composition's job tool plugin attaches; without one the
   // registry refuses to start owned work at all.
@@ -435,6 +439,18 @@ describe('aether_job_start raw output', () => {
     const id = jobIdOf(await mounted.call({ code: 'bg:pwd', cwd: mounted.workspace }))
     await mounted.waitForTerminal(id)
     expect(mounted.ringText(id)).toContain(mounted.workspace)
+  })
+
+  it('runs the job in the committed Session directory', async () => {
+    const moved = await mkdtemp(join(tmpdir(), 'dsh-aether-moved-'))
+    try {
+      const mounted = await setup({ workingDirectory: moved })
+      const id = jobIdOf(await mounted.call({ code: 'bg:pwd' }))
+      await mounted.waitForTerminal(id)
+      expect(mounted.ringText(id)).toContain(moved)
+    } finally {
+      await rm(moved, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
   })
 
   it('scrubs the child environment and applies this deployment\'s control values', async () => {

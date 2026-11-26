@@ -23,6 +23,7 @@
  */
 
 import { isAbsolute, resolve as resolvePath } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -37,6 +38,7 @@ import { describeError, toolAborted } from './errors.ts'
 import { assertEvalCode } from './request.ts'
 import { CWD_DESCRIPTION, FILE_POLICY_GUIDANCE } from './guidance.ts'
 import type { AetherToolDependencies } from './tools.ts'
+import { sessionDirectory } from './workdir.ts'
 
 declare module '@deepseek-ai/dsh-jobs' {
   interface JobKindMap {
@@ -140,11 +142,12 @@ function assertWorkdir(cwd: string | undefined): void {
  * against the session workspace, and an omitted one falls back to that
  * workspace and then to the harness process directory.
  * @param requested - the model-supplied directory, when it gave one.
- * @param exec - the calling execution, which carries the session workspace.
+ * @param exec - the calling execution, which carries the calling Session.
+ * @param ctx - the composition whose optional `workingDirectory` service owns that Session's directory.
  * @returns the absolute working directory for the interpreter.
  */
-function resolveWorkdir(requested: string | undefined, exec: ToolRunContext): string {
-  const workspace = exec.agent?.session.header.cwd
+function resolveWorkdir(requested: string | undefined, exec: ToolRunContext, ctx: Context): string {
+  const workspace = sessionDirectory(ctx.get('workingDirectory'), exec.agent?.session)
   if (requested === undefined) return workspace ?? process.cwd()
   if (workspace !== undefined && !isAbsolute(requested)) return resolvePath(workspace, requested)
   return requested
@@ -453,7 +456,7 @@ export function createAetherBackgroundTool(
         deps: dependencies,
         invocation: { transport: 'command-line', code: args.code },
         label: jobLabel(args.label, args.code),
-        cwd: resolveWorkdir(args.cwd, exec),
+        cwd: resolveWorkdir(args.cwd, exec, ctx),
         policy: ctx.sandboxPolicy.resolve({ session: owner.session }),
         managedEnv: ctx.get('shellEnv')?.collect(exec) ?? {},
         timeoutMs,

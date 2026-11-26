@@ -47,6 +47,7 @@ const roots = [
   'packages/subprocess/subprocess', 'packages/subprocess/subprocess-local',
   'packages/sandbox/sandbox', 'packages/sandbox/sandbox-policy', 'packages/sandbox/sandbox-windows-acl', 'packages/sandbox/sandbox-local',
   'packages/core/session', 'packages/session/session-projection', 'packages/core/system-prompt', 'packages/shell/shell-env',
+  'packages/session/working-directory',
   'packages/core/agent', 'packages/jobs/jobs', 'packages/jobs/jobs-local', 'packages/jobs/tool-jobs',
   'packages/test-support/agent-loop-testkit', 'packages/util/brand',
 ]

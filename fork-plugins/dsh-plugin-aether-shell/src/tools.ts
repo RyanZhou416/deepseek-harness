@@ -47,6 +47,7 @@ import type { AetherOutcome, AetherValueOutcome } from './outcome.ts'
 import { isJsonObject } from './outcome.ts'
 import { renderDiscovery, renderOutcome } from './render.ts'
 import type { AetherResults } from './results.ts'
+import { sessionDirectory } from './workdir.ts'
 import {
   assertEvalCode,
   assertRequestBytes,
@@ -406,11 +407,12 @@ function assertWorkdir(cwd: string | undefined): void {
  * against the session workspace, and an omitted one falls back to that
  * workspace and then to the harness process directory.
  * @param requested - the model-supplied directory, when it gave one.
- * @param exec - the calling execution, which carries the session workspace.
+ * @param exec - the calling execution, which carries the calling Session.
+ * @param ctx - the composition whose optional `workingDirectory` service owns that Session's directory.
  * @returns the absolute working directory for the interpreter.
  */
-function resolveWorkdir(requested: string | undefined, exec: ToolRunContext): string {
-  const workspace = exec.agent?.session.header.cwd
+function resolveWorkdir(requested: string | undefined, exec: ToolRunContext, ctx: Context): string {
+  const workspace = sessionDirectory(ctx.get('workingDirectory'), exec.agent?.session)
   if (requested === undefined) return workspace ?? process.cwd()
   if (workspace !== undefined && !isAbsolute(requested)) return resolvePath(workspace, requested)
   return requested
@@ -525,7 +527,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     label: string,
     run: (deps: AetherExecDeps, cwd: string, signal: AbortSignal, timeoutMs: number) => Promise<AetherOutcome>,
   ): Promise<AetherQueryResult> => {
-    const cwd = resolveWorkdir(args.cwd, exec)
+    const cwd = resolveWorkdir(args.cwd, exec, ctx)
     const deps = depsFor(exec)
     const retention = retentionFor(exec)
     const jobs = ctx.get('jobs')
@@ -580,7 +582,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
       const requestText = encodeRequest(args.query === undefined ? ontologyManifestRequest() : ontologyDescribeRequest(args.query, config.structuredDataMode))
       assertRequestBytes(requestText, config)
       const outcome = await runNativeRequest(depsFor(exec), {
-        cwd: resolveWorkdir(args.cwd, exec),
+        cwd: resolveWorkdir(args.cwd, exec, ctx),
         timeoutMs: callTimeout(args.timeoutMs, config),
         signal: exec.signal,
         structured: config.structuredDataMode,

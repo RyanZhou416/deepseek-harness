@@ -44,6 +44,7 @@ import { AetherProcesses, createExecutableResolver } from '../../src/exec.ts'
 import { createAetherSessionTools } from '../../src/session-tools.ts'
 import type { AetherSessions, AetherSessionSettings } from '../../src/sessions.ts'
 import { executeToolCall } from './execute.ts'
+import { mountMovedWorkingDirectory } from './working-directory.ts'
 
 /** The Windows installer's fixed location, checked before PATH. */
 const WINDOWS_AETHER_INSTALL = 'C:\\Program Files\\AetherShell\\ae.exe'
@@ -90,6 +91,8 @@ export interface SessionHarnessOptions {
   config?: Config
   /** Enforcement the recording backend claims for a confined session (default `full`). */
   enforcement?: SandboxEnforcement
+  /** Mount a `workingDirectory` service whose committed directory is this one, not the Session header's. */
+  workingDirectory?: string
 }
 
 /** A mounted persistent-session surface plus the observations a suite asserts on. */
@@ -212,6 +215,7 @@ export async function createSessionHarness(options: SessionHarnessOptions = {}):
   await ctx.plugin(RecordingSandboxProvider)
   await ctx.plugin(ObservingSubprocessRuntime)
   await ctx.plugin(AgentRegistry)
+  if (options.workingDirectory !== undefined) await mountMovedWorkingDirectory(ctx, options.workingDirectory)
 
   const resolved: ResolvedConfig = resolveConfig({
     executable: options.config?.executable ?? 'ae',

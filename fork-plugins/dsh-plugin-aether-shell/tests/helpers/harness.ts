@@ -32,6 +32,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as AetherShell from '../../src/index.ts'
 import { executeToolCall } from './execute.ts'
+import { mountMovedWorkingDirectory } from './working-directory.ts'
 
 /** Absolute path of the deterministic interpreter fixture every harness spawns. */
 export const AETHER_FIXTURE = fileURLToPath(new URL('../fixtures/ae-fixture.mjs', import.meta.url))
@@ -80,6 +81,8 @@ export interface HarnessOptions {
   executableArgs?: readonly string[]
   /** Mount the optional managed-`DSH_*` environment registry. */
   shellEnv?: boolean
+  /** Mount a `workingDirectory` service whose committed directory is this one, not the Session header's. */
+  workingDirectory?: string
 }
 
 /** A mounted plugin under test plus the observations a suite asserts on. */
@@ -188,6 +191,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     const shellEnv = await import('@deepseek-ai/dsh-shell-env')
     await ctx.plugin(shellEnv)
   }
+  if (options.workingDirectory !== undefined) await mountMovedWorkingDirectory(ctx, options.workingDirectory)
   const pluginConfig: AetherShell.Config = {
     executable: options.executable ?? process.execPath,
     executableArgs: [...(options.executableArgs ?? [AETHER_FIXTURE])],

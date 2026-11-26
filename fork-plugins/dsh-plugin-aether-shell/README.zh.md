@@ -27,7 +27,7 @@ kind: "package-bundle"
 
 ### 前置条件与安装
 
-插件面向 DSH `0.2.2-rc.1`：它针对该 Host 的工具运行时构建，其中模型工具批次由独立的 tool-executor 插件结算；替换软件包不会升级正在运行的 Host。默认的 `legacy` 数据模式支持原生 AetherShell `12.0.2` 协议；`typed-v1` 需要个人构建版 `12.0.2+ryan.2` 提供的类型化数据能力。单独安装 AetherShell；如果 Host 已继承的 PATH 中没有它，配置解释器绝对路径。Windows 系统级安装可使用 `C:\Program Files\AetherShell\ae.exe`；修改 PATH 不会更新已运行 Host 的环境。
+插件面向 DSH `0.2.3-alpha.2`：它针对该 Host 的工具运行时构建，其中模型工具批次由独立的 tool-executor 插件结算；替换软件包不会升级正在运行的 Host。默认的 `legacy` 数据模式支持原生 AetherShell `12.0.2` 协议；`typed-v1` 需要个人构建版 `12.0.2+ryan.2` 提供的类型化数据能力。单独安装 AetherShell；如果 Host 已继承的 PATH 中没有它，配置解释器绝对路径。Windows 系统级安装可使用 `C:\Program Files\AetherShell\ae.exe`；修改 PATH 不会更新已运行 Host 的环境。
 
 从 checkout 构建并打包，无须安装依赖：
 
@@ -38,7 +38,7 @@ pwsh -NoProfile -File fork-plugins/dsh-plugin-aether-shell/scripts/run-local.ps1
 
 从 checkout 运行 `pnpm dsh plugin --profile <profile> add <tarball> --ignore-scripts`，先在隔离的 Harness home 中安装生成的压缩包，再在真实 profile 中启用。bundle 插入一个 `aether-shell` 插件条目，不禁用其他 shell 条目。启用前备份 profile 配置。Host 运行时可通过 DSH 包管理替换软件包；已加载的模块版本会继续运行，直到重启。安装后重启，以配套的 Host 构建加载新软件包。不要手工覆盖已加载的模块文件。
 
-本 fork 的 `build.cmd` 还会在普通构建之后从源码构建该插件并链接到选定的 `web` profile，同事无需手工转交 tarball。该路径要求先停止 Host，从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.2-rc.1`；见 [fork 插件构建说明](../README.zh.md#repo-integrated-build-and-install)。
+本 fork 的 `build.cmd` 还会在普通构建之后从源码构建该插件并链接到选定的 `web` profile，同事无需手工转交 tarball。该路径要求先停止 Host，从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.3-alpha.2`；见 [fork 插件构建说明](../README.zh.md#repo-integrated-build-and-install)。
 
 ### 选择合适的工具
 
@@ -110,7 +110,7 @@ DSH 限制的是解释器进程的文件写入和删除，依据所属 Session �
 
 ### 执行与权限
 
-查询和会话有明确的工作目录；任务交接可用时，查询的前台等待与执行硬期限分开。会话命令和发现保留硬期限，原始后台任务只有在调用或部署提供期限时才受期限限制。插件清除继承的 `AETHER_*` 和 `AE_*` 控制变量，再使用自己的运行配置；权限真源仍是 DSH。除非部署配置启用，否则 `sh()` 启动时关闭。这个启动设置不是进程执行安全边界：其他进程内置操作和表达式代码可以改变解释器状态，其文件副作用仍受 DSH 文件策略限制。
+查询和会话有明确的工作目录；省略目录时使用宿主 `working-directory` 服务提交的会话目录——文件策略的工作区边界读取同一个值——所以宿主移动目录时解释器与边界一起移动；未挂载该服务的组合使用会话的原始目录。任务交接可用时，查询的前台等待与执行硬期限分开。会话命令和发现保留硬期限，原始后台任务只有在调用或部署提供期限时才受期限限制。插件清除继承的 `AETHER_*` 和 `AE_*` 控制变量，再使用自己的运行配置；权限真源仍是 DSH。除非部署配置启用，否则 `sh()` 启动时关闭。这个启动设置不是进程执行安全边界：其他进程内置操作和表达式代码可以改变解释器状态，其文件副作用仍受 DSH 文件策略限制。
 
 响应区分值、原生错误、文件沙箱拒绝和中断。解释器退出事实与有界 stderr 分开保留。原生 API 可能在进程退出零时报告失败。应用返回记录中的 `success:false` 是普通数据，不会自动变成工具失败。AetherShell 的子程序结果仍在该值中；解释器退出码不是子程序退出码。
 
