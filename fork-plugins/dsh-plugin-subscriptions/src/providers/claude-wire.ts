@@ -35,6 +35,7 @@ import { resolveSuppressBetas } from '../claude-engine/request-policy.js'
 import type { ClaudeEnginePolicy } from '../claude-engine/request-policy.js'
 import { oversizeWireError } from './claude-images.js'
 import { CLAUDE_PROTOCOL_PROFILE, claudeRoleHeaders } from './claude-protocol.js'
+import { pluginLlmError } from '../llm-error.js'
 
 declare module '@deepseek-ai/dsh-llm/types' {
   /**
@@ -429,7 +430,7 @@ export function assertPolicyRequestShape(messages: readonly TranslatableMessage[
     // A local policy decision, not a server statement about this client's version: reporting it as
     // a version refusal would block the shared provider profile and send the user to an upgrade
     // that cannot help. The message is fixed and carries no part of the conversation.
-    throw new LlmError(
+    throw pluginLlmError(
       'claude request shape unsupported under the account policy: a mid-conversation system message cannot be expressed while that policy withholds the mid-conversation betas',
       'POLICY_UNSUPPORTED',
       { retryDisposition: 'forbid' },

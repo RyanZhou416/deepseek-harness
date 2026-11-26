@@ -125,6 +125,7 @@ import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 import { parseUnifiedRateLimit, rememberUnifiedRateLimit } from './unified-rate-limit.js'
 import type { UnifiedRateLimitState } from './unified-rate-limit.js'
 import { parseUsageJson } from '../claude-core/quota-observation.js'
+import { pluginLlmError } from '../llm-error.js'
 
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 /**
@@ -248,7 +249,7 @@ interface ClaudeRequestContinuation {
  * @returns the harness error naming it.
  */
 function claudeContinuationRefusal(unavailable: ContinuationUnavailable): LlmError {
-  return new LlmError(
+  return pluginLlmError(
     `claude request refused: the continuation state is unavailable (${unavailable.reason})`,
     LOCAL_CONTINUATION_STATE_UNAVAILABLE,
     { retryDisposition: 'forbid' },
@@ -1278,7 +1279,7 @@ const CLAUDE_IDENTITY_CHANGED_CODE = 'CLAUDE_IDENTITY_CHANGED'
  * @returns the error to throw.
  */
 function claudeIdentityRacedError(because: string): LlmError {
-  return new LlmError(
+  return pluginLlmError(
     `claude account identity could not be attached because ${because} while it was read; `
     + 'the account was not modified, send the turn again',
     CLAUDE_IDENTITY_CHANGED_CODE,
@@ -1307,7 +1308,7 @@ const CLAUDE_IDENTITY_UNVERIFIABLE_CODE = 'CLAUDE_IDENTITY_UNVERIFIABLE'
  * @returns the error to throw.
  */
 function claudeOwnershipChangedError(): LlmError {
-  return new LlmError(
+  return pluginLlmError(
     'claude account credential ownership changed while this request was being prepared; '
     + 'the account was not modified and this request was not sent',
     CLAUDE_IDENTITY_CHANGED_CODE,
@@ -1324,7 +1325,7 @@ function claudeOwnershipChangedError(): LlmError {
  * @returns the error to throw.
  */
 function claudeIdentityUnverifiableError(): LlmError {
-  return new LlmError(
+  return pluginLlmError(
     'this claude credential backend reports no revision for the account, so binding an identity '
     + 'to its externally owned credential cannot be made conditional; nothing was written and the '
     + 'request was not sent',
@@ -2249,7 +2250,7 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       // account chain, the profile check, any credential read and any Files upload — keeps that
       // failure at zero side effects rather than merely at zero bytes.
       if (options.sessionId === undefined) {
-        throw new LlmError(
+        throw pluginLlmError(
           'claude request refused: GenerateOptions.sessionId is required because every prepared Messages request is recorded in its session log',
           CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED,
           { retryDisposition: 'forbid' },
@@ -2271,7 +2272,7 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       // no owner refuses here rather than minting an identity of its own.
       const state = this.options.continuation
       if (state === undefined) {
-        throw new LlmError(
+        throw pluginLlmError(
           'claude request refused: the continuation state owner is not wired, so this route cannot commit the wire identity a conversation declares',
           LOCAL_CONTINUATION_STATE_UNAVAILABLE,
           { retryDisposition: 'forbid' },
@@ -2414,7 +2415,7 @@ export class ClaudeAdapter extends PoolBackedAdapter {
         // An accepted response without a body has no terminal state to reach: it is the same
         // incomplete outcome as a stream that ends early, and the request has certainly been
         // sent, so it is not reported as the retryable empty-completion case.
-        throw new LlmError(
+        throw pluginLlmError(
           'claude API accepted the request but returned no response body',
           STREAM_INCOMPLETE_CODE,
           { retryDisposition: 'forbid' },
@@ -2789,7 +2790,7 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       },
     )
     if (!outcome.ok) {
-      throw new LlmError(
+      throw pluginLlmError(
         `claude request refused: the prepared request was not recorded (${outcome.code})`,
         outcome.code,
         { retryDisposition: 'forbid' },

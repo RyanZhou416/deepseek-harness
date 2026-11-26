@@ -24,9 +24,10 @@
  * @module dsh-plugin-subscriptions/providers/pool-gate
  */
 
-import { LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { LlmErrorOptions } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
+import { PluginCodeError } from '../llm-error.js'
 import type { ProviderId } from '../auth/store.js'
 import { accountKey, isAuthCooldownReason } from './pool-health.js'
 import type { PoolHealthRegistry } from './pool-health.js'
@@ -84,7 +85,7 @@ function coolingCode(reason: string): string {
  * decision itself, for callers that must distinguish "wait for this session's
  * backoff" from "this account is parked".
  */
-export class PoolGateError extends LlmError {
+export class PoolGateError extends PluginCodeError {
   /** The scheduling decision behind this refusal. */
   readonly gateReason: PoolGateReason
 

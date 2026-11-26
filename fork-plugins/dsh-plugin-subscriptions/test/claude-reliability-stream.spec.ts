@@ -28,6 +28,7 @@ import type { TranslatableMessage } from '../src/translate/resolved.js'
 import type { FetchFn } from '../src/providers/common.js'
 import { PermittingRecordPort } from './recording-port.js'
 import { ownedClaudeContinuation } from './claude-maintenance-fixtures.js'
+import { pluginLlmError } from '../src/llm-error.js'
 
 const MODEL = 'claude-opus-4-5'
 const ACCOUNT_UUID = '00000000-0000-4000-8000-000000000001'
@@ -724,7 +725,7 @@ test('a pool never answers a forbidden failure from another account, whatever it
   // retried inside the pool merely because its code looks transient.
   for (const code of ['SERVER', 'TIMEOUT']) {
     const attempted: string[] = []
-    const forbidden = new LlmError(`claude API ${code}`, code, { retryDisposition: 'forbid' })
+    const forbidden = pluginLlmError(`claude API ${code}`, code, { retryDisposition: 'forbid' })
     const fake = {
       streamAccount: (_options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> =>
         (async function* () {

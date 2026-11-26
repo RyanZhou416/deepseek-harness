@@ -15,7 +15,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { PluginCodeError } from '../llm-error.js'
 
 /** Namespaces separating these hashes from every other hash of the same input. */
 const FINGERPRINT_NAMESPACE = 'claude-device-fingerprint:'
@@ -32,7 +32,7 @@ export const DEVICE_IDENTITY_UNAVAILABLE = 'CLAUDE_DEVICE_IDENTITY_UNAVAILABLE'
  * re-wraps a thrown fetch failure returns it unchanged instead of reclassifying it as a
  * retryable transport failure.
  */
-export class DeviceIdentityError extends LlmError {
+export class DeviceIdentityError extends PluginCodeError {
   /** @param message - what could not be read; never the value or the environment. */
   constructor(message: string) {
     super(message, DEVICE_IDENTITY_UNAVAILABLE)

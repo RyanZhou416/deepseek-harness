@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path'
 import { getAccountSession } from './store.js'
 import { claudeCredentialModeOf, withClaudeCredentialReference } from './claude-credential-ownership.js'
 import type { ClaudeSession } from './store.js'
+import { pluginLlmError } from '../llm-error.js'
 
 const PRIMARY_SERVICE = 'Claude Code-credentials'
 
@@ -268,7 +269,7 @@ const CLAUDE_CREDENTIAL_SOURCE_CHANGED_CODE = 'CLAUDE_CREDENTIAL_SOURCE_CHANGED'
  * @returns the error to throw.
  */
 function claudeCredentialSourceChangedError(): LlmError {
-  return new LlmError(
+  return pluginLlmError(
     "Claude Code's credential store changed and cannot be confirmed for this account; "
     + 're-import it, or sign in with the browser flow',
     CLAUDE_CREDENTIAL_SOURCE_CHANGED_CODE,
@@ -363,7 +364,7 @@ export async function refreshClaudeSynced(
     return withClaudeCredentialReference(session, next)
   })
   if (!outcome.acquired) {
-    throw new LlmError(
+    throw pluginLlmError(
       'dsh-plugin-subscriptions: another process holds Claude Code\'s credential lock; '
       + 'the refreshed credential was not written back, retry shortly',
       'REFRESH_BUSY',

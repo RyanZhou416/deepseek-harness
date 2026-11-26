@@ -8,6 +8,9 @@ import { IMAGE_OFFLOAD_REQUIRED_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 /** Anthropic's standard endpoint request-body cap, including text, tools and image encoding. */
 const MAX_REQUEST_BYTES = 32_000_000
 
+/** One image's raw-byte cap: the Messages API's 10 MB of base64 is 7.5 MB of image bytes. */
+const MAX_IMAGE_BYTES = 7_500_000
+
 /**
  * Resolve Claude's protocol limits without changing normalized attachments.
  * @param contextWindow - resolved model context capacity.
@@ -17,8 +20,10 @@ export function claudeImagePolicy(contextWindow: number): SubscriptionImagePolic
   return {
     target: (ref, count) => ({
       ...longEdgeDimensions(ref.width, ref.height, count > 20 ? 2000 : 8000),
-      // The direct Messages API allows 10 MB of base64 for one image.
-      maxBytes: Math.min(ref.bytes, 7_500_000),
+      // The hard limit is the protocol's own per-image cap; the source's encoded size is the
+      // preferred target, so an image the store already holds is not re-encoded smaller.
+      maxImageBytes: MAX_IMAGE_BYTES,
+      imageTargetBytes: Math.min(ref.bytes, MAX_IMAGE_BYTES),
     }),
     budget: { representation: 'base64', maxImages: contextWindow <= 200_000 ? 100 : 600 },
   }

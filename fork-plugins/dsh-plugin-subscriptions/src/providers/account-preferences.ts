@@ -6,6 +6,7 @@ import type { AccountAwareAdapter } from './accounts.js'
 import { DISCOVERY_TIMEOUT_MS, withTimeout } from './common.js'
 import { exhaustionCode } from './pool-health.js'
 import type { PoolAdapter } from './pool.js'
+import { pluginLlmError } from '../llm-error.js'
 
 /** Reserved namespace, recognized even when malformed or no longer enabled. */
 const ACCOUNT_MODEL_PREFIX = '~account:'
@@ -170,7 +171,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
         : earliest === undefined ? entry.retryAfterMs : Math.min(earliest, entry.retryAfterMs),
       undefined,
     )
-    throw new LlmError(
+    throw pluginLlmError(
       `No eligible account for ${this.options.provider}/${model}: every candidate is cooling down or past its usage floor`,
       exhaustionCode(new Set(held.map(entry => entry.code))),
       { ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs } },

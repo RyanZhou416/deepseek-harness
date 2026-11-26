@@ -29,6 +29,7 @@ import { claudeHttpLlmError } from '../src/providers/claude-failure.js'
 import { classifyPoolFailure } from '../src/providers/pool-health.js'
 import type { PoolFailureAction } from '../src/providers/pool-health.js'
 import { anthropicErrorEventRule } from '../src/claude-engine/failure-rules.js'
+import { pluginLlmError } from '../src/llm-error.js'
 
 /** One produced failure and the effect it must map to. */
 interface Case {
@@ -200,14 +201,14 @@ test('in-band error types produce the same classes without switching accounts', 
   for (const testCase of cases) {
     const rule = anthropicErrorEventRule(testCase.type, testCase.message)
     assert.ok(rule !== undefined, `${testCase.name}: the vocabulary maps this type`)
-    const error = new LlmError(testCase.message, rule.code, {
+    const error = pluginLlmError(testCase.message, rule.code, {
       ...rule.retryDisposition === 'forbid' ? { retryDisposition: 'forbid' as const } : {},
     })
     expect(error, testCase)
   }
   // An in-band type this route does not map is terminal, never transient.
   assert.equal(anthropicErrorEventRule('not_a_real_type', 'x'), undefined)
-  expect(new LlmError('unmapped', 'UNCLASSIFIED_PROVIDER_ERROR', { retryDisposition: 'forbid' }),
+  expect(pluginLlmError('unmapped', 'UNCLASSIFIED_PROVIDER_ERROR', { retryDisposition: 'forbid' }),
     { name: 'unmapped in-band type', code: 'UNCLASSIFIED_PROVIDER_ERROR', action: 'throw' })
 })
 
@@ -235,7 +236,7 @@ test('a malformed stream after delivery is terminal, before delivery it is retry
     { name: 'malformed after delivery', code: 'MALFORMED_RESPONSE', action: 'throw' })
   expect(new LlmError('malformed before output', 'MALFORMED_RESPONSE'),
     { name: 'malformed before delivery', code: 'MALFORMED_RESPONSE', action: 'session-backoff' })
-  expect(new LlmError('incomplete stream', 'STREAM_INCOMPLETE', { retryDisposition: 'forbid' }),
+  expect(pluginLlmError('incomplete stream', 'STREAM_INCOMPLETE', { retryDisposition: 'forbid' }),
     { name: 'incomplete stream after delivery', code: 'STREAM_INCOMPLETE', action: 'throw' })
 })
 
@@ -245,9 +246,9 @@ test('no taxonomy class can switch accounts: every effect is one of the account-
     new LlmError('rate', 'RATE_LIMIT'),
     new LlmError('quota', 'QUOTA'),
     new LlmError('auth', 'AUTH', { status: 401 }),
-    new LlmError('model', MODEL_DENIED_CODE),
-    new LlmError('conflict', CONFLICT_CODE),
-    new LlmError('refused', ENFORCEMENT_CODE, { status: 500, retryDisposition: 'forbid' }),
+    pluginLlmError('model', MODEL_DENIED_CODE),
+    pluginLlmError('conflict', CONFLICT_CODE),
+    pluginLlmError('refused', ENFORCEMENT_CODE, { status: 500, retryDisposition: 'forbid' }),
     new LlmError('fault', 'INVALID_REQUEST', { retryDisposition: 'forbid' }),
     new LlmError('plain', 'HTTP_400'),
   ]

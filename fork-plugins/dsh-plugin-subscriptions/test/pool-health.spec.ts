@@ -26,6 +26,7 @@ import {
   PoolHealthRegistry,
   TRANSIENT_COOLDOWN_MS,
 } from '../src/providers/pool-health.js'
+import { pluginLlmError } from '../src/llm-error.js'
 
 test('classifyPoolFailure: quota parks the account until its reset', () => {
   assert.deepEqual(classifyPoolFailure(new LlmError('quota', 'QUOTA'), 'codex'), {
@@ -111,7 +112,7 @@ test('classifyPoolFailure: 401 and revoked 403 refresh before they park', () => 
   }
   // A dead login cannot be refreshed, so it parks immediately.
   for (const code of ['INVALID_CREDENTIAL', 'MISSING_CREDENTIAL']) {
-    assert.deepEqual(classifyPoolFailure(new LlmError('dead login', code), 'claude'), {
+    assert.deepEqual(classifyPoolFailure(pluginLlmError('dead login', code), 'claude'), {
       action: 'account-cooldown',
       cooldownMs: AUTH_COOLDOWN_MS,
       reason: code,
@@ -122,27 +123,27 @@ test('classifyPoolFailure: 401 and revoked 403 refresh before they park', () => 
 test('classifyPoolFailure: a window/quota 429 parks the account; other stated refusals are terminal', () => {
   // A disclosed window: an ENFORCEMENT-shaped 429 parks until its reset.
   assert.deepEqual(classifyPoolFailure(
-    new LlmError('refused', ENFORCEMENT_CODE, { status: 429, providerRetryAfterMs: 3_600_000 }), 'claude'), {
+    pluginLlmError('refused', ENFORCEMENT_CODE, { status: 429, providerRetryAfterMs: 3_600_000 }), 'claude'), {
     action: 'account-cooldown',
     cooldownMs: 3_600_000,
     reason: ENFORCEMENT_CODE,
   })
   assert.deepEqual(classifyPoolFailure(
-    new LlmError('refused', ENFORCEMENT_CODE, { status: 429 }), 'codex'), {
+    pluginLlmError('refused', ENFORCEMENT_CODE, { status: 429 }), 'codex'), {
     action: 'account-cooldown',
     cooldownMs: DEFAULT_QUOTA_COOLDOWN_MS,
     reason: ENFORCEMENT_CODE,
   })
   // x-should-retry:false on a non-429 status is terminal, not a parked account.
   assert.deepEqual(classifyPoolFailure(
-    new LlmError('refused', ENFORCEMENT_CODE, { status: 500, retryDisposition: 'forbid' }), 'codex'), {
+    pluginLlmError('refused', ENFORCEMENT_CODE, { status: 500, retryDisposition: 'forbid' }), 'codex'), {
     action: 'throw',
   })
 })
 
 test('classifyPoolFailure: transient statuses, 409 and a pre-delivery malformed stream back off', () => {
   for (const code of ['SERVER', 'TIMEOUT', 'EMPTY_RESPONSE', 'TRANSPORT', 'MALFORMED_RESPONSE', 'CONFLICT']) {
-    assert.deepEqual(classifyPoolFailure(new LlmError('oops', code), 'codex'), {
+    assert.deepEqual(classifyPoolFailure(pluginLlmError('oops', code), 'codex'), {
       action: 'session-backoff',
       reason: code,
     }, code)
@@ -150,7 +151,7 @@ test('classifyPoolFailure: transient statuses, 409 and a pre-delivery malformed 
 })
 
 test('classifyPoolFailure: a model-scoped refusal parks no account', () => {
-  assert.deepEqual(classifyPoolFailure(new LlmError('denied', 'MODEL_DENIED'), 'claude'), {
+  assert.deepEqual(classifyPoolFailure(pluginLlmError('denied', 'MODEL_DENIED'), 'claude'), {
     action: 'model-scoped',
     reason: 'MODEL_DENIED',
   })
@@ -181,7 +182,7 @@ test('classifyPoolFailure: request faults, refusals and aborts are terminal', ()
     'INVALID_REQUEST', 'PERMISSION_DENIED', 'CLIENT_VERSION_UNSUPPORTED',
     'UNCLASSIFIED_PROVIDER_ERROR', 'STREAM_INCOMPLETE',
   ]) {
-    assert.deepEqual(classifyPoolFailure(new LlmError('bad request', code), 'codex'), { action: 'throw' }, code)
+    assert.deepEqual(classifyPoolFailure(pluginLlmError('bad request', code), 'codex'), { action: 'throw' }, code)
   }
   assert.deepEqual(classifyPoolFailure(new Error('plain'), 'codex'), { action: 'throw' })
   assert.deepEqual(classifyPoolFailure('string failure', 'codex'), { action: 'throw' })
@@ -189,12 +190,12 @@ test('classifyPoolFailure: request faults, refusals and aborts are terminal', ()
 
 test('classifyPoolFailure: a hard stop is decided before its code, including a transient one', () => {
   for (const code of ['SERVER', 'TIMEOUT', 'PERMISSION_DENIED', 'MALFORMED_RESPONSE']) {
-    const error = new LlmError(code, code, { retryDisposition: 'forbid' })
+    const error = pluginLlmError(code, code, { retryDisposition: 'forbid' })
     assert.deepEqual(classifyPoolFailure(error, 'claude'), { action: 'throw' }, code)
   }
   // A forbidden 429 still names the window the account must sit out.
   assert.deepEqual(classifyPoolFailure(
-    new LlmError('refused', ENFORCEMENT_CODE, { status: 429, retryDisposition: 'forbid' }), 'claude'), {
+    pluginLlmError('refused', ENFORCEMENT_CODE, { status: 429, retryDisposition: 'forbid' }), 'claude'), {
     action: 'account-cooldown',
     cooldownMs: DEFAULT_QUOTA_COOLDOWN_MS,
     reason: ENFORCEMENT_CODE,

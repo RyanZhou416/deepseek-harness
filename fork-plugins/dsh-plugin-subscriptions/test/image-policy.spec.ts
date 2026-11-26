@@ -118,9 +118,12 @@ describe('subscription request images', () => {
   it('caps both orientations and preserves small images', () => {
     const ref: ImageAttachmentRef = { attachmentId: AttachmentId('geometry'), mediaType: 'image/png', bytes: 9_000_000, width: 100, height: 8192 }
     const policy = claudeImagePolicy(200_000)
-    assert.deepEqual(policy.target(ref, 20), { width: 98, height: 8000, maxBytes: 7_500_000 })
-    assert.deepEqual(policy.target(ref, 21), { width: 24, height: 2000, maxBytes: 7_500_000 })
-    assert.deepEqual(policy.target({ ...ref, width: 64, height: 32 }, 21), { width: 64, height: 32, maxBytes: 7_500_000 })
+    // The hard limit is the Messages API's per-image cap; the preferred target follows a source
+    // that already fits it, so an image the store holds is not re-encoded for a smaller one.
+    assert.deepEqual(policy.target(ref, 20), { width: 98, height: 8000, maxImageBytes: 7_500_000, imageTargetBytes: 7_500_000 })
+    assert.deepEqual(policy.target(ref, 21), { width: 24, height: 2000, maxImageBytes: 7_500_000, imageTargetBytes: 7_500_000 })
+    assert.deepEqual(policy.target({ ...ref, width: 64, height: 32 }, 21), { width: 64, height: 32, maxImageBytes: 7_500_000, imageTargetBytes: 7_500_000 })
+    assert.deepEqual(policy.target({ ...ref, width: 64, height: 32, bytes: 120_000 }, 21), { width: 64, height: 32, maxImageBytes: 7_500_000, imageTargetBytes: 120_000 })
   })
 
   it('counts exact UTF-8 body bytes and only asks to offload images when that can help', () => {

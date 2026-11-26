@@ -25,6 +25,7 @@ import type { ClaudeSession } from '../src/auth/store.js'
 import type { FetchFn } from '../src/providers/common.js'
 import { ownedClaudeContinuation } from './claude-maintenance-fixtures.js'
 import { PermittingRecordPort } from './recording-port.js'
+import { pluginLlmError } from '../src/llm-error.js'
 
 const MODEL = 'claude-opus-4-5'
 const ACCOUNT_UUID = '00000000-0000-4000-8000-000000000001'
@@ -406,7 +407,7 @@ test('the before hook sees the live attempt and may refuse it hard', async (t) =
     urls.push('unexpected')
     return new Response(COMPLETE)
   }, {
-    beforeAccountRequest: () => { throw new LlmError('policy blocked this session', 'POLICY_BLOCKED') },
+    beforeAccountRequest: () => { throw pluginLlmError('policy blocked this session', 'POLICY_BLOCKED') },
   })
   try {
     await assert.rejects(async () => {

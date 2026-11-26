@@ -45,6 +45,7 @@ import type {
   ClaudeProtocolProfile,
   RetryDisposition,
 } from './claude-protocol.js'
+import { pluginLlmError } from '../llm-error.js'
 
 /**
  * Stable code for a response the service refuses because the claiming client version is
@@ -648,7 +649,7 @@ export function claudeFailureError(
   message: string,
   extras: { readonly cause?: unknown; readonly status?: number; readonly providerRetryAfterMs?: number } = {},
 ): LlmError {
-  const error = new LlmError(message, decision.reason, decisionOptions(decision, extras))
+  const error = pluginLlmError(message, decision.reason, decisionOptions(decision, extras))
   failureDecisions.set(error, decision)
   return error
 }
@@ -787,7 +788,7 @@ export interface ClaudeStreamFailureInput {
 export function claudeStreamFailure(error: LlmError, input: ClaudeStreamFailureInput): LlmError {
   // A cancellation is not a failure to replay, and the Host already owns its disposition.
   if (!input.outputDelivered || error.code === 'ABORTED') return error
-  const classified = new LlmError(error.message, error.code, {
+  const classified = pluginLlmError(error.message, error.code, {
     cause: error.cause ?? error,
     ...error.failure.status === undefined ? {} : { status: error.failure.status },
     ...error.failure.providerRetryAfterMs === undefined
@@ -896,7 +897,7 @@ function withRetryAllowed(error: LlmError): LlmError {
   // A classification that already forbids replay outranks the ordinary transport case; keep its
   // hard stop instead of turning every issued-send failure into a resend.
   if (prior?.retryDisposition === 'forbid') return withHardStop(error)
-  const retryable = new LlmError(error.message, error.code, {
+  const retryable = pluginLlmError(error.message, error.code, {
     cause: error.cause ?? error,
     ...error.failure.status === undefined ? {} : { status: error.failure.status },
     ...error.failure.providerRetryAfterMs === undefined
@@ -917,7 +918,7 @@ function withRetryAllowed(error: LlmError): LlmError {
  * @returns the same failure with `retryDisposition: 'forbid'`.
  */
 function withHardStop(error: LlmError): LlmError {
-  const stopped = new LlmError(error.message, error.code, {
+  const stopped = pluginLlmError(error.message, error.code, {
     cause: error.cause ?? error,
     ...error.failure.status === undefined ? {} : { status: error.failure.status },
     ...error.failure.providerRetryAfterMs === undefined
@@ -949,5 +950,5 @@ export const MAINTENANCE_REFUSED_CODE = 'MAINTENANCE_REFUSED'
  */
 export function claudeBlockedRequest(error: unknown, message: string): LlmError {
   if (error instanceof LlmError) return claudeRecoveryExhausted(error)
-  return new LlmError(message, MAINTENANCE_REFUSED_CODE, { cause: error, retryDisposition: 'forbid' })
+  return pluginLlmError(message, MAINTENANCE_REFUSED_CODE, { cause: error, retryDisposition: 'forbid' })
 }

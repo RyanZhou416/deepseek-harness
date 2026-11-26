@@ -26,6 +26,7 @@ import { DEFAULT_RETRY, resolveRateLimitWait, subscriptionRetryPolicy } from '..
 import type { ProviderUsage, UsagePoolState } from '../src/providers/common.js'
 import type { ProviderId } from '../src/auth/store.js'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
+import { pluginLlmError } from '../src/llm-error.js'
 
 /** Brand a string as a GenerateOptions sessionId (the loop-stamped session identity). */
 const SessionId = (id: string): NonNullable<GenerateOptions['sessionId']> =>
@@ -721,7 +722,7 @@ test('a session keeps its bound account across turns while a new session ranks f
 })
 
 test('stream: a pre-chunk enforcement refusal ends the turn without another account or a usage re-poll', async () => {
-  const refusal = new LlmError('refused', ENFORCEMENT_CODE, { status: 429, providerRetryAfterMs: 10_800_000 })
+  const refusal = pluginLlmError('refused', ENFORCEMENT_CODE, { status: 429, providerRetryAfterMs: 10_800_000 })
   const codex = new FakeAdapter((_options, account) => account === 'a1' ? serveFail(refusal) : serveOk('a2'))
   const usageCalls: string[] = []
   const { pool, health, usage } = makePool({ codex }, {
@@ -1685,7 +1686,7 @@ test('an ordinary 429 backs off only the session that hit it', async () => {
 })
 
 test('a window 429 parks the account and the next turn rematches exactly once', async () => {
-  const refusal = new LlmError('window closed', ENFORCEMENT_CODE, { status: 429, providerRetryAfterMs: 60_000 })
+  const refusal = pluginLlmError('window closed', ENFORCEMENT_CODE, { status: 429, providerRetryAfterMs: 60_000 })
   const adapter = new FakeAdapter((_options, account) => account === 'a1' ? serveFail(refusal) : serveOk('a2'))
   const family = new Map([[poolKey('codex', 'm'), { members: ['a1', 'a2'].map(account => ({
     provider: 'codex' as const, account, model: 'm',

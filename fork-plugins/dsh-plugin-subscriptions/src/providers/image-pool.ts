@@ -13,6 +13,7 @@ import {
   memberKey,
   PoolHealthRegistry,
 } from './pool-health.js'
+import { pluginLlmError } from '../llm-error.js'
 
 type ImageProvider = 'codex' | 'grok'
 interface ImageSession { accessToken: string; refreshToken: string; expiresAt: number }
@@ -141,7 +142,7 @@ export class ImageAccountPool {
       if (cooling !== undefined) codes.add(cooling.reason)
     }
     const recovery = this.health.earliestRecovery(new Set(members.map(account => memberKey(provider, account, 'images'))))
-    throw new LlmError(`image_generate: all ${provider} image accounts are cooling down`, exhaustionCode(codes), {
+    throw pluginLlmError(`image_generate: all ${provider} image accounts are cooling down`, exhaustionCode(codes), {
       ...recovery === undefined ? {} : { providerRetryAfterMs: Math.max(0, recovery - Date.now()) },
     })
   }

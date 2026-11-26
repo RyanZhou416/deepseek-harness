@@ -83,7 +83,7 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-This source candidate is `0.9.4-dsh022rc1.1`, pinned to DSH `0.2.2-rc.1` and Cordis `^4.1.0`, and declares that cohort as `engines.dsh`, so `dsh plugin add` refuses an older profile instead of loading it. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI target that exact cohort. The version a running profile executes is decided by that profile's install manifest, not by this source version — the [implementation status note](docs/claude-implementation-status.md) owns the current install state. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private package.
+This source candidate is `0.9.4-dsh023a2.1`, pinned to DSH `0.2.3-alpha.2`, Cordis `^4.2.0-alpha.1` and schemastery `^3.20.0-alpha.1`, and declares that cohort as `engines.dsh`, so `dsh plugin add` refuses an older profile instead of loading it. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI target that exact cohort. The version a running profile executes is decided by that profile's install manifest, not by this source version — the [implementation status note](docs/claude-implementation-status.md) owns the current install state. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private package.
 
 ### Managing accounts and pool models
 

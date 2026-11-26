@@ -68,6 +68,7 @@ import type {
   ClaudePolicyScope,
   ClaudePolicySnapshot,
 } from './claude-managed-settings.js'
+import { pluginLlmError } from '../llm-error.js'
 
 /** The pinned first-party Messages origin, used when the deployment states no other. */
 export const CLAUDE_DEFAULT_ORIGIN = 'https://api.anthropic.com'
@@ -491,7 +492,7 @@ export class ClaudeMaintenanceController {
     if (blocked) {
       return {
         ok: false,
-        error: new LlmError(
+        error: pluginLlmError(
           'claude protocol configuration is blocked for this origin; update the client before retrying',
           'CLIENT_VERSION_UNSUPPORTED',
           { ...CLAUDE_FORBID, status: 400 },
@@ -1819,7 +1820,7 @@ export class ClaudeMaintenanceController {
 
   /** The refusal one denied policy decision becomes. */
   private policyRefusal(decision: Extract<ClaudePolicyDecision, { decision: 'deny' }>): LlmError {
-    return new LlmError(
+    return pluginLlmError(
       `claude request blocked by organization policy: ${decision.blocker.detail}`,
       decision.code,
       CLAUDE_FORBID,

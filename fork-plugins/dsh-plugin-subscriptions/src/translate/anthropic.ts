@@ -18,6 +18,7 @@ import type { ClaudeRefusalProbe } from '../providers/claude-failure.js'
 import { CLAUDE_CONTINUATION_VERSION } from '../claude-engine/continuation.js'
 import type { ClaudeContinuationV1 } from '../claude-engine/continuation.js'
 import type { ClaudeAccountRef } from '../claude-core/account-ref.js'
+import { pluginLlmError } from '../llm-error.js'
 export type { ClaudeRefusalProbe as AnthropicRefusalProbe } from '../providers/claude-failure.js'
 
 /**
@@ -1318,7 +1319,7 @@ export async function* streamAnthropic(
   // certainly been sent and its outcome is unknown: replaying it could submit the same turn
   // twice however little was delivered, and no delivery boundary changes that. A transport
   // failure that never produced a response is a different case, raised by the caller's fetch.
-  throw new LlmError(
+  throw pluginLlmError(
     'Anthropic SSE stream ended before message_stop',
     STREAM_INCOMPLETE_CODE,
     { retryDisposition: 'forbid' },

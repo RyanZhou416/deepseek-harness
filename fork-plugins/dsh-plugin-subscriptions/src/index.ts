@@ -123,6 +123,7 @@ import type { PoolGateConfig } from './providers/pool-gate.js'
 import { AccountPreferencesAdapter, accountAllowsPool, accountModelId, parseAccountModelId } from './providers/account-preferences.js'
 import { modelDisabledReason } from './providers/provider-catalog.js'
 export type { AccountPreferences, ProviderPreferences } from './provider-settings.js'
+import { pluginLlmError } from './llm-error.js'
 import { ImageAccountPool } from './providers/image-pool.js'
 import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
@@ -800,7 +801,7 @@ function claudeProtocolFence(): { provider: string; origin: string; fingerprint:
  * @returns the refusal.
  */
 function claudeProtocolBlockedError(): LlmError {
-  return new LlmError(
+  return pluginLlmError(
     'claude protocol configuration is blocked for this origin; update the client before retrying',
     CLIENT_VERSION_UNSUPPORTED_CODE,
     { retryDisposition: 'forbid', status: 400 },
@@ -817,7 +818,7 @@ function claudeProtocolBlockedError(): LlmError {
  * @returns the refusal.
  */
 function policyLimitsRefusalError(decision: { readonly code?: string; readonly key?: string }): LlmError {
-  return new LlmError(
+  return pluginLlmError(
     'claude request refused by the accepted policy_limits document'
     + `${decision.key === undefined ? '' : `: "${decision.key}"`}`,
     decision.code ?? POLICY_LIMITS_DENIED,
@@ -836,7 +837,7 @@ function policyLimitsRefusalError(decision: { readonly code?: string; readonly k
  * @returns the refusal.
  */
 function policyLimitsReadError(failure: CoreFailure): LlmError {
-  return new LlmError(
+  return pluginLlmError(
     `claude policy_limits could not be read for this account (${failure.code}`
     + `${failure.reason === undefined ? '' : `: ${failure.reason}`}); `
     + 'the request is refused rather than sent under an unknown policy',
@@ -2883,7 +2884,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
                   // let a hook that began during disposal reach managed settings.
                   const epoch = await claudeContinuation.currentEpoch(decision.account)
                   if (epoch === undefined) {
-                    throw new LlmError(
+                    throw pluginLlmError(
                       'claude request refused: the continuation state is unavailable (the identity generation could not be read)',
                       LOCAL_CONTINUATION_STATE_UNAVAILABLE,
                       { retryDisposition: 'forbid' },
@@ -2985,7 +2986,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
                   // failed, goes back to the operator as a refusal.
                   const unverified = outcome.code === 'pin_unverified'
                   const pinCheckReason = unverified && projected?.kind === 'unknown' ? ` (${projected.reason})` : ''
-                  throw new LlmError(
+                  throw pluginLlmError(
                     unverified
                       ? `claude organization policy not reverified locally; Messages request not sent; retry after policy check${pinCheckReason}`
                       : `claude organization validation refused this account (${outcome.code})`,

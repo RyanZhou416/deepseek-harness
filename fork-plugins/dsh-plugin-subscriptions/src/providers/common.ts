@@ -21,6 +21,7 @@ import { rateLimitDiagnostics, retryAfterInstant, waitFromReset } from './rate-l
 import type { RateLimitResetReader } from './rate-limit.js'
 import { parseUnifiedRateLimit } from './unified-rate-limit.js'
 import type { UnifiedRateLimitState } from './unified-rate-limit.js'
+import { pluginLlmError } from '../llm-error.js'
 
 /** One configured model catalog entry. */
 export interface ModelEntry {
@@ -410,7 +411,7 @@ export async function httpLlmError(
   if (reset === undefined && rateLimited) {
     options.onWarn?.(`${label}: ${rateLimitDiagnostics(response, body)}`)
   }
-  return new LlmError(httpFailureMessage(label, response, body), code, {
+  return pluginLlmError(httpFailureMessage(label, response, body), code, {
     ...body.length === 0 ? {} : { cause: new Error(body) },
     status: response.status,
     ...reset === undefined ? {} : { providerRetryAfterMs: waitFromReset(reset, now) },
@@ -853,7 +854,7 @@ export class TokenManager<S extends TimedSession> {
     const stored = await this.options.load()
     if (stored === undefined) throw this.missingCredential()
     if (stored.accessToken !== session.accessToken && stored.expiresAt > session.expiresAt) return stored
-    throw new LlmError(
+    throw pluginLlmError(
       `${this.options.displayName} credential refresh is owned by another process; retry shortly`,
       REFRESH_BUSY_CODE,
     )
@@ -886,7 +887,7 @@ export class TokenManager<S extends TimedSession> {
         await journal.begin(attempted, attemptedRevision)
       } catch (error: unknown) {
         // No grant may be spent when its intent could not be made durable.
-        throw new LlmError(
+        throw pluginLlmError(
           `${this.options.displayName} could not record the refresh intent `
           + `(${refreshFailureFacts(error)}); no grant was spent`,
           CREDENTIAL_JOURNAL_UNAVAILABLE_CODE,
@@ -918,7 +919,7 @@ export class TokenManager<S extends TimedSession> {
       try {
         await this.saveRefreshed(next, attempted, attemptedRevision)
       } catch (saveError: unknown) {
-        throw new LlmError(
+        throw pluginLlmError(
           `${this.options.displayName} refreshed the credential but could neither journal nor `
           + `store it (${refreshFailureFacts(journalFailure)}; ${refreshFailureFacts(saveError)}); `
           + 'the new token was not persisted — retry when the store is writable',
@@ -986,7 +987,7 @@ export class TokenManager<S extends TimedSession> {
         await delay(CREDENTIAL_SAVE_RETRY_MS * (attempt + 1))
       }
     }
-    throw new LlmError(
+    throw pluginLlmError(
       `${this.options.displayName} refreshed the credential but could not store it `
       + `(${refreshFailureFacts(last)}); the new token was not persisted — retry when the store is writable`,
       CREDENTIAL_NOT_PERSISTED_CODE,

@@ -9,17 +9,23 @@
 import { IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, prepareRequestImages, projectOffloadedImages, requiredImageOffload } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, LlmImageRequestBudget, Message, RequestImageTargetResolver, RequestMessage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
+import { pluginLlmError } from '../llm-error.js'
 
 /** Request-local policy supplied by the resolved provider/model route. */
 export interface SubscriptionImagePolicy {
-  /** Dimensions and byte target for each immutable source at this request's image count. */
+  /** Dimensions, hard byte limit and preferred byte target for each immutable source at this request's image count. */
   target: RequestImageTargetResolver
   /** Aggregate represented bytes and occurrence limit, enforced through logged offload. */
   budget?: LlmImageRequestBudget
 }
 
 /** Preserve normalized resolution when the route has no tighter protocol policy. */
-const normalizedTarget: RequestImageTargetResolver = ref => ({ width: ref.width, height: ref.height, maxBytes: ref.bytes })
+const normalizedTarget: RequestImageTargetResolver = ref => ({
+  width: ref.width,
+  height: ref.height,
+  maxImageBytes: ref.bytes,
+  imageTargetBytes: ref.bytes,
+})
 
 /** An image block with its bytes resolved to inline base64 for the wire. */
 export interface ResolvedImagePart {
@@ -116,7 +122,7 @@ export async function resolveImages(
   const hasImage = projected.some(message => message.content.some(block => block.type === 'image'))
   if (!hasImage) return projected.map(message => translatable(message, message.content))
   if (attachments === undefined) {
-    throw new LlmError(
+    throw pluginLlmError(
       'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
       + 'image input requires the harness attachment store',
       'UNSUPPORTED',
