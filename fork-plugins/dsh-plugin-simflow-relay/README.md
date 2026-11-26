@@ -7,7 +7,7 @@ The external SimFlow tool uses this loopback HTTP route to wake the DSH Session 
 ## Behavior
 
 - `POST <path>` (default `/api/simflow/relay`) accepts JSON: `{"sessionId","slot","text","mailId"?,"kind"?}`.
-- Authentication: only loopback connections are accepted. `x-simflow-token` must match the first line of `tokenFile` (at least 32 characters). The plugin uses a constant-time comparison and rereads the file for each request so the token can rotate.
+- Authentication: only loopback connections are accepted. `x-simflow-token` must match the first line of `tokenFile` (at least 32 characters). The plugin uses a constant-time comparison and rereads the file for each request so the token can rotate. Both routes are registered on the Host WebServer as `auth: 'anonymous'`: SimFlow carries no browser session or API credential, so the loopback check and the token are the whole gate. A route left at the WebServer default (`required`) would be refused with 401 or 503 before the handler runs.
 - Delivery uses the same path as the `session` tool's `send`: a working Session receives `Agent.send(message, 'next-step', true)` at the next step; the Session Controller resumes and wakes an idle or stored target.
 - The model sees `SimFlow 发来「<slot>」的消息：` followed by SimFlow's text. The source is `kind: 'simflow'`, `form: 'relay'`; the separate `Message from another Session (...)` prefix is not added.
 - Success returns `202 {ok, messageId, targetSessionId, targetStatus}` (`targetStatus` is working, idle or stored before delivery). Failures return `{ok:false, reason, error}` and do not deliver:
@@ -31,4 +31,4 @@ The default in `cordis.patch.yml` is `tokenFile = D:\Ryan416_DESKTOP-LETT6RL_The
 node --import ./test/register.mjs --test test/relay.test.mjs
 ```
 
-The test loader in `test/resolve-hooks.mjs` resolves the Host-supplied `@deepseek-ai/dsh-llm` and `@deepseek-ai/schemastery` from this checkout; no profile installation is needed.
+The test loader in `test/resolve-hooks.mjs` resolves the Host-supplied `@deepseek-ai/cordis`, `@deepseek-ai/dsh-llm`, `@deepseek-ai/dsh-host-webserver`, and `@deepseek-ai/schemastery` from this checkout; no profile installation is needed. `the carrier admits both routes anonymously` boots a real `WebServer` and fails with 503 when either route loses its `auth: 'anonymous'`.

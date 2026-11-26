@@ -5,7 +5,11 @@ import { createServer } from 'node:http'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createRelayHandler, createSimflowMessage, createStatusHandler, parseRelayRequest, sessionStatus, simflowLead } from '../src/index.js'
+import { Context } from '@deepseek-ai/cordis'
+import WebServer from '@deepseek-ai/dsh-host-webserver'
+import * as relayModule from '../src/index.js'
+
+const { createRelayHandler, createSimflowMessage, createStatusHandler, parseRelayRequest, sessionStatus, simflowLead } = relayModule
 
 const TOKEN = 'simflow-relay-test-token-0123456789abcdef'
 
@@ -175,4 +179,43 @@ test('status endpoint requires the token and returns every id', async () => {
     assert.deepEqual((await res.json()).statuses, { 'session-live': 'idle', 'session-archived': 'archived', 'session-nope': 'not-found' })
     assert.equal((await post(url, { sessionIds: 'x' })).status, 400)
   } finally { server.close() }
+})
+
+/** A Context with the three services the plugin injects, plus a removable WebServer. */
+async function withWebServer(fn) {
+  const context = new Context()
+  const agent = { status: 'idle', send: () => {} }
+  context.provide('agents', { get: id => (id === 'session-live' ? agent : undefined) })
+  context.provide('sessionController', { resolveAgent: async () => ({ error: Object.assign(new Error('no'), { code: 'session/not-found' }) }) })
+  context.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [] })
+  await context.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+  await context.plugin(relayModule, { path: '/api/simflow/relay', tokenFile: tokenFile(), maxBodyBytes: 65536 })
+  const deadline = Date.now() + 10_000
+  while (context.webServer.port === undefined) {
+    if (Date.now() > deadline) throw new Error('web server never bound a port')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  try {
+    await fn(`http://127.0.0.1:${context.webServer.port}`)
+  } finally {
+    await context.fiber.dispose()
+  }
+}
+
+test('the carrier admits both routes anonymously', async () => {
+  await withWebServer(async origin => {
+    // A registered Web route defaults to `auth: 'required'`, which refuses a
+    // caller carrying no browser session or API credential. SimFlow carries
+    // only its token, so the relay's own loopback and token checks must be the
+    // whole gate — and the handler, not the carrier, must answer a bad token.
+    const ok = await post(`${origin}/api/simflow/relay`, { sessionId: 'session-live', slot: '总设计', text: 'hi' })
+    assert.equal(ok.status, 202)
+    assert.equal((await ok.json()).ok, true)
+    const refused = await post(`${origin}/api/simflow/relay`, { sessionId: 'session-live', slot: 's', text: 'x' }, 'wrong-token-wrong-token-wrong-token!!')
+    assert.equal(refused.status, 401)
+    assert.equal((await refused.json()).reason, 'unauthorized')
+    const status = await post(`${origin}/api/simflow/relay/status`, { sessionIds: ['session-live'] })
+    assert.equal(status.status, 200)
+    assert.deepEqual((await status.json()).statuses, { 'session-live': 'idle' })
+  })
 })

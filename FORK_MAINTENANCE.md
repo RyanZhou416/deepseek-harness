@@ -74,7 +74,9 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 
 ### SimFlow relay
 
-The [SimFlow relay](fork-plugins/dsh-plugin-simflow-relay/README.md) accepts authenticated loopback requests and wakes the Session identified by the caller. Preserve the local token check, archived-session refusal and mail-ID deduplication. Verify delivery with `node --import ./test/register.mjs --test test/relay.test.mjs` in the plugin directory, and packaging with `scripts/fork-plugins-build.spec.ts`.
+The [SimFlow relay](fork-plugins/dsh-plugin-simflow-relay/README.md) accepts authenticated loopback requests and wakes the Session identified by the caller. It is a plain-JavaScript fork plugin, version `0.1.0-dsh023a2.1`, whose `@deepseek-ai/dsh-*` peers are pinned to the `0.2.3-alpha.2` cohort with Cordis `^4.2.0-alpha.1` and schemastery `^3.20.0-alpha.1`. Preserve the local token check, archived-session refusal and mail-ID deduplication.
+
+**Preservation rule.** Both routes must keep `auth: 'anonymous'`: a registered Web route defaults to `auth: 'required'`, and SimFlow's request carries only `x-simflow-token`, so the default makes the Host refuse every delivery with 401/503 before the handler runs. The loopback check plus the constant-time token comparison are the whole gate; do not replace them with a browser-session check or add a Host credential to the SimFlow request. **Focused verification.** `node --import ./test/register.mjs --test test/relay.test.mjs` in the plugin directory: `the carrier admits both routes anonymously` boots a real `WebServer` and fails with 503 when either route loses its `auth: 'anonymous'`. Packaging is covered by `scripts/fork-plugins-build.spec.ts`.
 
 ### Shutdown cancellation after inbox unload
 

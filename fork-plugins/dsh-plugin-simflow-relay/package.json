@@ -1,12 +1,12 @@
 {
   "name": "dsh-plugin-simflow-relay",
-  "version": "0.1.0",
+  "version": "0.1.0-dsh023a2.1",
   "private": true,
   "description": "Loopback HTTP ingress that lets the SimFlow tool wake a bound DSH Session with a SimFlow-attributed message, through the same Agent.send path as session send",
   "license": "MIT",
   "type": "module",
   "engines": {
-    "dsh": "0.2.2-rc.1"
+    "dsh": "0.2.3-alpha.2"
   },
   "main": "src/index.js",
   "types": "src/index.d.ts",
@@ -32,9 +32,9 @@
     "test": "node --import ./test/register.mjs --test test/relay.test.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.1.0",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1",
-    "@deepseek-ai/schemastery": "^3.19.0"
+    "@deepseek-ai/cordis": "^4.2.0-alpha.1",
+    "@deepseek-ai/dsh-llm": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.3-alpha.2",
+    "@deepseek-ai/schemastery": "^3.20.0-alpha.1"
   }
 }

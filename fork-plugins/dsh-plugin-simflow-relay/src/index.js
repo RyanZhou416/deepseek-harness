@@ -288,8 +288,13 @@ export function createStatusHandler(ctx, config) {
 /** Register the exact relay route and its read-only `<path>/status` sibling on the injected WebServer. */
 export function apply(ctx, config) {
   assertConfig(config)
-  const route = { kind: 'exact', path: config.path, handler: createRelayHandler(ctx, config) }
+  // A registered Web route defaults to `auth: 'required'`, which asks the Host's
+  // credential providers for a browser session or API credential. SimFlow carries
+  // neither: the loopback check and the per-request token below are this route's
+  // authentication, so the carrier must admit it anonymously.
+  const auth = 'anonymous'
+  const route = { kind: 'exact', path: config.path, auth, handler: createRelayHandler(ctx, config) }
   ctx.effect(() => ctx.webServer.register(route), `simflow-relay: ${config.path}`)
-  const status = { kind: 'exact', path: `${config.path}/status`, handler: createStatusHandler(ctx, config) }
+  const status = { kind: 'exact', path: `${config.path}/status`, auth, handler: createStatusHandler(ctx, config) }
   ctx.effect(() => ctx.webServer.register(status), `simflow-relay: ${config.path}/status`)
 }
