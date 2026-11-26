@@ -28,10 +28,12 @@ set "DSH_PERF_PATCH_ARG=--patch "%~dp0fork-runtime\web\perf.patch.yml""
 set "DSH_MEMORY_PATCH_ARGS="
 if exist "%DSH_HOME%\profiles\web\memory-limits.patch.yml" set DSH_MEMORY_PATCH_ARGS=--patch "%DSH_HOME%\profiles\web\memory-limits.patch.yml"
 
-rem Raise the Host above normal-priority background work (DSH_PROCESS_PRIORITY
-rem selects above-normal, normal, or high); see fork-runtime\web\process-priority.mjs.
-set "DSH_PRIORITY_PRELOAD=%~dp0fork-runtime\web\process-priority.mjs"
-set "DSH_PRIORITY_PRELOAD=file:///%DSH_PRIORITY_PRELOAD:\=/%"
+rem Set up the Host process: priority above normal-priority background work
+rem (DSH_PROCESS_PRIORITY) and, on by default, a guard that keeps commands the
+rem agent runs from terminating the Host (DSH_PROTECT_HOST=off disables it);
+rem see fork-runtime\web\host-process.mjs.
+set "DSH_HOST_PRELOAD=%~dp0fork-runtime\web\host-process.mjs"
+set "DSH_HOST_PRELOAD=file:///%DSH_HOST_PRELOAD:\=/%"
 
 set "DSH_BUILT_ENTRY=%~dp0apps\cli\lib\bin.js"
 if defined DSH_CLI_ENTRY set "DSH_BUILT_ENTRY=%DSH_CLI_ENTRY%"
@@ -46,7 +48,7 @@ if not defined DSH_CLI_ENTRY if not exist "%~dp0.dsh-build\client-build-environm
 )
 
 set "DSH_STEP=starting DeepSeek Harness"
-node --expose-internals --import "%DSH_PRIORITY_PRELOAD%" "%DSH_BUILT_ENTRY%" web %DSH_DIAGNOSTICS_PATCH_ARG% %DSH_MEMORY_PATCH_ARGS% %DSH_PERF_PATCH_ARG%
+node --expose-internals --import "%DSH_HOST_PRELOAD%" "%DSH_BUILT_ENTRY%" web %DSH_DIAGNOSTICS_PATCH_ARG% %DSH_MEMORY_PATCH_ARGS% %DSH_PERF_PATCH_ARG%
 if errorlevel 1 goto :failed
 exit /b 0
 
@@ -59,7 +61,7 @@ set "DSH_STEP=preparing pnpm"
 call "%~dp0scripts\fork-windows-pnpm.cmd" --version
 if errorlevel 1 goto :failed
 set "DSH_STEP=starting DeepSeek Harness from source"
-call "%~dp0scripts\fork-windows-pnpm.cmd" exec node --expose-internals --import "%DSH_PRIORITY_PRELOAD%" --import tsx/esm "%~dp0apps\cli\src\bin.ts" web %DSH_DIAGNOSTICS_PATCH_ARG% %DSH_MEMORY_PATCH_ARGS% %DSH_PERF_PATCH_ARG%
+call "%~dp0scripts\fork-windows-pnpm.cmd" exec node --expose-internals --import "%DSH_HOST_PRELOAD%" --import tsx/esm "%~dp0apps\cli\src\bin.ts" web %DSH_DIAGNOSTICS_PATCH_ARG% %DSH_MEMORY_PATCH_ARGS% %DSH_PERF_PATCH_ARG%
 if errorlevel 1 goto :failed
 exit /b 0
 

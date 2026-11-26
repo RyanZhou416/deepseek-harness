@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { constants, tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
@@ -6,8 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
-/** run.cmd preloads the priority module through a file URL built from its own directory. */
-const priorityPreload = `file:///${join(repositoryRoot, 'fork-runtime', 'web', 'process-priority.mjs').replaceAll('\\', '/')}`
+/** run.cmd preloads the Host process module through a file URL built from its own directory. */
+const hostPreload = `file:///${join(repositoryRoot, 'fork-runtime', 'web', 'host-process.mjs').replaceAll('\\', '/')}`
 const buildLauncher = join(repositoryRoot, 'build.cmd')
 const cleanLauncher = join(repositoryRoot, 'clean.cmd')
 const runLauncher = join(repositoryRoot, 'run.cmd')
@@ -59,8 +59,8 @@ describe('Windows fork launchers', () => {
   it('launches the built CLI directly with the fork patches', () => {
     const source = readFileSync(runLauncher, 'utf8')
     expect(source).toContain('set "DSH_BUILT_ENTRY=%~dp0apps\\cli\\lib\\bin.js"')
-    expect(source).toContain('node --expose-internals --import "%DSH_PRIORITY_PRELOAD%" "%DSH_BUILT_ENTRY%" web')
-    expect(source).toContain('set "DSH_PRIORITY_PRELOAD=%~dp0fork-runtime\\web\\process-priority.mjs"')
+    expect(source).toContain('node --expose-internals --import "%DSH_HOST_PRELOAD%" "%DSH_BUILT_ENTRY%" web')
+    expect(source).toContain('set "DSH_HOST_PRELOAD=%~dp0fork-runtime\\web\\host-process.mjs"')
     expect(source).toContain('--patch "%~dp0fork-runtime\\diagnostics\\cordis.patch.yml"')
     expect(source).toContain('--patch "%~dp0fork-runtime\\web\\perf.patch.yml"')
     expect(source).toContain('--max-old-space-size=32768')
@@ -71,7 +71,7 @@ describe('Windows fork launchers', () => {
     const fallback = source.indexOf(':source_launch')
     expect(fallback).toBeGreaterThan(-1)
     const section = source.slice(fallback)
-    expect(section).toContain('scripts\\fork-windows-pnpm.cmd" exec node --expose-internals --import "%DSH_PRIORITY_PRELOAD%" --import tsx/esm "%~dp0apps\\cli\\src\\bin.ts" web')
+    expect(section).toContain('scripts\\fork-windows-pnpm.cmd" exec node --expose-internals --import "%DSH_HOST_PRELOAD%" --import tsx/esm "%~dp0apps\\cli\\src\\bin.ts" web')
     expect(section).toContain('echo Run build.cmd to build the project')
   })
 
@@ -190,7 +190,7 @@ describe('Windows fork launchers', () => {
       'pnpm install --child-concurrency=4 --optimistic-repeat-install=false',
       'pnpm run build',
       `pnpm exec tsx ${join(repositoryRoot, 'scripts', 'fork-plugins-build.ts')}`,
-      `pnpm exec node --expose-internals --import ${priorityPreload} --import tsx/esm ${join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts')} web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')} --patch ${join(repositoryRoot, 'fork-runtime', 'web', 'perf.patch.yml')}`,
+      `pnpm exec node --expose-internals --import ${hostPreload} --import tsx/esm ${join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts')} web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')} --patch ${join(repositoryRoot, 'fork-runtime', 'web', 'perf.patch.yml')}`,
     ])
   })
 
@@ -223,7 +223,7 @@ describe('Windows fork launchers', () => {
     const { root, bin, log } = fixture(false)
     writeFileSync(join(root, 'pnpm-stub.mjs'), [
       "import { appendFileSync } from 'node:fs'",
-      "import { spawnSync } from 'node:child_process'",
+      "import { spawn, spawnSync } from 'node:child_process'",
       `if (process.argv[2] === '--version') console.log(${JSON.stringify(pnpmVersion)})`,
       'else {',
       "  appendFileSync(process.env.DSH_TEST_LOG, `pnpm ${process.argv.slice(2).join(' ')}\\n`)",
@@ -264,7 +264,7 @@ describe('Windows fork launchers', () => {
   })
   it.skipIf(process.platform !== 'win32')('raises the Host above normal priority while its children start at normal', () => {
     const script = "const os=require('os');const c=require('child_process').spawnSync(process.execPath,['-p','require(\"os\").getPriority()'],{encoding:'utf8'});console.log(os.getPriority(), c.stdout.trim())"
-    const run = (env: Record<string, string>) => spawnSync(process.execPath, ['--import', priorityPreload, '-e', script], {
+    const run = (env: Record<string, string>) => spawnSync(process.execPath, ['--import', hostPreload, '-e', script], {
       encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', ...env },
     })
     const raised = run({})
@@ -275,4 +275,34 @@ describe('Windows fork launchers', () => {
     expect(invalid.status).not.toBe(0)
     expect(invalid.stderr).toContain('DSH_PROCESS_PRIORITY must be one of')
   })
+
+  it.skipIf(process.platform !== 'win32')('keeps other processes of the same user from terminating the Host, which still exits by itself', async () => {
+    // The guarded process ends on its own, so a failed assertion cannot leak it.
+    const start = (env: Record<string, string>) => {
+      const child = spawn(process.execPath, ['--import', hostPreload, '-e', "console.log('ready');setTimeout(()=>process.exit(0),4000)"], {
+        env: { ...process.env, NODE_OPTIONS: '', ...env }, stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      const exited = new Promise<number | null>((resolve) => { child.once('exit', resolve) })
+      const ready = new Promise<void>((resolve) => { child.stdout.once('data', () => { resolve() }) })
+      return { child, exited, ready }
+    }
+    const guarded = start({})
+    await guarded.ready
+    const pid = guarded.child.pid as number
+    expect(() => process.kill(pid, 'SIGKILL')).toThrow(expect.objectContaining({ code: 'EPERM' }))
+    const taskkill = spawnSync('taskkill', ['/PID', String(pid), '/F'], { encoding: 'utf8' })
+    expect(taskkill.status).not.toBe(0)
+    expect(await guarded.exited).toBe(0)
+
+    const open = start({ DSH_PROTECT_HOST: 'off' })
+    await open.ready
+    process.kill(open.child.pid as number, 'SIGKILL')
+    expect(await open.exited).not.toBe(0)
+
+    const invalid = spawnSync(process.execPath, ['--import', hostPreload, '-e', ''], {
+      encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', DSH_PROTECT_HOST: 'yes' },
+    })
+    expect(invalid.status).not.toBe(0)
+    expect(invalid.stderr).toContain('DSH_PROTECT_HOST must be on or off')
+  }, 20_000)
 })
