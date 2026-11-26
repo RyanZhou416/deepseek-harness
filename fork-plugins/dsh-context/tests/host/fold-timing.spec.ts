@@ -1,15 +1,12 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import type { TimelineEvent } from '../../src/host/fold'
-import {
-  assistantAttempt,
-  assistantMessage,
-  stepEnd,
-  stepStart,
-  toolCall,
-  toolResult,
-} from './helpers/events'
+import { type TimelineEvent } from '../../src/host/fold'
+import { assistantAttempt, assistantMessage, codeDispatch, codeDispatchStart, stepEnd, stepStart, toolCall, toolResult, header, userMessage } from './helpers/events'
 import { assertPlainJson, assertStable, driveTimeline, timelineDef } from './helpers/projection'
+import { resolveBounds } from '../../src/host/config'
+import { buildTimelineHead } from '../../src/host/foldWire'
+
+describe('fold-timing', () => {
 
 const text = (t: string) => [{ type: 'text', text: t }]
 
@@ -155,6 +152,127 @@ describe('timing — tool call durations', () => {
   })
 })
 
+describe('timing — PTC sub-dispatches', () => {
+  const runCode = (seq: number, time: number): TimelineEvent => ({
+    type: 'tool/call', seq, time, data: { callId: 'rc1', name: 'run_code', arguments: '{}' },
+  })
+
+  test('a dispatch pair prices the inner call and leaves its run_code envelope out', () => {
+    const { state } = driveTimeline([
+      runCode(1, 1_000),
+      codeDispatchStart(2, { rootCallId: 'rc1', subCallId: 'rc1:ptc:1', name: 'read', arguments: { file_path: 'a.ts' }, time: 2_000 }),
+      codeDispatch(3, { rootCallId: 'rc1', subCallId: 'rc1:ptc:1', name: 'read', arguments: { file_path: 'a.ts' }, content: text('a'), time: 5_000 }),
+      toolResult(4, { callId: 'rc1', content: text('done'), time: 9_000 }),
+    ])
+    assert.deepEqual(state.timing, {
+      wallMs: 0, ttftMs: 0, genMs: 0, calls: 0, toolsMs: 3_000, toolBusyMs: 0, toolCalls: 1,
+      tools: { read: { calls: 1, ms: 3_000 } },
+    })
+    assert.deepEqual(state.toolTally, { read: 1, run_code: 1 }, 'the envelope stays the transport row')
+    assert.equal(state.pendingCodeStarts, undefined, 'the settle consumed its start')
+  })
+
+  test('a program that dispatched nothing keeps its envelope as the tool run', () => {
+    const { state } = driveTimeline([
+      runCode(1, 1_000),
+      toolResult(2, { callId: 'rc1', content: text('x'), time: 3_500 }),
+    ])
+    assert.equal(state.timing?.toolCalls, 1)
+    assert.equal(state.timing?.toolsMs, 2_500)
+    assert.deepEqual(state.timing?.tools, { run_code: { calls: 1, ms: 2_500 } })
+  })
+
+  test('a successful skill dispatch notes the loaded name; a failed one does not', () => {
+    const base = { rootCallId: 'rc1', subCallId: 'rc1:ptc:1', name: 'skill' }
+    const drive = driveTimeline([
+      runCode(1, 0),
+      codeDispatchStart(2, { ...base, arguments: { name: 'tdd' }, time: 100 }),
+      codeDispatch(3, { ...base, arguments: { name: 'tdd' }, content: text('<skill_content name="tdd">…</skill_content>'), time: 400 }),
+    ])
+    assert.deepEqual(drive.state.totals?.skills, { tdd: true })
+    const head = timelineDef({}, true).wire.view(drive.state)
+    assert.equal(head.counts?.skills, 1)
+    const fallback = driveTimeline([
+      runCode(1, 0),
+      codeDispatchStart(2, { ...base, arguments: {}, time: 100 }),
+      codeDispatch(3, { ...base, arguments: {}, content: text('<skill_content name="ponytail">…</skill_content>'), time: 400 }),
+    ])
+    assert.deepEqual(fallback.state.totals?.skills, { ponytail: true }, 'the content names the load when the arguments do not')
+    const failed = driveTimeline([
+      runCode(1, 0),
+      codeDispatchStart(2, { ...base, arguments: { name: 'tdd' }, time: 100 }),
+      codeDispatch(3, { ...base, arguments: { name: 'tdd' }, isError: true, content: text('unknown skill'), time: 400 }),
+    ])
+    assert.deepEqual(failed.state.totals?.skills, {}, 'a failed load is no load')
+    assert.deepEqual(failed.state.toolTally, { skill: 1 }, 'the tool run still tallies')
+  })
+
+  test('an unpaired dispatch settle books the name tally but no timing', () => {
+    const { state } = driveTimeline([
+      runCode(1, 0),
+      codeDispatch(2, { rootCallId: 'rc1', subCallId: 'rc1:ptc:9', name: 'read', content: text('a'), time: 500 }),
+    ])
+    assert.equal(state.timing, undefined)
+    assert.deepEqual(state.toolTally, { read: 1 })
+  })
+
+  test('dispatched starts stay bounded when the program never settles them', () => {
+    const events: TimelineEvent[] = [runCode(1, 0)]
+    for (let i = 0; i < 210; i++) {
+      events.push(codeDispatchStart(10 + i, {
+        rootCallId: 'rc1',
+        subCallId: `rc1:ptc:${i}`,
+        name: 'read',
+        arguments: {},
+        time: 10 + i,
+      }))
+    }
+    const { state } = driveTimeline(events)
+    assert.equal(Object.keys(state.pendingCodeStarts ?? {}).length, 200)
+    assert.equal(Object.hasOwn(state.pendingCodeStarts ?? {}, 'rc1:ptc:9'), false, 'the oldest start was evicted')
+    assert.equal(state.pendingCodeStarts?.['rc1:ptc:209'], 219)
+  })
+
+  test('a malformed dispatch envelope leaves the fold unchanged', () => {
+    const { def, state } = driveTimeline([runCode(1, 0)])
+    for (const event of [
+      { type: 'tool/ptc-dispatch-start', seq: 2, time: 1, data: null },
+      { type: 'tool/ptc-dispatch-start', seq: 2, time: 1, data: { rootCallId: 'rc1', subCallId: 7, name: 'read' } },
+      { type: 'tool/ptc-dispatch-start', seq: 2, time: 1, data: { rootCallId: 7, subCallId: 's', name: 'read' } },
+      { type: 'tool/ptc-dispatch', seq: 2, time: 1, data: null },
+      { type: 'tool/ptc-dispatch', seq: 2, time: 1, data: { rootCallId: 7, name: 'read' } },
+    ] as TimelineEvent[]) {
+      assertStable(state, event, def)
+    }
+    const fresh = driveTimeline([])
+    assertStable(fresh.state, {
+      type: 'tool/ptc-dispatch-start',
+      seq: 1,
+      time: Number.NaN,
+      data: { rootCallId: 'rc1', subCallId: 's', name: 'read', arguments: {} },
+    }, fresh.def)
+    const buffered = fresh.def.apply(fresh.state, {
+      type: 'tool/ptc-dispatch-start',
+      seq: 1,
+      time: Number.NaN,
+      data: { rootCallId: 'rc1', subCallId: 's', name: 'bash', arguments: { command: 'git status' } },
+    })
+    assert.equal(buffered.pendingCodeStarts, undefined, 'an unreadable start records no timing')
+    assert.equal(buffered.pendingCodeCmds?.rc1.length, 1, 'the command still buffers')
+    const envelope = driveTimeline([runCode(1, 1_000)])
+    const marked = envelope.def.apply(envelope.state, {
+      type: 'tool/ptc-dispatch-start',
+      seq: 2,
+      time: Number.NaN,
+      data: { rootCallId: 'rc1', parentCallId: 'rc1', subCallId: 's', name: 'read', arguments: {} },
+    })
+    assert.equal(marked.callNames.rc1.transport, undefined, 'an unreadable start marks no transport')
+    const settled = envelope.def.apply(marked, toolResult(3, { callId: 'rc1', content: text('x'), time: 4_000 }))
+    assert.equal(settled.timing?.toolCalls, 1, 'the envelope still counts')
+    assert.equal(settled.timing?.toolsMs, 3_000)
+  })
+})
+
 describe('timing — the generation split (reasoning / text / tool args)', () => {
   test('the embedded stream tiles the generation window into the three buckets', () => {
     const stream = [
@@ -169,9 +287,9 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
       stepStart(1, { time: 0 }),
       assistantMessage(2, { time: 2_000, stream }),
     ])
-    assert.equal(state.timing?.ttftMs, 200)
-    assert.equal(state.timing?.genMs, 1_800)
-    assert.equal(state.timing?.reasoningMs, 500, 'reasoning owns 200→700')
+    assert.equal(state.timing?.ttftMs, 210)
+    assert.equal(state.timing?.genMs, 1_790)
+    assert.equal(state.timing?.reasoningMs, 490, 'reasoning owns 210→700')
     assert.equal(state.timing?.textMs, 500, 'text owns 700→1200')
     assert.equal(state.timing?.toolArgMs, 800, 'tool args own 1200→message')
     assert.equal(
@@ -181,6 +299,24 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
     assert.equal(state.timing?.reasoningBlocks, 1)
     assert.equal(state.timing?.textBlocks, 1)
     assert.equal(state.timing?.toolArgBlocks, 1)
+  })
+
+  test('a zero-width marker pair contributes no block count', () => {
+    const { state } = driveTimeline([
+      stepStart(1, { time: 0 }),
+      assistantMessage(2, {
+        time: 900,
+        stream: [
+          chunkRec(100, { type: 'block-start', index: 0, blockType: 'reasoning' }),
+          chunkRec(100, { type: 'block-start', index: 1, blockType: 'text' }),
+          { type: 'text-chunks', time0: 100, index: 1, dt: [], texts: ['x'] },
+        ],
+      }),
+    ])
+    assert.deepEqual(
+      [state.timing?.reasoningMs, state.timing?.reasoningBlocks, state.timing?.textMs, state.timing?.textBlocks],
+      [undefined, undefined, 800, 1],
+    )
   })
 
   test('an unstamped call carries no split (its model time is unattributed wholesale)', () => {
@@ -628,4 +764,120 @@ describe('timing — the idle carve (eventless stretches price out of the active
     const c = def as unknown as { stateSchema: { parse(s: unknown): unknown } }
     for (const mid of drive.states) c.stateSchema.parse(structuredClone(mid))
   })
+})
+})
+
+describe('fold-totals', () => {
+
+function baseLog(): ReturnType<typeof header>[] {
+  return [header(1, { model: 'deepseek-v4-flash', provider: 'deepseek' }), userMessage(2, [{ type: 'text', text: 'go' }], { kind: 'user' }), stepStart(3)]
+}
+
+function toolPair(seq: number, callId: string, name: string, args: Record<string, unknown>, content: string, callOpts: Record<string, unknown> = {}) {
+  return [
+    toolCall(seq, { callId, name, arguments: JSON.stringify(args), ...callOpts }),
+    toolResult(seq + 1, { callId, content: [{ type: 'text', text: content }] }),
+  ]
+}
+
+describe('cumulative tallies in the fold', () => {
+  test('counts tools, file totals and command programs in one pass (full and head-only)', () => {
+    const log = [
+      ...baseLog(),
+      ...toolPair(4, 'c1', 'bash', { command: 'ls -la | grep foo' }, 'total 0'),
+      ...toolPair(6, 'c2', 'read', { path: '/tmp/x.ts' }, 'file body'),
+      ...toolPair(8, 'c3', 'read_image', { path: '/tmp/pic.png' }, 'image'),
+      ...toolPair(10, 'c4', 'read', { path: '/tmp/y.png' }, 'image body'),
+      stepEnd(12),
+      assistantMessage(13, { turn: 1, step: 0 }),
+    ]
+    for (const headOnly of [false, true]) {
+      const drive = driveTimeline(log, {}, headOnly)
+      const state = drive.state
+      assert.deepEqual(state.toolTally, { bash: 1, read: 2, read_image: 1 })
+      assert.deepEqual(state.programTally, { ls: 1, grep: 1 })
+      assert.deepEqual(drive.view.toolTally, state.toolTally)
+      assert.deepEqual(drive.view.programTally, state.programTally)
+      assert.equal(drive.view.commandStats?.runs, 1)
+      assert.equal(buildTimelineHead(state).commandStats?.runs, 1, 'the head wire carries the cumulative command stats')
+      assert.equal(drive.view.commandStats?.failed, 0)
+    }
+  })
+
+  test('tallies survive request trimming because they are cumulative', () => {
+    const log = [
+      ...baseLog(),
+      ...toolPair(4, 'c1', 'bash', { command: 'cat a' }, 'a'),
+      stepEnd(6),
+      assistantMessage(7, { turn: 1, step: 0 }),
+      ...toolPair(8, 'c2', 'bash', { command: 'cat b' }, 'b'),
+      stepEnd(10),
+      assistantMessage(11, { turn: 2, step: 0 }),
+    ]
+    const drive = driveTimeline(log, { maxRequestSteps: 1, maxKeptTurns: 1 })
+    assert.equal(drive.state.requests.length, 1)
+    assert.deepEqual(drive.state.toolTally, { bash: 2 })
+    assert.deepEqual(drive.state.programTally, { cat: 2 })
+    assert.deepEqual(drive.view.toolTally, { bash: 2 })
+  })
+
+  test('caps distinct tally names and ignores hostile names', () => {
+    const log: ReturnType<typeof toolCall>[] = [...baseLog()] as never[]
+    for (let i = 0; i < 130; i++) {
+      const seq = 4 + i * 2
+      log.push(toolCall(seq, { callId: 'c' + i, name: 'tool_' + i, arguments: '{}' }))
+      log.push(toolResult(seq + 1, { callId: 'c' + i, content: [{ type: 'text', text: 'ok' }] }))
+    }
+    const proto = log.length
+    log.push(toolCall(proto, { callId: 'p', name: '__proto__', arguments: '{}' }))
+    log.push(toolResult(proto + 1, { callId: 'p', content: [{ type: 'text', text: 'ok' }] }))
+    const drive = driveTimeline(log)
+    assert.equal(Object.keys(drive.state.toolTally ?? {}).length, 128)
+    assert.equal(Object.hasOwn(drive.state.toolTally ?? {}, '__proto__'), false)
+    assert.equal(Object.keys(drive.state.toolTally ?? {}).length, 128)
+  })
+
+  test('counts run_code PTC subcommands and their file operations in head-only folds', () => {
+    const log = [
+      ...baseLog(),
+      toolCall(4, { callId: 'root', name: 'run_code', arguments: JSON.stringify({ code: '1+1' }) }),
+      codeDispatchStart(5, { rootCallId: 'root', subCallId: 'root:0', name: 'bash', arguments: { command: 'echo hi' } }),
+      codeDispatch(6, { rootCallId: 'root', subCallId: 'root:0', name: 'bash', content: [{ type: 'text', text: 'hi' }] }),
+      codeDispatchStart(7, { rootCallId: 'root', subCallId: 'root:1', name: 'read', arguments: { path: 'src/p.ts' } }),
+      codeDispatch(8, { rootCallId: 'root', subCallId: 'root:1', name: 'read', content: [{ type: 'text', text: 'body' }] }),
+      toolResult(9, { callId: 'root', content: [{ type: 'text', text: 'done' }] }),
+      stepEnd(10),
+      assistantMessage(11, { turn: 1, step: 0 }),
+    ]
+    for (const headOnly of [false, true]) {
+      const drive = driveTimeline(log, {}, headOnly)
+      assert.equal(drive.state.commands.length, headOnly ? 0 : 2, 'settled command rows stay refold-only head-side')
+      assert.equal(headOnly ? drive.state.commandCalls?.length : undefined, headOnly ? 2 : undefined)
+      assert.deepEqual(drive.state.programTally, { run_code: 1, echo: 1 })
+      assert.deepEqual(drive.view.programTally, drive.state.programTally)
+      assert.equal(drive.view.commandStats?.runs, 2)
+    }
+  })
+
+  test('clamps long tally names to the persisted key budget', () => {
+    const longName = 'x'.repeat(130)
+    const drive = driveTimeline([
+      ...baseLog(),
+      ...toolPair(4, 'long', longName, {}, 'ok'),
+      stepEnd(6),
+      assistantMessage(7, { turn: 1, step: 0 }),
+    ], {}, true)
+    assert.equal(drive.state.toolTally?.['x'.repeat(120)], 1)
+    assert.equal(Object.keys(drive.state.toolTally ?? {})[0]?.length, 120)
+    assert.equal(drive.view.toolTally?.['x'.repeat(120)], 1)
+  })
+
+  test('omits the tally fields until the first counted event', () => {
+    const drive = driveTimeline(baseLog(), {}, true)
+    assert.equal(drive.view.toolTally, undefined)
+    assert.equal(drive.view.programTally, undefined)
+    assert.equal(drive.view.commandStats, undefined)
+    assert.equal(resolveBounds({}).maxRequestSteps, 1500)
+  })
+})
 })

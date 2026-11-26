@@ -1,12 +1,10 @@
 import type { FileOpRecord } from './types'
+import { asPlainObject } from './decode'
 
 export function parseCallArgs(raw: unknown): Record<string, unknown> | null {
   if (typeof raw !== 'string' || raw === '') return null
   try {
-    const parsed: unknown = JSON.parse(raw)
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null
+    return asPlainObject(JSON.parse(raw))
   } catch {
     return null
   }
@@ -127,6 +125,12 @@ function searchFilesOf(meta: unknown): { path: string; hits: number }[] | null {
     }
   }
   return files.length > 0 ? files : null
+}
+
+export const IMAGE_FILE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i
+
+export function isImageFileOp(tool: string, path: string): boolean {
+  return tool === 'read_image' || IMAGE_FILE_EXT.test(path)
 }
 
 export function opsOfCall(input: {

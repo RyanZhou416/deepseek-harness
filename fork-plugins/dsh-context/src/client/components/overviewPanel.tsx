@@ -1,15 +1,16 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
-import { estimateSessionCost, formatCost, type CostCurrency, type ModelBook } from '../cost'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
+import { formatCost, toCurrency, type CostCurrency } from '../cost'
+import { RING_COLOR } from '../categories'
 import { fmt } from '../format'
-import { useModelPrices } from '../modelPrices'
 import {
-  coveredRowsOf, DayAggregator, dayRangeWindow, filterRows, groupCountsOf, inGroup, kpisOf,
-  pageOf, rangeWindowOf, refreshSessions, requestActivityBackfill, rowsOfSnapshot,
-  rowLoadedSkill, sessionGroupsOf, sessionsSnapshotOf, skillLoadsOf, sortRows,
-  UNGROUPED_KEY, workspacesSnapshotOf,
-  type DayRange, type OverviewCoverage, type OverviewRange, type OverviewRow, type OverviewSort, type SkillSort,
+  currentSessionOf, dayRangeWindow, rangeWindowOf, UNGROUPED_KEY,
+  type DayRange, type DayTotals, type OverviewCoverage, type OverviewRange, type OverviewSort,
+  type TallyField, type TallyStat,
 } from '../overview'
-import { openPluginSettings, openSessionVia, activeMsOf, type ClientCtx } from '../services'
+import { foldStateOf, retryBackfill, useOverviewDays, useOverviewPage, useOverviewProjects, useOverviewSummary, useOverviewTally } from '../overviewSource'
+import type { PartState } from '../overviewSource'
+import type { OverviewRange as HostRange, OverviewScope, OverviewSummary, BackfillSessionIssue } from '../../shared/types'
+import { openPluginSettings, openSessionVia, seatKeyOf, type ClientCtx } from '../services'
 import { readSkillCatalog } from '../skills'
 import type { ContextSettings } from '../settings'
 import type { SkillInfo } from '../../shared/types'
@@ -25,8 +26,11 @@ import { useHoverTip } from './hoverTip'
 import { makeOverviewTokens } from './overviewTokens'
 import { makeOverviewUsage } from './overviewUsage'
 import { makeStatsTiming } from './statsTiming'
-import { makeOverviewCard } from './overviewCard'
+import { makeOverviewCard, type OverviewCardRow } from './overviewCard'
+import { makeOverviewProjects } from './overviewProjects'
 import { makeOverviewSkills } from './overviewSkills'
+import { makeOverviewTally } from './overviewTally'
+import type { TallyCardKind } from './overviewTally'
 import { makeUpdatePill } from './updatePill'
 import { useLazyMount } from './useLazyMount'
 import { IconGauge, IconSettings } from '../primitives'
@@ -36,10 +40,21 @@ export interface OverviewPanelProps {
   useWorkspaces?: unknown
 }
 
-const RANGES: readonly OverviewRange[] = ['today', '7d', '30d', 'all']
+const RANGES: readonly OverviewRange[] = ['today', '7d', '30d']
 const SORTS: readonly OverviewSort[] = ['recent', 'tokens', 'context']
 const COVERAGE: readonly OverviewCoverage[] = ['all', 'active', 'archived']
 const METRICS: readonly HeatMetric[] = ['sessions', 'tokens']
+const PICK_FILTER: Record<TallyField, { label: string; clear: string }> = {
+  skills: { label: 'node.skillTag', clear: 'ov.list.skillClear' },
+  tools: { label: 'ov.list.toolFilter', clear: 'ov.list.toolClear' },
+  cmds: { label: 'ov.list.commandFilter', clear: 'ov.list.commandClear' },
+}
+
+function awaitingValueOf<T>(state: PartState<T>): boolean {
+  return state.data === null && !state.error
+}
+
+const SESSION_SKELETON = Array.from({ length: 12 }, (_, index) => index)
 
 export function makeOverviewPanel(
   ctx: ClientCtx,
@@ -50,13 +65,15 @@ export function makeOverviewPanel(
   const subscribeSettings = settings.store.subscribe.bind(settings.store)
   const Heatmap = makeHeatmap(kit)
   const OverviewCard = makeOverviewCard(kit)
-  const BalanceCapsule = makeBalanceCapsule(ctx, kit)
+  const BalanceCapsule = makeBalanceCapsule(ctx, kit, settings)
   const DateRange = makeDateRange(kit)
   const OverviewTokens = makeOverviewTokens(kit, Donut)
   const StatsTiming = makeStatsTiming(kit, Donut)
   const OverviewUsage = makeOverviewUsage(kit)
+  const OverviewProjects = makeOverviewProjects(kit)
   const OverviewSkills = makeOverviewSkills(kit)
-  const UpdatePill = makeUpdatePill(kit)
+  const OverviewTally = makeOverviewTally(kit)
+  const UpdatePill = makeUpdatePill(kit, ctx)
   const ErrorBoundary = makeErrorBoundary(t)
 
   function activeLocale(): string {
@@ -69,9 +86,6 @@ export function makeOverviewPanel(
   }
 
   function OverviewBody(props: OverviewPanelProps): ReactElement | null {
-    const { book } = useModelPrices()
-    const snapshot = useDeferredValue(sessionsSnapshotOf(props))
-    const wsSnapshot = useDeferredValue(workspacesSnapshotOf(props))
     const configuredRange = useSyncExternalStore(subscribeSettings, () => settings.defaultOverviewRange())
     const [picked, setPicked] = useState<OverviewRange | null>(null)
     const preset = picked ?? configuredRange
@@ -80,21 +94,18 @@ export function makeOverviewPanel(
     const [day, setDay] = useState<string | null>(null)
     const [query, setQuery] = useState('')
     const [group, setGroup] = useState<string | null>(null)
-    const [skill, setSkill] = useState<string | null>(null)
-    const [skillSort, setSkillSort] = useState<SkillSort>('loads')
+    const [pick, setPick] = useState<{ field: TallyField; name: string } | null>(null)
     const [sort, setSort] = useState<OverviewSort>('recent')
     const [metric, setMetric] = useState<HeatMetric>('tokens')
     const [page, setPage] = useState(0)
+    const [retrying, setRetrying] = useState(false)
     const { zoneProps, bubble } = useHoverTip()
     const [bodyRef, bodyMounted] = useLazyMount()
 
-    const rows = useMemo(() => rowsOfSnapshot(snapshot, wsSnapshot), [snapshot, wsSnapshot])
-    const groups = useMemo(() => sessionGroupsOf(wsSnapshot), [wsSnapshot])
+    const current = currentSessionOf(props)
+    const currentId = current?.id
+    const currentCwd = current?.cwd
     const [catalog, setCatalog] = useState<ReadonlyMap<string, SkillInfo> | null>(null)
-
-    const currentRow = (rows ?? []).find(row => row.current)
-    const currentCwd = currentRow?.cwd
-    const currentId = currentRow?.id
     useEffect(() => {
       let alive = true
       setCatalog(null)
@@ -102,45 +113,128 @@ export function makeOverviewPanel(
       return () => { alive = false }
     }, [currentCwd, currentId])
 
-    useEffect(() => {
-      requestActivityBackfill()
-      refreshSessions(ctx)
-    }, [])
-
-    useEffect(() => { setPage(0) }, [preset, custom, coverage, day, query, group, skill, sort])
+    useEffect(() => { setPage(0) }, [preset, custom, coverage, day, query, group, pick, sort])
 
     const currency = activeCurrency()
     const nowMinute = Math.floor(Date.now() / 60_000) * 60_000
     const nowForCards = Date.now()
-    const allRows = rows ?? []
-    const covered = useMemo(() => coveredRowsOf(allRows, coverage), [allRows, coverage])
-    const scope = useMemo(
-      () => (custom !== null ? dayRangeWindow(custom) : null) ?? rangeWindowOf(preset, nowMinute),
-      [custom, preset, nowMinute],
-    )
-    const spanFrom = scope.start === null ? null : dayKeyOf(scope.start)
-    const spanTo = scope.start === null ? null : dayKeyOf(scope.end ?? nowMinute)
-    const span = spanFrom !== null && spanTo !== null ? { from: spanFrom, to: spanTo } : null
-    const ranged = useMemo(() => filterRows(covered, { scope, day: null, query: '' }), [covered, scope])
-    const scoped = useMemo(() => filterRows(ranged, { scope, day, query }), [ranged, scope, day, query])
-    const counts = useMemo(() => groupCountsOf(scoped, wsSnapshot), [scoped, wsSnapshot])
-    const chips = group !== null && !counts.some(c => c.key === group)
-      ? [...counts, { key: group, count: 0 }]
-      : counts
-    const visible = useMemo(() => sortRows(
-      (group === null ? scoped : scoped.filter(row => inGroup(row, group, groups)))
-        .filter(row => skill === null || rowLoadedSkill(row, skill, { scope, day })),
+    const hostRange = useMemo<HostRange>(() => {
+      const window = custom === null ? null : dayRangeWindow(custom)
+      return window === null ? preset : { start: window.start, end: window.end }
+    }, [custom, preset])
+    const listScope = useMemo<OverviewScope>(() => ({
+      range: hostRange,
+      ...(custom === null ? {} : { calendar: custom }),
+      coverage,
+      ...(day === null ? {} : { day }),
+      ...(group === null ? {} : { group: group === UNGROUPED_KEY ? '__ungrouped__' : group }),
+      ...(query.trim() === '' ? {} : { query: query.trim() }),
+    }), [hostRange, custom, coverage, day, group, query])
+    const tallyScope = useMemo<OverviewScope>(() => ({
+      range: hostRange,
+      ...(custom === null ? {} : { calendar: custom }),
+      coverage,
+      ...(day === null ? {} : { day }),
+    }), [hostRange, custom, coverage, day])
+    const summaryScope = listScope
+    const daysScope = useMemo<OverviewScope>(() => ({ coverage }), [coverage])
+    const summaryState = useOverviewSummary(summaryScope, true)
+    const daysState = useOverviewDays(daysScope, true)
+    const pageState = useOverviewPage({
+      part: 'page',
+      scope: listScope,
       sort,
-    ), [scoped, group, groups, skill, scope, day, sort])
-    const paged = pageOf(visible, page)
-    const kpi = useMemo(() => kpisOf(ranged, book, currency, scope), [ranged, book, currency, scope])
-    const teamTiming = kpi.timing
-    const dayAggregator = useRef<DayAggregator | null>(null)
-    const days = useMemo(
-      () => (dayAggregator.current ??= new DayAggregator()).aggregate(covered, book, currency),
-      [covered, book, currency],
+      page,
+      ...(pick === null ? {} : { pick }),
+    }, true)
+    const skillsState = useOverviewTally({ part: 'tally', scope: tallyScope, tally: 'skills' }, bodyMounted)
+    const toolsState = useOverviewTally({ part: 'tally', scope: tallyScope, tally: 'tools' }, bodyMounted)
+    const cmdsState = useOverviewTally({ part: 'tally', scope: tallyScope, tally: 'cmds' }, bodyMounted)
+    const projectsState = useOverviewProjects({ part: 'projects', scope: tallyScope }, bodyMounted)
+    const summary: OverviewSummary | null = summaryState.data?.summary ?? null
+    const fallbackWindow = (custom !== null ? dayRangeWindow(custom) : null) ?? rangeWindowOf(preset, nowMinute)
+    const summaryFresh = summary !== null && !summaryState.stale
+    const spanFrom = (summaryFresh ? summary.window?.from : undefined) ?? dayKeyOf(fallbackWindow.start)
+    const spanTo = (summaryFresh ? summary.window?.to : undefined) ?? dayKeyOf(fallbackWindow.end ?? nowMinute)
+    const span = spanFrom !== null && spanTo !== null ? { from: spanFrom, to: spanTo } : null
+    const shownCoverageRef = useRef<OverviewCoverage>(coverage)
+    if (!summaryState.stale) shownCoverageRef.current = coverage
+    const shownCoverage = shownCoverageRef.current
+    const backfill = summaryState.coverage
+    const fold = foldStateOf(backfill)
+    const unreadable = backfill?.unreadable ?? 0
+    const failedCount = backfill?.failed ?? 0
+    const coveredCount = backfill?.covered ?? 0
+    const totalSessions = backfill?.total ?? 0
+    const retryable = fold === 'stalled' || (fold === 'idle' && unreadable > 0)
+    const issues: BackfillSessionIssue[] = [...(backfill?.failedSessions ?? []), ...(backfill?.unreadableSessions ?? [])]
+    const issueTotal = failedCount + unreadable
+    const foldTip = [
+      fold === 'idle' ? t('ov.fold.unreadableTip') : fold === 'stalled' ? t('ov.fold.stalledTip') : t('ov.fold.tip'),
+      ...(retryable ? [t('ov.fold.retry')] : []),
+      ...issues.map(entry => `${entry.id} — ${entry.reason}`),
+      ...(issues.length > 0 && issues.length < issueTotal ? [t('ov.fold.more', { n: issues.length, total: issueTotal })] : []),
+    ].join('\n')
+    const foldLabel = fold === 'stalled'
+      ? t('ov.fold.stalled', { n: fmt(failedCount) })
+      : fold === 'idle'
+        ? t('ov.fold.unreadable', { n: unreadable })
+        : totalSessions === 0
+          ? t('ov.fold.starting')
+          : t('ov.fold.progress', { n: coveredCount, total: totalSessions })
+    const retryFold = (): void => {
+      setRetrying(true)
+      void retryBackfill().finally(() => { setRetrying(false) })
+    }
+    const pageValue = pageState.data?.page ?? null
+    const pageIndex = pageValue?.index ?? 0
+    const pageCount = pageValue?.count ?? 1
+    const listTotal = pageValue?.total ?? 0
+    const scopeTotal = pageValue?.scopeTotal ?? 0
+    const rows = useMemo<OverviewCardRow[]>(
+      () => (pageValue?.items ?? []).map(row => ({ ...row, current: currentId === row.id })),
+      [pageValue, currentId],
     )
-    const skillStats = useMemo(() => skillLoadsOf(ranged, { scope, day, sort: skillSort }), [ranged, scope, day, skillSort])
+    const chips = useMemo(() => {
+      const base = pageValue?.groups ?? []
+      return group !== null && !base.some(chip => chip.key === group) ? [...base, { key: group, count: 0 }] : base
+    }, [pageValue, group])
+    const teamTiming = summary?.timing ?? null
+    const days = useMemo<Record<string, DayTotals>>(() => {
+      const out: Record<string, DayTotals> = {}
+      for (const entry of daysState.data?.days ?? []) {
+        out[entry.key] = {
+          tokens: entry.tokens,
+          sessions: entry.sessions,
+          cost: entry.costUsd === null ? null : toCurrency(entry.costUsd, currency),
+        }
+      }
+      return out
+    }, [daysState.data, currency])
+    const tokenParts = useMemo(() => {
+      const parts = summary?.tokenParts ?? null
+      if (parts === null) return null
+      let total = 0
+      const shown: { key: string; color: string; value: number }[] = []
+      for (const part of parts) {
+        if (!(part.value > 0)) continue
+        total += part.value
+        shown.push({ key: part.key, color: RING_COLOR[part.key] ?? 'var(--color-gray-400)', value: part.value })
+      }
+      return { parts: shown, total }
+    }, [summary])
+    const skillStats = useMemo(() => [...(skillsState.data?.tally.stats ?? [])], [skillsState.data])
+    const toolStats = useMemo(() => [...(toolsState.data?.tally.stats ?? [])], [toolsState.data])
+    const commandStats = useMemo(() => [...(cmdsState.data?.tally.stats ?? [])], [cmdsState.data])
+    const projectStats = useMemo(() => [...(projectsState.data?.projects ?? [])], [projectsState.data])
+    const tallyCards: readonly { kind: TallyCardKind; field: TallyField; stats: TallyStat[] }[] = [
+      { kind: 'tool', field: 'tools', stats: toolStats },
+      { kind: 'command', field: 'cmds', stats: commandStats },
+    ]
+    const summaryLoading = awaitingValueOf(summaryState)
+    const daysLoading = awaitingValueOf(daysState)
+    const pageLoading = awaitingValueOf(pageState)
+    const busy = summaryState.pending || daysState.pending || pageState.pending
     const pickPreset = (range: OverviewRange): void => {
       setPicked(range)
       setCustom(null)
@@ -150,13 +244,20 @@ export function makeOverviewPanel(
     const openOne = (id: string): void => {
       openSessionVia(ctx, id)
     }
-    const sessionsLabel = coverage === 'archived' ? t('ov.kpi.archived') : coverage === 'active' ? t('ov.kpi.sessions') : t('ov.kpi.allSessions')
-    const sessionsSub = coverage === 'all'
-      ? t('ov.kpi.inclArchived', { n: ranged.filter(row => row.archived).length })
-      : t('ov.kpi.ofTotal', { n: allRows.length })
+    const sessionsLabel = shownCoverage === 'archived' ? t('ov.kpi.archived') : shownCoverage === 'active' ? t('ov.kpi.sessions') : t('ov.kpi.allSessions')
+    const sessionsSub = summary === null
+      ? '—'
+      : shownCoverage === 'all'
+        ? t('ov.kpi.inclArchived', { n: summary.archivedScoped })
+        : t('ov.kpi.ofTotal', { n: summary.sessionsTotal })
 
     return (
-      <section className="lc-ov-page" aria-label={t('ov.title')} {...zoneProps}>
+      <section
+        className={'lc-ov-page' + (busy ? ' lc-ov-busy' : '')}
+        aria-label={t('ov.title')}
+        aria-busy={busy || undefined}
+        {...zoneProps}
+      >
         {bubble}
         <div className="lc-ov-pagescroll">
           <div className="lc-ov-pagecontent">
@@ -167,6 +268,21 @@ export function makeOverviewPanel(
               </button>
               <BalanceCapsule />
               <UpdatePill />
+              {backfill !== null && (fold !== 'idle' || unreadable > 0) && (
+                retryable ? (
+                  <button
+                    type="button"
+                    className="lc-ov-folding lc-ov-folding-action"
+                    title={foldTip}
+                    aria-label={`${foldLabel}, ${t('ov.fold.retry')}`}
+                    aria-busy={retrying || undefined}
+                    disabled={retrying}
+                    onClick={retryFold}
+                  >{foldLabel}</button>
+                ) : (
+                  <span className="lc-ov-folding" title={foldTip}>{foldLabel}</span>
+                )
+              )}
               <div className="lc-ov-headctl">
                 <DateRange
                   value={span}
@@ -181,6 +297,7 @@ export function makeOverviewPanel(
                       key={r}
                       type="button"
                       className={'lc-gran-btn' + (custom === null && preset === r ? ' lc-gran-on' : '')}
+                      aria-pressed={custom === null && preset === r}
                       onClick={() => { pickPreset(r) }}
                     >{t('ov.range.' + r)}</button>
                   ))}
@@ -188,7 +305,7 @@ export function makeOverviewPanel(
               </div>
             </div>
 
-            {rows === null ? (
+            {pageValue === null && pageState.error ? (
               <div className="lc-empty">{t('ov.unavailable')}</div>
             ) : (
               <>
@@ -196,90 +313,107 @@ export function makeOverviewPanel(
                   <div className="lc-ov-kpis">
                     <div className="lc-stat lc-ov-kpi">
                       <span className="lc-stat-label">{sessionsLabel}</span>
-                      <span className="lc-stat-value">{kpi.sessions}</span>
+                      <span className="lc-stat-value">{summary === null ? '—' : summary.sessions}</span>
                       <span className="lc-stat-sub">{sessionsSub}</span>
                     </div>
                     <div className="lc-stat lc-ov-kpi">
                       <span className="lc-stat-label">{t('ov.kpi.tokens')}</span>
-                      <span className="lc-stat-value">{fmt(kpi.tokens)}</span>
-                      <span className="lc-stat-sub">{t('stats.turns')} {fmt(kpi.turns)}</span>
+                      <span className="lc-stat-value">{summary === null ? '—' : fmt(summary.tokens)}</span>
+                      <span className="lc-stat-sub">{t('stats.turns')} {summary === null ? '—' : fmt(summary.turns)}</span>
                     </div>
                     <div className="lc-stat lc-ov-kpi">
                       <span className="lc-stat-label">{t('stats.cost')}</span>
-                      <span className="lc-stat-value">{kpi.cost === null ? '—' : formatCost(kpi.cost, currency)}</span>
-                      <span className="lc-stat-sub">{t('ov.kpi.pricedSub', { n: kpi.costSessions, total: kpi.sessions })}</span>
+                      <span className="lc-stat-value">{summary === null || summary.costUsd === null ? '—' : formatCost(toCurrency(summary.costUsd, currency), currency)}</span>
+                      <span className="lc-stat-sub">{summary === null ? '—' : t('ov.kpi.pricedSub', { n: summary.costSessions, total: summary.usageSessions })}</span>
                     </div>
                     <div className="lc-stat lc-ov-kpi">
                       <span className="lc-stat-label">{t('stats.cacheHit')}</span>
-                      <span className="lc-stat-value">{kpi.cacheHit === null ? '—' : kpi.cacheHit + '%'}</span>
-                      <span className="lc-stat-sub">{t('ov.kpi.sessionsSub', { n: kpi.usageSessions })}</span>
+                      <span className="lc-stat-value">{summary === null || summary.cacheHit === null ? '—' : summary.cacheHit + '%'}</span>
+                      <span className="lc-stat-sub">{summary === null ? '—' : t('ov.kpi.sessionsSub', { n: summary.usageSessions })}</span>
                     </div>
                     <div className="lc-stat lc-ov-kpi">
                       <span className="lc-stat-label">{t('stats.toolCalls')}</span>
-                      <span className="lc-stat-value">{fmt(teamTiming?.toolCalls ?? 0)}</span>
-                      <span className="lc-stat-sub">{t('ov.kpi.toolSub', { dur: fmtDuration(teamTiming?.toolBusyMs ?? teamTiming?.toolsMs ?? 0) })}</span>
+                      <span className="lc-stat-value">{summary === null ? '—' : fmt(summary.windowTiming.toolCalls)}</span>
+                      <span className="lc-stat-sub">{summary === null ? '—' : t('ov.kpi.toolSub', { dur: fmtDuration(summary.windowTiming.toolsMs) })}</span>
                     </div>
                     <div className="lc-stat lc-ov-kpi">
                       <span className="lc-stat-label">{t('timing.total')}</span>
-                      <span className="lc-stat-value">{fmtDuration(activeMsOf(teamTiming))}</span>
-                      <span className="lc-stat-sub">{t('ov.kpi.wallSub', { n: fmt(teamTiming?.calls ?? 0) })}</span>
+                      <span className="lc-stat-value">{summary === null ? '—' : fmtDuration(summary.windowTiming.wallMs)}</span>
+                      <span className="lc-stat-sub">{summary === null ? '—' : t('ov.kpi.wallSub', { n: fmt(summary.windowTiming.calls) })}</span>
                     </div>
                   </div>
-                  <OverviewUsage days={days} currency={currency} today={todayKey()} />
+                  <OverviewUsage days={days} currency={currency} today={todayKey()} pending={daysLoading} />
+                  <div className="lc-card lc-ov-heat-card">
+                    <div className="lc-card-title">
+                      <span className="lc-card-title-text">
+                        <IconGauge size={14} />
+                        {t('ov.heat.title')}
+                      </span>
+                      <span className="lc-heat-ctl">
+                        <span className="lc-card-sub">{t('ov.heat.sub')}</span>
+                        <div className="lc-gran" role="group" aria-label={t('ov.heat.metric')}>
+                          {METRICS.map(m => (
+                            <button
+                              key={m}
+                              type="button"
+                              className={'lc-gran-btn' + (metric === m ? ' lc-gran-on' : '')}
+                              aria-pressed={metric === m}
+                              onClick={() => { setMetric(m) }}
+                            >{t('ov.heat.metric.' + m)}</button>
+                          ))}
+                        </div>
+                      </span>
+                    </div>
+                    <Heatmap days={days} metric={metric} selected={day} onSelect={setDay} today={todayKey()} pending={daysLoading} />
+                  </div>
                 </div>
                 <div className="lc-ov-stats">
-                  <OverviewTokens tokens={kpi.tokenParts} />
-                  <StatsTiming timing={teamTiming} />
+                  <OverviewTokens tokens={tokenParts} pending={summaryLoading} />
+                  <StatsTiming timing={teamTiming} note={t('ov.timing.lifetime')} />
                 </div>
                 <div className="lc-ov-body" ref={bodyRef}>
                   {bodyMounted ? (<>
-                    <div className="lc-ov-left">
-                      <div className="lc-card lc-ov-heat-card">
-                        <div className="lc-card-title">
-                          <span className="lc-card-title-text">
-                            <IconGauge size={14} />
-                            {t('ov.heat.title')}
-                          </span>
-                          <span className="lc-heat-ctl">
-                            <span className="lc-card-sub">{t('ov.heat.sub')}</span>
-                            <div className="lc-gran" role="group" aria-label={t('ov.heat.metric')}>
-                              {METRICS.map(m => (
-                                <button
-                                  key={m}
-                                  type="button"
-                                  className={'lc-gran-btn' + (metric === m ? ' lc-gran-on' : '')}
-                                  onClick={() => { setMetric(m) }}
-                                >{t('ov.heat.metric.' + m)}</button>
-                              ))}
-                            </div>
-                          </span>
-                        </div>
-                        <Heatmap days={days} metric={metric} selected={day} onSelect={setDay} today={todayKey()} />
-                      </div>
+                    <div className="lc-ov-tiles">
+                      <OverviewProjects
+                        stats={projectStats}
+                        day={day}
+                        selected={group}
+                        onSelect={setGroup}
+                        pending={awaitingValueOf(projectsState)}
+                      />
                       <OverviewSkills
                         stats={skillStats}
                         day={day}
-                        selected={skill}
-                        onSelect={setSkill}
-                        sort={skillSort}
-                        onSort={setSkillSort}
+                        selected={pick !== null && pick.field === 'skills' ? pick.name : null}
+                        onSelect={(name) => { setPick(name === null ? null : { field: 'skills', name }) }}
                         catalog={catalog}
-                        now={nowForCards}
+                        pending={awaitingValueOf(skillsState)}
                       />
+                      {tallyCards.map(card => (
+                        <OverviewTally
+                          key={card.kind}
+                          kind={card.kind}
+                          stats={card.stats}
+                          day={day}
+                          selected={pick !== null && pick.field === card.field ? pick.name : null}
+                          onSelect={(name) => { setPick(name === null ? null : { field: card.field, name }) }}
+                          pending={card.kind === 'tool' ? awaitingValueOf(toolsState) : awaitingValueOf(cmdsState)}
+                        />
+                      ))}
                     </div>
 
-                    <div className="lc-ov-right">
+                    <div className="lc-ov-list">
                       <div className="lc-ov-list-head">
                         <span className="lc-ov-list-title">{t('ov.list.title')}</span>
-                        <span className="lc-ov-list-count">{visible.length}</span>
+                        <span className="lc-ov-list-count">{listTotal}</span>
                         {day !== null && (
                           <button type="button" className="lc-ov-day-chip" title={t('ov.list.dayClear')} onClick={() => { setDay(null) }}>
                             {t('ov.list.dayFilter', { day })} ×
                           </button>
                         )}
-                        {skill !== null && (
-                          <button type="button" className="lc-ov-day-chip" title={t('ov.list.skillClear')} onClick={() => { setSkill(null) }}>
-                            {t('node.skillTag', { name: skill })} ×
+                        {pick !== null && (
+                          <button type="button" className="lc-ov-day-chip" title={t(PICK_FILTER[pick.field].clear)} onClick={() => { setPick(null) }}>
+                            {t(PICK_FILTER[pick.field].label, { name: pick.name })} ×
                           </button>
                         )}
                         <ClearableInput
@@ -306,19 +440,20 @@ export function makeOverviewPanel(
                               key={s}
                               type="button"
                               className={'lc-gran-btn' + (sort === s ? ' lc-gran-on' : '')}
+                              aria-pressed={sort === s}
                               onClick={() => { setSort(s) }}
                             >{t('ov.list.sort.' + s)}</button>
                           ))}
                         </div>
                       </div>
 
-                      {chips.length > 0 && (
+                      {pageValue !== null && (
                         <div className="lc-ov-groups" role="group" aria-label={t('ov.group.label')}>
                           <button
                             type="button"
                             className={'lc-ov-chip' + (group === null ? ' lc-ov-chip-on' : '')}
                             onClick={() => { setGroup(null) }}
-                          >{t('ov.range.all')}<span className="lc-ov-chip-n">{scoped.length}</span></button>
+                          >{t('ov.group.all')}<span className="lc-ov-chip-n">{scopeTotal}</span></button>
                           {chips.map(c => (
                             <button
                               key={c.key}
@@ -330,38 +465,42 @@ export function makeOverviewPanel(
                         </div>
                       )}
 
-                      {visible.length === 0 ? (
-                        <div className="lc-empty">{t(allRows.length === 0 ? 'ov.list.empty' : 'ov.list.noMatch')}</div>
+                      {pageLoading ? (
+                        <div className="lc-ov-grid" aria-hidden="true">
+                          {SESSION_SKELETON.map(i => <div key={i} className="lc-card lc-ov-skel-card" />)}
+                        </div>
+                      ) : rows.length === 0 ? (
+                        <div className="lc-empty">{t((summary?.sessionsTotal ?? 0) === 0 ? 'ov.list.empty' : 'ov.list.noMatch')}</div>
                       ) : (
                         <>
                           <div className="lc-ov-grid">
-                            {paged.items.map(row => (
+                            {rows.map(row => (
                               <OverviewCard
                                 key={row.id}
                                 row={row}
-                                {...(groups?.[row.id] !== undefined ? { group: groups[row.id] } : {})}
-                                costLabel={cardCostOf(row, book, currency)}
+                                {...(row.group === undefined ? {} : { group: row.group })}
+                                costLabel={cardCostOf(row, currency)}
                                 now={nowForCards}
                                 onOpen={openOne}
                               />
                             ))}
                           </div>
-                          {paged.count > 1 && (
+                          {pageCount > 1 && (
                             <div className="lc-ov-pager" role="navigation" aria-label={t('ov.list.pager')}>
                               <button
                                 type="button"
                                 className="lc-ov-pager-btn"
-                                disabled={paged.index === 0}
+                                disabled={pageIndex === 0}
                                 aria-label={t('ov.list.prev')}
-                                onClick={() => { setPage(paged.index - 1) }}
+                                onClick={() => { setPage(pageIndex - 1) }}
                               >‹</button>
-                              <span className="lc-ov-pager-n">{t('ov.list.page', { n: paged.index + 1, total: paged.count })}</span>
+                              <span className="lc-ov-pager-n">{t('ov.list.page', { n: pageIndex + 1, total: pageCount })}</span>
                               <button
                                 type="button"
                                 className="lc-ov-pager-btn"
-                                disabled={paged.index === paged.count - 1}
+                                disabled={pageIndex === pageCount - 1}
                                 aria-label={t('ov.list.next')}
-                                onClick={() => { setPage(paged.index + 1) }}
+                                onClick={() => { setPage(pageIndex + 1) }}
                               >›</button>
                             </div>
                           )}
@@ -369,12 +508,14 @@ export function makeOverviewPanel(
                       )}
                     </div>
                   </>) : (<>
-                    <div className="lc-ov-left">
-                      <div className="lc-card lc-deferred-skeleton" style={{ minHeight: 230 }} aria-hidden="true" />
-                      <div className="lc-card lc-deferred-skeleton" style={{ minHeight: 230 }} aria-hidden="true" />
+                    <div className="lc-ov-tiles">
+                      <div className="lc-card lc-deferred-skeleton lc-ov-tile" aria-hidden="true" />
+                      <div className="lc-card lc-deferred-skeleton lc-ov-tile" aria-hidden="true" />
+                      <div className="lc-card lc-deferred-skeleton lc-ov-tile" aria-hidden="true" />
+                      <div className="lc-card lc-deferred-skeleton lc-ov-tile" aria-hidden="true" />
                     </div>
-                    <div className="lc-ov-right">
-                      <div className="lc-card lc-deferred-skeleton" style={{ minHeight: 520 }} aria-hidden="true" />
+                    <div className="lc-ov-grid" aria-hidden="true">
+                      {SESSION_SKELETON.map(i => <div key={i} className="lc-card lc-ov-skel-card" />)}
                     </div>
                   </>)}
                 </div>
@@ -387,12 +528,10 @@ export function makeOverviewPanel(
   }
 
   return function OverviewPanel(props: OverviewPanelProps): ReactElement | null {
-    return <ErrorBoundary><OverviewBody {...props} /></ErrorBoundary>
+    return <ErrorBoundary><OverviewBody key={seatKeyOf(props)} {...props} /></ErrorBoundary>
   }
 }
 
-function cardCostOf(row: OverviewRow, book: ModelBook | null, currency: CostCurrency): string {
-  if (row.familyCost === null) return '—'
-  const cost = estimateSessionCost(row.familyCost, book, currency)
-  return cost === null ? '—' : formatCost(cost, currency)
+function cardCostOf(row: OverviewCardRow, currency: CostCurrency): string {
+  return row.costUsd === null ? '—' : formatCost(toCurrency(row.costUsd, currency), currency)
 }

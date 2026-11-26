@@ -1,4 +1,5 @@
-import { createElement as h, useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { createElement as h, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { createPortal } from 'react-dom'
 import { providerModelLabelOf } from '../agentTree'
 import { makeAttachmentOpener } from '../attachmentSource'
 import { measureDock } from '../dockMeasure'
@@ -6,10 +7,11 @@ import { headlineOf } from '../headline'
 import { modalStoreOf, takePendingConsume } from '../modalStore'
 import type { ClientCtx, SessionStandardProps, SessionsFace } from '../services'
 import type { ContextSettings } from '../settings'
-import { contextBreakdownOf, contextPressureOf, conversationNodesOf, headersOf, imageLoaderOf, projectionOf, sessionAddressOf, workspaceOf } from '../services'
+import { contextBreakdownOf, contextPressureOf, conversationNodesOf, headersOf, imageLoaderOf, projectionOf, seatKeyOf, seatOf, sessionAddressOf, workspaceOf } from '../services'
 import { makeContentFetcher, makeHeaderFetcher, useHistoryFace } from '../historyPage'
 import { useSessionDetailWarm } from '../prefetch'
-import { useTimelineSource } from '../timelineSource'
+import { COLD_TIMELINE } from '../coldTimeline'
+import { makeDeltaFetcher, useTimelineSource } from '../timelineSource'
 import type { ViewKit } from '../viewkit'
 import { useConversationSurface } from './useConversationSurface'
 import { makeContextBrowser } from './browser'
@@ -23,6 +25,10 @@ export interface ContextModalProps extends SessionStandardProps {
   useContextModal?: (sel: (open: boolean) => boolean) => boolean
   warm?: boolean
 }
+
+type ModalSeat = NonNullable<ContextModalProps['useContextModal']>
+
+const NO_MODAL: ModalSeat = () => false
 
 export function makeContextModal(
   ctx: ClientCtx,
@@ -45,15 +51,15 @@ export function makeContextModal(
 
   function ContextModalGate(props: ContextModalProps): ReactElement | null {
     const warm = props.warm === true
+    const open = seatOf(props.useContextModal, NO_MODAL)
     useSessionDetailWarm(warm ? props.sessionId : undefined, warm ? props.useProjection : undefined)
-    const open = typeof props.useContextModal === 'function' ? props.useContextModal(s => s) : false
-    return open ? h(ContextModalBody, props) : null
+    return open(s => s) ? h(ContextModalBody, props) : null
   }
 
   function ContextModalBody(props: ContextModalProps): ReactElement {
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
     const source = useTimelineSource(props)
-    const data = source.data
+    const data = source.data ?? COLD_TIMELINE
     const pressure = projectionOf(props, 'contextPressure', contextPressureOf)
     const breakdown = projectionOf(props, 'contextBreakdown', contextBreakdownOf)
     const headers = projectionOf(props, 'contextHeaders', headersOf)
@@ -61,7 +67,8 @@ export function makeContextModal(
     const [hoverCat, setHoverCat] = useState<string | null>(null)
     const [dock, setDock] = useState({ left: 0, right: 0 })
     const backdropRef = useRef<HTMLDivElement | null>(null)
-    useConversationSurface(backdropRef, 'modal')
+    const surfaceRef = useRef<HTMLSpanElement | null>(null)
+    useConversationSurface(surfaceRef, 'modal')
     const loadImage = useMemo(
       () => imageLoaderOf(ctx, sessionId !== '' ? sessionId : undefined),
       [ctx, sessionId],
@@ -85,6 +92,10 @@ export function makeContextModal(
         : undefined),
       [ctx, sessionId, historyFace],
     )
+    const fetchDelta = useMemo(
+      () => (sessionId !== '' ? makeDeltaFetcher(sessionId) : undefined),
+      [sessionId],
+    )
 
     const close = useCallback(() => {
       if (sessionId === '') return
@@ -96,67 +107,76 @@ export function makeContextModal(
       if (scope !== undefined) scope.bail(scope, 'slash/input-consume-token', { guard })
     }, [ctx, sessionId])
 
+    useEffect(() => {
+      if (source.detailState === 'ready') source.ensurePart('nodes')
+    }, [source.detailState, source.ensurePart])
+
     useEscapeClose(true, close)
 
     useLayoutEffect(() => {
-      const dock = measureDock(backdropRef.current)
+      const dock = measureDock(surfaceRef.current)
       setDock({ left: dock.left, right: dock.right })
       if (dock.frame === null) return undefined
       const observer = new MutationObserver(() => {
-        const next = measureDock(backdropRef.current)
+        const next = measureDock(surfaceRef.current)
         setDock({ left: next.left, right: next.right })
       })
       observer.observe(dock.frame, { attributes: true, attributeFilter: ['style'] })
       return () => { observer.disconnect() }
     }, [])
 
-    const head = data !== null ? headlineOf(data, pressure, breakdown) : null
-    const subtitle = data !== null ? providerModelLabelOf(data.provider, data.model, data.reasoningEffort) : ''
+    const head = headlineOf(data, pressure, breakdown)
+    const subtitle = providerModelLabelOf(data.provider, data.model, data.reasoningEffort)
 
     return (
-      <div ref={backdropRef} className="lc-modal-backdrop" style={{ left: dock.left, right: dock.right }} onClick={close}>
-        <div className="lc-modal-card lc-modal-fill" onClick={(ev) => { ev.stopPropagation() }}>
-          <div className="lc-modal-head">
-            <span className="lc-modal-title">{t('tab.context')}</span>
-            <button className="lc-modal-close hover:text-(--dsw-alias-label-primary) hover:bg-(--dsw-alias-interactive-bg-hover)" aria-label={t('cmd.close')} onClick={close}>×</button>
-          </div>
+      <>
+        <span ref={surfaceRef} hidden />
+        {createPortal(
+          <div ref={backdropRef} className="lc-modal-backdrop" style={{ left: dock.left, right: dock.right }} onClick={close}>
+            <div className="lc-modal-card lc-modal-fill" onClick={(ev) => { ev.stopPropagation() }}>
+              <div className="lc-modal-head">
+                <span className="lc-modal-title">{t('tab.context')}</span>
+                <button className="lc-modal-close hover:text-(--dsw-alias-label-primary) hover:bg-(--dsw-alias-interactive-bg-hover)" aria-label={t('cmd.close')} onClick={close}>×</button>
+              </div>
 
-          {data === null || head === null ? (
-            source.detailState === 'failed' ? (
-              <DetailNote state="failed" onRetry={source.retryDetail} />
-            ) : (
-              <div className="lc-empty">{t('loading')}</div>
-            )
-          ) : (
-            <div className="lc-modal-body">
-              <CurrentComposition
-                head={head}
-                subtitle={subtitle}
-                hoverKey={hoverCat}
-                onHoverKey={setHoverCat}
-              />
-              <ContextBrowser
-                data={data}
-                headers={headers}
-                convNodes={convNodes}
-                fetchContent={fetchContent}
-                fetchHeader={fetchHeader}
-                loadImage={loadImage}
-                openAttachment={openAttachment}
-                hoverKey={hoverCat}
-                onHoverKey={setHoverCat}
-                detailState={source.detailState}
-                onDetailRetry={source.retryDetail}
-                locale={activeLocale()}
-              />
+              {source.detailState === 'failed' && source.data === null ? (
+                <DetailNote state="failed" onRetry={source.retryDetail} />
+              ) : (
+                <div className="lc-modal-body">
+                  <CurrentComposition
+                    head={head}
+                    subtitle={subtitle}
+                    hoverKey={hoverCat}
+                    onHoverKey={setHoverCat}
+                  />
+                  <ContextBrowser
+                    data={data}
+                    headers={headers}
+                    convNodes={convNodes}
+                    fetchContent={fetchContent}
+                    fetchHeader={fetchHeader}
+                    fetchDelta={fetchDelta}
+                    loadImage={loadImage}
+                    openAttachment={openAttachment}
+                    hoverKey={hoverCat}
+                    onHoverKey={setHoverCat}
+                    detailState={source.detailState}
+                    onDetailRetry={source.retryDetail}
+                    locale={activeLocale()}
+                    session={sessionId !== '' ? sessionId : undefined}
+                  />
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      </div>
+          </div>,
+          document.body,
+        )}
+      </>
     )
   }
 
   return function ContextModal(props: ContextModalProps): ReactElement | null {
-    return h(ErrorBoundary, null, h(ContextModalGate, props))
+    const key = `${props.warm === true ? 'warm' : 'cold'}:${seatKeyOf(props)}`
+    return h(ErrorBoundary, null, h(ContextModalGate, { ...props, key }))
   }
 }

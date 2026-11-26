@@ -90,7 +90,7 @@ const NODE_ENV = process.env.NODE_ENV ?? 'production'
 const WATCH = process.env.DSH_CTX_WATCH === '1'
 
 // Rolldown wraps each rebuild's artifacts in napi objects that a pressure-free V8 never finalizes, so a watcher's resident set
-// climbs with every rebuild; watch.sh exposes gc and every successful build collects.
+// climbs with every rebuild; the watch script exposes gc and every successful build collects.
 const collectGarbage = (): void => {
   const maybeGc = globalThis as typeof globalThis & { gc?: () => void }
   maybeGc.gc?.()
@@ -253,7 +253,7 @@ export default defineConfig([
       neverBundle: isRequested,
       alwaysBundle: (specifier: string) => !isRequested(specifier),
       // Keeps "everything else inlines" auditable: a dependency that starts being bundled fails the build instead of silently growing the artifact.
-      onlyBundle: ['@opencode-ai/models', '@deepseek-ai/dsh-util-workspace-path', 'simple-icons'],
+      onlyBundle: ['@deepseek-ai/dsh-util-workspace-path', 'simple-icons'],
     },
     // Inlined node-idiom deps read process.env.NODE_ENV or probe import.meta.env(.MODE); without these substitutions the factory throws ReferenceError at boot.
     define: {

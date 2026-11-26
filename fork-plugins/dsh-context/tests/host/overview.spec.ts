@@ -1,0 +1,849 @@
+import assert from 'node:assert/strict'
+import { Context } from '@deepseek-ai/cordis'
+import { describe, test, vi } from 'vitest'
+import { watchOverviewRoute, OVERVIEW_ROUTE } from '../../src/host/overview'
+import { buildRows as buildRowsOf } from '../../src/host/overviewCorpus'
+import { type ContextTimeline, type SessionCostUsage } from '../../src/shared/types'
+import { boot, call, summaryOf, pageOf, revisionOf, recordOf, unwrap, usageOf, timelineOf, timingOf, dayOf, costOfUsage, fakeCost, fakeBackfill, fakeState, tokenPartsOf, sortedParts, WIDE_RANGE, type RouteBox } from './helpers/overview'
+import { makeScanWindow, type ScanResult } from '../../src/host/overviewScan'
+
+describe('overview', () => {
+
+describe('dsh-context overview route', () => {
+
+  test('without the connection face the route never registers', async () => {
+    const ctx = new Context()
+    const routes = new Map<string, RouteBox>()
+    ctx.provide('connection', {} as never)
+    ctx.provide('sessionQuery', { listSessions: async () => [] })
+    ctx.provide('sessionProjectionCache', { cachedSnapshot: () => undefined })
+    ctx.provide('sessions', { get: () => undefined })
+    ctx.provide('sessionProjections', { snapshot: () => undefined })
+    watchOverviewRoute(ctx, fakeCost(true), fakeBackfill(fakeState()))
+    await new Promise(resolve => setTimeout(resolve, 2))
+    assert.equal(routes.has(OVERVIEW_ROUTE), false)
+  })
+
+  test('summary aggregates the full corpus and equals the pure aggregation of the same session values', async () => {
+    const firstUsage = usageOf(100, 50, 10, 20)
+    const secondUsage = usageOf(30, 5, 0, 7)
+    const firstCost = usageOf(60, 20, 5, 10)
+    const secondCost = usageOf(10, 2, 0, 3)
+    const values = {
+      a: {
+        contextTimeline: timelineOf({ total: 100, turns: 2, cost: firstUsage, timing: timingOf(1_000, 3, 400), lastUser: 'first' }),
+        contextActivity: { days: { '2026-11-01': dayOf(120, 2, { cost: firstCost, turns: 2, toolCalls: 2, skills: ['s1'] }) } },
+        title: 'Alpha',
+        sessionListMetadata: { blank: false, lastPromptAt: 1_000 },
+      },
+      b: {
+        contextTimeline: timelineOf({ total: 200, turns: 3, cost: secondUsage, timing: timingOf(500, 1, 100) }),
+        contextActivity: { days: { '2026-11-02': dayOf(80, 1, { cost: secondCost, turns: 3, toolCalls: 1, toolsMs: 200, wallMs: 500 }) } },
+        title: 'Beta',
+        sessionListMetadata: { blank: false, lastPromptAt: 2_000 },
+      },
+    }
+    const harness = await boot({
+      records: [recordOf('a'), recordOf('b')],
+      values,
+      coverage: { complete: true, remaining: 0, failed: 0, running: false, total: 2, covered: 2, unsupported: 0, unreadable: 0 },
+    })
+    const reply = await call(harness, { part: 'summary' })
+    const summary = summaryOf(reply)
+    const merged = { deepseek: { 'deepseek-v4-flash': { off: { uncached: 70, cacheRead: 22, cacheWrite: 5, output: 13 } } } }
+    const expectedParts: { key: string; value: number }[] = []
+    for (const valuesOfSession of [values.a, values.b]) {
+      const timeline = valuesOfSession.contextTimeline as unknown as ContextTimeline
+      const cost = Object.values(valuesOfSession.contextActivity.days)[0].cost as SessionCostUsage
+      const parts = tokenPartsOf(timeline, cost)
+      for (const part of parts) {
+        const prev = expectedParts.find(entry => entry.key === part.key)
+        if (prev === undefined) expectedParts.push({ ...part })
+        else prev.value += part.value
+      }
+    }
+    assert.equal(summary.sessions, 2)
+    assert.equal(summary.sessionsTotal, 2)
+    assert.equal(summary.sessionsArchived, 0)
+    assert.equal(summary.archivedScoped, 0)
+    assert.equal(summary.tokens, 200, 'the KPI uses the canonical activity-day token total')
+    assert.equal(summary.turns, 5)
+    assert.equal(summary.costUsd, costOfUsage(merged))
+    assert.equal(summary.costSessions, 2)
+    assert.equal(summary.usageSessions, 2)
+    assert.equal(summary.cacheHit, '22.68')
+    assert.deepEqual(summary.tokenParts?.map(part => part.key), sortedParts(expectedParts).map(part => part.key))
+    for (const part of summary.tokenParts ?? []) {
+      const expected = expectedParts.find(entry => entry.key === part.key)
+      assert.ok(expected !== undefined)
+      assert.equal(part.value, expected.value)
+    }
+    assert.equal(summary.timing?.wallMs, 1_500)
+    assert.equal(summary.timing?.toolCalls, 4)
+    assert.equal(summary.timing?.tools.bash.calls, 4)
+    assert.deepEqual(summary.windowTiming, { calls: 3, toolCalls: 3, toolsMs: 200, wallMs: 500 })
+    assert.equal(summary.coverage.complete, true)
+    assert.equal(summary.coverage.total, 2)
+  })
+
+  test('summary keeps family members together: tokens, turns, timing, and cost merge subagent children into the root row', async () => {
+    const rootUsage = usageOf(10, 0, 0, 1)
+    const childUsage = usageOf(20, 0, 0, 2)
+    const harness = await boot({
+      records: [
+        recordOf('root', { createdAt: 5 }),
+        recordOf('child', { parentSession: 'root', origin: 'subagent' }),
+        recordOf('other'),
+      ],
+      values: {
+        root: {
+          contextTimeline: timelineOf({ total: 10, turns: 1, cost: rootUsage, timing: timingOf(100, 1, 10) }),
+          contextActivity: { days: { '2026-11-01': dayOf(11, 1, { turns: 1, cost: rootUsage }) } },
+          sessionListMetadata: { blank: false, lastPromptAt: 10 },
+        },
+        child: {
+          contextTimeline: timelineOf({ total: 20, turns: 2, cost: childUsage, timing: timingOf(200, 2, 20) }),
+          contextActivity: { days: { '2026-11-01': dayOf(22, 2, { turns: 2, cost: childUsage }) } },
+          sessionListMetadata: { blank: false, lastPromptAt: 20 },
+        },
+        other: {
+          contextTimeline: timelineOf({ total: 5, turns: 0 }),
+          sessionListMetadata: { blank: false, lastPromptAt: 30 },
+        },
+      },
+    })
+    const summary = summaryOf(await call(harness, { part: 'summary' }))
+    assert.equal(summary.sessions, 2, 'the subagent child is not a top-level session')
+    assert.equal(summary.tokens, 33, 'billed tokens merge root and child')
+    assert.equal(summary.turns, 1 + 2 + 0)
+    assert.equal(summary.timing?.wallMs, 300)
+    assert.equal(summary.timing?.toolCalls, 3)
+    assert.deepEqual(summary.windowTiming, { calls: 3, toolCalls: 0, toolsMs: 0, wallMs: 0 })
+    assert.equal(summary.costUsd, costOfUsage({ deepseek: { 'deepseek-v4-flash': { off: { uncached: 30, cacheRead: 0, cacheWrite: 0, output: 3 } } } }))
+    const page = pageOf(await call(harness, { part: 'page' }))
+    const rootRow = page.items.find(row => row.id === 'root')
+    assert.ok(rootRow !== undefined)
+    assert.equal(rootRow.tokens, 33)
+    assert.equal(rootRow.turns, 1, 'the page card keeps the root session turns')
+  })
+
+  test('summary bills the activity ledger for every scope, so windows add up', async () => {
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: {
+        a: {
+          contextTimeline: timelineOf({ total: 50, turns: 9, cost: usageOf(999, 0, 0, 999) }),
+          contextActivity: {
+            days: {
+              '2026-10-01': dayOf(10, 1, { turns: 1, cost: usageOf(10, 0, 0, 1), toolCalls: 1 }),
+              '2026-11-01': dayOf(20, 2, { turns: 2, cost: usageOf(20, 0, 0, 2), toolCalls: 2, toolsMs: 30, wallMs: 40 }),
+            },
+          },
+          sessionListMetadata: { blank: false, lastPromptAt: 2_000 },
+        },
+      },
+    })
+    const wide = summaryOf(await call(harness, { part: 'summary' }))
+    assert.equal(wide.tokens, 30, 'the wide scope sums every retained day')
+    assert.equal(wide.turns, 3)
+    assert.deepEqual(wide.windowTiming, { calls: 3, toolCalls: 3, toolsMs: 30, wallMs: 40 })
+    const ranged = summaryOf(await call(harness, { part: 'summary', scope: { range: { start: Date.UTC(2026, 9, 20), end: Date.UTC(2026, 10, 5) } } }))
+    assert.equal(ranged.tokens, 20, 'a bounded scope bills only its window days')
+    assert.equal(ranged.turns, 2)
+    assert.equal(ranged.windowTiming.toolCalls, 2)
+    const day = summaryOf(await call(harness, { part: 'summary', scope: { day: '2026-11-01' } }))
+    assert.equal(day.tokens, 20)
+    assert.equal(day.turns, 2)
+    assert.ok(wide.tokens >= ranged.tokens)
+    assert.ok(ranged.tokens >= day.tokens)
+  })
+
+  test('summary keeps a session whose timeline is missing on the activity ledger', async () => {
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: {
+        a: {
+          contextActivity: { days: { '2026-11-01': dayOf(20, 2, { turns: 2, cost: usageOf(20, 0, 0, 2), toolCalls: 1 }) } },
+          sessionListMetadata: { blank: false, lastPromptAt: 2_000 },
+        },
+      },
+    })
+    const wide = summaryOf(await call(harness, { part: 'summary' }))
+    assert.equal(wide.tokens, 20)
+    assert.equal(wide.costSessions, 1)
+    assert.equal(wide.usageSessions, 1)
+    assert.equal(wide.tokenParts, null)
+    const ranged = summaryOf(await call(harness, { part: 'summary', scope: { range: 'today' } }))
+    assert.equal(ranged.tokens, 0)
+  })
+
+  test('days returns host-priced day totals in key order and skips empty days', async () => {
+    const harness = await boot({
+      records: [recordOf('a'), recordOf('b'), recordOf('c')],
+      values: {
+        a: {
+          contextActivity: {
+            days: {
+              '2026-11-02': dayOf(20, 2, { cost: usageOf(20, 0, 0, 2) }),
+              '2026-11-01': dayOf(10, 1, { cost: usageOf(10, 0, 0, 1) }),
+            },
+          },
+          title: 'Alpha',
+        },
+        b: {
+          contextActivity: { days: { '2026-11-01': dayOf(5, 1, { cost: usageOf(5, 0, 0, 0) }), '2026-11-03': dayOf(0, 0) } },
+        },
+        c: { contextActivity: { days: {} } },
+      },
+    })
+    const result = await call(harness, { part: 'days' })
+    const reply = result.reply
+    assert.equal(reply.ok, true)
+    assert.ok(reply.value !== undefined && 'days' in reply.value)
+    assert.deepEqual(reply.value.days.map(day => day.key), ['2026-11-01', '2026-11-02'])
+    assert.equal(reply.value.days[0].tokens, 15)
+    assert.equal(reply.value.days[0].sessions, 2)
+    assert.equal(reply.value.days[0].costUsd, costOfUsage({ deepseek: { 'deepseek-v4-flash': { off: { uncached: 15, cacheRead: 0, cacheWrite: 0, output: 1 } } } }))
+    assert.equal(reply.value.days[1].tokens, 20)
+    assert.equal(reply.value.pricingReady, true)
+  })
+
+  test('revision is stable for the same corpus and unchanged polls reply tiny; a data change makes a new revision', async () => {
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: { a: { contextTimeline: timelineOf(), contextActivity: { days: {} }, title: 'Alpha' } },
+    })
+    const first = await call(harness, { part: 'summary' })
+    const revision = revisionOf(first)
+    const repeated = await call(harness, { part: 'summary' })
+    assert.equal(revisionOf(repeated), revision, 'the same corpus keeps the same revision')
+    const unchanged = await call(harness, { part: 'summary', revision })
+    assert.deepEqual(unchanged.reply, { ok: true, value: { revision, unchanged: true } })
+    assert.ok(unchanged.bytes < 400, `the unchanged poll stays tiny (${unchanged.bytes} B)`)
+    const summaryBytes = first.bytes
+    assert.ok(summaryBytes < 4_096, `the summary reply stays small (${summaryBytes} B)`)
+    const otherPart = await call(harness, { part: 'page', revision })
+    assert.equal(otherPart.reply.ok, true)
+    assert.ok(otherPart.reply.value !== undefined && !('unchanged' in otherPart.reply.value), 'a part never served at this revision still gets its data')
+    const stale = await call(harness, { part: 'summary', revision: 'r1-bogus' })
+    assert.ok(stale.reply.value !== undefined && !('unchanged' in stale.reply.value), 'an unknown revision gets a full reply')
+    harness.state.backfillVersion = 3
+    const changed = await call(harness, { part: 'summary', revision })
+    assert.notEqual(revisionOf(changed), revision, 'a backfill write moves the revision')
+    assert.ok(changed.reply.value !== undefined && !('unchanged' in changed.reply.value))
+  })
+
+  test('a running backfill moves the revision as its coverage advances', async () => {
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: { a: { contextTimeline: timelineOf(), contextActivity: { days: {} }, title: 'Alpha' } },
+      coverage: { complete: false, remaining: 2, failed: 0, running: true, total: 3, covered: 1, unsupported: 0, unreadable: 0 },
+    })
+    const first = await call(harness, { part: 'summary' })
+    const revision = revisionOf(first)
+    assert.deepEqual(summaryOf(first).coverage, {
+      complete: false, remaining: 2, failed: 0, running: true, total: 3, covered: 1, unsupported: 0, unreadable: 0,
+    })
+    harness.state.coverage.covered = 2
+    harness.state.coverage.remaining = 1
+    const advanced = await call(harness, { part: 'summary', revision })
+    assert.notEqual(revisionOf(advanced), revision, 'advancing coverage moves the revision')
+    assert.equal(summaryOf(advanced).coverage.covered, 2, 'the reply carries the advanced counters')
+    const running = revisionOf(advanced)
+    harness.state.coverage.running = false
+    const settled = await call(harness, { part: 'summary', revision: running })
+    assert.notEqual(revisionOf(settled), running, 'the pass ending moves the revision even with unchanged counters')
+    const stalled = revisionOf(settled)
+    harness.state.coverage.complete = false
+    harness.state.coverage.failed = 1
+    harness.state.coverage.failedSessions = [{ id: 'b', reason: 'schema rejected the cached row' }]
+    const detailed = await call(harness, { part: 'summary', revision: stalled })
+    assert.notEqual(revisionOf(detailed), stalled, 'a new failure detail moves the revision')
+    assert.deepEqual(summaryOf(detailed).coverage.failedSessions, [{ id: 'b', reason: 'schema rejected the cached row' }])
+    harness.state.coverage.failedSessions = [{ id: 'b', reason: 'a second attempt failed differently' }]
+    const reworded = await call(harness, { part: 'summary', revision: revisionOf(detailed) })
+    assert.notEqual(revisionOf(reworded), revisionOf(detailed), 'a changed reason moves the revision')
+    const unchanged = await call(harness, { part: 'summary', revision: revisionOf(reworded) })
+    assert.deepEqual(unchanged.reply, { ok: true, value: { revision: revisionOf(reworded), unchanged: true } })
+  })
+
+  test('coverage progress reuses the built rows while the response revision advances', async () => {
+    const buildRows = vi.fn(buildRowsOf)
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: { a: { contextTimeline: timelineOf(), contextActivity: { days: {} }, title: 'Alpha' } },
+      persistence: { stat: async () => ({ path: '/p/a.jsonl', sizeBytes: 1, mtimeMs: 2 }) },
+      coverage: { complete: false, remaining: 1, failed: 0, running: true, total: 2, covered: 1, unsupported: 0, unreadable: 0 },
+      buildRows,
+    })
+    const first = await call(harness, { part: 'summary' })
+    const revision = revisionOf(first)
+    assert.equal(buildRows.mock.calls.length, 1, 'the first request builds the rows')
+    harness.state.coverage.covered = 2
+    harness.state.coverage.remaining = 0
+    harness.state.coverage.complete = true
+    harness.state.coverage.running = false
+    const advanced = await call(harness, { part: 'summary', revision })
+    assert.notEqual(revisionOf(advanced), revision, 'the coverage progress moves the response revision')
+    assert.equal(summaryOf(advanced).coverage.complete, true, 'the reply carries the advanced coverage')
+    assert.equal(buildRows.mock.calls.length, 1, 'the coverage-only poll reuses the built rows')
+    const settled = revisionOf(advanced)
+    const unchanged = await call(harness, { part: 'summary', revision: settled })
+    assert.deepEqual(unchanged.reply, { ok: true, value: { revision: settled, unchanged: true } })
+    assert.equal(buildRows.mock.calls.length, 1, 'the unchanged poll builds nothing')
+  })
+
+  test('a pricing flip reuses the built rows and reprices the response', async () => {
+    const buildRows = vi.fn(buildRowsOf)
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: {
+        a: {
+          contextTimeline: timelineOf({ cost: usageOf(10, 2, 3, 4) }),
+          contextActivity: { days: { '2026-11-01': dayOf(20, 2, { cost: usageOf(10, 2, 3, 4) }) } },
+          title: 'Alpha',
+        },
+      },
+      persistence: { stat: async () => ({ path: '/p/a.jsonl', sizeBytes: 1, mtimeMs: 2 }) },
+      costReady: true,
+      buildRows,
+    })
+    const first = await call(harness, { part: 'summary' })
+    const revision = revisionOf(first)
+    harness.state.costReady = false
+    const cold = await call(harness, { part: 'summary', revision })
+    assert.notEqual(revisionOf(cold), revision, 'the pricing flip moves the response revision')
+    const coldValue = unwrap(cold).value
+    assert.ok(coldValue !== undefined && 'summary' in coldValue)
+    assert.equal(coldValue.pricingReady, false, 'the cold price book marks the reply')
+    assert.equal(summaryOf(cold).costUsd, null, 'the cold price book serves no money')
+    assert.equal(buildRows.mock.calls.length, 1, 'the pricing-only poll reuses the built rows')
+    harness.state.costReady = true
+    const warm = await call(harness, { part: 'summary', revision: revisionOf(cold) })
+    assert.ok(summaryOf(warm).costUsd !== null, 'the re-priced reply carries money again')
+    assert.equal(buildRows.mock.calls.length, 1, 'the re-priced poll reuses the built rows')
+    const unchanged = await call(harness, { part: 'summary', revision: revisionOf(warm) })
+    assert.deepEqual(unchanged.reply, { ok: true, value: { revision: revisionOf(warm), unchanged: true } })
+    assert.equal(buildRows.mock.calls.length, 1, 'the unchanged poll builds nothing')
+  })
+
+  test('without the fold journal a coverage advance still rebuilds the rows', async () => {
+    const buildRows = vi.fn(buildRowsOf)
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: { a: { contextTimeline: timelineOf(), contextActivity: { days: {} }, title: 'Alpha' } },
+      foldedAvailable: false,
+      coverage: { complete: false, remaining: 1, failed: 0, running: true, total: 2, covered: 1, unsupported: 0, unreadable: 0 },
+      buildRows,
+    })
+    const first = await call(harness, { part: 'summary' })
+    assert.equal(buildRows.mock.calls.length, 1)
+    harness.state.coverage.covered = 2
+    harness.state.coverage.remaining = 0
+    harness.state.coverage.complete = true
+    const advanced = await call(harness, { part: 'summary', revision: revisionOf(first) })
+    assert.notEqual(revisionOf(advanced), revisionOf(first), 'the coverage progress moves the revision')
+    assert.equal(buildRows.mock.calls.length, 2, 'the fallback invalidation rebuilds the rows')
+  })
+
+  test('a live session moves the revision with its event seq, and the live snapshot path serves its values', async () => {
+    const harness = await boot({
+      records: [recordOf('live', { live: true })],
+      liveSeq: { live: 1 },
+      liveValues: {
+        live: {
+          contextTimeline: timelineOf({ total: 42, turns: 3, cost: usageOf(10, 0, 0, 2) }),
+          contextActivity: { days: { '2026-11-01': dayOf(12, 1, { turns: 3, cost: usageOf(10, 0, 0, 2) }) } },
+          title: 'Live',
+          sessionListMetadata: { blank: false, lastPromptAt: 5_000 },
+        },
+      },
+    })
+    const first = await call(harness, { part: 'summary' })
+    assert.equal(summaryOf(first).sessions, 1)
+    assert.equal(summaryOf(first).tokens, 12)
+    assert.deepEqual(harness.calls.snapshot, ['live'], 'a live session reads the registry snapshot')
+    assert.deepEqual(harness.calls.cached, [], 'a live session never reads the cold cache')
+    const revision = revisionOf(first)
+    harness.state.liveSeq.live = 2
+    harness.cacheMode.liveValues.live = {
+      contextTimeline: timelineOf({ total: 84, turns: 4, cost: usageOf(20, 0, 0, 2) }),
+      contextActivity: { days: { '2026-11-01': dayOf(30, 2, { turns: 4, cost: usageOf(20, 0, 0, 2) }) } },
+      title: 'Live updated',
+      sessionListMetadata: { blank: false, lastPromptAt: 6_000 },
+    }
+    const next = await call(harness, { part: 'summary', revision })
+    assert.notEqual(revisionOf(next), revision, 'a live event seq change moves the revision')
+    assert.equal(summaryOf(next).sessions, 1)
+    assert.equal(summaryOf(next).tokens, 30, 'the new live seq cannot reuse the old materialized values')
+    assert.deepEqual(harness.calls.snapshot, ['live', 'live'])
+  })
+
+  test('a fresh route instance still replies fully when a known revision arrives before any rows were built', async () => {
+    const values = { a: { contextTimeline: timelineOf({ turns: 1 }), title: 'Alpha' } }
+    const firstHarness = await boot({ records: [recordOf('a')], values })
+    const revision = revisionOf(await call(firstHarness, { part: 'summary' }))
+    const secondHarness = await boot({ records: [recordOf('a')], values })
+    const reply = await call(secondHarness, { part: 'summary', revision })
+    assert.equal(reply.reply.ok, true)
+    assert.ok(reply.reply.value !== undefined && !('unchanged' in reply.reply.value), 'a route with no built rows cannot confirm unchanged')
+    assert.equal(revisionOf(reply), revision, 'the deterministic revision matches across route instances')
+  })
+
+  test('workspace claims: archived coverage excludes archived sessions, groups follow the claims and titles', async () => {
+    const workspace = {
+      list: () => [
+        { id: 'w1', title: 'Alpha', sessionIds: ['a'] },
+        { id: 'w2', title: 'Beta', sessionIds: ['b', 'c'] },
+      ],
+      archivedSessionIds: ['c'],
+    }
+    const harness = await boot({
+      records: [recordOf('a'), recordOf('b'), recordOf('c')],
+      values: {
+        a: { contextTimeline: timelineOf({ turns: 1 }), contextActivity: { days: {} }, title: 'A' },
+        b: { contextTimeline: timelineOf({ turns: 1 }), contextActivity: { days: {} }, title: 'B' },
+        c: { contextTimeline: timelineOf({ turns: 1 }), title: 'C' },
+      },
+      workspace,
+    })
+    const summary = summaryOf(await call(harness, { part: 'summary', scope: { coverage: 'active' } }))
+    assert.equal(summary.sessions, 2)
+    assert.equal(summary.sessionsTotal, 3)
+    assert.equal(summary.archivedScoped, 0)
+    const kept = summaryOf(await call(harness, { part: 'summary', scope: { coverage: 'archived' } }))
+    assert.equal(kept.sessions, 1)
+    assert.equal(kept.archivedScoped, 1)
+    const page = pageOf(await call(harness, { part: 'page', scope: { group: 'Alpha' } }))
+    assert.deepEqual(page.items.map(row => row.id), ['a'])
+    assert.deepEqual(page.groups, [{ key: 'Alpha', count: 1 }, { key: 'Beta', count: 2 }])
+  })
+
+  test('model-less activity keeps the same token total in summary, cards, and days', async () => {
+    const harness = await boot({
+      records: [recordOf('plain')],
+      values: {
+        plain: {
+          contextTimeline: timelineOf({ total: 5, turns: 1 }),
+          contextActivity: { days: { '2026-11-01': { tokens: 17, requests: 2, turns: 1 } } },
+          sessionListMetadata: { blank: false, lastPromptAt: 10 },
+        },
+      },
+    })
+    const summary = summaryOf(await call(harness, { part: 'summary' }))
+    assert.equal(summary.tokens, 17)
+    assert.equal(pageOf(await call(harness, { part: 'page' })).items[0].tokens, 17)
+    const days = await call(harness, { part: 'days' })
+    const value = days.reply.value
+    assert.ok(value !== undefined && 'days' in value)
+    assert.equal(value.days[0].tokens, 17)
+    harness.dispose()
+  })
+
+  test('calendar day keys override the legacy absolute range and resolve on the host', async () => {
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: {
+        a: {
+          contextTimeline: timelineOf(),
+          contextActivity: { days: { '2026-11-01': dayOf(11, 1) } },
+          sessionListMetadata: { blank: false, lastPromptAt: 10 },
+        },
+      },
+    })
+    const summary = summaryOf(await call(harness, {
+      part: 'summary',
+      scope: {
+        range: { start: 1, end: 2 },
+        calendar: { from: '2026-11-01', to: '2026-11-02' },
+      },
+    }))
+    assert.equal(summary.tokens, 11)
+    assert.equal(summary.window?.from, '2026-11-01')
+    assert.equal(summary.window?.to, '2026-11-02')
+    assert.equal(summary.window?.start, new Date(2026, 10, 1).getTime())
+    assert.equal(summary.window?.end, new Date(2026, 10, 2, 23, 59, 59, 999).getTime())
+    const reversed = summaryOf(await call(harness, {
+      part: 'summary', scope: { range: '30d', calendar: { from: '2026-11-02', to: '2026-11-01' } },
+    }))
+    assert.deepEqual(reversed.window, summary.window)
+    const invalid = summaryOf(await call(harness, {
+      part: 'summary',
+      scope: { range: { start: 1, end: 2 }, calendar: { from: '2026-02-30', to: '2026-02-30' } },
+    }))
+    assert.equal(invalid.window?.start, 1)
+    harness.dispose()
+  })
+
+  test('pricing not ready keeps money null and marks the reply', async () => {
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: { a: { contextActivity: { days: { '2026-11-01': dayOf(11, 1, { cost: usageOf(10, 0, 0, 1) }) } } } },
+      costReady: false,
+    })
+    const result = await call(harness, { part: 'summary' })
+    const summary = summaryOf(result)
+    assert.equal(summary.costUsd, null)
+    assert.equal(summary.costSessions, 0)
+    assert.equal(result.reply.value !== undefined && 'pricingReady' in result.reply.value && result.reply.value.pricingReady, false)
+  })
+
+  test('hostile values degrade field-by-field and a throwing row read never drops the session', async () => {
+    const harness = await boot({
+      records: [
+        recordOf('junk'),
+        recordOf('throwing'),
+        recordOf('badtitle'),
+        { header: { id: 'ok', cwd: '/repo/ok' } },
+        { header: null },
+        null,
+        { nope: true },
+        recordOf('no-cwd-cold', { cwd: '' }),
+      ],
+      values: {
+        junk: {
+          contextTimeline: { current: 'bad', counts: { turns: 'many' }, cost: 'nope', timing: { wallMs: 'x' } },
+          contextActivity: { days: { '2026-11-01': { tokens: 'x', requests: null } } },
+          title: 7,
+          sessionListMetadata: { blank: 'no', lastPromptAt: 'soon' },
+        },
+        badtitle: { title: '', contextTimeline: { current: { total: 5 } }, sessionListMetadata: null },
+      },
+    })
+    harness.cacheMode.throwCached = true
+    const reply = await call(harness, { part: 'summary' })
+    assert.equal(reply.reply.ok, true)
+    const summary = summaryOf(reply.reply)
+    assert.equal(summary.sessions, 4, 'junk, bad-title, throwing, and bare-header rows stay visible')
+    assert.equal(summary.tokens, 0)
+    assert.equal(summary.costUsd, null)
+    const pageReply = await call(harness, { part: 'page' })
+    const page = pageOf(pageReply.reply)
+    assert.equal(page.total, 4)
+    for (const row of page.items) {
+      assert.deepEqual(row.parts, [])
+      assert.equal(row.total, 0)
+      assert.equal(row.costUsd, null)
+      assert.equal(row.turns, 0)
+    }
+    harness.cacheMode.throwCached = false
+    const recovered = pageOf(await call(harness, { part: 'page' }))
+    assert.equal(recovered.total >= 3, true, 'a transient row failure is not cached forever')
+    harness.cacheMode.throwSnapshot = true
+    harness.state.liveSeq = { live: 1 }
+    harness.state.records = [recordOf('live', { live: true })]
+    const liveFailed = summaryOf(await call(harness, { part: 'summary' }))
+    assert.equal(liveFailed.sessions, 1, 'a throwing live snapshot keeps the row without values')
+  })
+
+  test('hostile workspace and agents faces degrade to no groups and no running state', async () => {
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: { a: { contextTimeline: timelineOf() } },
+      workspace: {
+        list: () => { throw new Error('no registry') },
+        get archivedSessionIds(): readonly string[] { throw new Error('no archive') },
+      },
+      agents: { get: () => { throw new Error('no agent') } },
+    })
+    const page = pageOf(await call(harness, { part: 'page' }))
+    assert.equal(page.items[0].running, false)
+    assert.deepEqual(page.groups, [{ key: '__ungrouped__', count: 1 }])
+    const summary = summaryOf(await call(harness, { part: 'summary' }))
+    assert.equal(summary.sessions, 1)
+  })
+
+  test('hostile bodies, non-array listings, and listing failures keep the route lifecycle intact', async () => {
+    const harness = await boot({ records: [recordOf('a')], values: { a: { contextTimeline: timelineOf() } } })
+    const malformed = await call(harness, 'not json')
+    assert.equal(malformed.reply.error?.code, 'dsh-context/bad-request')
+    const missingPart = await call(harness, {})
+    assert.equal(missingPart.reply.error?.code, 'dsh-context/bad-request')
+    const unknownPart = await call(harness, { part: 'nope' })
+    assert.equal(unknownPart.reply.error?.code, 'dsh-context/bad-request')
+    const hostileRevision = await call(harness, { part: 'summary', revision: 7, scope: 'nope', sort: 'bogus', page: -5, tally: 'nope', pick: { field: 'bogus', name: 7 } })
+    assert.equal(hostileRevision.reply.ok, true)
+    const flatHarness = await boot({ records: 'not-a-listing' })
+    const flat = await call(flatHarness, { part: 'summary' })
+    assert.equal(flat.reply.ok, true)
+    assert.equal(summaryOf(flat.reply).sessions, 0)
+    assert.equal(flat.reply.ok && (flat.reply.value as { pricingReady?: boolean }).pricingReady, true)
+    const failedHarness = await boot({ listSessions: () => Promise.reject(new Error('listing down')) })
+    const failed = await call(failedHarness, { part: 'summary' })
+    assert.equal(failed.reply.error?.code, 'gateway/internal')
+    const plainHarness = await boot({ listSessions: () => Promise.reject('plain failure') })
+    const failedPlain = await call(plainHarness, { part: 'summary' })
+    assert.equal(failedPlain.reply.error?.message, 'plain failure')
+  })
+
+  test('a live session with no registry snapshot and a cold session with a throwing cached read both stay listed', async () => {
+    const harness = await boot({
+      records: [recordOf('cold'), recordOf('live', { live: true })],
+      liveSeq: { live: 1 },
+    })
+    harness.cacheMode.throwCached = true
+    const summary = summaryOf(await call(harness, { part: 'summary' }))
+    assert.equal(summary.sessions, 2)
+    assert.equal(summary.sessionsTotal, 2)
+  })
+
+  test('a short scan TTL shares one listSessions across parts and concurrent requests, and a backfill write invalidates it', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = () => resolve() })
+    let listed = 0
+    const gateAt = 2
+    const harness = await boot({
+      scanTtlMs: 10_000,
+      listSessions: async () => {
+        listed++
+        if (listed === gateAt) await gate
+        return [recordOf('a')]
+      },
+      values: { a: { contextTimeline: timelineOf({ turns: 1 }), contextActivity: { days: {} }, title: 'Alpha' } },
+    })
+    const first = call(harness, { part: 'summary' })
+    const second = call(harness, { part: 'days' })
+    await new Promise(resolve => setTimeout(resolve, 5))
+    release()
+    await Promise.all([first, second])
+    assert.equal(listed, 1, 'concurrent parts share one in-flight corpus scan')
+    await call(harness, { part: 'page' })
+    await call(harness, { part: 'tally' })
+    assert.equal(listed, 1, 'later parts within the TTL reuse the scan')
+    harness.state.backfillVersion = 1
+    await call(harness, { part: 'summary' })
+    assert.equal(listed, 2, 'a backfill version change forces a fresh scan')
+  })
+
+  test('the served-key set is bounded so paging and filtering cannot grow it without limit', async () => {
+    const harness = await boot({
+      scanTtlMs: 10_000,
+      servedKeysMax: 2,
+      records: [recordOf('a'), recordOf('b')],
+      values: {
+        a: { contextTimeline: timelineOf({ turns: 1 }), contextActivity: { days: {} }, title: 'A' },
+        b: { contextTimeline: timelineOf({ turns: 1 }), contextActivity: { days: {} }, title: 'B' },
+      },
+    })
+    const summary = await call(harness, { part: 'summary' })
+    const revision = revisionOf(summary)
+    await call(harness, { part: 'page', page: 0 })
+    await call(harness, { part: 'page', page: 1 })
+    const evicted = await call(harness, { part: 'summary', revision })
+    assert.ok(evicted.reply.value !== undefined && !('unchanged' in evicted.reply.value), 'the oldest served key was evicted')
+    const remembered = await call(harness, { part: 'page', page: 1, revision })
+    assert.ok(remembered.reply.value !== undefined && 'unchanged' in remembered.reply.value, 'a recent key stays remembered')
+  })
+
+  test('a held Today revision re-serves the new day at local midnight', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date(2026, 10, 8, 23, 59, 50))
+      const harness = await boot({
+        records: [recordOf('a', { createdAt: new Date(2026, 10, 8, 20, 0, 0).getTime() })],
+        values: {
+          a: {
+            contextTimeline: timelineOf({ total: 900, turns: 1 }),
+            contextActivity: { days: { '2026-11-08': dayOf(900, 1) } },
+            title: 'Overnight',
+            sessionListMetadata: { blank: false, lastPromptAt: new Date(2026, 10, 8, 23, 0, 0).getTime() },
+          },
+        },
+      })
+      const before = await call(harness, { part: 'summary', scope: { range: 'today' } })
+      assert.equal(summaryOf(before).sessions, 1)
+      const revision = revisionOf(before)
+      vi.setSystemTime(new Date(2026, 10, 9, 0, 0, 20))
+      const held = unwrap(await call(harness, { part: 'summary', scope: { range: 'today' }, revision }))
+      assert.ok(held.value !== undefined && 'summary' in held.value, 'the midnight poll re-serves the new day')
+      assert.equal(held.value.summary.sessions, 0)
+      const steady = unwrap(await call(harness, { part: 'summary', scope: { range: 'today' }, revision: held.value.revision }))
+      assert.ok(steady.value !== undefined && 'unchanged' in steady.value, 'the same-day poll stays unchanged')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a held absolute-range revision stays unchanged across local midnight', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date(2026, 10, 8, 23, 59, 50))
+      const harness = await boot({
+        records: [recordOf('a', { createdAt: new Date(2026, 10, 8, 20, 0, 0).getTime() })],
+        values: {
+          a: {
+            contextTimeline: timelineOf({ total: 900, turns: 1 }),
+            contextActivity: { days: { '2026-11-08': dayOf(900, 1) } },
+          },
+        },
+      })
+      const before = await call(harness, { part: 'summary', scope: { range: { start: Date.UTC(2026, 10, 1), end: Date.UTC(2026, 11, 1) } } })
+      const revision = revisionOf(before)
+      vi.setSystemTime(new Date(2026, 10, 9, 0, 0, 20))
+      const after = await call(harness, { part: 'summary', scope: { range: { start: Date.UTC(2026, 10, 1), end: Date.UTC(2026, 11, 1) } }, revision })
+      assert.ok(after.reply.value !== undefined && 'unchanged' in after.reply.value, 'an absolute window is day-independent')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a dirty session missing from the feed reloads a complete plugin cache record', async () => {
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: { a: { contextActivity: { days: { '2026-11-01': dayOf(11, 1) } } } },
+      persistence: { stat: async () => ({ path: '/p/a.jsonl', sizeBytes: 1, mtimeMs: 2 }) },
+      coverage: { complete: true, remaining: 0, failed: 0, running: false, total: 1, covered: 1, unsupported: 0, unreadable: 0 },
+    })
+    const first = await call(harness, { part: 'summary', scope: { range: WIDE_RANGE } })
+    assert.equal(summaryOf(first).sessions, 1)
+    assert.equal(harness.state.savedRecords.length, 0, 'a snapshot with only one projection is never cached')
+    harness.cacheMode.values.a = {}
+    harness.state.cachedSessions.set('a', {
+      id: 'a', title: 'Cached', updatedAt: 5, blank: false,
+      timeline: { current: null, total: 10, turns: 1 },
+      activity: { days: { '2026-11-01': dayOf(44, 4, { cost: usageOf(44) }) } },
+      signature: '',
+    })
+    harness.state.foldedVersion = 1
+    harness.state.foldedIds = ['a']
+    harness.state.workerFoldedIds = ['a']
+    const second = await call(harness, { part: 'summary', scope: { range: WIDE_RANGE } })
+    assert.equal(summaryOf(second).sessions, 1, 'the dirty session reloaded from the plugin cache')
+    assert.equal(summaryOf(second).tokens, 44)
+  })
+
+  test('a null worker journal never reloads from the plugin cache', async () => {
+    const harness = await boot({
+      records: [recordOf('a')],
+      values: { a: { contextActivity: { days: { '2026-11-01': dayOf(11, 1) } } } },
+      persistence: { stat: async () => ({ path: '/p/a.jsonl', sizeBytes: 1, mtimeMs: 2 }) },
+      coverage: { complete: true, remaining: 0, failed: 0, running: false, total: 1, covered: 1, unsupported: 0, unreadable: 0 },
+    })
+    const first = await call(harness, { part: 'summary', scope: { range: WIDE_RANGE } })
+    assert.equal(summaryOf(first).sessions, 1)
+    harness.state.foldedVersion = 1
+    harness.state.foldedIds = ['a']
+    harness.state.workerFoldedIds = null
+    const second = await call(harness, { part: 'summary', scope: { range: WIDE_RANGE } })
+    assert.equal(summaryOf(second).sessions, 1, 'the session refolds from the served projections instead')
+  })
+
+  test('a clock beyond the day-key range answers with an open relative window', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date(10_000, 0, 1))
+      const harness = await boot({ records: [], values: {} })
+      const reply = await call(harness, { part: 'summary', scope: { range: 'today' } })
+      assert.ok(reply.reply.value !== undefined && 'summary' in reply.reply.value)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+})
+
+describe('overviewScan', () => {
+
+function result(id: string): ScanResult {
+  return { entries: [], coldIds: new Set([id]), identitiesSynced: false }
+}
+
+describe('scan window', () => {
+  test('reuses a fresh scan for the same version and rescans after ttl or version change', async () => {
+    let clock = 0
+    let version = 1
+    let loads = 0
+    const window = makeScanWindow(1_000, () => clock)
+    const load = async (): Promise<ScanResult> => {
+      loads++
+      return result(String(loads))
+    }
+    assert.equal((await window.read(load, () => version)).coldIds.has('1'), true)
+    assert.equal((await window.read(load, () => version)).coldIds.has('1'), true)
+    assert.equal(loads, 1)
+    clock = 999
+    await window.read(load, () => version)
+    assert.equal(loads, 1)
+    clock = 1_000
+    await window.read(load, () => version)
+    assert.equal(loads, 2)
+    version = 2
+    await window.read(load, () => version)
+    assert.equal(loads, 3)
+    window.reset()
+    await window.read(load, () => version)
+    assert.equal(loads, 4)
+  })
+
+  test('coalesces concurrent loads', async () => {
+    let release: (value: ScanResult) => void = () => {}
+    let loads = 0
+    const window = makeScanWindow(1_000, () => 0)
+    const load = (): Promise<ScanResult> => {
+      loads++
+      return new Promise((resolve) => { release = resolve })
+    }
+    const first = window.read(load, () => 1)
+    const second = window.read(load, () => 1)
+    assert.equal(loads, 1)
+    const value = result('1')
+    release(value)
+    assert.equal(await first, value)
+    assert.equal(await second, value)
+  })
+
+  test('a reset during a load does not cache the stale scan', async () => {
+    let release: (value: ScanResult) => void = () => {}
+    let loads = 0
+    const window = makeScanWindow(1_000, () => 0)
+    const load = (): Promise<ScanResult> => {
+      loads++
+      return new Promise((resolve) => { release = resolve })
+    }
+    const pending = window.read(load, () => 1)
+    window.reset()
+    const stale = result('stale')
+    release(stale)
+    assert.equal(await pending, stale)
+    const fresh = await window.read(async () => {
+      loads++
+      return result('fresh')
+    }, () => 1)
+    assert.equal(fresh.coldIds.has('fresh'), true)
+    assert.equal(loads, 2)
+  })
+
+  test('stamps the version read after the load', async () => {
+    let version = 1
+    let release: (value: ScanResult) => void = () => {}
+    let loads = 0
+    const window = makeScanWindow(1_000, () => 0)
+    const pending = window.read(() => {
+      loads++
+      return new Promise((resolve) => { release = resolve })
+    }, () => version)
+    version = 2
+    release(result('a'))
+    await pending
+    const cached = await window.read(async () => {
+      loads++
+      return result('b')
+    }, () => version)
+    assert.equal(cached.coldIds.has('a'), true)
+    assert.equal(loads, 1)
+  })
+
+  test('a failed load clears the in-flight slot', async () => {
+    let loads = 0
+    const window = makeScanWindow(1_000, () => 0)
+    const load = (): Promise<ScanResult> => {
+      loads++
+      return loads === 1 ? Promise.reject(new Error('scan failed')) : Promise.resolve(result('2'))
+    }
+    await assert.rejects(window.read(load, () => 1), /scan failed/)
+    assert.equal(loads, 1)
+    assert.equal((await window.read(load, () => 1)).coldIds.has('2'), true)
+    assert.equal(loads, 2)
+  })
+})
+})

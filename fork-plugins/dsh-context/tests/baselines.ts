@@ -1,4 +1,5 @@
-export type BaselineId = 'v0.2.0-rc.2' | 'v0.2.1-rc.2' | 'v0.2.2-rc.1'
+// DeepSeek Harness fork modification: the 0.2.3-alpha.2 host baseline.
+export type BaselineId = 'v0.2.0-rc.2' | 'v0.2.1-rc.2' | 'v0.2.2-rc.1' | 'v0.2.2-rc.3' | 'v0.2.3-alpha.2'
 
 export interface ClientSeam {
   imageFaceMethod: string
@@ -15,7 +16,8 @@ export interface ClientSeam {
     clientRpcNeedle: string
     registryFile: string
     registryNeedle: string
-    projectionHandle: boolean
+    fallbackStateOfNeedle: string
+    awaitableRegister: boolean
   }
   sessionNav: {
     workspaceFile: string
@@ -97,6 +99,14 @@ export interface Baseline {
     providerDirectory: { file: string; needle: string }
     stockIds: { file: string; ids: readonly string[] }
     providerFiles: readonly { file: string; needles: readonly string[] }[]
+    account: {
+      serviceFile: string
+      serviceNeedle: string
+      providerFile: string
+      providerNeedle: string
+      bundleFile: string
+      bundleNeedle: string
+    }
   }
   prompt: {
     serviceFile: string
@@ -109,7 +119,6 @@ export interface Baseline {
     registryFile: string
     storeFile: string
     cacheFile: string
-    cacheSpecFile: string
   }
 }
 
@@ -126,10 +135,11 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
   stockIds?: readonly string[]
   extraFoldEvents?: readonly string[]
   platformModules?: readonly string[]
-  registryNeedle?: string
-  projectionHandle?: boolean
+  stateOfNeedle?: string
+  fallbackStateOfNeedle?: string
+  awaitableRegister?: boolean
+  account?: Partial<Omit<Baseline['balance']['account'], 'bundleFile'>>
 } = {}): Baseline {
-  const lineTwo = id !== 'v0.2.0-rc.2'
   return {
     id,
     tag,
@@ -141,6 +151,8 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
       'user/message', 'developer/message', 'tool/call', 'tool/result', 'assistant/message', 'assistant/attempt',
       'tool/ptc-dispatch', 'tool/ptc-dispatch-start',
       'plan/mode', 'compaction/summary', 'compaction/prune', 'system/message',
+      'subagent/catalog', 'team/member', 'team/task',
+      'goal/change', 'todo/write',
       'approval/asked', 'approval/decided', 'session/end-seed',
       ...(line.extraFoldEvents ?? []),
     ],
@@ -158,8 +170,9 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
         clientRpcFile: 'packages/client/connection/src/client/rpc.ts',
         clientRpcNeedle: 'call(channel, endpoint, payload',
         registryFile: 'packages/session/session-projection/src/index.ts',
-        registryNeedle: line.registryNeedle ?? 'stateOf<',
-        projectionHandle: line.projectionHandle ?? false,
+        registryNeedle: line.stateOfNeedle ?? 'stateOf<',
+        fallbackStateOfNeedle: line.fallbackStateOfNeedle ?? 'stateOf<',
+        awaitableRegister: line.awaitableRegister ?? false,
       },
       sidebar: {
         serviceFile: 'packages/client/ui-sidebar-right/src/client/index.ts',
@@ -174,6 +187,7 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
         guideEntry: {
           file: 'packages/client/ui-sidebar-right/src/client/tab-registry.ts',
           fields: [
+            'readonly id: string',
             'readonly order: number',
             'readonly title: () => string',
             'readonly description?: () => string',
@@ -196,15 +210,15 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
       subagentAddress: {
         file: 'packages/api/session-controller/src/client/sessions/manager.ts',
         needle: 'subagentAddress',
-        summaryFallback: lineTwo,
+        summaryFallback: id !== 'v0.2.0-rc.2',
         summaryNeedle: 'summary?.origin',
       },
       pluginsNav: {
         file: 'packages/client/ui-plugin-manager/src/client/index.ts',
         needle: "'pluginNavigation', {",
-        tabReset: lineTwo,
+        tabReset: id !== 'v0.2.0-rc.2',
         tabResetNeedle: 'instance.actions.setTab',
-        tabsSlot: lineTwo,
+        tabsSlot: id !== 'v0.2.0-rc.2',
         tabsSlotFile: 'packages/client/ui-plugin-manager/src/client/slot-contract.ts',
         tabsSlotNeedle: "'plugins.tab'",
       },
@@ -256,6 +270,14 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
           needles: ['baseURL: z.string().volatile()'],
         },
       ],
+      account: {
+        serviceFile: line.account?.serviceFile ?? 'packages/credentials/deepseek-account/src/index.ts',
+        serviceNeedle: line.account?.serviceNeedle ?? 'abstract getBalance(client: AccountClientMetadata)',
+        providerFile: line.account?.providerFile ?? 'packages/credentials/deepseek-account-platform/src/index.ts',
+        providerNeedle: line.account?.providerNeedle ?? 'getBalance(client: AccountClientMetadata)',
+        bundleFile: 'packages/bundle/base/cordis.patch.yml',
+        bundleNeedle: line.account?.bundleNeedle ?? "'@deepseek-ai/dsh-deepseek-account-platform'",
+      },
     },
     stepGuard: {
       loopFile: 'packages/core/agent-loop/src/agent.ts',
@@ -273,9 +295,18 @@ function baseline(id: BaselineId, tag: string, session: string, line: {
       registryFile: 'packages/session/session-projection/src/index.ts',
       storeFile: 'packages/core/session/src/index.ts',
       cacheFile: 'packages/session/session-projection-cache/src/index.ts',
-      cacheSpecFile: 'packages/session/session-projection-cache/src/spec.ts',
     },
   }
+}
+
+const line022Seams = {
+  cordis: '4.1.0',
+  stockIds: ['llm-deepseek', 'web-search-deepseek', 'web-deepseek-api'],
+  platformModules: [...DEFAULT_PLATFORM_MODULES, 'zod', '@tanstack/react-virtual'],
+  extraFoldEvents: ['job/registered', 'job/settled'],
+  stateOfNeedle: 'stateOf(session: Session): S',
+  fallbackStateOfNeedle: 'stateOf(session: Session, key: string): unknown',
+  awaitableRegister: true,
 }
 
 export const BASELINES: readonly Baseline[] = [
@@ -286,12 +317,24 @@ export const BASELINES: readonly Baseline[] = [
     platformModules: [...DEFAULT_PLATFORM_MODULES, 'zod', '@tanstack/react-virtual'],
     extraFoldEvents: ['job/registered', 'job/settled'],
   }),
-  baseline('v0.2.2-rc.1', 'dsh-v0.2.2-rc.1', '0.2.2-rc.1', {
-    cordis: '4.1.0',
-    stockIds: ['llm-deepseek', 'web-search-deepseek', 'web-deepseek-api'],
-    platformModules: [...DEFAULT_PLATFORM_MODULES, 'zod', '@tanstack/react-virtual'],
-    extraFoldEvents: ['job/registered', 'job/settled'],
-    registryNeedle: 'stateOf(session: Session): S',
-    projectionHandle: true,
+  baseline('v0.2.2-rc.1', 'dsh-v0.2.2-rc.1', '0.2.2-rc.1', { ...line022Seams }),
+  baseline('v0.2.2-rc.3', 'dsh-v0.2.2-rc.3', '0.2.2-rc.3', {
+    ...line022Seams,
+    account: {
+      serviceNeedle: 'interface Context { deepseekAccount: DeepSeekAccount }',
+      providerFile: 'packages/credentials/deepseek-account/src/index.ts',
+      bundleNeedle: "'@deepseek-ai/dsh-deepseek-account'",
+    },
+  }),
+  baseline('v0.2.3-alpha.2', 'dsh-v0.2.3-alpha.2', '0.2.3-alpha.2', {
+    ...line022Seams,
+    cordis: '4.2.0-alpha.1',
+    account: {
+      serviceFile: 'packages/account/deepseek-account/src/index.ts',
+      serviceNeedle: 'interface Context { deepseekAccount: DeepSeekAccount }',
+      providerFile: 'packages/account/deepseek-account/src/index.ts',
+      providerNeedle: 'getBalance(client: AccountClientMetadata)',
+      bundleNeedle: "'@deepseek-ai/dsh-deepseek-account'",
+    },
   }),
 ]

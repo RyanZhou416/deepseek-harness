@@ -1,13 +1,14 @@
 import { z } from 'zod'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { Config } from './config'
+import type { Config, FoldBounds } from './config'
 import { resolveBounds } from './config'
 import type { WiredProjection } from './projection'
 import type { ContextTimeline } from '../shared/types'
 import { applyTimeline } from './fold'
-import { countTurnRuns, createTimelineState, trimState } from './foldState'
+import { createTimelineState } from './foldState'
 import type { TimelineState } from './foldState'
 import { buildTimelineHead, buildTimelineView } from './foldWire'
+import { withCost, type CostSource } from './cost'
 
 const surfaceNodeSchema = z.object({
   seq: z.number().int().nonnegative(),
@@ -26,6 +27,7 @@ const surfaceNodeSchema = z.object({
   err: z.boolean().optional(),
   skill: z.string().optional(),
   calls: z.array(z.string()).optional(),
+  agent: z.string().optional(),
 }).strict()
 
 const systemPromptNodeSchema = z.object({
@@ -39,12 +41,12 @@ const requestRecordSchema = z.object({
   step: z.number().optional(),
   time: z.number(),
   seq: z.number(),
-  system: z.number().int().nonnegative(),
-  tools: z.number().int().nonnegative(),
-  user: z.number().int().nonnegative(),
-  inject: z.number().int().nonnegative(),
-  assistant: z.number().int().nonnegative(),
-  tool: z.number().int().nonnegative(),
+  system: z.number().int().nonnegative().optional(),
+  tools: z.number().int().nonnegative().optional(),
+  user: z.number().int().nonnegative().optional(),
+  inject: z.number().int().nonnegative().optional(),
+  assistant: z.number().int().nonnegative().optional(),
+  tool: z.number().int().nonnegative().optional(),
   total: z.number().int().nonnegative(),
   prompt: z.number().int().nonnegative().optional(),
   skill: z.number().int().nonnegative().optional(),
@@ -57,13 +59,20 @@ const requestRecordSchema = z.object({
 const contextEventSchema = z.object({
   seq: z.number(),
   time: z.number(),
-  kind: z.enum(['compaction', 'prune', 'inject', 'model', 'mode']),
+  kind: z.enum([
+    'compaction', 'prune', 'inject', 'model', 'mode', 'agent',
+    'goal-create', 'goal-complete', 'todo-add', 'todo-done', 'ask',
+    'team-task-create', 'team-task-complete',
+  ]),
   form: z.string().optional(),
   tokens: z.number().optional(),
+  grossTokens: z.number().optional(),
   count: z.number().optional(),
   sub: z.string().optional(),
   name: z.string().optional(),
+  agent: z.string().optional(),
   detail: z.string().optional(),
+  items: z.array(z.string()).optional(),
   from: z.string().optional(),
   to: z.string().optional(),
   fromTurn: z.number().optional(),
@@ -98,7 +107,7 @@ const commandSchema = z.object({
   resultSeq: z.number().int().nonnegative().optional(),
   time: z.number(),
   tool: z.string(),
-  cmd: z.string(),
+  cmd: z.string().optional(),
   cmdTruncated: z.literal(true).optional(),
   description: z.string().optional(),
   cwd: z.string().optional(),
@@ -211,12 +220,44 @@ const countsSchema = z.object({
   compactions: z.number().int().nonnegative(),
   prunes: z.number().int().nonnegative(),
   skills: z.number().int().nonnegative().optional(),
+  events: z.number().int().nonnegative().optional(),
+  modelSwitches: z.number().int().nonnegative().optional(),
 }).strict()
 
 const lastSchema = z.object({
   seq: z.number(),
   total: z.number().int().nonnegative(),
   prompt: z.number().int().nonnegative().optional(),
+}).strict()
+
+const tallySchema = z.record(z.string(), z.number().int().nonnegative())
+
+const costFaceSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  rate: z.object({
+    hit: z.number(),
+    miss: z.number(),
+    write: z.number(),
+    out: z.number(),
+  }).strict(),
+  via: z.string(),
+  confidence: z.enum(['high', 'medium', 'low']),
+  canonical: z.string().optional(),
+}).strict()
+
+const costMissSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  reason: z.string(),
+  candidates: z.number().int().nonnegative().optional(),
+}).strict()
+
+const sessionCostReadSchema = z.object({
+  usd: z.number().nullable(),
+  ready: z.boolean(),
+  faces: z.array(costFaceSchema).optional(),
+  misses: z.array(costMissSchema).optional(),
 }).strict()
 
 export const contextTimelineSchema = z.object({
@@ -233,6 +274,8 @@ export const contextTimelineSchema = z.object({
   generatedAnswerTokens: z.number().int().nonnegative().optional(),
   generatedCallTokens: z.number().int().nonnegative().optional(),
   toolCalls: z.number().int().nonnegative().optional(),
+  toolTally: tallySchema.optional(),
+  programTally: tallySchema.optional(),
   humanInputs: z.number().int().nonnegative().optional(),
   answers: z.number().int().nonnegative().optional(),
   lastUser: z.string().optional(),
@@ -242,6 +285,7 @@ export const contextTimelineSchema = z.object({
   requests: z.array(requestRecordSchema).optional(),
   events: z.array(contextEventSchema).optional(),
   cost: costUsageSchema.optional(),
+  costRead: sessionCostReadSchema.optional(),
   timing: timingTotalsSchema.optional(),
   systems: z.array(systemPromptNodeSchema).optional(),
   nodes: z.array(surfaceNodeSchema).optional(),
@@ -256,8 +300,6 @@ export const contextTimelineSchema = z.object({
   commandStats: commandStatsSchema.optional(),
   spans: z.array(timingSpanSchema).optional(),
 }).strict() as unknown as z.ZodType<ContextTimeline>
-
-export const TIMELINE_STATE_VERSION = 36
 
 export const timelineStateSchema = z.object({
   surface: z.array(surfaceNodeSchema),
@@ -282,6 +324,17 @@ export const timelineStateSchema = z.object({
   maxOutputTokens: z.number().positive().optional(),
   requests: z.array(requestRecordSchema),
   turnRuns: z.number().int().nonnegative().optional(),
+  totals: z.object({
+    turns: z.number().int().nonnegative(),
+    steps: z.number().int().nonnegative(),
+    events: z.number().int().nonnegative(),
+    injects: z.number().int().nonnegative(),
+    compactions: z.number().int().nonnegative(),
+    prunes: z.number().int().nonnegative(),
+    modelSwitches: z.number().int().nonnegative(),
+    skills: z.record(z.string(), z.literal(true)),
+    lastTurn: z.number().optional(),
+  }).strict().optional(),
   events: z.array(contextEventSchema),
   archived: z.array(surfaceNodeSchema),
   cost: costUsageSchema.optional(),
@@ -302,7 +355,19 @@ export const timelineStateSchema = z.object({
   stepRequestSeq: z.number().optional(),
   stepBeats: z.array(z.number()).optional(),
   stepBeatsFull: z.boolean().optional(),
-  callNames: z.record(z.string(), z.object({ name: z.string(), start: z.number(), argsRaw: z.string().optional() }).strict()),
+  callNames: z.record(z.string(), z.object({
+    name: z.string(),
+    start: z.number(),
+    argsRaw: z.string().optional(),
+    transport: z.literal(true).optional(),
+  }).strict()),
+  agents: z.record(z.string(), z.object({
+    catalogName: z.string().optional(),
+    memberName: z.string().optional(),
+    catalogLabel: z.string().optional(),
+  }).strict()).optional(),
+  todoItems: z.record(z.string(), z.enum(['pending', 'in_progress', 'completed'])).optional(),
+  teamTasks: z.record(z.string(), z.enum(['pending', 'in_progress', 'completed', 'deleted'])).optional(),
   pendingShadowedSeqs: z.array(z.number()).optional(),
   pendingShadowEventSeq: z.number().optional(),
   detailRev: z.number().int().nonnegative().optional(),
@@ -315,65 +380,60 @@ export const timelineStateSchema = z.object({
   spans: z.array(timingSpanSchema),
   stepSpans: z.array(timingSpanSchema).optional(),
   pendingCodeOps: z.record(z.string(), z.array(fileOpSchema)).optional(),
+  pendingCodeStarts: z.record(z.string(), z.number()).optional(),
+  toolTally: tallySchema.optional(),
+  programTally: tallySchema.optional(),
+  commandCalls: z.array(z.string()).optional(),
+  commandCallsOverflow: z.boolean().optional(),
 }) as unknown as z.ZodType<TimelineState>
 
-// DeepSeek Harness fork modification: clamp restored states to the deployment bounds and reuse a
-// wire value across host-only state churn. See ../../FORK_MAINTENANCE.md.
-export function createContextTimelineDefinition(config: Config, slim: () => boolean): WiredProjection<'contextTimeline', TimelineState> {
+export const TIMELINE_STATE_VERSION = 47
+
+// DeepSeek Harness fork modification: reuse a wire value across host-only state churn so the
+// registry's `Object.is` check suppresses validation and publication. See ../../FORK_MAINTENANCE.md.
+const HEAD_WIRE_KEYS = [
+  'surface', 'sums', 'assistantReasoning', 'assistantAnswerTokens', 'assistantCallTokens',
+  'systemTokens', 'toolsTokens', 'model', 'provider', 'reasoningEffort', 'contextWindow',
+  'maxOutputTokens', 'requests', 'events', 'totals', 'cost', 'generatedReasoning',
+  'generatedAnswerTokens', 'generatedCallTokens', 'humanInputs', 'answers', 'lastUser',
+  'archiveFloor', 'detailRev', 'timing', 'systems', 'toolTally', 'programTally', 'commandStats',
+] as const satisfies readonly (keyof TimelineState)[]
+
+const INLINE_WIRE_KEYS = [
+  ...HEAD_WIRE_KEYS, 'archived', 'spans', 'fileOps', 'fileOpsFloor', 'commands', 'commandsFloor',
+] as const satisfies readonly (keyof TimelineState)[]
+
+export function createContextTimelineDefinition(
+  config: Config,
+  slim: () => boolean,
+  cost?: CostSource,
+): WiredProjection<'contextTimeline', TimelineState> {
   const bounds = resolveBounds(config)
-  const overBound = (state: TimelineState): boolean =>
-    state.requests.length > bounds.maxRequestSteps
-    || state.events.length > bounds.maxEvents
-    || state.archived.length > bounds.maxArchiveNodes
-    || state.fileOps.length > bounds.maxFileOps
-    || state.commands.length > bounds.maxCommands
-    || (state.turnRuns ?? countTurnRuns(state.requests)) > bounds.maxKeptTurns
-  const bounded = (state: TimelineState): TimelineState => {
-    if (!overBound(state)) return state
-    const copy: TimelineState = {
-      ...state,
-      requests: [...state.requests],
-      events: [...state.events],
-      archived: [...state.archived],
-      fileOps: [...state.fileOps],
-      spans: [...state.spans],
-    }
-    trimState(copy, bounds)
-    return copy
-  }
-  const HEAD_KEYS = [
-    'surface', 'sums', 'assistantReasoning', 'assistantAnswerTokens', 'assistantCallTokens',
-    'systemTokens', 'systems', 'toolsTokens', 'model', 'provider', 'reasoningEffort', 'contextWindow',
-    'maxOutputTokens', 'requests', 'events', 'cost', 'generatedReasoning', 'generatedAnswerTokens',
-    'generatedCallTokens', 'humanInputs', 'answers', 'lastUser', 'archiveFloor', 'detailRev', 'timing',
-  ] as const satisfies readonly (keyof TimelineState)[]
-  const INLINE_KEYS = [
-    ...HEAD_KEYS, 'archived', 'spans', 'fileOps', 'fileOpsFloor', 'commands', 'commandsFloor', 'commandStats',
-  ] as const satisfies readonly (keyof TimelineState)[]
+  const headBounds: FoldBounds = { ...bounds, headOnly: true }
   const sameWireInputs = (a: TimelineState, b: TimelineState, head: boolean): boolean => {
-    const keys: readonly (keyof TimelineState)[] = head ? HEAD_KEYS : INLINE_KEYS
+    const keys: readonly (keyof TimelineState)[] = head ? HEAD_WIRE_KEYS : INLINE_WIRE_KEYS
     return keys.every(key => a[key] === b[key])
   }
   const headLast: { state?: TimelineState; view?: ContextTimeline } = {}
   const inlineLast: { state?: TimelineState; view?: ContextTimeline } = {}
-  const view = (state: TimelineState): ContextTimeline => {
+  const bare = (state: TimelineState): ContextTimeline => {
     const head = slim()
     const last = head ? headLast : inlineLast
     if (last.state !== undefined && last.state !== state && sameWireInputs(last.state, state, head)) {
       return last.view as ContextTimeline
     }
-    const boundedState = bounded(state)
-    const value = head ? buildTimelineHead(boundedState) : buildTimelineView(boundedState, bounds)
+    const value = head ? buildTimelineHead(state) : buildTimelineView(state, bounds)
     last.state = state
     last.view = value
     return value
   }
+  const view = (state: TimelineState): ContextTimeline => withCost(cost, bare(state))
   const definition: WiredProjection<'contextTimeline', TimelineState> = {
     key: 'contextTimeline',
     stateSchema: timelineStateSchema,
-    wire: { viewSchema: contextTimelineSchema, view },
+    wire: { viewSchema: contextTimelineSchema, view, summary: false },
     init: () => createTimelineState(),
-    apply: (state: TimelineState, event: SessionEvent) => applyTimeline(state, event as Parameters<typeof applyTimeline>[1], bounds),
+    apply: (state: TimelineState, event: SessionEvent) => applyTimeline(state, event as Parameters<typeof applyTimeline>[1], headBounds),
     stateVersion: TIMELINE_STATE_VERSION,
   }
   return definition

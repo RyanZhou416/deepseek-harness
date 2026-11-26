@@ -1,4 +1,4 @@
-import { memo, Fragment, useEffect, useMemo, useRef, useState, type ComponentType, type MouseEvent, type ReactElement, type ReactNode } from 'react'
+import { memo, Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentType, type ReactElement, type ReactNode } from 'react'
 import { useCodeHighlighter } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HighlightSpan } from '@deepseek-ai/dsh-client-ui-primitives'
 import { attentionOf, byLatest, bySlowest, durationOf, matchesFilter, matchesQuery, previewTextOf, programsOf, resultTextOf, surfaceSeqOf, tallyOfCommands, viewsOf } from '../commands'
@@ -11,10 +11,13 @@ import type { DetailState } from '../timelineSource'
 import type { ViewKit } from '../viewkit'
 import { ClearableInput } from './clearableInput'
 import { makeDetailNote } from './detailNote'
+import { LoadingLane } from './skeleton'
 import { makeRichText } from './richText'
 import { IconApi, IconShare } from '../primitives'
 import { Section } from './section'
-import { useRowWindow } from './useRowWindow'
+import { lruTrim } from '../boundedCache'
+import { useSurfaceWindow } from './useRowWindow'
+import { remoteStateOf } from './useRemoteState'
 import type { CommandFill } from './useCommandLog'
 
 export interface CommandPanelProps {
@@ -55,6 +58,9 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
   const FILTERS: readonly CommandFilter[] = ['all', 'failed', 'slow', 'background']
   const SORTS: readonly CommandSort[] = ['latest', 'slowest']
   const WINDOW_MIN_ROWS = 100
+  const COMMAND_ROW_ESTIMATE = 30
+  const RESULT_KEEP_MAX = 8
+  const rowEstimateSize = (): number => COMMAND_ROW_ESTIMATE
 
   function statusGlyphOf(rec: Command): { glyph: string; cls: string; tip: string } {
     if (rec.status === 'running') return { glyph: '⏳', cls: 'run', tip: t('cmds.status.running') }
@@ -111,21 +117,36 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
     const [programPick, setProgramPick] = useState<string | null>(null)
     const [openSeq, setOpenSeq] = useState<number | null>(null)
     type ResultRead = { state: 'loading' } | { state: 'miss' } | { state: 'empty' } | { state: 'failed' } | { state: 'ready'; text: string }
-    const [results, setResults] = useState<Partial<Record<number, ResultRead>>>({})
+    const [results, setResults] = useState<ReadonlyMap<number, ResultRead>>(() => new Map())
+    const remember = (seq: number, read: ResultRead): void => {
+      setResults((cur) => {
+        const next = new Map(cur)
+        next.delete(seq)
+        next.set(seq, read)
+        lruTrim(next, RESULT_KEEP_MAX)
+        return next
+      })
+    }
     const openRec = openSeq === null ? undefined : commands.find(rec => rec.seq === openSeq)
     const openTarget = openRec !== undefined ? surfaceSeqOf(openRec) : undefined
     useEffect(() => {
       const fetchContent = props.fetchContent
       if (openTarget === undefined || fetchContent === undefined) return
       let live = true
-      setResults(cur => (cur[openTarget] !== undefined ? cur : { ...cur, [openTarget]: { state: 'loading' } }))
+      setResults((cur) => {
+        if (cur.has(openTarget)) return cur
+        const next = new Map(cur)
+        next.set(openTarget, { state: 'loading' })
+        lruTrim(next, RESULT_KEEP_MAX)
+        return next
+      })
       void fetchContent(openTarget).then(
         (node) => {
           if (!live) return
           const text = node === null ? null : resultTextOf(node)
-          setResults(cur => ({ ...cur, [openTarget]: node === null ? { state: 'miss' } : text === null ? { state: 'empty' } : { state: 'ready', text } }))
+          remember(openTarget, node === null ? { state: 'miss' } : text === null ? { state: 'empty' } : { state: 'ready', text })
         },
-        () => { if (live) setResults(cur => ({ ...cur, [openTarget]: { state: 'failed' } })) },
+        () => { if (live) remember(openTarget, { state: 'failed' }) },
       )
       return () => { live = false }
     }, [openTarget, props.fetchContent])
@@ -142,7 +163,8 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
       () => scoped.slice().sort((a, b) => (sort === 'slowest' ? bySlowest(a.rec, b.rec) : byLatest(a.rec, b.rec))),
       [scoped, sort],
     )
-    const tally = props.stats ?? tallyOfCommands(commands)
+    const fallbackTally = useMemo(() => tallyOfCommands(commands), [commands])
+    const tally = props.stats ?? fallbackTally
     const counts = useMemo(() => ({
       all: picked.length,
       failed: picked.filter(view => matchesFilter(view.rec, 'failed')).length,
@@ -157,34 +179,17 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
     }, [programPick, programs])
 
     const listRef = useRef<HTMLDivElement | null>(null)
-    const [rowPitch, setRowPitch] = useState(0)
-    const [rowGap, setRowGap] = useState(0)
-    const measured = useRef(false)
-    useEffect(() => {
-      if (measured.current || openSeq !== null || shown.length < WINDOW_MIN_ROWS) return
-      const el = listRef.current
-      /* v8 ignore next 1 */
-      if (el === null) return
-      const items = [...el.querySelectorAll<HTMLElement>('.lc-cmd-item')]
-      /* v8 ignore next 1 */
-      if (items.length !== shown.length) return
-      measured.current = true
-      const rects = items.map(item => item.getBoundingClientRect())
-      const height = Math.round(rects[0].height)
-      const uniform = height > 4 && rects.every(r => Math.abs(Math.round(r.height) - height) <= 1)
-      if (!uniform) return
-      const pitch = rects[1].top - rects[0].top
-      /* v8 ignore next 1 */
-      if (Number.isFinite(pitch) && pitch > 4) {
-        setRowPitch(Math.round(pitch))
-        setRowGap(Math.max(0, Math.round(pitch - height)))
-      }
-    }, [openSeq, shown.length])
-    const windowed = openSeq === null && rowPitch > 0 && shown.length >= WINDOW_MIN_ROWS
-    const rowRange = useRowWindow(listRef, shown.length, rowPitch, windowed)
-    const lastRow = Math.max(0, shown.length - 1)
-    const windowFrom = Math.min(rowRange.from, lastRow)
-    const windowTo = Math.min(rowRange.to, lastRow)
+    const idBase = useId()
+    const getRowKey = useCallback((index: number): string => String(shown[index].rec.seq), [shown])
+    const scope = useSurfaceWindow(listRef, {
+      count: shown.length,
+      getKey: getRowKey,
+      estimateSize: rowEstimateSize,
+      minCount: WINDOW_MIN_ROWS,
+      overscan: 240,
+      seed: 10,
+    })
+    const bodyIdOf = (index: number): string => `${idBase}-${index}`
     const [progQuery, setProgQuery] = useState('')
     const railPreview = (cmd: string): string => {
       const first = previewTextOf(cmd, props.workspace)
@@ -252,8 +257,7 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
     const showProgSearch = programs.length > 6 || pq !== ''
     const shownPrograms = programs.filter(p => p.name === programPick || pq === '' || p.name.toLowerCase().includes(pq))
 
-    const loadingChannel = commands.length === 0 && props.state === 'loading'
-    const failedChannel = commands.length === 0 && props.state === 'failed'
+    const remote = remoteStateOf(commands.length, props.state, props.onRetry, false)
     const fillNote = ((): ReactNode => {
       if (props.floor === undefined || commands.length === 0 || fillStatus === 'done') return null
       if (fillStatus === 'loading') {
@@ -275,20 +279,26 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
       }
       return <div className="lc-cmd-floor">{t('cmds.coverage', { n: fmt(commands.length) })}</div>
     })()
-    const showRail = !loadingChannel && !failedChannel
+    const showRail = remote.kind !== 'loading' && remote.kind !== 'failed'
     const totalTime = commands.length === 0 ? '0' : fmtDuration(tally.ms)
     const rail = showRail ? (
       <div className="lc-cmd-rail">
         <div className="lc-cmd-rail-sec">
           <div className="lc-cmd-rail-h" title={t('cmds.rail.summaryTip')}>{t('cmds.rail.summary')}</div>
           <div className="lc-cmd-kpis">
-            <div className="lc-cmd-kpi"><b>{fmt(tally.runs)}</b><span>{t('cmds.rail.runs')}</span></div>
-            <div className="lc-cmd-kpi lc-cmd-kpi-time"><b>{totalTime}</b><span>{t('cmds.rail.totalTime')}</span></div>
-            <div className="lc-cmd-kpi lc-cmd-kpi-fail">
+            <button type="button" className="lc-cmd-kpi" onClick={() => { applyLens({ filter: 'all' }) }}>
+              <b>{fmt(tally.runs)}</b><span>{t('cmds.rail.runs')}</span>
+            </button>
+            <button type="button" className="lc-cmd-kpi lc-cmd-kpi-time" onClick={() => { applyLens({ filter: 'all' }) }}>
+              <b>{totalTime}</b><span>{t('cmds.rail.totalTime')}</span>
+            </button>
+            <button type="button" className="lc-cmd-kpi lc-cmd-kpi-fail" onClick={() => { applyLens({ filter: 'failed' }) }}>
               <b>{fmt(tally.failed)}</b>
               <span>{t('cmds.rail.failed')}{tally.runs > 0 ? ' · ' + kit.fmtShare(tally.failed, tally.runs) : ''}</span>
-            </div>
-            <div className="lc-cmd-kpi lc-cmd-kpi-bg"><b>{fmt(tally.bg)}</b><span>{t('cmds.rail.background')}</span></div>
+            </button>
+            <button type="button" className="lc-cmd-kpi lc-cmd-kpi-bg" onClick={() => { applyLens({ filter: 'background' }) }}>
+              <b>{fmt(tally.bg)}</b><span>{t('cmds.rail.background')}</span>
+            </button>
           </div>
         </div>
         {attentionRows.length > 0 ? (
@@ -357,7 +367,7 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
       </div>
     ) : null
 
-    const detailOf = (view: CommandView): ReactElement => {
+    const detailOf = (view: CommandView, bodyId: string): ReactElement => {
       const rec = view.rec
       const target = surfaceSeqOf(rec)
       const locatable = props.onLocate !== undefined && target !== undefined
@@ -393,7 +403,7 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
       if (rec.denied === true) facts.push(<span key="deny">{t('cmds.denied')}</span>)
       if (rec.signal !== undefined) facts.push(<span key="sig">{t('cmds.signalOf', { s: rec.signal })}</span>)
       if (rec.sandbox !== undefined) facts.push(<span key="sand">{t('cmds.sandboxAsk', { s: rec.sandbox })}</span>)
-      const result = target !== undefined ? results[target] : undefined
+      const result = target !== undefined ? results.get(target) : undefined
       const factsEl = facts.length > 0 ? <div className="lc-cmd-detail-facts">{facts}</div> : null
       const stampSuffix = stamp !== null ? ' · ' + t('browser.stepAt', { t: stamp.turn, s: stamp.step }) : ''
       const resultCard = target !== undefined && props.fetchContent !== undefined ? (
@@ -422,10 +432,10 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
         )
       ) : null
       return (
-        <div className="lc-cmd-detail">
+        <div className="lc-cmd-detail" id={bodyId}>
           <FindCard
             label={t('cmds.kv.cmd')}
-            text={rec.cmd}
+            text={rec.cmd ?? ''}
             headNote={rec.description}
             meta={<span className="lc-ts-card-meta">{t('cmds.lines', { n: view.shape.lines })}</span>}
             leading={locatable ? (
@@ -439,7 +449,7 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
             ) : undefined}
             trailing={resultCard === null ? factsEl : undefined}
           >
-            <pre className="lc-cmd-full"><CmdText text={rec.cmd} runs={runsOf(rec.tool, rec.cmd)} />{rec.cmdTruncated === true ? ' …' : ''}</pre>
+            <pre className="lc-cmd-full"><CmdText text={rec.cmd ?? ''} runs={runsOf(rec.tool, rec.cmd ?? '')} />{rec.cmdTruncated === true ? ' …' : ''}</pre>
           </FindCard>
           {resultCard}
         </div>
@@ -454,54 +464,67 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
       const target = surfaceSeqOf(rec)
       const stamp = target !== undefined ? props.stampOf?.(target) ?? null : null
       const locatable = props.onLocate !== undefined && target !== undefined
+      const bodyId = bodyIdOf(index)
+      const toggle = (): void => { setOpenSeq(open ? null : rec.seq) }
+      const stampSuffix = stamp !== null ? ' · ' + t('browser.stepAt', { t: stamp.turn, s: stamp.step }) : ''
       return (
-        <div key={rec.seq} className={'lc-cmd-item' + (index % 2 === 1 ? ' lc-cmd-item-alt' : '') + (open ? ' lc-cmd-item-on' : '')}>
-          <button
-            type="button"
+        <div key={rec.seq} className={'lc-cmd-item' + (index % 2 === 1 ? ' lc-cmd-item-alt' : '') + (open ? ' lc-cmd-item-on' : '')} ref={scope.measure(String(rec.seq))}>
+          <div
             className="lc-cmd-row hover:bg-(--dsw-alias-interactive-bg-hover)"
             title={rec.description ?? view.preview}
-            onClick={() => { setOpenSeq(open ? null : rec.seq) }}
+            onClick={toggle}
           >
-            <span className={'lc-br-chev' + (open ? ' lc-br-chev-on' : '')} />
-            <span className={'lc-cmd-st lc-cmd-st-' + st.cls} title={st.tip}>{st.glyph}</span>
-            <span className="lc-cmd-cmd">
-              {rec.tool !== 'bash' ? <span className="lc-cmd-tool">{rec.tool === 'run_code' ? t('cmds.tool.code') : rec.tool}</span> : null}
-              {rec.codeMode === true && rec.tool === 'bash' ? <span className="lc-cmd-tool">{t('cmds.tool.nested')}</span> : null}
-              <CmdText text={view.preview} runs={runsOf(rec.tool, view.preview)} />
-            </span>
-            <span className="lc-cmd-badges">
-              {view.shape.lines > 1 ? <span className="lc-cmd-badge">{t('cmds.lines', { n: view.shape.lines })}</span> : null}
-              {view.shape.heredoc ? <span className="lc-cmd-badge">{t('cmds.heredoc')}</span> : null}
-              {view.shape.inline ? <span className="lc-cmd-badge">{t('cmds.inline')}</span> : null}
-              {rec.background === true ? <span className="lc-cmd-badge lc-cmd-badge-bg">{t('cmds.bgBadge')}</span> : null}
-            </span>
-            {d !== undefined
-              ? (
-                <span
-                  className={'lc-cmd-dur' + (d >= 60_000 ? ' lc-cmd-dur-3' : d >= 10_000 ? ' lc-cmd-dur-2' : d >= 1000 ? ' lc-cmd-dur-1' : '')}
-                  title={rec.derived === true ? t('cmds.derivedTip') : undefined}
-                >
-                  {rec.derived === true ? '≈' : ''}{fmtDuration(d)}
-                </span>
-              )
-              : <span className="lc-cmd-dur lc-cmd-dur-run">{t('cmds.status.running')}</span>}
+            <button
+              type="button"
+              className="lc-cmd-toggle"
+              tabIndex={scope.tabIndexFor(String(rec.seq))}
+              aria-expanded={open}
+              {...(open ? { 'aria-controls': bodyId } : {})}
+              aria-label={t(open ? 'fleet.collapse' : 'fleet.expand')}
+              onClick={(ev) => { ev.stopPropagation(); toggle() }}
+            >
+              <span className={'lc-br-chev' + (open ? ' lc-br-chev-on' : '')} />
+              <span className={'lc-cmd-st lc-cmd-st-' + st.cls} title={st.tip}>{st.glyph}</span>
+              <span className="lc-cmd-cmd">
+                {rec.tool !== 'bash' ? <span className="lc-cmd-tool">{rec.tool === 'run_code' ? t('cmds.tool.code') : rec.tool}</span> : null}
+                {rec.codeMode === true && rec.tool === 'bash' ? <span className="lc-cmd-tool">{t('cmds.tool.nested')}</span> : null}
+                <CmdText text={view.preview} runs={runsOf(rec.tool, view.preview)} />
+              </span>
+              <span className="lc-cmd-badges">
+                {view.shape.lines > 1 ? <span className="lc-cmd-badge">{t('cmds.lines', { n: view.shape.lines })}</span> : null}
+                {view.shape.heredoc ? <span className="lc-cmd-badge">{t('cmds.heredoc')}</span> : null}
+                {view.shape.inline ? <span className="lc-cmd-badge">{t('cmds.inline')}</span> : null}
+                {rec.background === true ? <span className="lc-cmd-badge lc-cmd-badge-bg">{t('cmds.bgBadge')}</span> : null}
+              </span>
+              {d !== undefined
+                ? (
+                  <span
+                    className={'lc-cmd-dur' + (d >= 60_000 ? ' lc-cmd-dur-3' : d >= 10_000 ? ' lc-cmd-dur-2' : d >= 1000 ? ' lc-cmd-dur-1' : '')}
+                    title={rec.derived === true ? t('cmds.derivedTip') : undefined}
+                  >
+                    {rec.derived === true ? '≈' : ''}{fmtDuration(d)}
+                  </span>
+                )
+                : <span className="lc-cmd-dur lc-cmd-dur-run">{t('cmds.status.running')}</span>}
+            </button>
             {locatable
               ? (
-                <span
+                <button
+                  type="button"
                   className="lc-cmd-time lc-cmd-time-link"
-                  role="link"
-                  title={t('cmds.revealTip')}
-                  onClick={(ev: MouseEvent) => {
+                  title={t('cmds.revealTip') + stampSuffix}
+                  aria-label={t('cmds.act.reveal') + stampSuffix}
+                  onClick={(ev) => {
                     ev.stopPropagation()
                     props.onLocate?.(rec)
                   }}
                 >
                   {stamp !== null ? t('browser.stepAt', { t: stamp.turn, s: stamp.step }) + ' · ' : ''}{fmtTime(rec.time)}
-                </span>
+                </button>
               )
               : <span className="lc-cmd-time">{stamp !== null ? t('browser.stepAt', { t: stamp.turn, s: stamp.step }) + ' · ' : ''}{fmtTime(rec.time)}</span>}
-          </button>
-          {open ? detailOf(view) : null}
+          </div>
+          {open ? detailOf(view, bodyId) : null}
         </div>
       )
     }
@@ -519,6 +542,7 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
                 key={f}
                 type="button"
                 className={'lc-gran-btn lc-cmd-chip-' + f + (filter === f ? ' lc-gran-on' : '')}
+                aria-pressed={filter === f}
                 onClick={() => { setFilter(cur => (cur === f ? 'all' : f)) }}
               >
                 {t('cmds.filter.' + f)}
@@ -544,6 +568,7 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
                     key={k}
                     type="button"
                     className={'lc-gran-btn' + (sort === k ? ' lc-gran-on' : '')}
+                    aria-pressed={sort === k}
                     onClick={() => { setSort(k) }}
                   >
                     {t('cmds.sort.' + k)}
@@ -552,22 +577,20 @@ export function makeCommandPanel(kit: ViewKit): ComponentType<CommandPanelProps>
               </span>
             </div>
             {fillNote}
-            {loadingChannel ? (
-              <DetailNote state="loading" className="lc-empty lc-lane" />
-            ) : failedChannel ? (
-              <DetailNote state="failed" onRetry={props.onRetry} className="lc-empty lc-lane" />
+            {remote.kind === 'loading' ? (
+              <LoadingLane className="lc-cmd-lane" />
+            ) : remote.kind === 'failed' ? (
+              <DetailNote state="failed" onRetry={remote.retry} className="lc-empty lc-lane" />
             ) : shown.length === 0 ? (
               <div className="lc-empty lc-lane">{t(commands.length === 0 ? 'cmds.empty' : 'cmds.noMatch')}</div>
             ) : (
-              <div className="lc-cmd-list" ref={listRef}>
-                {windowed && windowFrom > 0
-                  ? <div className="lc-row-pad" style={{ height: Math.max(0, windowFrom * rowPitch - rowGap) }} aria-hidden="true" />
+              <div className="lc-cmd-list" ref={listRef} onKeyDown={scope.onKeyDown}>
+                {scope.topPad > 0
+                  ? <div className="lc-row-pad" style={{ height: scope.topPad }} aria-hidden="true" />
                   : null}
-                {windowed
-                  ? shown.slice(windowFrom, windowTo + 1).map((view, i) => rowOf(view, windowFrom + i))
-                  : shown.map(rowOf)}
-                {windowed && windowTo < lastRow
-                  ? <div className="lc-row-pad" style={{ height: Math.max(0, (lastRow - windowTo) * rowPitch - rowGap) }} aria-hidden="true" />
+                {shown.slice(scope.from, scope.to + 1).map((view, i) => rowOf(view, scope.from + i))}
+                {scope.bottomPad > 0
+                  ? <div className="lc-row-pad" style={{ height: scope.bottomPad }} aria-hidden="true" />
                   : null}
               </div>
             )}

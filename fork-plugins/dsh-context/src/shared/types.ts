@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: long-context cost bucket, partial detail, and long price tag.
 import type { ActivityState } from '../host/activity'
 import type { HeadersState } from '../host/headers'
 import type { TimelineState } from '../host/foldState'
@@ -32,12 +33,19 @@ export interface TimelineCounts {
   compactions: number
   prunes: number
   skills?: number
+  events?: number
+  modelSwitches?: number
 }
 
 export interface TimelineLast {
   seq: number
   total: number
   prompt?: number
+}
+
+export interface ActivityTally {
+  n: number
+  last: number
 }
 
 export interface ActivityDay {
@@ -48,7 +56,9 @@ export interface ActivityDay {
   toolCalls?: number
   toolsMs?: number
   wallMs?: number
-  skills?: Record<string, { n: number; last: number }>
+  skills?: Record<string, ActivityTally>
+  tools?: Record<string, ActivityTally>
+  cmds?: Record<string, ActivityTally>
 }
 
 export interface ContextActivity {
@@ -93,19 +103,65 @@ export interface FleetMemberInfo {
   context?: 'fresh' | 'fork'
 }
 
+export interface FleetDelegation {
+  seq: number
+  time: number
+  to: string
+  mode: 'one-shot' | 'continuable' | 'external' | 'unknown'
+  label?: string
+}
+
 export interface FleetDetail {
   descriptor?: FleetDescriptor
   initialPrompt?: string
   lastReply?: { time: number; text: string }
   roster?: FleetMemberInfo[]
+  delegations?: FleetDelegation[]
   messages: FleetMessage[]
   messagesTotal?: number
   truncated: boolean
 }
 
+export interface FleetSummaryMember {
+  id: string
+  createdAt?: number
+  mode?: 'one-shot' | 'continuable' | 'external' | 'unknown'
+  label?: string
+  name?: string
+  description?: string
+  phase?: string
+}
+
+export interface FleetDetailCounts {
+  readAt: number
+  messagesTotal: number
+  delegationsCount: number
+}
+
+export interface FleetSummary {
+  rootId: string
+  rootCreatedAt?: number
+  detail: FleetDetail
+  members: FleetSummaryMember[]
+  familySize: number
+  counts: Record<string, FleetDetailCounts>
+}
+
+export interface FleetBatchRequest {
+  ids: string[]
+  mode: 'preview' | 'history'
+  rootId?: string
+}
+
+export interface FleetBatchValue {
+  rows: Record<string, FleetDetail>
+  missing: string[]
+  total: number
+}
+
 export type DefaultGranularity = 'step' | 'turn'
 
-export type DefaultTrendMode = 'total' | 'delta'
+export type DefaultTimelineMode = 'total' | 'delta'
 
 export type DefaultDeltaBase = 'step' | 'turn'
 
@@ -121,14 +177,14 @@ export type DefaultDurationCurve = 'show' | 'hide'
 
 export type OverviewAutoSteps = 'off' | '100' | '200' | '300'
 
-export type DefaultOverviewRange = 'today' | '7d' | '30d' | 'all'
+export type DefaultOverviewRange = 'today' | '7d' | '30d'
 
 export type FleetTab = 'show' | 'hide'
 
 export interface PluginSettings {
   defaultPlacement: DefaultPlacement
   defaultGranularity: DefaultGranularity
-  defaultTrendMode: DefaultTrendMode
+  defaultTimelineMode: DefaultTimelineMode
   defaultDeltaBase: DefaultDeltaBase
   defaultToolSort: DefaultToolSort
   defaultFileSort: DefaultFileSort
@@ -137,13 +193,22 @@ export interface PluginSettings {
   overviewAutoSteps: OverviewAutoSteps
   defaultOverviewRange: DefaultOverviewRange
   fleetTab: FleetTab
+  balanceSource: BalanceSource
   promptPrefix: string
   promptSuffix: string
 }
 
 export type SettingsField = keyof PluginSettings
 
-export interface Snapshot {
+export interface SurfaceNodeWindow {
+  nodes: SurfaceNode[]
+  droppedNodes: number
+  archive: SurfaceNode[]
+  surfaceFloor?: number
+  archiveFloor?: number
+}
+
+export interface Snapshot extends SurfaceNodeWindow {
   ok: boolean
   unsupported?: {
     current: string
@@ -172,6 +237,8 @@ export interface Snapshot {
   generatedAnswerTokens?: number
   generatedCallTokens?: number
   toolCalls?: number
+  toolTally?: Record<string, number>
+  programTally?: Record<string, number>
   humanInputs?: number
   answers?: number
   lastUser?: string
@@ -183,29 +250,54 @@ export interface Snapshot {
   cost?: SessionCostUsage
   timing?: TimingTotals
   systems?: SystemPromptNode[]
-  nodes: SurfaceNode[]
-  droppedNodes: number
-  archive: SurfaceNode[]
-  surfaceFloor?: number
-  archiveFloor?: number
   fileOps?: FileOpRecord[]
   fileOpsFloor?: number
   commands?: CommandRecord[]
   commandsFloor?: number
   commandStats?: CommandStats
   spans?: TimingSpan[]
+  costRead?: SessionCostRead
 }
 
-export interface ContextTimelineDetail {
+export interface CostPriceRate {
+  hit: number
+  miss: number
+  write: number
+  out: number
+}
+
+export type CostConfidence = 'high' | 'medium' | 'low'
+
+export interface CostPriceFace {
+  provider: string
+  model: string
+  rate: CostPriceRate
+  via: string
+  confidence: CostConfidence
+  canonical?: string
+  /** The model billed whole requests at its long-context tier. */
+  long?: true
+}
+
+export interface CostPriceMiss {
+  provider: string
+  model: string
+  reason: string
+  candidates?: number
+}
+
+export interface SessionCostRead {
+  usd: number | null
+  ready: boolean
+  faces?: CostPriceFace[]
+  misses?: CostPriceMiss[]
+}
+
+export interface ContextTimelineDetail extends SurfaceNodeWindow {
   rev: number
   head?: ContextTimeline
   requests: RequestRecord[]
   events: ContextEventRecord[]
-  nodes: SurfaceNode[]
-  droppedNodes: number
-  archive: SurfaceNode[]
-  surfaceFloor?: number
-  archiveFloor?: number
   fileOps?: FileOpRecord[]
   fileOpsFloor?: number
   commands?: CommandRecord[]
@@ -213,8 +305,9 @@ export interface ContextTimelineDetail {
   commandStats?: CommandStats
   spans?: TimingSpan[]
   /**
-   * Set when the detail covers only a bounded tail window of the durable log; `fromSeq` is the
-   * first durable event the payload covers, so earlier history is not loaded.
+   * Set when the detail covers only a bounded tail window of the durable log;
+   * `fromSeq` is the first durable event the payload covers, so earlier
+   * history is not loaded.
    */
   partial?: { fromSeq: number }
 }
@@ -232,7 +325,7 @@ export interface CommandRecord {
   resultSeq?: number
   time: number
   tool: string
-  cmd: string
+  cmd?: string
   cmdTruncated?: true
   description?: string
   cwd?: string
@@ -372,39 +465,49 @@ export interface SurfaceNode {
   err?: boolean
   skill?: string
   calls?: string[]
+  agent?: string
 }
 
-export interface RequestRecord {
+export interface SlimRequestRecord {
   turn?: number
   step?: number
   time: number
   seq: number
+  total: number
+  prompt?: number
+  activeMs?: number
+}
+
+export interface RequestRecord extends SlimRequestRecord {
   system: number
   tools: number
   user: number
   inject: number
   assistant: number
   tool: number
-  total: number
-  prompt?: number
   skill?: number
   cacheRead?: number
   output?: number
-  activeMs?: number
   stepCount?: number
   net?: number
 }
 
 export interface ContextEventRecord {
   seq: number
+  ord?: number
   time: number
-  kind: 'compaction' | 'prune' | 'inject' | 'model' | 'mode'
+  kind: 'compaction' | 'prune' | 'inject' | 'model' | 'mode' | 'agent'
+    | 'goal-create' | 'goal-complete' | 'todo-add' | 'todo-done' | 'ask'
+    | 'team-task-create' | 'team-task-complete'
   form?: string
   tokens?: number
+  grossTokens?: number
   count?: number
   sub?: string
   name?: string
+  agent?: string
   detail?: string
+  items?: string[]
   from?: string
   to?: string
   fromTurn?: number
@@ -453,3 +556,216 @@ export interface PlatformBalance {
   balances: PlatformBalanceEntry[]
 }
 
+export type BalanceSource = 'account' | 'api'
+
+export interface PlatformBalances {
+  account: PlatformBalance | null
+  api: PlatformBalance | null
+}
+
+export interface BackfillSessionIssue {
+  id: string
+  reason: string
+}
+
+export interface BackfillCoverage {
+  complete: boolean
+  remaining: number
+  failed: number
+  running: boolean
+  total: number
+  covered: number
+  unsupported: number
+  unreadable: number
+  unreadableSessions?: BackfillSessionIssue[]
+  failedSessions?: BackfillSessionIssue[]
+}
+
+export type OverviewPart = 'summary' | 'days' | 'page' | 'tally' | 'projects'
+
+export type OverviewCoverage = 'all' | 'active' | 'archived'
+
+export type OverviewSort = 'recent' | 'tokens' | 'context'
+
+export type OverviewTallyField = 'skills' | 'tools' | 'cmds'
+
+export type OverviewRange = 'today' | '7d' | '30d' | { start: number; end: number }
+
+export interface OverviewScope {
+  range?: OverviewRange
+  day?: string | null
+  calendar?: { from: string; to: string }
+  coverage?: OverviewCoverage
+  group?: string | null
+  query?: string
+}
+
+export interface OverviewPick {
+  field: OverviewTallyField
+  name: string
+}
+
+export interface OverviewRequest {
+  part: OverviewPart
+  revision?: string | null
+  scope?: OverviewScope
+  sort?: OverviewSort
+  page?: number
+  tally?: OverviewTallyField
+  pick?: OverviewPick | null
+}
+
+export interface OverviewPartTotal {
+  key: string
+  value: number
+}
+
+export interface OverviewTimingWindow {
+  calls: number
+  toolCalls: number
+  toolsMs: number
+  wallMs: number
+}
+
+export interface OverviewResolvedWindow {
+  start: number
+  end: number | null
+  from: string | null
+  to: string | null
+}
+
+export interface OverviewSummary {
+  sessions: number
+  sessionsTotal: number
+  sessionsArchived: number
+  archivedScoped: number
+  tokens: number
+  turns: number
+  costUsd: number | null
+  costSessions: number
+  usageSessions: number
+  cacheHit: string | null
+  tokenParts: OverviewPartTotal[] | null
+  timing: TimingTotals | null
+  windowTiming: OverviewTimingWindow
+  window?: OverviewResolvedWindow
+  coverage: BackfillCoverage
+}
+
+export interface OverviewDay {
+  key: string
+  tokens: number
+  sessions: number
+  costUsd: number | null
+}
+
+export interface OverviewPageRow {
+  id: string
+  title: string
+  cwd?: string
+  updatedAt: number
+  running: boolean
+  archived: boolean
+  group?: string
+  tokens: number
+  turns: number
+  steps?: number
+  parts: OverviewPartTotal[]
+  total: number
+  contextWindow?: number
+  maxOutputTokens?: number
+  model?: string
+  lastUser?: string
+  costUsd: number | null
+  createdDay?: string
+}
+
+export interface OverviewGroupCount {
+  key: string
+  count: number
+}
+
+export interface OverviewPage {
+  items: OverviewPageRow[]
+  index: number
+  count: number
+  total: number
+  scopeTotal: number
+  groups: OverviewGroupCount[]
+}
+
+export interface OverviewTallyStat {
+  name: string
+  n: number
+  sessions: number
+  last: number
+}
+
+export interface OverviewTally {
+  field: OverviewTallyField
+  stats: OverviewTallyStat[]
+}
+
+export interface OverviewProjectStat {
+  key: string
+  tokens: number
+  sessions: number
+}
+
+export interface OverviewUnchanged {
+  revision: string
+  unchanged: true
+}
+
+export interface OverviewSummaryValue {
+  revision: string
+  pricingReady: boolean
+  summary: OverviewSummary
+}
+
+export interface OverviewDaysValue {
+  revision: string
+  pricingReady: boolean
+  days: OverviewDay[]
+}
+
+export interface OverviewPageValue {
+  revision: string
+  pricingReady: boolean
+  page: OverviewPage
+}
+
+export interface OverviewTallyValue {
+  revision: string
+  pricingReady: boolean
+  tally: OverviewTally
+}
+
+export interface OverviewProjectsValue {
+  revision: string
+  pricingReady: boolean
+  projects: OverviewProjectStat[]
+}
+
+export type OverviewValue = OverviewUnchanged | OverviewSummaryValue | OverviewDaysValue | OverviewPageValue
+  | OverviewTallyValue | OverviewProjectsValue
+
+export const HISTORY_PARTS = ['requests', 'events', 'milestones', 'nodes', 'archive', 'files', 'spans'] as const
+
+export type HistoryPart = (typeof HISTORY_PARTS)[number]
+
+export type HistoryRow = RequestRecord | ContextEventRecord | SurfaceNode | FileOpRecord | TimingSpan
+
+export interface HistoryPage {
+  rev: number
+  live: boolean
+  part: HistoryPart
+  rows: HistoryRow[]
+  first: number
+  last: number
+  total: number
+  atStart: boolean
+  atEnd: boolean
+  beforeSeq?: number
+  beforeIndex?: number
+}

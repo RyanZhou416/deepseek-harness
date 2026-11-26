@@ -1,3 +1,4 @@
+import { makeRetentionCache, registerRetentionCleanup, trimRetentionMap } from './retention'
 import type { TokenSpan } from './services'
 
 export interface ModalStore {
@@ -6,7 +7,7 @@ export interface ModalStore {
   set(open: boolean): void
 }
 
-const stores = new Map<string, ModalStore>()
+const stores = makeRetentionCache<string, ModalStore>('modalStores')
 
 export function modalStoreOf(sessionId: string): ModalStore {
   const existing = stores.get(sessionId)
@@ -37,6 +38,7 @@ const pendingConsume = new Map<string, ConsumeGuard>()
 
 export function setPendingConsume(sessionId: string, guard: ConsumeGuard): void {
   pendingConsume.set(sessionId, guard)
+  trimRetentionMap(pendingConsume, 'modalPendingConsume')
 }
 
 export function takePendingConsume(sessionId: string): ConsumeGuard | undefined {
@@ -44,3 +46,8 @@ export function takePendingConsume(sessionId: string): ConsumeGuard | undefined 
   if (guard !== undefined) pendingConsume.delete(sessionId)
   return guard
 }
+
+registerRetentionCleanup(() => {
+  stores.dispose()
+  pendingConsume.clear()
+})

@@ -1,12 +1,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandPage } from '../shared/types'
 import { type ColdReadGate, makeColdReadGate } from './coldRead'
-import { type ConnectionHostFace, registerPostRoute } from './connection'
+import { failure, leaseOf, mountPostRoute, observeOf, readBody, reply, revisionOf } from './postRoute'
+import { makeFoldCache, type FoldCache } from './foldCache'
 import type { FoldBounds } from './config'
 import { applyTimeline } from './fold'
 import { createTimelineState } from './foldState'
 import type { CommandStateRecord, TimelineState } from './foldState'
 import { serveCommand } from './foldWire'
+import { serviceIdentityOf } from './serviceIdentity'
 
 export const COMMANDS_ROUTE = '/api/dsh-context/commands'
 
@@ -25,10 +27,6 @@ interface CommandObservation {
   [Symbol.dispose]?: unknown
 }
 
-interface SessionQueryFace {
-  observeSession?(id: string, options: unknown): Promise<unknown>
-}
-
 interface CachedState {
   live: boolean
   persistence?: unknown
@@ -37,32 +35,19 @@ interface CachedState {
   state: TimelineState
 }
 
-function reply(value: unknown): Response {
-  return Response.json(value, { headers: { 'cache-control': 'no-store' } })
-}
-
-function failure(code: string, message: string): Response {
-  return reply({ ok: false, error: { code, message } })
-}
-
-function revisionOf(observation: CommandObservation): string | undefined {
-  const revision = observation.revision
-  return typeof revision === 'string' && revision !== '' ? revision : undefined
-}
-
 function cursorOf(observation: CommandObservation): number {
   const cursor = observation.cursor
   return typeof cursor === 'number' && Number.isFinite(cursor) ? cursor : -1
 }
 
 function reusable(
-  entry: CachedState | undefined,
+  entry: CachedState,
   live: boolean,
   revision: string | undefined,
   cursor: number,
   persistence: unknown,
 ): boolean {
-  if (entry === undefined || entry.live !== live || entry.cursor > cursor) return false
+  if (entry.live !== live || entry.cursor > cursor) return false
   return live || (entry.revision === revision && entry.persistence === persistence)
 }
 
@@ -83,7 +68,7 @@ async function readPage(
   beforeSeq: number | undefined,
   limit: number,
   bounds: FoldBounds,
-  cache: Map<string, CachedState>,
+  cache: FoldCache<CachedState>,
   sessionId: string,
   persistence: unknown,
 ): Promise<CommandPage | null> {
@@ -91,10 +76,9 @@ async function readPage(
   const revision = live ? undefined : revisionOf(observation)
   const cursor = cursorOf(observation)
   const keyed = live || revision !== undefined
-  const cached = cache.get(sessionId)
-  const reuse = keyed && reusable(cached, live, revision, cursor, persistence)
-  let state = reuse && cached !== undefined ? cached.state : createTimelineState()
-  let cut = reuse && cached !== undefined ? cached.cursor : -1
+  const cached = keyed ? cache.get(sessionId, entry => reusable(entry, live, revision, cursor, persistence)) : undefined
+  let state = cached?.state ?? createTimelineState()
+  let cut = cached?.cursor ?? -1
   if (cut < cursor) {
     if (!Array.isArray(observation.events)) return null
     const fullBounds: FoldBounds = { ...bounds, maxCommands: Number.MAX_SAFE_INTEGER }
@@ -106,12 +90,7 @@ async function readPage(
     }
   }
   if (keyed) {
-    cache.delete(sessionId)
     cache.set(sessionId, { live, persistence, ...(revision !== undefined ? { revision } : {}), cursor: cut, state })
-    for (const oldest of cache.keys()) {
-      if (cache.size <= STATE_CACHE_MAX) break
-      cache.delete(oldest)
-    }
   }
   return pageOf(state, beforeSeq, limit)
 }
@@ -120,52 +99,54 @@ export function watchCommandPageChannel(
   ctx: Context,
   bounds: FoldBounds,
   coldReads: ColdReadGate = makeColdReadGate(),
+  options: { idleSweepMs?: number } = {},
 ): void {
-  const cache = new Map<string, CachedState>()
-  ctx.inject(['connection', 'sessionQuery'], (c) => {
-    const query = c.get('sessionQuery') as SessionQueryFace | undefined
-    const observe = typeof query?.observeSession === 'function' ? query.observeSession.bind(query) : undefined
-    if (observe === undefined) return
-    const handler = async (request: Request): Promise<Response> => {
-      let sessionId: unknown
-      let beforeSeq: unknown
-      let limit: unknown
-      try {
-        const body: unknown = await request.json()
-        if (body !== null && typeof body === 'object') {
-          sessionId = (body as { sessionId?: unknown }).sessionId
-          beforeSeq = (body as { beforeSeq?: unknown }).beforeSeq
-          limit = (body as { limit?: unknown }).limit
+  const cache = makeFoldCache<CachedState>(ctx, {
+    maxEntries: STATE_CACHE_MAX,
+    idleMs: options.idleSweepMs,
+  })
+  mountPostRoute({
+    ctx,
+    deps: ['connection', 'sessionQuery'],
+    path: COMMANDS_ROUTE,
+    label: 'dsh-context: command page route',
+    handler: (c) => {
+      const observe = observeOf(c)
+      if (observe === undefined) return undefined
+      return async (request: Request): Promise<Response> => {
+        cache.touch()
+        const read = await readBody(request)
+        if (!read.ok) return read.response
+        const body = read.body
+        const sessionId = body !== null && typeof body === 'object' ? (body as { sessionId?: unknown }).sessionId : undefined
+        const beforeSeq = body !== null && typeof body === 'object' ? (body as { beforeSeq?: unknown }).beforeSeq : undefined
+        const limit = body !== null && typeof body === 'object' ? (body as { limit?: unknown }).limit : undefined
+        if (typeof sessionId !== 'string' || sessionId === '') {
+          return failure('dsh-context/bad-request', 'missing sessionId')
         }
-      } catch {
-        return failure('dsh-context/bad-request', 'body is not JSON')
+        if (beforeSeq !== undefined && (typeof beforeSeq !== 'number' || !Number.isFinite(beforeSeq) || beforeSeq < 0)) {
+          return failure('dsh-context/bad-request', 'beforeSeq must be a non-negative number')
+        }
+        const pageSize = typeof limit === 'number' && Number.isFinite(limit)
+          ? Math.min(PAGE_LIMIT_MAX, Math.max(1, Math.floor(limit)))
+          : PAGE_LIMIT
+        try {
+          const persistence = serviceIdentityOf(c.get('sessionPersistence'))
+          const value = await coldReads.admit(async () => {
+            const observation = await observe(sessionId, { projectionMode: 'none' }) as CommandObservation | null
+            if (observation === null || typeof observation !== 'object') return null
+            const release = leaseOf(observation)
+            try {
+              return await readPage(observation, beforeSeq, pageSize, bounds, cache, sessionId, persistence)
+            } finally {
+              release()
+            }
+          })
+          return reply({ ok: true, value: value ?? null })
+        } catch (err) {
+          return failure('gateway/internal', err instanceof Error ? err.message : String(err))
+        }
       }
-      if (typeof sessionId !== 'string' || sessionId === '') {
-        return failure('dsh-context/bad-request', 'missing sessionId')
-      }
-      if (beforeSeq !== undefined && (typeof beforeSeq !== 'number' || !Number.isFinite(beforeSeq) || beforeSeq < 0)) {
-        return failure('dsh-context/bad-request', 'beforeSeq must be a non-negative number')
-      }
-      const pageSize = typeof limit === 'number' && Number.isFinite(limit)
-        ? Math.min(PAGE_LIMIT_MAX, Math.max(1, Math.floor(limit)))
-        : PAGE_LIMIT
-      try {
-        const persistence: unknown = c.get('sessionPersistence')
-        const value = await coldReads.admit(async () => {
-          const observation = await observe(sessionId, { projectionMode: 'none' }) as CommandObservation | null
-          if (observation === null || typeof observation !== 'object') return null
-          try {
-            return await readPage(observation, beforeSeq, pageSize, bounds, cache, sessionId, persistence)
-          } finally {
-            const dispose = observation[Symbol.dispose]
-            if (typeof dispose === 'function') dispose.call(observation)
-          }
-        })
-        return reply({ ok: true, value: value ?? null })
-      } catch (err) {
-        return failure('gateway/internal', err instanceof Error ? err.message : String(err))
-      }
-    }
-    registerPostRoute(c, c.get('connection') as ConnectionHostFace | undefined, COMMANDS_ROUTE, handler, 'dsh-context: command page route')
+    },
   })
 }

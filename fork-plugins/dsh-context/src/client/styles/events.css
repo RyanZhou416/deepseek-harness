@@ -5,16 +5,39 @@
 .lc-event-icon.lc-event-inject { color: var(--color-purple-500); }
 .lc-event-icon.lc-event-model { color: var(--dsw-alias-brand-primary); }
 .lc-event-icon.lc-event-mode { color: var(--dsw-alias-label-secondary); }
+.lc-event-icon.lc-event-agent { color: var(--dsw-alias-state-success-primary); }
+.lc-event-icon.lc-event-compaction { color: var(--dsw-alias-state-error-primary); }
+.lc-event-icon.lc-event-prune { color: var(--color-violet-500); }
+.lc-event-icon.lc-event-goal-create { color: var(--color-blue-500); }
+.lc-event-icon.lc-event-goal-complete { color: var(--dsw-alias-state-success-primary); }
+.lc-event-icon.lc-event-todo-add { color: var(--color-indigo-500); }
+.lc-event-icon.lc-event-todo-done { color: var(--color-teal-500); }
+.lc-event-icon.lc-event-ask { color: var(--dsw-alias-state-warn-primary); }
+.lc-event-icon.lc-event-team-task-create { color: var(--color-pink-500); }
+.lc-event-icon.lc-event-team-task-complete { color: var(--color-violet-500); }
 .lc-kind { flex: none; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
-.lc-kind-inject { background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 15%, transparent); color: var(--dsw-alias-state-success-primary); }
-.lc-kind-compaction { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 15%, transparent); color: var(--dsw-alias-state-error-primary); }
-.lc-kind-prune { background: color-mix(in srgb, var(--color-violet-500) 15%, transparent); color: var(--color-violet-500); }
-.lc-kind-model { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 15%, transparent); color: var(--dsw-alias-brand-primary); }
-.lc-kind-mode { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 15%, transparent); color: var(--dsw-alias-label-secondary); }
+.lc-kind-inject { --lc-kind-fg: var(--dsw-alias-state-success-primary); }
+.lc-kind-compaction { --lc-kind-fg: var(--dsw-alias-state-error-primary); }
+.lc-kind-prune { --lc-kind-fg: var(--color-violet-500); }
+.lc-kind-model { --lc-kind-fg: var(--dsw-alias-brand-primary); }
+.lc-kind-mode { --lc-kind-fg: var(--dsw-alias-label-secondary); }
+.lc-kind-agent { --lc-kind-fg: var(--dsw-alias-state-success-primary); }
+.lc-kind-goal-create { --lc-kind-fg: var(--color-blue-500); }
+.lc-kind-goal-complete { --lc-kind-fg: var(--dsw-alias-state-success-primary); }
+.lc-kind-todo-add { --lc-kind-fg: var(--color-indigo-500); }
+.lc-kind-todo-done { --lc-kind-fg: var(--color-teal-500); }
+.lc-kind-ask { --lc-kind-fg: var(--dsw-alias-state-warn-primary); }
+.lc-kind-team-task-create { --lc-kind-fg: var(--color-pink-500); }
+.lc-kind-team-task-complete { --lc-kind-fg: var(--color-violet-500); }
+.lc-kind-all { --lc-kind-fg: var(--dsw-alias-state-business-primary); }
+.lc-kind { background: color-mix(in srgb, var(--lc-kind-fg) 15%, transparent); color: var(--lc-kind-fg); }
+.lc-kinds .lc-gran-btn, .lc-kinds .lc-gran-btn:hover { color: var(--lc-kind-fg); }
+.lc-kinds .lc-gran-on, .lc-kinds .lc-gran-on:hover { background: color-mix(in srgb, var(--lc-kind-fg) 15%, transparent); color: var(--lc-kind-fg); }
+.lc-kinds .lc-kind-all.lc-gran-on, .lc-kinds .lc-kind-all.lc-gran-on:hover { background: var(--dsw-alias-button-info-fill); color: var(--dsw-alias-label-primary-foreground); }
 .lc-event-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lc-event-jump { border: 0; background: transparent; color: inherit; font: inherit; text-align: left; padding: 0; cursor: pointer; }
 .lc-event-jump:hover { text-decoration: underline; }
 .lc-event-at { flex: none; color: var(--dsw-alias-label-secondary); font-size: 11px; white-space: nowrap; }
-.lc-event-tokens { color: var(--dsw-alias-state-success-primary); font-weight: 600; white-space: nowrap; }
-.lc-event-tokens.lc-up { color: var(--dsw-alias-state-warn-primary); }
+.lc-event-tokens { color: var(--dsw-alias-state-warn-primary); font-weight: 600; white-space: nowrap; }
+.lc-event-tokens.lc-up { color: var(--dsw-alias-state-success-primary); }
 .lc-event-time { color: var(--dsw-alias-label-secondary); font-size: 12px; }

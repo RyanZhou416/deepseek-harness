@@ -1,19 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import {
-  estimateAnswerTokens,
-  estimateCallTokens,
-  estimateMessage,
-  estimateReasoningTokens,
-  estimateToolSchema,
-  estimateToolsTotal,
-  firstText,
-  imageCountOf,
-  injectionSourceName,
-  isInjection,
-  toolCallNames,
-} from '../../src/host/pricing'
-import type { ContentBlock } from '../../src/host/pricing'
+import { estimateAnswerTokens, estimateCallTokens, estimateMessage, estimateReasoningTokens, estimateToolSchema, estimateToolsTotal, firstText, imageCountOf, injectionSourceName, isInjection, toolCallNames, type ContentBlock } from '../../src/host/pricing'
+
+describe('pricing', () => {
 
 describe('estimateToolsTotal', () => {
   test('an empty tool list prices zero; a non-empty one prices the whole-array JSON plus one block', () => {
@@ -76,7 +65,7 @@ describe('estimateMessage', () => {
   test('image blocks price through the vision calculator only with two finite dimensions', () => {
     assert.equal(
       estimateMessage({ content: [{ type: 'image', attachment: { width: 800, height: 600 } }] }),
-      341 + 8,
+      317 + 8,
     )
     for (const attachment of [null, 'ref', { width: 800 }, { width: NaN, height: 100 }]) {
       const block = { type: 'image', attachment } as unknown as ContentBlock
@@ -200,4 +189,5 @@ describe('hostile block shapes', () => {
     assert.equal(imageCountOf(nested), 1)
     assert.ok(estimateMessage({ content: nested }) > 0)
   })
+})
 })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-context",
-  "version": "0.78.2-dsh022rc1.1",
+  "version": "0.87.2-dsh023a2.1",
   "description": "A DeepSeek Harness plugin for context insight and management, with context dashboard and context command, for understanding how the context is made of, and how it evolves.",
   "icon": "icon.svg",
   "author": "bowenliang123",
@@ -15,7 +15,7 @@
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "dsh": ">=0.2.1-rc.2 || >=0.2.0-rc.2 || >=0.2.2-rc.1"
+    "dsh": ">=0.2.0-rc.2 || >=0.2.1-rc.2 || >=0.2.2-rc.1 || >=0.2.3-alpha.2"
   },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -31,25 +31,25 @@
   "files": [
     "icon.svg",
     "locale/*.json",
+    "README*.md",
     "lib/client.js",
     "lib/index.js",
     "lib/index.d.ts",
     "cordis.patch.yml",
-    "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsdown",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
-    "check": "bash scripts/check.sh",
-    "watch": "bash scripts/watch.sh",
-    "web": "bash scripts/web.sh",
-    "register": "bash scripts/register.sh",
+    "check": "node scripts/run-bash.mjs scripts/check.sh",
+    "watch": "node scripts/watch.mjs",
+    "web": "node scripts/web.mjs",
+    "register": "node scripts/run-bash.mjs scripts/register.sh",
     "typecheck": "tsc --noEmit -p tsconfig.tests.json --incremental",
     "test": "vitest run --coverage",
     "coverage": "vitest run --coverage",
-    "release": "bash scripts/publish.sh",
+    "release": "node scripts/run-bash.mjs scripts/publish.sh",
     "social-preview": "node scripts/social-preview/generate.ts",
     "prepare": "husky && tsdown"
   },
@@ -70,9 +70,11 @@
     },
     "compatibility": {
       "dshReleases": {
-        "0.2.0-rc.2": "compatible",
-        "0.2.1-rc.2": "compatible",
-        "0.2.2-rc.1": "compatible"
+        "0.2.0-rc.2+": "compatible",
+        "0.2.1-rc.2+": "compatible",
+        "0.2.2-rc.1+": "compatible",
+        "0.2.2-rc.3+": "compatible",
+        "0.2.3-alpha.2+": "compatible"
       }
     }
   },
@@ -87,13 +89,13 @@
   ],
   "license": "Apache-2.0",
   "dependencies": {
-    "zod": "4.4.3"
+    "zod": "4.6.6"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.0-rc.2 || >=0.2.1-rc.2 || >=0.2.2-rc.1",
-    "@deepseek-ai/dsh-session": ">=0.2.0-rc.2 || >=0.2.1-rc.2 || >=0.2.2-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/cordis": "^4.0.4 || >=4.0.6-alpha.2 <5.0.0",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.0-rc.2 || >=0.2.1-rc.2 || >=0.2.2-rc.1 || >=0.2.3-alpha.2",
+    "@deepseek-ai/dsh-session": ">=0.2.0-rc.2 || >=0.2.1-rc.2 || >=0.2.2-rc.1 || >=0.2.3-alpha.2",
+    "@deepseek-ai/schemastery": "^3.18.2 || >=3.18.6-alpha.2 <4.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -109,23 +111,24 @@
     }
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/cordis": "4.1.0",
     "@deepseek-ai/dsh-client-store": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-primitives": "0.2.0-rc.2",
     "@deepseek-ai/dsh-session": "0.2.0-rc.2",
     "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
     "@deepseek-ai/dsh-util-code-language": "0.2.0-rc.2",
     "@deepseek-ai/dsh-util-workspace-path": "0.2.0-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.5",
-    "@opencode-ai/models": "^0.0.87",
+    "@deepseek-ai/schemastery": "3.19.0",
     "@shikijs/langs": "^4.5.0",
     "@stylistic/eslint-plugin": "^5.10.0",
     "@tailwindcss/node": "4.3.3",
     "@tailwindcss/oxide": "4.3.3",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^26.6.5",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
-    "@vitest/coverage-v8": "^5.0.5",
+    "@types/semver": "^7.8.0",
+    "@vitest/coverage-v8": "^5.1.0",
     "anser": "^2.3.5",
     "clsx": "^2.1.1",
     "diff": "^9.0.0",
@@ -148,13 +151,15 @@
     "micromark-util-symbol": "^2.0.1",
     "oxlint": "1.85.0",
     "oxlint-tsgolint": "7.0.2003",
+    "playwright-core": "^1.65.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "semver": "^7.8.5",
     "shiki": "^4.5.0",
-    "simple-icons": "16.32.0",
-    "tsdown": "0.23.1",
-    "typescript": "~7.0.2",
-    "vitest": "^5.0.5",
+    "simple-icons": "16.38.1",
+    "tsdown": "0.23.7",
+    "typescript": "7.1.0-beta",
+    "vitest": "^5.1.0",
     "zustand": "~4.4.7"
   }
 }

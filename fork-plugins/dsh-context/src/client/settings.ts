@@ -1,4 +1,4 @@
-import type { DefaultDeltaBase, DefaultFileSort, DefaultGranularity, DefaultDurationCurve, DefaultOverviewRange, DefaultPlacement, DefaultToolSort, DefaultTrendMode, FleetTab, InsightsEntry, OverviewAutoSteps, SettingsField } from '../shared/types'
+import type { BalanceSource, DefaultDeltaBase, DefaultFileSort, DefaultGranularity, DefaultDurationCurve, DefaultOverviewRange, DefaultPlacement, DefaultToolSort, DefaultTimelineMode, FleetTab, InsightsEntry, OverviewAutoSteps, SettingsField } from '../shared/types'
 
 export type { DefaultDeltaBase, DefaultFileSort, DefaultToolSort, SettingsField } from '../shared/types'
 
@@ -21,7 +21,7 @@ export interface SettingsState {
   status: 'loading' | 'ready' | 'unavailable'
   placement: DefaultPlacement
   granularity: DefaultGranularity
-  mode: DefaultTrendMode
+  mode: DefaultTimelineMode
   deltaBase: DefaultDeltaBase
   toolSort: DefaultToolSort
   fileSort: DefaultFileSort
@@ -30,6 +30,7 @@ export interface SettingsState {
   overviewAutoSteps: OverviewAutoSteps
   overviewRange: DefaultOverviewRange
   fleetTab: FleetTab
+  balanceSource: BalanceSource
   promptPrefix: string
   promptSuffix: string
   writable: boolean
@@ -39,7 +40,7 @@ export interface ContextSettings {
   store: { subscribe(listener: () => void): () => void; getSnapshot(): SettingsState }
   defaultPlacement(): DefaultPlacement
   defaultGranularity(): DefaultGranularity
-  defaultTrendMode(): DefaultTrendMode
+  defaultTimelineMode(): DefaultTimelineMode
   defaultDeltaBase(): DefaultDeltaBase
   defaultToolSort(): DefaultToolSort
   defaultFileSort(): DefaultFileSort
@@ -48,6 +49,7 @@ export interface ContextSettings {
   overviewAutoSteps(): OverviewAutoSteps
   defaultOverviewRange(): DefaultOverviewRange
   fleetTab(): FleetTab
+  balanceSource(): BalanceSource
   attach(scope: SettingsScopeLike): () => void
   set(field: SettingsField, value: string): void
 }
@@ -55,7 +57,7 @@ export interface ContextSettings {
 type Prefs = {
   placement?: DefaultPlacement
   granularity?: DefaultGranularity
-  mode?: DefaultTrendMode
+  mode?: DefaultTimelineMode
   deltaBase?: DefaultDeltaBase
   toolSort?: DefaultToolSort
   fileSort?: DefaultFileSort
@@ -64,6 +66,7 @@ type Prefs = {
   overviewAutoSteps?: OverviewAutoSteps
   overviewRange?: DefaultOverviewRange
   fleetTab?: FleetTab
+  balanceSource?: BalanceSource
   promptPrefix?: string
   promptSuffix?: string
 }
@@ -74,22 +77,23 @@ function prefsOf(value: unknown): Prefs {
   return {
     ...(v.defaultPlacement === 'all' || v.defaultPlacement === 'tab' || v.defaultPlacement === 'sidebar' || v.defaultPlacement === 'hide' ? { placement: v.defaultPlacement } : {}),
     ...(v.defaultGranularity === 'step' || v.defaultGranularity === 'turn' ? { granularity: v.defaultGranularity } : {}),
-    ...(v.defaultTrendMode === 'total' || v.defaultTrendMode === 'delta' ? { mode: v.defaultTrendMode } : {}),
+    ...(v.defaultTimelineMode === 'total' || v.defaultTimelineMode === 'delta' ? { mode: v.defaultTimelineMode } : {}),
     ...(v.defaultDeltaBase === 'step' || v.defaultDeltaBase === 'turn' ? { deltaBase: v.defaultDeltaBase } : {}),
     ...(v.defaultToolSort === 'size' || v.defaultToolSort === 'count' || v.defaultToolSort === 'name' ? { toolSort: v.defaultToolSort } : {}),
     ...(v.defaultFileSort === 'count' || v.defaultFileSort === 'lines' || v.defaultFileSort === 'latest' || v.defaultFileSort === 'path' || v.defaultFileSort === 'name' ? { fileSort: v.defaultFileSort } : {}),
     ...(v.insightsEntry === 'show' || v.insightsEntry === 'hide' ? { insightsEntry: v.insightsEntry } : {}),
     ...(v.defaultDurationCurve === 'show' || v.defaultDurationCurve === 'hide' ? { durationCurve: v.defaultDurationCurve } : {}),
     ...(v.overviewAutoSteps === '100' || v.overviewAutoSteps === '200' || v.overviewAutoSteps === '300' || v.overviewAutoSteps === 'off' ? { overviewAutoSteps: v.overviewAutoSteps } : {}),
-    ...(v.defaultOverviewRange === 'today' || v.defaultOverviewRange === '7d' || v.defaultOverviewRange === '30d' || v.defaultOverviewRange === 'all' ? { overviewRange: v.defaultOverviewRange } : {}),
+    ...(v.defaultOverviewRange === 'today' || v.defaultOverviewRange === '7d' || v.defaultOverviewRange === '30d' ? { overviewRange: v.defaultOverviewRange } : {}),
     ...(v.fleetTab === 'show' || v.fleetTab === 'hide' ? { fleetTab: v.fleetTab } : {}),
+    ...(v.balanceSource === 'account' || v.balanceSource === 'api' ? { balanceSource: v.balanceSource } : {}),
     ...(typeof v.promptPrefix === 'string' ? { promptPrefix: v.promptPrefix } : {}),
     ...(typeof v.promptSuffix === 'string' ? { promptSuffix: v.promptSuffix } : {}),
   }
 }
 
 export function createContextSettings(): ContextSettings {
-  let state: SettingsState = { status: 'loading', placement: 'all', granularity: 'step', mode: 'total', deltaBase: 'step', toolSort: 'count', fileSort: 'lines', insightsEntry: 'show', durationCurve: 'show', overviewAutoSteps: '100', overviewRange: '30d', fleetTab: 'show', promptPrefix: '', promptSuffix: '', writable: false }
+  let state: SettingsState = { status: 'loading', placement: 'all', granularity: 'step', mode: 'total', deltaBase: 'step', toolSort: 'count', fileSort: 'lines', insightsEntry: 'show', durationCurve: 'show', overviewAutoSteps: '100', overviewRange: '30d', fleetTab: 'show', balanceSource: 'account', promptPrefix: '', promptSuffix: '', writable: false }
   let scope: SettingsScopeLike | undefined
   const listeners = new Set<() => void>()
   const unchanged = (a: SettingsState, b: SettingsState): boolean =>
@@ -120,6 +124,7 @@ export function createContextSettings(): ContextSettings {
       overviewAutoSteps: prefs.overviewAutoSteps ?? (raw?.overviewAutoSteps === undefined ? state.overviewAutoSteps : '100'),
       overviewRange: prefs.overviewRange ?? (raw?.defaultOverviewRange === undefined ? state.overviewRange : '30d'),
       fleetTab: prefs.fleetTab ?? (raw?.fleetTab === undefined ? state.fleetTab : 'show'),
+      balanceSource: prefs.balanceSource ?? state.balanceSource,
       promptPrefix: prefs.promptPrefix ?? (raw?.promptPrefix === undefined ? state.promptPrefix : ''),
       promptSuffix: prefs.promptSuffix ?? (raw?.promptSuffix === undefined ? state.promptSuffix : ''),
       writable: snap.writable,
@@ -136,7 +141,7 @@ export function createContextSettings(): ContextSettings {
     },
     defaultPlacement: () => state.placement,
     defaultGranularity: () => state.granularity,
-    defaultTrendMode: () => state.mode,
+    defaultTimelineMode: () => state.mode,
     defaultDeltaBase: () => state.deltaBase,
     defaultToolSort: () => state.toolSort,
     defaultFileSort: () => state.fileSort,
@@ -145,6 +150,7 @@ export function createContextSettings(): ContextSettings {
     overviewAutoSteps: () => state.overviewAutoSteps,
     defaultOverviewRange: () => state.overviewRange,
     fleetTab: () => state.fleetTab,
+    balanceSource: () => state.balanceSource,
     attach(bound) {
       scope = bound
       sync(bound)

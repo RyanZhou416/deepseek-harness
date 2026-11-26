@@ -1,3 +1,5 @@
+// @vitest-environment node
+// DeepSeek Harness fork modification: fetched head views merge into the row values.
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import {
@@ -14,7 +16,7 @@ import {
   familyParentOf,
   fmtDurationCompact,
   layoutForest,
-  lineageOf,
+  neighborhoodOf,
   pressureColorOf,
   providerModelLabelOf,
   sessionTitlesOf,
@@ -22,36 +24,13 @@ import {
   subagentCostFoldOf,
   type AgentForest,
 } from '../../src/client/agentTree'
-import { mergeCostUsage } from '../../src/client/cost'
-import type { AgentHead } from '../../src/client/agentHeads'
-import type { ContextTimeline, SessionCostUsage } from '../../src/shared/types'
-
-function timeline(total: number, requests = 0): ContextTimeline {
-  return {
-    ok: true,
-    contextWindow: 1000,
-    current: {
-      system: 0, tools: 0, user: total, inject: 0, skill: 0, assistant: 0, tool: 0, total,
-    },
-    requests: Array.from({ length: requests }, (_, i) => ({
-      seq: i + 1, time: 0, system: 0, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total: 1,
-    })),
-    events: [],
-    nodes: [],
-    droppedNodes: 0,
-    archive: [],
-  }
-}
-
-function row(over: Record<string, unknown> = {}): Record<string, unknown> {
-  return { running: false, updatedAt: 1, ...over }
-}
-
-function snap(byId: Record<string, unknown>): unknown {
-  return { byId }
-}
+import { mergeCostUsage } from '../../src/shared/pricing'
+import type { ContextTimeline, SessionCostRead, SessionCostUsage } from '../../src/shared/types'
+import { row, snap, timeline } from './helpers/agentTreeFixtures'
 
 const LEVEL = 180
+import type { AgentHead } from '../../src/client/agentHeads'
+function landedHead(timeline: ContextTimeline): AgentHead { return { timeline, pressure: null, breakdown: null, usage: null } }
 
 describe('agentRowOf', () => {
   test('rejects non-records and re-proves every field', () => {
@@ -124,10 +103,10 @@ describe('agentTurnCompletedOf', () => {
 describe('agentStatsOf', () => {
   test('absent values degrade to empty stats', () => {
     assert.deepEqual(agentStatsOf(undefined), {
-      head: null, pressureKnown: false, requests: 0, billed: null, costUsage: null, durationMs: null, identity: null,
+      head: null, requests: 0, billed: null, costUsage: null, costRead: null, durationMs: null, identity: null,
     })
     assert.deepEqual(agentStatsOf({}), {
-      head: null, pressureKnown: false, requests: 0, billed: null, costUsage: null, durationMs: null, identity: null,
+      head: null, requests: 0, billed: null, costUsage: null, costRead: null, durationMs: null, identity: null,
     })
   })
 
@@ -331,10 +310,10 @@ describe('agentForestOf', () => {
         projectionValues: { contextPressure: { projectedTokens: 500, contextWindow: 1000 } },
       }),
       warm: row({ parentId: 'root', origin: 'subagent', projectionValues: { contextTimeline: timeline(100, 1) } }),
-    }), 'root', undefined, new Map<string, unknown>([
-      ['cold', { timeline: composed, pressure: null, breakdown: null }],
-      ['warm', { timeline: composed, pressure: null, breakdown: null }],
-      ['ghost', { timeline: timeline(5), pressure: null, breakdown: null }],
+    }), 'root', undefined, new Map<string, AgentHead>([
+      ['cold', landedHead(composed)],
+      ['warm', landedHead(composed)],
+      ['ghost', landedHead(timeline(5))],
     ]))
     assert.ok(forest !== null)
     const cold = forest.nodes.find(n => n.id === 'cold')
@@ -342,44 +321,20 @@ describe('agentForestOf', () => {
     assert.equal(cold.head.tokens, 500)
     assert.equal(cold.head.pct, 50)
     assert.ok(cold.head.parts.filter(p => p.value > 0).length >= 5, 'composed, not the single occupancy arc')
-    assert.equal(cold.pressureKnown, true, 'the row pressure anchors; the fetched head fills the timeline')
     const warm = forest.nodes.find(n => n.id === 'warm')
     assert.equal(warm?.head?.tokens, 100)
     assert.ok(forest.nodes[0].head === null)
     const solo = agentForestOf(snap({
       s1: row({}),
-    }), 's1', undefined, new Map([['s1', { timeline: composed, pressure: { projectedTokens: 500, contextWindow: 1000 }, breakdown: null }]]))
+    }), 's1', undefined, new Map([['s1', landedHead(composed)]]))
     assert.ok(solo !== null)
     const soloHead = solo.nodes[0].head
     assert.ok(soloHead !== null)
-    assert.equal(soloHead.tokens, 500, 'the fetched pressure anchors the ring')
-    assert.equal(soloHead.pct, 50)
-    assert.equal(solo.nodes[0].pressureKnown, true, 'the fetched pressure is known')
+    assert.equal(soloHead.tokens, 600, 'no pressure anchor: the fold total carries')
+    assert.equal(soloHead.pct, 60)
   })
 
-  test('a fetched head supplies the billed total the row no longer carries', () => {
-    const forest = agentForestOf(snap({ s1: row({}) }), 's1', undefined, new Map([['s1', {
-      timeline: timeline(5), pressure: null, breakdown: null,
-      usage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
-    }]]))
-    assert.ok(forest !== null)
-    assert.equal(forest.nodes[0].billed, 10)
-  })
-
-  test('a fetched breakdown refines the composition parts', () => {
-    const forest = agentForestOf(snap({
-      s1: row({}),
-    }), 's1', undefined, new Map([['s1', {
-      timeline: timeline(100, 1),
-      pressure: null,
-      breakdown: { systemTokens: 900, toolsTokens: 50, messageTokens: 50 },
-    }]]))
-    assert.ok(forest !== null)
-    const parts = forest.nodes[0].head?.parts ?? []
-    assert.equal(parts.find(p => p.key === 'system')?.value, 900, 'the fetched breakdown replaces the folded split')
-  })
-
-  test('a hostile fetched head degrades back to the pressure-only ring', () => {
+  test('a child without a fetched head keeps the pressure-only ring', () => {
     const byId = {
       root: row({ displayTitle: 'Root' }),
       cold: row({
@@ -387,14 +342,12 @@ describe('agentForestOf', () => {
         projectionValues: { contextPressure: { projectedTokens: 500, contextWindow: 1000 } },
       }),
     }
-    for (const junk of ['garbage', null, 42]) {
-      const forest = agentForestOf(snap(byId), 'root', undefined, new Map([['cold', junk]]))
-      assert.ok(forest !== null)
-      const cold = forest.nodes.find(n => n.id === 'cold')
-      assert.ok(cold !== undefined && cold.head !== null)
-      assert.equal(cold.head.tokens, 500, 'pressure still anchors the ring')
-      assert.equal(cold.head.parts.length, 0, 'no composition invented from junk')
-    }
+    const forest = agentForestOf(snap(byId), 'root', undefined, new Map())
+    assert.ok(forest !== null)
+    const cold = forest.nodes.find(n => n.id === 'cold')
+    assert.ok(cold !== undefined && cold.head !== null)
+    assert.equal(cold.head.tokens, 500, 'pressure still anchors the ring')
+    assert.equal(cold.head.parts.length, 0, 'no composition invented without a head')
   })
 
   test('walks the lineage up to the topmost ancestor and DFSes the subtree', () => {
@@ -535,18 +488,42 @@ describe('subagentCostFoldOf', () => {
   const COST_A: SessionCostUsage = { 'deepseek-official': { 'deepseek-v4-flash': { peak: { uncached: 1, cacheRead: 2, cacheWrite: 0, output: 3 } } } }
   const COST_B: SessionCostUsage = { 'zai-coding-cn': { 'glm-5.3-flash': { peak: { uncached: 10, cacheRead: 0, cacheWrite: 20, output: 0 } } } }
 
-  function costRow(parentId: string | undefined, cost?: SessionCostUsage): Record<string, unknown> {
+  function costRow(parentId: string | undefined, cost?: SessionCostUsage, costRead?: SessionCostRead): Record<string, unknown> {
     return row({
       ...(parentId !== undefined ? { parentId, origin: 'subagent' } : {}),
-      projectionValues: { contextTimeline: { ...timeline(100), ...(cost !== undefined ? { cost } : {}) } },
+      projectionValues: {
+        contextTimeline: {
+          ...timeline(100),
+          ...(cost !== undefined ? { cost } : {}),
+          ...(costRead !== undefined ? { costRead } : {}),
+        },
+      },
     })
   }
 
   test('absent snapshot or anchor folds nothing', () => {
-    assert.deepEqual(subagentCostFoldOf(undefined, 's1'), { usage: null, cold: [], count: 0 })
-    assert.deepEqual(subagentCostFoldOf(snap({}), 's1'), { usage: null, cold: [], count: 0 })
-    assert.deepEqual(subagentCostFoldOf(snap({ s1: row({}) }), undefined), { usage: null, cold: [], count: 0 })
-    assert.deepEqual(subagentCostFoldOf(snap({ s1: row({}) }), ''), { usage: null, cold: [], count: 0 })
+    assert.deepEqual(subagentCostFoldOf(undefined, 's1'), { usage: null, cold: [], count: 0, costRead: null })
+    assert.deepEqual(subagentCostFoldOf(snap({}), 's1'), { usage: null, cold: [], count: 0, costRead: { usd: null, ready: true } })
+    assert.deepEqual(subagentCostFoldOf(snap({ s1: row({}) }), undefined), { usage: null, cold: [], count: 0, costRead: null })
+    assert.deepEqual(subagentCostFoldOf(snap({ s1: row({}) }), ''), { usage: null, cold: [], count: 0, costRead: null })
+  })
+
+  test('folds the host cost reads of the subtree: USD sums, faces and misses concat, ready only when every read is ready', () => {
+    const FACE_A = { provider: 'deepseek', model: 'deepseek-v4-flash', rate: { hit: 0.003, miss: 0.15, write: 0.15, out: 0.6 }, via: 'direct' as const, confidence: 'high' as const }
+    const FACE_B = { provider: 'zhipuai', model: 'glm-5.3-flash', rate: { hit: 0.015, miss: 0.075, write: 0.075, out: 0.25 }, via: 'family' as const, confidence: 'medium' as const }
+    const MISS = { provider: 'future', model: 'mystery', reason: 'model-unknown' as const }
+    const byId = {
+      root: costRow(undefined),
+      a: costRow('root', undefined, { usd: 0.5, ready: true, faces: [FACE_A] }),
+      b: costRow('a', undefined, { usd: 0.25, ready: false, faces: [FACE_B], misses: [MISS] }),
+    }
+    assert.deepEqual(subagentCostFoldOf(snap(byId), 'root').costRead, { usd: 0.75, ready: false, faces: [FACE_A, FACE_B], misses: [MISS] })
+    byId.b = costRow('a', undefined, { usd: 0.25, ready: true })
+    assert.deepEqual(subagentCostFoldOf(snap(byId), 'root').costRead, { usd: 0.75, ready: true, faces: [FACE_A] })
+    const nullUsd = { root: costRow(undefined), kid: costRow('root', undefined, { usd: null, ready: true }) }
+    assert.deepEqual(subagentCostFoldOf(snap(nullUsd), 'root').costRead, { usd: null, ready: true })
+    const cold = { root: costRow(undefined), cold: row({ parentId: 'root', origin: 'subagent' }) }
+    assert.equal(subagentCostFoldOf(snap(cold), 'root').costRead, null, 'a cold-only subtree has no read yet')
   })
 
   test('merges the whole descendant subtree, never the current session itself', () => {
@@ -574,14 +551,14 @@ describe('subagentCostFoldOf', () => {
     assert.equal(fold.usage, null, 'nothing warm or landed yet')
     assert.deepEqual(fold.cold, ['cold', 'bare'])
     assert.equal(fold.count, 2, 'a cold descendant is a subagent too')
-    const landed = new Map<string, AgentHead>([['cold', { timeline: { ...timeline(50), cost: COST_B }, pressure: null, breakdown: null }]])
+    const landed = new Map<string, AgentHead>([['cold', landedHead({ ...timeline(50), cost: COST_B })]])
     assert.deepEqual(subagentCostFoldOf(snap(byId), 'root', landed).usage, COST_B)
     assert.deepEqual(subagentCostFoldOf(snap(byId), 'root', landed).cold, ['bare'])
   })
 
   test('a landed head whose cost is absent leaves the id warm but contributes nothing', () => {
     const byId = { root: costRow(undefined, COST_A), cold: row({ parentId: 'root', origin: 'subagent' }) }
-    const landed = new Map<string, AgentHead>([['cold', { timeline: timeline(50), pressure: null, breakdown: null }]])
+    const landed = new Map<string, AgentHead>([['cold', landedHead(timeline(50))]])
     const fold = subagentCostFoldOf(snap(byId), 'root', landed)
     assert.deepEqual(fold.usage, null)
     assert.deepEqual(fold.cold, [])
@@ -631,8 +608,8 @@ describe('subagentCostFoldOf', () => {
       fork: row({ parentId: 'root', projectionValues: { contextTimeline: { ...timeline(1), cost: COST_B } } }),
       forkKid: row({ parentId: 'fork', origin: 'subagent', projectionValues: { contextTimeline: { ...timeline(1), cost: COST_A } } }),
     }
-    assert.deepEqual(subagentCostFoldOf(snap(byId), 'root'), { usage: null, cold: [], count: 0 })
-    assert.deepEqual(subagentCostFoldOf(snap(byId), 'fork'), { usage: COST_A, cold: [], count: 1 })
+    assert.deepEqual(subagentCostFoldOf(snap(byId), 'root'), { usage: null, cold: [], count: 0, costRead: { usd: null, ready: true } })
+    assert.deepEqual(subagentCostFoldOf(snap(byId), 'fork'), { usage: COST_A, cold: [], count: 1, costRead: { usd: null, ready: true } })
   })
 })
 
@@ -811,9 +788,36 @@ describe('layoutForest', () => {
     assert.equal(partial.links.find(l => l.to === 'k2a')?.color, familyHue(1))
     assert.equal(partial.links.find(l => l.to === 'k1')?.color, familyHue(0))
   })
+
+  test('compact geometry tightens cards and links without changing parent centering or band placement', () => {
+    const natural = layoutForest(forestOf([['root'], ['a', 'root'], ['b', 'root'], ['g', 'a']]), 0, true)
+    const naturalPoint = new Map(natural.points.map(p => [p.id, p]))
+    assert.equal(natural.width, 464)
+    assert.equal(natural.cardW, 222)
+    assert.equal(naturalPoint.get('root')?.x, 232)
+    assert.equal(naturalPoint.get('a')?.x, 116)
+    assert.equal(naturalPoint.get('b')?.x, 348)
+    assert.equal(naturalPoint.get('root')?.y, 32)
+    assert.equal(naturalPoint.get('a')?.y, 168)
+    assert.equal(naturalPoint.get('g')?.y, 304)
+    assert.equal(natural.links.find(l => l.to === 'g')?.y1, 260)
+    assert.equal(natural.height, 420)
+
+    const band = layoutForest(forestOf([['root'], ['a', 'root'], ['b', 'root'], ['c', 'root']]), 400, true)
+    const bandPoint = new Map(band.points.map(p => [p.id, p]))
+    assert.equal(band.cardW, 190)
+    assert.equal(bandPoint.get('root')?.x, 200)
+    assert.equal(bandPoint.get('a')?.x, 100)
+    assert.equal(bandPoint.get('b')?.x, 300)
+    assert.equal(bandPoint.get('c')?.x, 200)
+    assert.equal(bandPoint.get('a')?.y, 168)
+    assert.equal(bandPoint.get('c')?.y, 304)
+    assert.equal(band.links.find(l => l.to === 'c')?.y1, 124)
+    assert.equal(band.height, 420)
+  })
 })
 
-describe('lineageOf', () => {
+describe('neighborhoodOf', () => {
   const forest = agentForestOf(snap({
     root: row({}),
     a: row({ parentId: 'root', origin: 'subagent' }),
@@ -823,20 +827,20 @@ describe('lineageOf', () => {
   assert.ok(forest !== null)
 
   test('null or unknown id lights nothing', () => {
-    assert.equal(lineageOf(forest, null), null)
-    assert.equal(lineageOf(forest, 'ghost'), null)
+    assert.equal(neighborhoodOf(forest, null), null)
+    assert.equal(neighborhoodOf(forest, 'ghost'), null)
   })
 
-  test('a leaf lights its ancestor chain only; the root and a mid node light both directions; a parentage cycle terminates', () => {
-    assert.deepEqual([...lineageOf(forest, 'g') ?? []].sort(), ['a', 'g', 'root'])
-    assert.deepEqual([...lineageOf(forest, 'root') ?? []].sort(), ['a', 'b', 'g', 'root'])
-    assert.deepEqual([...lineageOf(forest, 'a') ?? []].sort(), ['a', 'g', 'root'])
+  test('lights the node with its parent and direct children only; a parentage cycle terminates', () => {
+    assert.deepEqual([...neighborhoodOf(forest, 'g') ?? []].sort(), ['a', 'g'])
+    assert.deepEqual([...neighborhoodOf(forest, 'root') ?? []].sort(), ['a', 'b', 'root'])
+    assert.deepEqual([...neighborhoodOf(forest, 'a') ?? []].sort(), ['a', 'g', 'root'])
     const cycle = agentForestOf(snap({
       a: row({ parentId: 'b', origin: 'subagent' }),
       b: row({ parentId: 'a', origin: 'subagent' }),
     }), 'a')
     assert.ok(cycle !== null)
-    assert.deepEqual([...lineageOf(cycle, 'a') ?? []].sort(), ['a', 'b'])
+    assert.deepEqual([...neighborhoodOf(cycle, 'a') ?? []].sort(), ['a', 'b'])
   })
 })
 
@@ -964,5 +968,40 @@ describe('agentRowOf caching', () => {
     const next = { ...row, running: false }
     assert.notEqual(agentRowOf(next), agentRowOf(next) === null ? null : agentRowOf(row))
     assert.equal(agentRowOf(next)?.running, false)
+  })
+})
+describe('fetched head views', () => {
+  test('a fetched head contributes its composition and usage while the row values win', () => {
+    const byId = {
+      root: row({ displayTitle: 'Root' }),
+      kid: row({ parentId: 'root', origin: 'subagent', updatedAt: 2 }),
+      warm: row({ parentId: 'root', origin: 'subagent', updatedAt: 3, projectionValues: { contextTimeline: timeline(40, 1) } }),
+    }
+    const fetched = new Map<string, AgentHead>([
+      ['kid', {
+        timeline: timeline(100, 1),
+        pressure: { pressureTokens: 120, contextWindow: 1000 },
+        breakdown: { systemTokens: 10, toolsTokens: 20, messageTokens: 70 },
+        usage: { uncachedInputTokens: 100, outputTokens: 30, cacheReadTokens: 5, cacheWriteTokens: 0 },
+      }],
+      ['warm', {
+        timeline: timeline(500, 1),
+        pressure: null,
+        breakdown: null,
+        usage: { uncachedInputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      }],
+    ])
+    const forest = agentForestOf(snap(byId), 'root', undefined, fetched)
+    assert.ok(forest !== null)
+    const kid = forest.nodes.find(n => n.id === 'kid')
+    assert.ok(kid !== undefined)
+    assert.equal(kid.head?.tokens, 120, 'the fetched pressure anchors the ring')
+    assert.ok((kid.head?.parts.length ?? 0) >= 2, 'the fetched breakdown composes the ring')
+    assert.equal(kid.billed, 135, 'the fetched usage bills the row')
+
+    const warm = forest.nodes.find(n => n.id === 'warm')
+    assert.ok(warm !== undefined)
+    assert.equal(warm.head?.tokens, 40, 'the row timeline wins over the fetched timeline')
+    assert.equal(warm.billed, 2, 'the fetched usage fills a row that carries none')
   })
 })

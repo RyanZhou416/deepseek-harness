@@ -24,7 +24,7 @@ The threshold applies to each request's complete prompt, including cached input,
 | `gpt-6-sol` | >272,000 | 4 | 0.40 | 5 | 15 |
 | `grok-4.7` | >200,000 | 4 | 1 | 4* | 12 |
 
-Claude Opus 5.5 and Fable 5.1 retain their standard rates throughout their supported context windows. Context preserves long-context requests in a separate derived cost bucket; merging Agents or sessions does not reclassify their requests. Projection version 21 rebuilds this classification from existing Session logs when cached summaries are read. Original Session events are unchanged.
+Claude Opus 5.5 and Fable 5.1 retain their standard rates throughout their supported context windows. `src/host/foldMetering.ts` books a threshold-crossing request into the separate `long` derived cost bucket; `src/shared/pricing.ts` resolves that bucket to the long tier, and merging Agents or sessions does not reclassify their requests. The classification is part of `contextTimeline`'s derived state (`TIMELINE_STATE_VERSION` 47); a cached row written before the bucket existed stays readable and keeps its peak/off classification until the log refolds.
 
 These estimates do not calculate subscription fees, quota deductions, Fast-mode premiums, regional premiums, server-side tool charges, or one-hour Claude cache-write prices. The CNY display retains the plugin's reference conversion of 1 CNY = 0.15 USD.
 

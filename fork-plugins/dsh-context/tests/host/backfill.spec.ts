@@ -1,11 +1,133 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
+import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { BACKFILL_ROUTE, watchActivityBackfill } from '../../src/host/backfill'
-import { arm, captureLogs, coldFaces, connectionOf, fakeState, trigger, unsupportedFormatError, until } from './helpers/backfill'
+import { createContextTimelineDefinition } from '../../src/host/timeline'
+import { createContextActivityDefinition } from '../../src/host/activity'
+import { createContextHeadersDefinition } from '../../src/host/headers'
+import { arm, captureLogs, coldFaces, connectionOf, FAST_PACING, fakeState, trigger, unsupportedFormatError, until } from './helpers/backfill'
 import type { RouteBox } from './helpers/backfill'
+import type { ColdReadGate } from '../../src/host/coldRead'
 
 const settle = (ms = 30): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+function crashTailEvents(filler: number): SessionEvent[] {
+  const events: SessionEvent[] = Array.from({ length: filler }, (_, seq) => ({
+    type: 'todo/write', seq, time: seq + 1, data: {},
+  })) as unknown as SessionEvent[]
+  const base = filler
+  const tail = [
+    { type: 'turn/start', seq: base, time: base + 1, data: { turn: 1 } },
+    { type: 'step/start', seq: base + 1, time: base + 2, data: { turn: 1, step: 1 } },
+    {
+      type: 'user/message',
+      seq: base + 2,
+      time: base + 3,
+      data: { id: 'u1', role: 'user', content: [{ type: 'text', text: 'run it' }], source: { kind: 'user' } },
+      surfaceOp: 'append',
+    },
+    {
+      type: 'assistant/message',
+      seq: base + 3,
+      time: base + 4,
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          id: 'a1',
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{"command":"true"}' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        stream: [],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      surfaceOp: 'append',
+    },
+    {
+      type: 'tool/call',
+      seq: base + 4,
+      time: base + 5,
+      data: { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"true"}' },
+    },
+  ]
+  return [...events, ...tail as unknown as SessionEvent[]]
+}
+
+function fakePersistence(events: SessionEvent[], stat?: (id: string) => Promise<unknown>, opened?: string[]) {
+  return {
+    open: async (id: string) => {
+      opened?.push(id)
+      return {
+        header: { id, version: 1, createdAt: 1, cwd: `/repo/${id}`, isSeeded: false },
+        inheritedEventCount: 0,
+        read: async () => ({ events }),
+        close: async () => {},
+      }
+    },
+    ...(stat === undefined ? {} : { stat }),
+  }
+}
+
+interface SlicedRig {
+  route: RouteBox
+  writes: Map<string, Record<string, { seq: number }>>
+  hydrateCuts: number[]
+  prepareCuts: number[]
+}
+
+function slicedRig(ctx: Context, eventsById: Map<string, SessionEvent[]>): SlicedRig {
+  const route: RouteBox = {}
+  const state = fakeState([...eventsById.keys()].map(id => ({ header: { id, cwd: `/repo/${id}` } })))
+  const rig: SlicedRig = { route, writes: new Map(), hydrateCuts: [], prepareCuts: [] }
+  const registry = new SessionProjectionRegistry(ctx as never)
+  registry.register(createContextTimelineDefinition({}, () => true) as never)
+  registry.register(createContextActivityDefinition() as never)
+  registry.register(createContextHeadersDefinition() as never)
+  const hydrate = registry.hydrate.bind(registry)
+  registry.hydrate = ((session: never, checkpoint: never, events: SessionEvent[], baseSeq: never) => {
+    rig.hydrateCuts.push(events.at(-1)?.seq ?? -1)
+    return hydrate(session, checkpoint, events, baseSeq)
+  }) as typeof registry.hydrate
+  ctx.provide('connection', connectionOf(route))
+  ctx.provide('sessionQuery', { listSessions: async () => state.listed })
+  ctx.provide('sessionProjectionCache', {
+    cachedSnapshot: () => undefined,
+    coldSnapshot: () => { throw new Error('the sliced path never calls coldSnapshot') },
+    write: async (session: { id: string }) => {
+      rig.writes.set(session.id, registry.checkpoint(session as never) as never)
+    },
+  })
+  ctx.provide('sessionPersistence', {
+    open: async (id: string) => ({
+      header: { id, version: 1, createdAt: 1, cwd: `/repo/${id}`, isSeeded: false },
+      inheritedEventCount: 0,
+      read: async () => ({ events: eventsById.get(id) ?? [] }),
+      close: async () => {},
+    }),
+    stat: async () => ({ eventCount: 0 }),
+  })
+  ctx.provide('sessions', {
+    get: () => undefined,
+    prepare: (id: string, o: { seed: SessionEvent[]; meta: unknown; inheritedEventCount: number }) => {
+      rig.prepareCuts.push(o.seed.at(-1)?.seq ?? -1)
+      const marker = { type: 'session/end-seed', seq: o.seed.length, time: Date.now(), data: {} } as SessionEvent
+      const log = [...o.seed, marker]
+      return {
+        id,
+        header: o.meta,
+        inheritedEventCount: o.inheritedEventCount,
+        seq: log.length,
+        eventAt: (seq: number) => log[seq],
+        snapshotEvents: () => log,
+      }
+    },
+  })
+  return rig
+}
 
 describe('watchActivityBackfill', () => {
   test('without a connection route, or with a half that never registers, the pass stays unarmed', async () => {
@@ -30,6 +152,127 @@ describe('watchActivityBackfill', () => {
       dispose()
       assert.deepEqual(state.coldReads, [], 'a route half that never registers leaves the pass unarmed')
     }
+  })
+
+  test('app readiness starts backfill without a connection or browser route', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+    coldFaces(ctx, state)
+    let ready: (() => void) | null = null
+    let cancelled = false
+    ctx.provide('appReady', {
+      onReady: (listener: () => void) => {
+        ready = listener
+        return () => { cancelled = true }
+      },
+    })
+    let started = 0
+    const handle = watchActivityBackfill(ctx, undefined, undefined, { autoStart: true, onStart: () => { started++ } })
+    await settle()
+    assert.equal(started, 0, 'catalog warm-up waits for readiness too')
+    assert.deepEqual(state.coldReads, [], 'startup work waits for the readiness commit')
+    assert.equal(typeof ready, 'function')
+    ;(ready as unknown as () => void)()
+    await until(() => (state.coldSnapshots.length === 1 ? true : undefined), 'readiness started the cold fold')
+    assert.equal(started, 1)
+    handle()
+    assert.equal(cancelled, true, 'the readiness listener is disposed with backfill')
+    assert.equal(typeof handle.request, 'function')
+  })
+
+  test('a throwing readiness face falls back to an immediate startup request', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+    coldFaces(ctx, state)
+    ctx.provide('appReady', { onReady: () => { throw new Error('not ready') } })
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING, { autoStart: true })
+    await until(() => (state.coldSnapshots.length === 1 ? true : undefined), 'the readiness failure did not block startup')
+    handle()
+  })
+
+  test('a manual request clears a pending default retry and runs immediately', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+    coldFaces(ctx, state)
+    let admissions = 0
+    const gate: ColdReadGate = {
+      admit: async <T,>(read: () => Promise<T>): Promise<T | undefined> => {
+        admissions++
+        return admissions === 1 ? undefined : await read()
+      },
+    }
+    const handle = watchActivityBackfill(ctx, gate, FAST_PACING, { autoStart: true })
+    await until(() => (admissions === 1 && !handle.coverage().running ? true : undefined), 'the default retry was scheduled')
+    handle.request()
+    await until(() => (state.coldSnapshots.length === 1 ? true : undefined), 'the manual nudge completed without waiting for the timer')
+    handle()
+  })
+
+  test('a fully warm startup still publishes materialization readiness', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+    state.served.add('a')
+    coldFaces(ctx, state)
+    let changes = 0
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING, { autoStart: true, onChange: () => { changes++ } })
+    await until(() => (changes > 0 ? true : undefined), 'the warm pass published its completion')
+    handle()
+    assert.deepEqual(state.coldReads, [])
+  })
+
+  test('a disposed live session schedules its cold materialization', async () => {
+    const ctx = new Context()
+    const listed = [{ header: { id: 'a', cwd: '/repo/a' } }]
+    const state = fakeState(listed)
+    coldFaces(ctx, state)
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING, { autoStart: true })
+    await until(() => (state.coldSnapshots.length === 1 ? true : undefined), 'startup folded the first session')
+    state.served.add('a')
+    listed.push({ header: { id: 'b', cwd: '/repo/b' } })
+    let observed = 0
+    ctx.on('session/disposed', () => { observed++ })
+    ctx.emit('session/disposed', { id: 'b' } as never)
+    assert.equal(observed, 1, 'the test context emits the lifecycle event')
+    await until(() => (state.coldSnapshots.length === 2 ? true : undefined), 'disposal scheduled the new cold session')
+    handle()
+    assert.deepEqual(state.coldSnapshots, ['a', 'b'])
+  })
+
+  test('startup fallback resumes after heap admission without a browser retry', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+    coldFaces(ctx, state)
+    let admissions = 0
+    const gate: ColdReadGate = {
+      admit: async <T,>(read: () => Promise<T>): Promise<T | undefined> => {
+        admissions++
+        return admissions === 1 ? undefined : await read()
+      },
+    }
+    const handle = watchActivityBackfill(ctx, gate, FAST_PACING, { autoStart: true, retryBaseMs: 2 })
+    await until(() => (state.coldSnapshots.length === 1 ? true : undefined), 'the host resumed the paused startup pass')
+    handle()
+    assert.ok(admissions >= 2)
+    assert.equal(handle.coverage().complete, true)
+  })
+
+  test('a permanent admission failure exhausts the host retry budget', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+    coldFaces(ctx, state)
+    let admissions = 0
+    const gate: ColdReadGate = {
+      admit: async <T,>(): Promise<T | undefined> => {
+        admissions++
+        return undefined
+      },
+    }
+    const handle = watchActivityBackfill(ctx, gate, FAST_PACING, { autoStart: true, retryBaseMs: 0 })
+    await until(() => (admissions >= 11 ? true : undefined), 'the bounded retries ran')
+    await settle()
+    assert.equal(admissions, 11)
+    assert.equal(handle.coverage().complete, false)
+    handle()
   })
 
   test('incomplete faces are re-proved away — an armed request waits, then never launches', async () => {
@@ -258,7 +501,7 @@ describe('watchActivityBackfill', () => {
     assert.deepEqual(state.coldSnapshots, ['good'])
   })
 
-  test('the route answers ok and every hit after the first is a no-op (one pass per process)', async () => {
+  test('the route answers ok with coverage, and a later POST reruns the pass over the warm corpus', async () => {
     const ctx = new Context()
     const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
     let listed = 0
@@ -270,17 +513,115 @@ describe('watchActivityBackfill', () => {
         },
       },
     })
-    const dispose = watchActivityBackfill(ctx)
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING)
+    assert.deepEqual(handle.coverage(), { complete: false, remaining: 0, failed: 0, running: false, total: 0, covered: 0, unsupported: 0, unreadable: 0 })
+    assert.equal(handle.version(), 0)
     const first = await trigger(route)
     assert.equal(route.path, BACKFILL_ROUTE)
-    assert.deepEqual(await first.json(), { ok: true })
-    await until(() => (listed === 1 ? true : undefined), 'the first pass listed the corpus')
+    const firstBody = await first.json() as { ok: boolean; coverage: { running: boolean } }
+    assert.equal(firstBody.ok, true)
+    assert.equal(firstBody.coverage.running, true, 'the reply carries the running coverage')
+    await until(() => (handle.coverage().complete ? true : undefined), 'the first pass finished')
+    assert.deepEqual(handle.coverage(), { complete: true, remaining: 0, failed: 0, running: false, total: 1, covered: 1, unsupported: 0, unreadable: 0 })
+    assert.equal(handle.version(), 1)
+    state.served.add('a')
     const second = await trigger(route)
-    assert.deepEqual(await second.json(), { ok: true })
+    const secondBody = await second.json() as { ok: boolean; coverage: { complete: boolean; running: boolean } }
+    assert.equal(secondBody.ok, true)
+    await until(() => (listed >= 2 ? true : undefined), 'the verified rerun listed the corpus')
+    await until(() => (!handle.coverage().running ? true : undefined), 'the verified-warm rerun ends without probing')
+    assert.deepEqual(handle.coverage(), { complete: true, remaining: 0, failed: 0, running: false, total: 1, covered: 1, unsupported: 0, unreadable: 0 })
+    assert.deepEqual(state.coldReads, ['a'], 'the warm session is not read again')
+    assert.equal(handle.version(), 1, 'a skipped pass keeps the revision')
+    ;(state.listed as { header: Record<string, unknown> }[]).push({ header: { id: 'new', cwd: '/repo/new' } })
+    await trigger(route)
+    await until(() => (listed >= 3 ? true : undefined), 'a corpus change starts a new pass')
+    await until(() => (!handle.coverage().running ? true : undefined), 'the corpus-change pass finished')
+    assert.equal(handle.version(), 2, 'the new folded row bumped the version')
+    assert.deepEqual(state.coldReads, ['a', 'new'], 'only the new session was folded')
+    handle()
+  })
+
+  test('a running pass publishes its coverage before it settles', async () => {
+    const ctx = new Context()
+    const state = fakeState([
+      { header: { id: 'a', cwd: '/repo/a' } },
+      { header: { id: 'b', cwd: '/repo/b' } },
+      { header: { id: 'c', cwd: '/repo/c' } },
+    ])
+    let opens = 0
+    let release: (() => void) | null = null
+    const route = arm(ctx, state, {
+      sessionPersistence: {
+        open: async (id: string) => {
+          opens++
+          if (opens === 2) await new Promise<void>(resolve => { release = resolve })
+          return {
+            header: { id, version: 1, createdAt: 1, cwd: '/repo', isSeeded: false },
+            inheritedEventCount: 0,
+            read: async () => ({ events: [] }),
+            close: async () => {},
+          }
+        },
+      },
+    })
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING)
+    await trigger(route)
+    await until(
+      () => (handle.coverage().total === 3 && handle.coverage().covered === 1 ? true : undefined),
+      'the pass published the corpus total and the first folded session',
+    )
+    assert.deepEqual(handle.coverage(), {
+      complete: false, remaining: 2, failed: 0, running: true, total: 3, covered: 1, unsupported: 0, unreadable: 0,
+    })
+    release!()
+    await until(() => (handle.coverage().complete ? true : undefined), 'the pass settled')
+    assert.deepEqual(handle.coverage(), {
+      complete: true, remaining: 0, failed: 0, running: false, total: 3, covered: 3, unsupported: 0, unreadable: 0,
+    })
+    handle()
+  })
+
+  test('a POST during a running pass coalesces into exactly one rerun', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'slow', cwd: '/repo/slow' } }])
+    let listed = 0
+    let gate: (() => void) | null = null
+    let opens = 0
+    const route = arm(ctx, state, {
+      sessionQuery: {
+        listSessions: async () => {
+          listed++
+          return state.listed
+        },
+      },
+      sessionPersistence: {
+        open: async (id: string) => ({
+          header: { id, version: 1, createdAt: 1, cwd: '/repo', isSeeded: false },
+          inheritedEventCount: 0,
+          read: async () => {
+            opens++
+            if (opens > 1) return { events: [] }
+            return new Promise((resolve) => {
+              gate = () => resolve({ events: [] })
+            })
+          },
+          close: async () => {},
+        }),
+      },
+    })
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING)
+    await trigger(route)
+    await until(() => (gate !== null ? true : undefined), 'the first pass opened its log')
+    await trigger(route)
+    await trigger(route)
+    gate!()
+    await until(() => (listed >= 2 ? true : undefined), 'the coalesced rerun listed the corpus')
     await settle()
-    assert.equal(listed, 1, 'the second POST is a no-op')
-    assert.deepEqual(state.coldReads, ['a'])
-    dispose()
+    assert.equal(opens, 1, 'the verified-complete rerun never re-opens cold logs')
+    assert.equal(listed, 2, 'two queued POSTs share one rerun')
+    assert.equal(handle.version(), 1, 'the skipped rerun keeps the version')
+    handle()
   })
 
   test('a route hit BEFORE the cold-path faces compose still launches the pass (either half first)', async () => {
@@ -398,5 +739,198 @@ describe('watchActivityBackfill', () => {
     assert.equal(admitted, 2, 'one run plus one skip — the loop did not hammer the gate')
     assert.ok(lines.some(l => l.level === 'info' && l.text.includes('backfilled for 1 session(s)')), 'the folded count still reports')
     assert.ok(lines.some(l => l.level === 'info' && l.text.includes('stopped early under heap pressure')), 'the early stop reports once')
+  })
+
+  test('a crash-tailed log is written from the durable stored events: no synthetic closer reaches the cold write-back', async () => {
+    const ctx = new Context()
+    const durable = crashTailEvents(0)
+    const durableLast = durable.at(-1)?.seq
+    assert.ok(interruptedTurnClosers(durable).length > 0, 'the fixture ends in an open turn with an unanswered call')
+    const state = fakeState([{ header: { id: 'crash', cwd: '/repo/crash' } }])
+    const written: SessionEvent[] = []
+    let coldCalls = 0
+    const route = arm(ctx, state, {
+      sessionProjectionCache: {
+        cachedSnapshot: () => undefined,
+        coldSnapshot: (_header: unknown, _inheritedEventCount: unknown, events: SessionEvent[]) => {
+          coldCalls++
+          written.push(...events)
+          return {}
+        },
+      },
+      sessionPersistence: fakePersistence(durable),
+    })
+    const dispose = watchActivityBackfill(ctx)
+    await trigger(route)
+    await until(() => (coldCalls === 1 ? true : undefined), 'the cold fold ran')
+    dispose()
+    assert.deepEqual(written.map(event => event.seq), durable.map(event => event.seq), 'the write-back sees the durable log verbatim')
+    assert.equal(written.at(-1)?.seq, durableLast)
+  })
+
+  test('the sliced write-back folds the durable seed and lands only the deterministic resume marker above it', async () => {
+    const ctx = new Context()
+    const durable = crashTailEvents(4_000)
+    const durableLast = durable.at(-1)?.seq ?? -1
+    assert.ok(interruptedTurnClosers(durable).length > 0, 'the fixture ends in an open turn with an unanswered call')
+    const rig = slicedRig(ctx, new Map([['monster', durable]]))
+    const dispose = watchActivityBackfill(ctx)
+    await trigger(rig.route)
+    await until(() => (rig.writes.has('monster') ? true : undefined), 'the write-back landed')
+    dispose()
+    assert.deepEqual(rig.prepareCuts, [durableLast], 'the prepared seed ends at the durable cut')
+    assert.deepEqual(rig.hydrateCuts, [durableLast], 'hydrate folds only the durable cut')
+    const rows = Object.values(rig.writes.get('monster') ?? {})
+    assert.ok(rows.length > 0, 'the write-back carries at least one projection row')
+    for (const row of rows) assert.ok(row.seq <= durableLast + 1, `row seq ${row.seq} exceeds the durable end plus its resume marker`)
+    assert.ok(rows.some(row => row.seq === durableLast + 1), 'the prepared session cursor carries the constructor resume marker')
+  })
+
+  test('a row at the durable end stays served while rows behind or ahead of it refold', async () => {
+    const ctx = new Context()
+    const state = fakeState([
+      { header: { id: 'fresh', cwd: '/repo/fresh' } },
+      { header: { id: 'behind', cwd: '/repo/behind' } },
+      { header: { id: 'ahead', cwd: '/repo/ahead' } },
+      { header: { id: 'marker', cwd: '/repo/marker' } },
+    ])
+    const route = arm(ctx, state, {
+      sessionProjectionCache: {
+        cachedSnapshot: (header: { id: string }) => {
+          const asOfSeq = header.id === 'behind' ? 1 : header.id === 'ahead' ? 5 : header.id === 'marker' ? 3 : 2
+          return { asOfSeq, values: { contextActivity: { days: {} }, contextTimeline: { ok: true } } }
+        },
+        coldSnapshot: (header: { id: string }) => {
+          state.coldSnapshots.push(header.id)
+          return {}
+        },
+      },
+      sessionPersistence: fakePersistence([], async () => ({ eventCount: 3 }), state.coldReads),
+    })
+    const dispose = watchActivityBackfill(ctx)
+    await trigger(route)
+    await until(() => (state.coldSnapshots.length >= 2 ? true : undefined), 'the stale rows refolded')
+    await settle(40)
+    dispose()
+    assert.deepEqual(state.coldReads.sort(), ['ahead', 'behind'])
+    assert.deepEqual(state.coldSnapshots.sort(), ['ahead', 'behind'])
+  })
+
+  test('a no-stat backend keeps the presence check: a watermark that would look stale is served', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+    state.served.add('a')
+    const route = arm(ctx, state)
+    const dispose = watchActivityBackfill(ctx)
+    await trigger(route)
+    await settle(40)
+    dispose()
+    assert.deepEqual(state.coldReads, [], 'no stat face means a present row is warm')
+  })
+
+  test('a backend whose stat never reports an event count is probed once per run', async () => {
+    const ctx = new Context()
+    const state = fakeState(['a', 'b', 'c'].map(id => ({ header: { id, cwd: `/repo/${id}` } })))
+    for (const id of ['a', 'b', 'c']) state.served.add(id)
+    let probes = 0
+    const route = arm(ctx, state, {
+      sessionPersistence: fakePersistence([], async () => { probes++; return { header: { id: 'x' } } }),
+    })
+    const dispose = watchActivityBackfill(ctx)
+    await trigger(route)
+    await settle(40)
+    dispose()
+    assert.deepEqual(state.coldReads, [], 'presence keeps every served row warm')
+    assert.equal(probes, 1, 'the capability probe runs once per pass, not once per session')
+  })
+
+  test('an unhelpful stat face falls back to the presence check', async () => {
+    const statVariants: [string, (id: string) => Promise<unknown>][] = [
+      ['throwing', async () => { throw new Error('no stat') }],
+      ['non-record', async () => 'junk'],
+      ['string count', async () => ({ eventCount: '2' })],
+      ['fractional count', async () => ({ eventCount: 1.5 })],
+      ['negative count', async () => ({ eventCount: -1 })],
+    ]
+    for (const [label, stat] of statVariants) {
+      const ctx = new Context()
+      const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+      state.served.add('a')
+      const route = arm(ctx, state, { sessionPersistence: fakePersistence([], stat) })
+      const dispose = watchActivityBackfill(ctx)
+      await trigger(route)
+      await settle(20)
+      dispose()
+      assert.deepEqual(state.coldReads, [], label)
+    }
+  })
+
+  test('a served block without a usable watermark refolds instead of trusting the rows', async () => {
+    const ctx = new Context()
+    const state = fakeState([
+      { header: { id: 'missing', cwd: '/repo/missing' } },
+      { header: { id: 'fractional', cwd: '/repo/fractional' } },
+      { header: { id: 'activity-only', cwd: '/repo/activity-only' } },
+    ])
+    const full = { contextActivity: { days: {} }, contextTimeline: { ok: true } }
+    const route = arm(ctx, state, {
+      sessionProjectionCache: {
+        cachedSnapshot: (header: { id: string }) => {
+          if (header.id === 'activity-only') return { asOfSeq: 0, values: { contextTimeline: {} } }
+          if (header.id === 'fractional') return { asOfSeq: 0.5, values: full }
+          return { values: full }
+        },
+        coldSnapshot: (header: { id: string }) => {
+          state.coldSnapshots.push(header.id)
+          return {}
+        },
+      },
+    })
+    const dispose = watchActivityBackfill(ctx)
+    await trigger(route)
+    await until(() => (state.coldSnapshots.length >= 3 ? true : undefined), 'the unusable blocks refolded')
+    await settle(30)
+    dispose()
+    assert.deepEqual(state.coldReads.sort(), ['activity-only', 'fractional', 'missing'])
+  })
+})
+
+describe('watchActivityBackfill — folded session journal', () => {
+  test('folded ids drain once, an equal marker is empty, and overflow reports null', async () => {
+    const ctx = new Context()
+    const state = fakeState([
+      { header: { id: 'a', cwd: '/repo/a' } },
+      { header: { id: 'b', cwd: '/repo/b' } },
+    ])
+    const route = arm(ctx, state, { sessionQuery: { listSessions: async () => state.listed } })
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING)
+    await trigger(route)
+    await until(() => (handle.coverage().complete ? true : undefined), 'the first pass finished')
+    const drained = handle.foldedSince(0)
+    assert.equal(drained.version, 2, 'one journal version per folded session')
+    assert.deepEqual([...(drained.ids ?? [])].sort(), ['a', 'b'])
+    assert.deepEqual(handle.foldedSince(drained.version), { version: drained.version, ids: [], workerIds: [] })
+    handle()
+
+    const many = new Context()
+    const records = Array.from({ length: 4_100 }, (_, index) => ({ header: { id: `s${index}`, cwd: '/repo/x' } }))
+    const big = fakeState(records)
+    const bigRoute = arm(many, big, {
+      sessionQuery: { listSessions: async () => big.listed },
+      sessionPersistence: {
+        open: async (id: string) => ({
+          header: { id, version: 1, createdAt: 1, cwd: '/repo/x', isSeeded: false },
+          inheritedEventCount: 0,
+          read: async () => ({ events: [] }),
+          close: async () => {},
+        }),
+      },
+    })
+    const bigHandle = watchActivityBackfill(many, undefined, FAST_PACING)
+    await trigger(bigRoute)
+    await until(() => (bigHandle.coverage().complete ? true : undefined), 'the big pass finished')
+    const overflow = bigHandle.foldedSince(0)
+    assert.equal(overflow.ids, null, 'more folded ids than the journal holds report the whole corpus dirty')
+    bigHandle()
   })
 })

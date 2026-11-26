@@ -60,4 +60,3 @@ export function paramsOf(schema: unknown): ParamSchema | null {
   }
   return null
 }
-

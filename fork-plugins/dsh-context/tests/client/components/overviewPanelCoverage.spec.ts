@@ -1,0 +1,224 @@
+import assert from 'node:assert/strict'
+import { act } from 'react'
+import { afterEach, beforeEach, describe, test, vi } from 'vitest'
+import { resetInvalidations } from '../../../src/client/invalidation'
+import { click, flush, text } from '../helpers/kit'
+import { COMPLETE_COVERAGE, panelSummaryRaw as summaryRaw, pinCurrentSession, stubPanelRoutes as stubRoutes } from '../overview.fixtures'
+import { makeCtx, openPanelFake } from './overviewPanelHarness'
+
+beforeEach(() => {
+  pinCurrentSession('a')
+})
+
+afterEach(async () => {
+  resetInvalidations()
+  vi.unstubAllGlobals()
+  vi.useRealTimers()
+  localStorage.clear()
+  await new Promise(resolve => setTimeout(resolve, 1))
+})
+
+const progress = (covered: number, total: number): string => `Folding projections (${covered}/${total})…`
+
+const STALLED = {
+  complete: false, running: false, remaining: 0, failed: 2, total: 3, covered: 1, unsupported: 0, unreadable: 0,
+  failedSessions: [{ id: 's1', reason: 'Invalid input: expected number' }],
+}
+
+describe('OverviewPanel coverage state', () => {
+  test('an incomplete coverage shows progress and re-reads overview without posting backfill', async () => {
+    vi.useFakeTimers()
+    const incomplete = { complete: false, running: false, remaining: 2, failed: 0, total: 3, covered: 1, unsupported: 0, unreadable: 0 }
+    const calls = stubRoutes({
+      summary: () => ({ revision: 's0', pricingReady: true, summary: summaryRaw({ coverage: incomplete }) }),
+    })
+    const { m } = await openPanelFake(makeCtx())
+    assert.equal(calls.filter(c => c.route.endsWith('/overview')).length, 7, 'summary, days, page, projects, and three tallies fetched once')
+    assert.ok(text(m.container).includes(progress(1, 3)), 'the partial projection set is annotated')
+    assert.equal(calls.filter(c => c.route.endsWith('/backfill')).length, 0)
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+    assert.equal(calls.filter(c => c.route.endsWith('/backfill')).length, 0, 'the host owns continuation')
+    assert.ok(calls.filter(c => c.route.endsWith('/overview')).length > 7, 'coverage progress schedules fresh overview reads')
+    await m.unmount()
+  })
+
+  test('running, failed, and starting coverage never post the backfill route', async () => {
+    vi.useFakeTimers()
+    const running = { complete: false, running: true, remaining: 2, failed: 0, total: 3, covered: 1, unsupported: 0, unreadable: 0 }
+    const runningCalls = stubRoutes({
+      summary: () => ({ revision: 's0', pricingReady: true, summary: summaryRaw({ coverage: running }) }),
+    })
+    const first = await openPanelFake(makeCtx())
+    assert.ok(text(first.m.container).includes(progress(1, 3)))
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+    assert.equal(runningCalls.filter(c => c.route.endsWith('/backfill')).length, 0, 'a running pass is left alone')
+    await first.m.unmount()
+
+    const failed = { complete: false, running: false, remaining: 0, failed: 1, total: 3, covered: 2, unsupported: 0, unreadable: 0 }
+    const failedCalls = stubRoutes({
+      summary: () => ({ revision: 's1', pricingReady: true, summary: summaryRaw({ coverage: failed }) }),
+    })
+    const second = await openPanelFake(makeCtx())
+    assert.ok(text(second.m.container).includes('1 sessions failed to fold'), 'a failed pass is marked, not silent')
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+    assert.equal(failedCalls.filter(c => c.route.endsWith('/backfill')).length, 0, 'a failed pass is not retried forever')
+    await second.m.unmount()
+
+    const startingCalls = stubRoutes({
+      summary: () => ({
+        revision: 's2',
+        pricingReady: true,
+        summary: summaryRaw({ coverage: { complete: false, running: false, remaining: 0, failed: 0, total: 0, covered: 0, unsupported: 0, unreadable: 0 } }),
+      }),
+    })
+    const third = await openPanelFake(makeCtx())
+    assert.ok(text(third.m.container).includes('Folding projections…'), 'an unlisted pass reads as starting')
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+    assert.equal(startingCalls.filter(c => c.route.endsWith('/backfill')).length, 0, 'startup is host-owned even before the first corpus listing')
+    await third.m.unmount()
+  })
+
+  test('a settled pass with unreadable sessions keeps their ids and reasons in the pill tooltip', async () => {
+    vi.useFakeTimers()
+    stubRoutes({
+      summary: () => ({
+        revision: 's0',
+        pricingReady: true,
+        summary: summaryRaw({
+          coverage: {
+            complete: true,
+            remaining: 0,
+            failed: 0,
+            running: false,
+            total: 3,
+            covered: 2,
+            unsupported: 0,
+            unreadable: 1,
+            unreadableSessions: [{ id: '31a305b6-session', reason: 'SessionPersistenceCorruptionError: stored log is corrupt' }],
+          },
+        }),
+      }),
+    })
+    const { m } = await openPanelFake(makeCtx())
+    assert.ok(text(m.container).includes('Unreadable sessions: 1'))
+    const pill = m.container.querySelector('.lc-ov-folding')
+    assert.ok(pill !== null, 'the unreadable pill is mounted')
+    const title = pill.getAttribute('title') ?? ''
+    assert.ok(title.includes('DeepSeek Harness refuses to read these session logs'))
+    assert.ok(title.includes('31a305b6-session'))
+    assert.ok(title.includes('stored log is corrupt'))
+    await m.unmount()
+
+    stubRoutes({
+      summary: () => ({
+        revision: 's1',
+        pricingReady: true,
+        summary: summaryRaw({
+          coverage: {
+            complete: false,
+            remaining: 2,
+            failed: 0,
+            running: true,
+            total: 3,
+            covered: 1,
+            unsupported: 0,
+            unreadable: 1,
+            unreadableSessions: [{ id: 'refused', reason: 'host refused the log' }],
+          },
+        }),
+      }),
+    })
+    const running = await openPanelFake(makeCtx())
+    assert.ok(text(running.m.container).includes(progress(1, 3)), 'a running pass still shows progress')
+    const runningTitle = running.m.container.querySelector('.lc-ov-folding')?.getAttribute('title') ?? ''
+    assert.ok(runningTitle.includes('refused'), 'the running tooltip carries the unreadable detail')
+    await running.m.unmount()
+
+    stubRoutes({
+      summary: () => ({
+        revision: 's2',
+        pricingReady: true,
+        summary: summaryRaw({
+          coverage: {
+            complete: true, remaining: 0, failed: 0, running: false, total: 3, covered: 2, unsupported: 0, unreadable: 1,
+          },
+        }),
+      }),
+    })
+    const bare = await openPanelFake(makeCtx())
+    assert.ok(text(bare.m.container).includes('Unreadable sessions: 1'))
+    assert.equal(
+      bare.m.container.querySelector('.lc-ov-folding')?.getAttribute('title'),
+      'DeepSeek Harness refuses to read these session logs, so folding skips them for now; a Harness update retries them automatically\nRetry folding',
+    )
+    await bare.m.unmount()
+  })
+
+  test('a stalled pill retries the pass on click and clears once coverage heals', async () => {
+    vi.useFakeTimers()
+    let stalled = true
+    const calls = stubRoutes({
+      summary: () => ({
+        revision: stalled ? 's0' : 's1',
+        pricingReady: true,
+        summary: summaryRaw({ coverage: stalled ? STALLED : COMPLETE_COVERAGE }),
+      }),
+    })
+    const { m } = await openPanelFake(makeCtx())
+    const pill = m.container.querySelector('.lc-ov-folding')
+    assert.ok(pill instanceof HTMLButtonElement, 'the stalled pill is a button')
+    assert.ok(text(m.container).includes('2 sessions failed to fold'))
+    assert.equal(pill.getAttribute('aria-label'), '2 sessions failed to fold, Retry folding')
+    const title = pill.getAttribute('title') ?? ''
+    assert.ok(title.includes('Retry folding'), 'the tooltip names the action')
+    assert.ok(title.includes('s1 — Invalid input: expected number'), 'the tooltip carries the failing session and its reason')
+    assert.ok(title.includes('Showing 1 of 2 reasons'), 'a capped detail list says how much it hides')
+    stalled = false
+    await click(pill)
+    await act(async () => { await vi.advanceTimersByTimeAsync(300) })
+    assert.equal(calls.filter(c => c.route.endsWith('/backfill')).length, 1, 'the click starts one fresh pass')
+    assert.equal(m.container.querySelector('.lc-ov-folding'), null, 'the healed coverage drops the pill')
+    await m.unmount()
+  })
+
+  test('a posting retry disables its pill until the acknowledgement lands', async () => {
+    vi.useFakeTimers()
+    stubRoutes({
+      summary: () => ({ revision: 's0', pricingReady: true, summary: summaryRaw({ coverage: STALLED }) }),
+    })
+    const { m } = await openPanelFake(makeCtx())
+    const pill = m.container.querySelector('.lc-ov-folding')
+    assert.ok(pill instanceof HTMLButtonElement)
+    let release: (() => void) | null = null
+    vi.stubGlobal('fetch', () => new Promise((resolve) => {
+      release = () => resolve({ ok: true, json: async () => ({ ok: true, coverage: STALLED }) })
+    }))
+    await click(pill)
+    assert.equal(pill.disabled, true, 'the pill parks while the pass starts')
+    assert.equal(pill.getAttribute('aria-busy'), 'true')
+    await act(async () => { release?.() })
+    await flush()
+    assert.equal(pill.disabled, false, 'the acknowledgement re-enables it')
+    await m.unmount()
+  })
+
+  test('a progressing coverage repaints the label in place', async () => {
+    vi.useFakeTimers()
+    let covered = 1
+    stubRoutes({
+      summary: () => ({
+        revision: `s${covered}`,
+        pricingReady: true,
+        summary: summaryRaw({
+          coverage: { complete: false, running: true, remaining: 3 - covered, failed: 0, total: 3, covered, unsupported: 0, unreadable: 0 },
+        }),
+      }),
+    })
+    const { m } = await openPanelFake(makeCtx())
+    assert.ok(text(m.container).includes(progress(1, 3)), 'the first progress tick renders')
+    covered = 2
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+    assert.ok(text(m.container).includes(progress(2, 3)), 'the label follows the host coverage')
+    await m.unmount()
+  })
+})

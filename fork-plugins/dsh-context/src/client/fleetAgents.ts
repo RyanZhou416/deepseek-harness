@@ -1,9 +1,12 @@
-import { BRAND_HUE, familyHue, type AgentNode } from './agentTree'
+import { LEAD_HUE, familyHue, type AgentNode } from './agentTree'
 import {
   NEUTRAL_HUE,
   UNKNOWN_PARTY,
+  avatarLabelsOf,
+  avatarNameOf,
   nameOfParty,
   type CommsAgent,
+  type CommsRole,
 } from './commsModel'
 import type { CommsRow } from './fleetDetail'
 import type { FleetTeam } from './fleetTeam'
@@ -35,43 +38,47 @@ export function commsAgentsOf(
     const entry = memberAt.get(node.id)
     if (entry === undefined) {
       const name = attested.get(node.id)
-      const lead = name === 'lead'
-      const shown = lead ? t('fleet.role.lead') : name ?? node.label
+      const role: CommsRole = name === 'lead'
+        ? 'lead'
+        : name !== undefined ? 'teammate' : node.isCurrent ? 'agent' : 'subagent'
+      const shown = avatarNameOf(name ?? node.label, role, t)
       map.set(node.id, {
         id: node.id,
         name: shown,
-        role: lead ? 'lead' : name !== undefined ? 'teammate' : node.isCurrent ? 'agent' : 'subagent',
+        role,
         self: node.isCurrent,
-        hue: lead || node.isCurrent ? BRAND_HUE : familyHue(node.family),
+        hue: role === 'lead' || node.isCurrent ? LEAD_HUE : familyHue(node.family),
         ...(name !== undefined && node.label !== shown ? { description: node.label } : {}),
       })
       continue
     }
-    const lead = entry.member.role === 'lead'
-    const shown = lead ? t('fleet.role.lead') : entry.member.name
+    const role: CommsRole = entry.member.role
+    const shown = avatarNameOf(entry.member.name, role, t)
     const description = info.get(entry.member.name)?.description ?? node.label
     map.set(node.id, {
       id: node.id,
       name: shown,
-      role: lead ? 'lead' : 'teammate',
+      role,
       self: node.isCurrent,
-      hue: lead ? BRAND_HUE : familyHue(entry.index),
+      hue: role === 'lead' ? LEAD_HUE : familyHue(entry.index),
       ...(description !== '' && description !== shown ? { description } : {}),
     })
   }
   for (const [index, member] of members.entries()) {
     if (map.has(member.id)) continue
-    const lead = member.role === 'lead'
+    const role: CommsRole = member.role
     const description = info.get(member.name)?.description
     map.set(member.id, {
       id: member.id,
-      name: lead ? t('fleet.role.lead') : member.name,
-      role: lead ? 'lead' : 'teammate',
+      name: avatarNameOf(member.name, role, t),
+      role,
       self: false,
-      hue: lead ? BRAND_HUE : familyHue(index),
+      hue: role === 'lead' ? LEAD_HUE : familyHue(index),
       ...(description !== undefined && description !== '' ? { description } : {}),
     })
   }
+  const labels = avatarLabelsOf(map.values())
+  for (const agent of map.values()) agent.initials = labels.get(agent.id)
   return map
 }
 

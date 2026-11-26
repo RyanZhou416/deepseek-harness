@@ -1,62 +1,35 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { FoldBounds } from './config'
+import { asRecord } from './record'
+import { serviceIdentityOf } from './serviceIdentity'
 import { type ColdReadGate, makeColdReadGate } from './coldRead'
-import { type ConnectionHostFace, registerPostRoute } from './connection'
-import { applyTimeline } from './fold'
-import { createTimelineState } from './foldState'
 import { buildTimelineDetail, buildTimelineHead } from './foldWire'
-import { HEAD_VIEW_KEYS, headViewsOf, headViewsOfValues, registryReaderOf, type HeadViews, type TimelineReader } from './projectionHandle'
-import { TIMELINE_STATE_VERSION, timelineStateSchema } from './timeline'
+import { withCost, withDetailCost, type CostSource } from './cost'
+import { DetailShadow, foldLog } from './detailShadow'
+import { makeFoldCache } from './foldCache'
+import { HEAD_VIEW_KEYS, headViewsOf, headViewsOfValues, type HeadViews } from './headViews'
+import { failure, leaseOf, mountPostRoute, observeOf, readBody, reply, revisionOf } from './postRoute'
 import type { ContextTimelineDetail, Snapshot } from '../shared/types'
 import type { TimelineState } from './foldState'
 
 export const DETAIL_ROUTE = '/api/dsh-context/detail'
 
-const FOLD_YIELD_EVENTS = 1_000
-
 const PAYLOAD_CACHE_MAX = 4
 
-// DeepSeek Harness fork modification: a cold detail is served from the persisted projection
-// checkpoint, and the fallback reads a bounded tail window instead of the whole durable log.
-// See ../../FORK_MAINTENANCE.md.
-const CACHE_DOMAIN = 'session_projcache'
-
-const CACHE_TABLE = 'sessions'
-
-const CACHE_KEY = 'contextTimeline'
-
+// DeepSeek Harness fork modification: a stored session's head costs one metadata
+// stat and its detail a bounded tail window; only an explicit `full` folds the
+// whole durable log. See ../../FORK_MAINTENANCE.md.
 const DETAIL_WINDOW_EVENTS = 400
+
+const TIMELINE_KEY = 'contextTimeline'
+
+type QuickEvent = Parameters<typeof foldLog>[0][number]
 
 interface ColdPayload {
   persistence: unknown
   revision: string
   value: ContextTimelineDetail
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (value === null || value === undefined || typeof value !== 'object') return null
-  return value as Record<string, unknown>
-}
-
-function revisionOf(observation: unknown): string | undefined {
-  const revision = asRecord(observation)?.revision
-  return typeof revision === 'string' && revision !== '' ? revision : undefined
-}
-
-function headPayloadOf(state: TimelineState): { rev: number; head: Snapshot } {
-  return { rev: state.detailRev ?? 0, head: buildTimelineHead(state) }
-}
-
-function headPayloadOfValue(value: Record<string, unknown>): { rev: number; head: unknown } {
-  return { rev: typeof value.detailRev === 'number' ? value.detailRev : 0, head: value }
-}
-
-export interface DetailChannelGate {
-  live: boolean
-}
-
-interface SessionsHostFace {
-  get?(id: string): unknown
 }
 
 interface SessionQueryFace {
@@ -65,23 +38,69 @@ interface SessionQueryFace {
   readWindow?(id: string, options: unknown): Promise<unknown>
 }
 
-interface StorageDomainFace {
-  get?(name: string): { table?(name: string): { get?(key: string): unknown } } | undefined
-}
-
 interface HeaderFace {
   version?: unknown
   createdAt?: unknown
-  cwd?: unknown
-  isSeeded?: unknown
 }
 
-function reply(value: unknown): Response {
-  return Response.json(value, { headers: { 'cache-control': 'no-store' } })
+interface ServeOptions {
+  headOnly: boolean
+  full: boolean
+  signal: AbortSignal
+  cost?: CostSource
 }
 
-function failure(code: string, message: string): Response {
-  return reply({ ok: false, error: { code, message } })
+function cancelled(signal: AbortSignal): boolean {
+  return signal.aborted
+}
+
+function headPayloadOf(state: TimelineState, cost?: CostSource, views: HeadViews = {}): { rev: number; head: Snapshot } {
+  return { rev: state.detailRev ?? 0, head: withCost(cost, buildTimelineHead(state)), ...views }
+}
+
+export interface DetailChannelGate {
+  live: boolean
+  retain(key: string, registration: unknown): void
+  stateOf(session: unknown, key: string): unknown
+}
+
+interface ProjectionHandleLike {
+  stateOf(session: unknown): unknown
+}
+
+function handleOf(value: unknown): ProjectionHandleLike | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const stateOf = (value as { stateOf?: unknown }).stateOf
+  return typeof stateOf === 'function' ? value as ProjectionHandleLike : undefined
+}
+
+export function createDetailGate(ctx: Context): DetailChannelGate {
+  const handles = new Map<string, ProjectionHandleLike>()
+  return {
+    live: false,
+    retain(key: string, registration: unknown): void {
+      if (registration === null || (typeof registration !== 'object' && typeof registration !== 'function')) return
+      const then = (registration as { then?: unknown }).then
+      if (typeof then !== 'function') return
+      void Promise.resolve(registration as Promise<unknown>).then(
+        (handle) => {
+          const retained = handleOf(handle)
+          if (retained !== undefined) handles.set(key, retained)
+        },
+        (error: unknown) => { ctx.logger.error(error) },
+      )
+    },
+    stateOf(session: unknown, key: string): unknown {
+      const handle = handles.get(key)
+      if (handle !== undefined) return handle.stateOf(session)
+      const projections = ctx.sessionProjections as unknown as { stateOf?(session: unknown, key: string): unknown } | undefined
+      return typeof projections?.stateOf === 'function' ? projections.stateOf(session, key) : undefined
+    },
+  }
+}
+
+interface SessionsHostFace {
+  get?(id: string): unknown
 }
 
 /** The header a metadata observation carries, or `undefined` when it is absent or malformed. */
@@ -95,7 +114,7 @@ function headerOf(metadata: unknown): HeaderFace | undefined {
 /** The cached `contextTimeline` wire value a metadata observation serves, when the host has one. */
 function cachedHeadOf(metadata: unknown): Record<string, unknown> | undefined {
   const values = asRecord(asRecord(asRecord(metadata)?.projections)?.values)
-  return values === null ? undefined : asRecord(values[CACHE_KEY]) ?? undefined
+  return values === null ? undefined : asRecord(values[TIMELINE_KEY]) ?? undefined
 }
 
 /** The head views the same metadata observation serves, when the host has them. */
@@ -103,38 +122,10 @@ function cachedHeadViewsOf(metadata: unknown): HeadViews {
   return headViewsOfValues(asRecord(asRecord(asRecord(metadata)?.projections)?.values))
 }
 
-/** The persisted projection state bound to this exact session lifecycle, read with no log I/O. */
-function checkpointStateOf(ctx: Context, sessionId: string, header: HeaderFace): TimelineState | undefined {
-  let domain: ReturnType<NonNullable<StorageDomainFace['get']>> | undefined
-  try {
-    domain = (ctx.get('storageDomain') as StorageDomainFace | undefined)?.get?.(CACHE_DOMAIN)
-  } catch {
-    return undefined
-  }
-  let table: { get?(key: string): unknown } | undefined
-  try {
-    table = domain?.table?.(CACHE_TABLE)
-  } catch {
-    return undefined
-  }
-  let record: unknown
-  try {
-    record = table?.get?.(sessionId)
-  } catch {
-    return undefined
-  }
-  const identity = asRecord(asRecord(record)?.identity)
-  const rows = asRecord(asRecord(record)?.rows)
-  if (identity === null || rows === null) return undefined
-  if (identity.formatVersion !== header.version) return undefined
-  if (identity.createdAt !== header.createdAt) return undefined
-  if (identity.cwd !== header.cwd) return undefined
-  if ((identity.isSeeded ?? false) !== (header.isSeeded ?? false)) return undefined
-  if ((identity.inheritedEventCount ?? 0) !== 0) return undefined
-  const row = asRecord(rows[CACHE_KEY])
-  if (row === null || row.ver !== TIMELINE_STATE_VERSION) return undefined
-  const parsed = timelineStateSchema.safeParse(row.val)
-  return parsed.success ? parsed.data : undefined
+/** The rev the cached head serves, or undefined when it carries none. */
+function revOfHead(head: Record<string, unknown> | undefined): number | undefined {
+  const rev = head?.detailRev
+  return typeof rev === 'number' && Number.isFinite(rev) && rev >= 0 ? rev : undefined
 }
 
 /** The bounded tail window a `readWindow` observation carries, or `undefined` when unusable. */
@@ -143,8 +134,6 @@ function windowOf(read: unknown): { events: QuickEvent[]; hasMore: boolean } | u
   if (window === null || !Array.isArray(window.events)) return undefined
   return { events: window.events as QuickEvent[], hasMore: window.hasMore === true }
 }
-
-type QuickEvent = Parameters<typeof applyTimeline>[1]
 
 function firstSeqOf(events: readonly QuickEvent[]): number | undefined {
   let first: number | undefined
@@ -155,154 +144,140 @@ function firstSeqOf(events: readonly QuickEvent[]): number | undefined {
   return first
 }
 
-/** Fold a bounded event slice without ever blocking the event loop for more than a chunk. */
-async function foldSlice(
-  events: readonly QuickEvent[],
-  bounds: FoldBounds,
-  signal: AbortSignal | undefined,
-): Promise<TimelineState | undefined> {
-  let state = createTimelineState()
-  let folded = 0
-  for (const event of events) {
-    if (signal?.aborted === true) return undefined
-    state = applyTimeline(state, event, bounds)
-    if (++folded % FOLD_YIELD_EVENTS === 0) await new Promise(resolve => setTimeout(resolve, 0))
-  }
-  return state
-}
-
 export function watchDetailChannel(
   ctx: Context,
   bounds: FoldBounds,
   coldReads: ColdReadGate = makeColdReadGate(),
-  timeline: TimelineReader | null = null,
-  gate: DetailChannelGate = { live: false },
+  gate: DetailChannelGate = createDetailGate(ctx),
+  shadow: DetailShadow = new DetailShadow(ctx, bounds, coldReads, () => observeOf(ctx)),
+  cost?: CostSource,
+  options: { idleSweepMs?: number } = {},
 ): DetailChannelGate {
-  const readTimeline = timeline ?? registryReaderOf(ctx)
-  const payloads = new Map<string, ColdPayload>()
-  ctx.inject(['connection', 'sessions'], (c) => {
-    const sessions = c.get('sessions') as SessionsHostFace | undefined
-    const getSession = typeof sessions?.get === 'function' ? sessions.get.bind(sessions) : undefined
-    if (getSession === undefined) return
+  const payloads = makeFoldCache<ColdPayload>(ctx, { maxEntries: PAYLOAD_CACHE_MAX, idleMs: options.idleSweepMs })
+  mountPostRoute({
+    ctx,
+    deps: ['connection', 'sessions'],
+    path: DETAIL_ROUTE,
+    label: 'dsh-context: detail route',
+    gate,
+    handler: (c) => {
+      const sessions = c.get('sessions') as SessionsHostFace | undefined
+      const getSession = typeof sessions?.get === 'function' ? sessions.get.bind(sessions) : undefined
+      if (getSession === undefined) return undefined
 
-    const handler = async (request: Request): Promise<Response> => {
-      let sessionId: unknown
-      let headOnly = false
-      let full = false
-      try {
-        const body: unknown = await request.json()
-        sessionId = body !== null && typeof body === 'object'
+      return async (request: Request): Promise<Response> => {
+        payloads.touch()
+        const read = await readBody(request)
+        if (!read.ok) return read.response
+        const body = read.body
+        const sessionId = body !== null && typeof body === 'object'
           ? (body as { sessionId?: unknown }).sessionId
           : undefined
-        headOnly = body !== null && typeof body === 'object' && (body as { head?: unknown }).head === true
-        full = body !== null && typeof body === 'object' && (body as { full?: unknown }).full === true
-      } catch {
-        return failure('dsh-context/bad-request', 'body is not JSON')
-      }
-      if (typeof sessionId !== 'string' || sessionId === '') {
-        return failure('dsh-context/bad-request', 'missing sessionId')
-      }
-      const signal = request.signal
-      try {
-        const session = getSession(sessionId)
-        if (session !== undefined && session !== null) {
-          const state = readTimeline?.(session)
-          if (state === undefined) return reply({ ok: true, value: null })
-          return reply({
-            ok: true,
-            value: headOnly
-              ? { ...headPayloadOf(state), ...headViewsOf(ctx, session) }
-              : buildTimelineDetail(state, bounds),
-          })
+        const headOnly = body !== null && typeof body === 'object' && (body as { head?: unknown }).head === true
+        const full = body !== null && typeof body === 'object' && (body as { full?: unknown }).full === true
+        if (typeof sessionId !== 'string' || sessionId === '') {
+          return failure('dsh-context/bad-request', 'missing sessionId')
         }
-        const query = ctx.get('sessionQuery') as SessionQueryFace | undefined
-        if (query === undefined) return reply({ ok: true, value: null })
-        const value = await serveCold(ctx, query, sessionId, bounds, coldReads, payloads, { headOnly, full, signal })
-        if (signal.aborted) return failure('dsh-context/aborted', 'request cancelled')
-        return reply({ ok: true, value: value ?? null })
-      } catch (err) {
-        if (signal.aborted) return failure('dsh-context/aborted', 'request cancelled')
-        return failure('gateway/internal', err instanceof Error ? err.message : String(err))
+        const signal = request.signal
+        try {
+          const session = getSession(sessionId)
+          if (session !== undefined && session !== null) {
+            const state = gate.stateOf(session, TIMELINE_KEY) as TimelineState | undefined
+            if (state === undefined) return reply({ ok: true, value: null })
+            if (headOnly) return reply({ ok: true, value: headPayloadOf(state, cost, headViewsOf(ctx, session)) })
+            const detailState = await shadow.stateOf(sessionId)
+            if (detailState === null) return reply({ ok: true, value: null })
+            return reply({ ok: true, value: withDetailCost(cost, buildTimelineDetail(detailState, bounds)) })
+          }
+          const query = c.get('sessionQuery') as SessionQueryFace | undefined
+          const value = await serveCold(ctx, query, sessionId, bounds, coldReads, payloads, {
+            headOnly,
+            full,
+            signal,
+            ...(cost === undefined ? {} : { cost }),
+          })
+          if (cancelled(signal)) return failure('dsh-context/aborted', 'request cancelled')
+          return reply({ ok: true, value: value ?? null })
+        } catch (err) {
+          if (cancelled(signal)) return failure('dsh-context/aborted', 'request cancelled')
+          return failure('gateway/internal', err instanceof Error ? err.message : String(err))
+        }
       }
-    }
-
-    if (!registerPostRoute(c, c.get('connection') as ConnectionHostFace | undefined, DETAIL_ROUTE, handler, 'dsh-context: detail route')) return
-    gate.live = true
-    return () => {
-      gate.live = false
-    }
+    },
   })
   return gate
 }
 
-interface ServeOptions {
-  headOnly: boolean
-  full: boolean
-  signal: AbortSignal
-}
-
 /**
- * Serve one cold session's detail without materializing the durable log: the host's persisted
- * projection checkpoint carries the exact fold state, so the common path costs one persistence
- * stat and one in-memory record read. Only a missing or incompatible checkpoint falls back to a
- * bounded tail window, and only an explicit `full` request folds the complete log.
+ * Serve one stored session: the head from its projection checkpoint with no log
+ * read, the detail from a bounded tail window marked `partial`, and the whole
+ * log only for an explicit `full` request.
  */
 async function serveCold(
   ctx: Context,
-  query: SessionQueryFace,
+  query: SessionQueryFace | undefined,
   sessionId: string,
   bounds: FoldBounds,
   coldReads: ColdReadGate,
-  payloads: Map<string, ColdPayload>,
+  payloads: ReturnType<typeof makeFoldCache<ColdPayload>>,
   options: ServeOptions,
 ): Promise<unknown> {
-  const { headOnly, full, signal } = options
+  const { headOnly, full, signal, cost } = options
+  if (query === undefined) return null
   let metadata: unknown
   if (typeof query.observeSessionMetadata === 'function') {
     try {
-      metadata = await query.observeSessionMetadata(sessionId, { signal, projectionKeys: [CACHE_KEY, ...HEAD_VIEW_KEYS] })
+      metadata = await query.observeSessionMetadata(sessionId, {
+        signal,
+        projectionKeys: [TIMELINE_KEY, ...HEAD_VIEW_KEYS],
+      })
     } catch {
-      if (signal.aborted) return null
+      if (cancelled(signal)) return null
       metadata = undefined
     }
   }
+  if (cancelled(signal)) return null
   const header = headerOf(metadata)
   const cachedHead = cachedHeadOf(metadata)
   const cachedViews = cachedHeadViewsOf(metadata)
-  if (headOnly) return cachedHead === undefined ? null : { ...headPayloadOfValue(cachedHead), ...cachedViews }
-  if (full) return serveFullDetail(ctx, query, sessionId, bounds, coldReads, payloads, signal)
-  if (header !== undefined) {
-    const state = checkpointStateOf(ctx, sessionId, header)
-    if (state !== undefined) return buildTimelineDetail(state, bounds)
+  if (typeof query.observeSessionMetadata !== 'function') {
+    // A host that predates the log-free projection stat keeps the legacy whole-log fold.
+    return serveLegacyCold(ctx, query, sessionId, bounds, coldReads, payloads, headOnly, signal, cost)
   }
-  // A host that predates the log-free projection stat and the bounded window keeps the legacy
-  // whole-log fold; both faces arrived together, so one absence means neither cheap rung exists.
-  if (typeof query.readWindow !== 'function') {
-    return typeof query.observeSessionMetadata === 'function'
-      ? null
-      : serveFullDetail(ctx, query, sessionId, bounds, coldReads, payloads, signal)
+  if (headOnly) {
+    if (cachedHead === undefined) return null
+    return {
+      rev: revOfHead(cachedHead) ?? 0,
+      head: withCost(cost, cachedHead),
+      ...cachedViews,
+    }
   }
+  if (full) return serveFullDetail(ctx, query, sessionId, bounds, coldReads, payloads, signal, cost)
+  if (header === undefined) return null
+  if (typeof query.readWindow !== 'function') return null
   let read: unknown
   try {
     read = await query.readWindow(sessionId, { signal, maxEvents: DETAIL_WINDOW_EVENTS })
   } catch {
-    if (signal.aborted) return null
+    if (cancelled(signal)) return null
     read = undefined
   }
-  if (signal.aborted) return null
+  if (cancelled(signal)) return null
   const window = windowOf(read)
   if (window === undefined) return null
-  const state = await foldSlice(window.events, bounds, signal)
-  if (state === undefined) return null
-  const detail = buildTimelineDetail(state, bounds)
+  const folded = await foldLog(window.events, bounds, () => cancelled(signal))
+  /* v8 ignore next 1 */
+  if (cancelled(signal)) return null
+  const detail = buildTimelineDetail(folded.state, bounds)
+  const rev = revOfHead(cachedHead)
   const first = firstSeqOf(window.events)
   const partial = first === undefined || !window.hasMore ? undefined : { fromSeq: first }
-  return {
+  return withDetailCost(cost, {
     ...detail,
-    rev: cachedHead === undefined ? detail.rev : headPayloadOfValue(cachedHead).rev,
-    ...(cachedHead === undefined ? {} : { head: cachedHead }),
+    ...(rev === undefined ? {} : { rev }),
+    ...(cachedHead === undefined ? {} : { head: withCost(cost, cachedHead) }),
     ...(partial === undefined ? {} : { partial }),
-  }
+  })
 }
 
 /** Fold the complete durable log for an explicit `full` request; the only whole-log read left. */
@@ -312,42 +287,80 @@ async function serveFullDetail(
   sessionId: string,
   bounds: FoldBounds,
   coldReads: ColdReadGate,
-  payloads: Map<string, ColdPayload>,
+  payloads: ReturnType<typeof makeFoldCache<ColdPayload>>,
   signal: AbortSignal,
+  cost?: CostSource,
 ): Promise<unknown> {
   const observe = typeof query.observeSession === 'function' ? query.observeSession.bind(query) : undefined
   if (observe === undefined) return null
   const value = await coldReads.admit(async () => {
     const observation = await observe(sessionId, { projectionMode: 'none', signal })
+    const release = leaseOf(observation)
     try {
-      const persistence: unknown = ctx.get('sessionPersistence')
+      const persistence = serviceIdentityOf(ctx.get('sessionPersistence'))
       const revision = revisionOf(observation)
       if (revision !== undefined) {
-        const hit = payloads.get(sessionId)
-        if (hit !== undefined && hit.revision === revision && hit.persistence === persistence) {
-          payloads.delete(sessionId)
-          payloads.set(sessionId, hit)
-          return hit.value
+        const hit = payloads.get(sessionId, cached => cached.revision === revision && cached.persistence === persistence)
+        if (hit !== undefined) return withDetailCost(cost, hit.value)
+      }
+      const events = asRecord(observation)?.events
+      if (!Array.isArray(events)) return null
+      const folded = await foldLog(events, bounds, () => cancelled(signal))
+      if (cancelled(signal)) return null
+      const detail = buildTimelineDetail(folded.state, bounds)
+      if (revision === undefined) return withDetailCost(cost, detail)
+      payloads.set(sessionId, { persistence, revision, value: detail })
+      return withDetailCost(cost, detail)
+    } finally {
+      release()
+    }
+  })
+  return value ?? null
+}
+/** Serve a host without the metadata face: one whole-log fold, head included. */
+async function serveLegacyCold(
+  ctx: Context,
+  query: SessionQueryFace,
+  sessionId: string,
+  bounds: FoldBounds,
+  coldReads: ColdReadGate,
+  payloads: ReturnType<typeof makeFoldCache<ColdPayload>>,
+  headOnly: boolean,
+  signal: AbortSignal,
+  cost?: CostSource,
+): Promise<unknown> {
+  const observe = typeof query.observeSession === 'function' ? query.observeSession.bind(query) : undefined
+  if (observe === undefined) return null
+  const value = await coldReads.admit(async () => {
+    const observation = await observe(sessionId, { projectionMode: 'none', signal })
+    const release = leaseOf(observation)
+    try {
+      const persistence = serviceIdentityOf(ctx.get('sessionPersistence'))
+      const revision = revisionOf(observation)
+      if (revision !== undefined) {
+        const hit = payloads.get(sessionId, cached => cached.revision === revision && cached.persistence === persistence)
+        if (hit !== undefined) {
+          if (headOnly) {
+            /* v8 ignore next 2 */
+            return hit.value.head === undefined
+              ? { rev: hit.value.rev }
+              : { rev: hit.value.rev, head: withCost(cost, hit.value.head) }
+          }
+          return withDetailCost(cost, hit.value)
         }
       }
       const events = asRecord(observation)?.events
       if (!Array.isArray(events)) return null
-      const state = await foldSlice(events as QuickEvent[], bounds, signal)
-      if (state === undefined) return null
-      if (revision !== undefined) {
-        const detail = buildTimelineDetail(state, bounds)
-        payloads.delete(sessionId)
-        payloads.set(sessionId, { persistence, revision, value: detail })
-        for (const oldest of payloads.keys()) {
-          if (payloads.size <= PAYLOAD_CACHE_MAX) break
-          payloads.delete(oldest)
-        }
-        return detail
-      }
-      return buildTimelineDetail(state, bounds)
+      const folded = await foldLog(events as SessionEvent[], bounds, () => signal.aborted)
+      /* v8 ignore next 1 */
+      if (cancelled(signal)) return null
+      if (headOnly) return headPayloadOf(folded.state, cost)
+      const detail = buildTimelineDetail(folded.state, bounds)
+      if (revision === undefined) return withDetailCost(cost, detail)
+      payloads.set(sessionId, { persistence, revision, value: detail })
+      return withDetailCost(cost, detail)
     } finally {
-      const dispose = (observation as { [Symbol.dispose]?: unknown } | null)?.[Symbol.dispose]
-      if (typeof dispose === 'function') dispose.call(observation)
+      release()
     }
   })
   return value ?? null

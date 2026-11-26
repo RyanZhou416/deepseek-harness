@@ -1,22 +1,14 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import type { TimelineEvent } from '../../src/host/fold'
-import {
-  assistantAttempt,
-  assistantMessage,
-  at,
-  compaction,
-  endSeed,
-  foreign,
-  header,
-  planMode,
-  requestContext,
-  toolCall,
-  toolResult,
-  userMessage,
-} from './helpers/events'
+import { Context } from '@deepseek-ai/cordis'
+import SessionStore, { foldSurface } from '@deepseek-ai/dsh-session'
+import { type TimelineEvent, buildTimelineDetail, buildTimelineHead, skillNameOf } from '../../src/host/fold'
+import { assistantAttempt, assistantMessage, at, compaction, endSeed, foreign, header, planMode, requestContext, toolCall, toolResult, userMessage, canonicalLog, stepStart } from './helpers/events'
 import { estimateToolsTotal } from '../../src/host/pricing'
-import { assertPlainJson, assertStable, driveTimeline, timelineDef } from './helpers/projection'
+import { assertPlainJson, assertStable, driveTimeline, fullDef, requestsOf, timelineDef, assertStatesPlainJson } from './helpers/projection'
+import { resolveBounds } from '../../src/host/config'
+
+describe('fold-events', () => {
 
 const text = (t: string) => [{ type: 'text', text: t }]
 
@@ -62,7 +54,7 @@ describe('request/header', () => {
 })
 
 describe('request/context', () => {
-  test('route and capacity metadata land; hostile or absent values change nothing but still re-seal', () => {
+  test('route and capacity metadata land; hostile or absent values return the same state reference', () => {
     const routed = driveTimeline([header(1, { model: 'm' }), requestContext(2, {
       contextWindow: 128000, model: 'm2', provider: 'p2',
     })]).state
@@ -70,13 +62,18 @@ describe('request/context', () => {
     const def = timelineDef({})
     const armed = def.apply(def.init(), header(1, { model: 'm', provider: 'p' }))
     const hostile = def.apply(armed, requestContext(2, { contextWindow: 'x', model: 5, provider: 9 }))
-    assert.ok(hostile !== armed)
-    assert.deepEqual([hostile.contextWindow, hostile.model, hostile.provider], [undefined, 'm', 'p'])
+    assert.equal(hostile, armed)
     const init = def.init()
     const absent = def.apply(init, requestContext(1))
-    assert.ok(absent !== init, 'request/context always re-seals the state')
-    assert.equal(absent.contextWindow, undefined)
-    assert.equal(absent.model, undefined)
+    assert.equal(absent, init, 'an unchanged route leaves the state untouched')
+    const same = def.apply(routed, requestContext(3, { contextWindow: 128000, model: 'm2', provider: 'p2' }))
+    assert.equal(same, routed)
+    const routedOnly = def.apply(def.apply(def.init(), header(1, { model: 'm', provider: 'p' })), requestContext(2, { contextWindow: 64000 }))
+    assert.deepEqual([routedOnly.contextWindow, routedOnly.model, routedOnly.provider], [64000, 'm', 'p'])
+    const modelOnly = def.apply(routedOnly, requestContext(3, { model: 'm2', provider: 'p2' }))
+    assert.deepEqual([modelOnly.contextWindow, modelOnly.model, modelOnly.provider], [64000, 'm2', 'p2'])
+    const windowOnly = def.apply(modelOnly, requestContext(4, { contextWindow: 64000 }))
+    assert.equal(windowOnly, modelOnly)
   })
 })
 
@@ -172,7 +169,7 @@ describe('tool/result skill tagging', () => {
     ])
     const node = state.surface.at(-2)
     assert.deepEqual([node?.tool, node?.skill, node?.cat], ['skill', 'pdf', 'skill'])
-    assert.deepEqual([state.sums.tool, state.sums.skill, state.requests.at(-1)?.skill], [0, node?.tokens, node?.tokens])
+    assert.deepEqual([state.sums.tool, state.sums.skill, requestsOf(state).at(-1)?.skill], [0, node?.tokens, node?.tokens])
     assert.ok((state.requests.at(-1)?.total ?? 0) >= (node?.tokens ?? 0))
     assert.deepEqual(state.events, [
       { seq: 2, time: state.events[0].time, kind: 'inject', form: 'instructions', sub: 'skill', name: 'pdf', tokens: node?.tokens },
@@ -245,14 +242,14 @@ describe('assistant/message request records', () => {
     assert.ok(!('prompt' in absent.requests[0]))
     assert.equal(absent.cost, undefined)
     const outputOnly = driveTimeline([assistantMessage(1, { usage: { outputTokens: 5 } })]).state
-    assert.deepEqual([outputOnly.requests[0].prompt, outputOnly.requests[0].output, outputOnly.cost], [0, 5, undefined])
+    assert.deepEqual([requestsOf(outputOnly)[0].prompt, requestsOf(outputOnly)[0].output, outputOnly.cost], [0, 5, undefined])
     assert.ok(!('cacheRead' in outputOnly.requests[0]))
-    const inputOnly = driveTimeline([assistantMessage(1, { usage: { inputTokens: 100 } })]).state.requests[0]
+    const inputOnly = requestsOf(driveTimeline([assistantMessage(1, { usage: { inputTokens: 100 } })]).state)[0]
     assert.equal(inputOnly.prompt, 100)
     assert.ok(!('cacheRead' in inputOnly) && !('output' in inputOnly))
-    const full = driveTimeline([
+    const full = requestsOf(driveTimeline([
       assistantMessage(1, { usage: { inputTokens: 10, cacheReadTokens: 20, cacheWriteTokens: 30, outputTokens: 40 } }),
-    ]).state.requests[0]
+    ]).state)[0]
     assert.deepEqual([full.prompt, full.cacheRead, full.output], [60, 20, 40])
   })
 
@@ -283,15 +280,15 @@ describe('the answers tally (assistant messages carrying text)', () => {
 
 describe('hostile provider usage (issue #44: stats must survive nonconforming figures)', () => {
   test('nonconforming buckets sanitize: fractional rounds, a negative clamps, string figures read, a readable minority bills', () => {
-    const fractional = driveTimeline([
+    const fractional = requestsOf(driveTimeline([
       assistantMessage(1, { usage: { inputTokens: 10.4, cacheReadTokens: 20.6, outputTokens: 3.5 } }),
-    ]).state.requests[0]
+    ]).state)[0]
     assert.equal(fractional.prompt, 31)
     assert.equal(fractional.cacheRead, 21)
     assert.equal(fractional.output, 4)
-    const negative = driveTimeline([
+    const negative = requestsOf(driveTimeline([
       assistantMessage(1, { usage: { inputTokens: -80, cacheReadTokens: 150, outputTokens: 22 } }),
-    ]).state.requests[0]
+    ]).state)[0]
     assert.equal(negative.prompt, 150, 'the cache bucket still bills')
     assert.equal(negative.cacheRead, 150)
     assert.equal(negative.output, 22)
@@ -301,7 +298,7 @@ describe('hostile provider usage (issue #44: stats must survive nonconforming fi
     assert.equal(strings.prompt, 107)
     assert.ok(!('cacheRead' in strings))
     assert.ok(!('output' in strings))
-    const minority = driveTimeline([assistantMessage(1, { usage: { inputTokens: 'n/a', outputTokens: 9 } })]).state.requests[0]
+    const minority = requestsOf(driveTimeline([assistantMessage(1, { usage: { inputTokens: 'n/a', outputTokens: 9 } })]).state)[0]
     assert.equal(minority.prompt, 0)
     assert.equal(minority.output, 9)
     const billed = driveTimeline([
@@ -460,6 +457,7 @@ describe('unknown event types', () => {
     const { state } = driveTimeline([])
     assertStable(state, foreign(1))
     assertStable(state, foreign(2, 'todo/update'))
+    assertStable(state, { type: 'team/mode', seq: 3, time: at(), data: { enabled: true } })
   })
 })
 
@@ -580,4 +578,311 @@ describe('hostile events', () => {
     assert.ok(state.sums.user > 0)
     assertPlainJson(state)
   })
+})
+
+describe('surface order parity with the harness fold', () => {
+  test('every prefix keeps the canonical surface order after prune and summary replacements', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const session = ctx.sessions.create()
+    const appendUnknown = (type: string, data: unknown): { seq: number } =>
+      (session.append as unknown as (type: string, data: unknown) => { seq: number })(type, data)
+    session.append('request/header', { header: { config: { model: 'deepseek-v4-flash', provider: 'deepseek' } }, reason: 'initial' } as never)
+    session.append('system/message', {
+      turn: 1,
+      step: 0,
+      message: { role: 'system', source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }, content: [{ type: 'text', text: 'You are an agent.' }] },
+    } as never, { surfaceOp: 'append' })
+    session.append('user/message', { content: [{ type: 'text', text: 'one' }], source: { kind: 'user' } } as never, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 0,
+      message: { content: [{ type: 'text', text: 'reply' }] },
+      usage: { inputTokens: 10, outputTokens: 5 },
+    } as never, { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 1, step: 0, callId: 'c1', name: 'bash', arguments: '{}' } as never)
+    const result = session.append('tool/result', {
+      message: { role: 'tool', toolCallId: 'c1', source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'text', text: 'ok' }] },
+    } as never, { surfaceOp: 'append' })
+    const two = session.append('user/message', { content: [{ type: 'text', text: 'two' }], source: { kind: 'user' } } as never, { surfaceOp: 'append' })
+    const three = session.append('user/message', { content: [{ type: 'text', text: 'three' }], source: { kind: 'user' } } as never, { surfaceOp: 'append' })
+    appendUnknown('compaction/prune', { shadowedRange: { start: result.seq, end: result.seq }, shadowedSeqs: [result.seq], shadowedTokenCount: 5 })
+    session.append('tool/result', {
+      message: { role: 'tool', toolCallId: 'c1', source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'text', text: 'pruned' }] },
+    } as never, { surfaceOp: { op: 'replace', startSeq: result.seq, endSeq: result.seq }, sourceEventSeqs: [result.seq] })
+    appendUnknown('compaction/summary', {
+      compactionId: 'c1',
+      summary: 'summary',
+      shadowedRange: { start: two.seq, end: three.seq },
+      shadowedSeqs: [two.seq, three.seq],
+      shadowedTokenCount: 12,
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+    })
+    session.append('user/message', { content: [{ type: 'text', text: 'summary' }], source: { kind: 'plugin', form: 'summary' } } as never, {
+      surfaceOp: { op: 'replace', startSeq: two.seq, endSeq: three.seq },
+      sourceEventSeqs: [two.seq, three.seq],
+    })
+    const log = session.snapshotEvents() as unknown as TimelineEvent[]
+    const def = fullDef()
+    for (let cut = 1; cut <= log.length; cut++) {
+      const prefix = log.slice(0, cut)
+      const types = new Map<number, string>(prefix.map(event => [event.seq, event.type] as const))
+      let state = def.init()
+      for (const event of prefix) state = def.apply(state, event)
+      const canonical = foldSurface(prefix as never).nodes.filter(seq => types.get(seq) !== 'system/message')
+      assert.deepStrictEqual(state.surface.map(node => node.seq), canonical, `surface order drift at prefix ${cut}`)
+    }
+  })
+})
+})
+
+describe('fold-split', () => {
+
+describe('the detailRev ledger', () => {
+  test('bumps exactly on detail-mutating folds — never on working-slot or envelope folds — and on a real model switch', () => {
+    const { def, state } = driveTimeline(canonicalLog())
+    assert.equal(state.detailRev, 7)
+    const workingSlot: TimelineEvent[] = [
+      requestContext(13, { contextWindow: 256000 }),
+      header(14, { model: 'deepseek-v4-flash', provider: 'deepseek', reason: 'change' }),
+      stepStart(15),
+      toolCall(16, { callId: 'c2', name: 'bash' }),
+    ]
+    let st = state
+    for (const ev of workingSlot) st = def.apply(st, ev)
+    assert.equal(st.detailRev, 7, 'no detail mutation, no bump')
+    assert.notEqual(st, state)
+    const switched = def.apply(state, header(13, { model: 'deepseek-v4-pro', provider: 'deepseek', reason: 'change' }))
+    assert.equal(switched.detailRev, 8, 'the events collection gained a model row')
+  })
+})
+
+describe('buildTimelineHead', () => {
+  test('serves the counters, the headline anchor, and the revision; a fresh state zeroes them', () => {
+    const fresh = buildTimelineHead(timelineDef().init())
+    assert.deepEqual(fresh.counts, { turns: 0, steps: 0, events: 0, injects: 0, compactions: 0, prunes: 0, modelSwitches: 0, skills: 0 })
+    assert.equal(fresh.humanInputs, 0, 'the tally defaults to zero on the wire')
+    assert.equal(fresh.answers, 0, 'the answers tally defaults to zero on the wire too')
+    assert.ok(!('lastUser' in fresh), 'no own key on the wire — no user message yet')
+    assert.equal(fresh.last, undefined, 'no request yet — the anchor stays absent')
+    assert.equal(fresh.detailRev, 0)
+    assert.equal(fresh.current.total, 0)
+    const { state } = driveTimeline(canonicalLog())
+    const head = buildTimelineHead(state)
+    assert.equal(head.ok, true)
+    assert.deepEqual(
+      [head.model, head.provider, head.reasoningEffort, head.contextWindow],
+      ['deepseek-v4-flash', 'deepseek', 'max', 128000],
+    )
+    assert.ok(head.current.total > 0)
+    assert.deepEqual(head.counts, { turns: 1, steps: 2, events: 2, injects: 0, compactions: 1, prunes: 0, modelSwitches: 0, skills: 0 })
+    assert.equal(head.humanInputs, 1)
+    assert.equal(head.answers, 2)
+    assert.equal(head.lastUser, 'hello there')
+    const lastReq = state.requests.at(-1)!
+    assert.deepEqual(head.last, { seq: lastReq.seq, total: lastReq.total, prompt: 20 })
+    assert.equal(head.detailRev, 7)
+    assert.deepEqual(head.requests, [])
+    assert.deepEqual(head.events, [])
+    assert.deepEqual(head.nodes, [])
+    assert.equal(head.droppedNodes, 0)
+    assert.deepEqual(head.archive, [])
+    assertPlainJson(head)
+  })
+
+  test('the counters tally injects/prunes, a turn-less record folds as turn 0, and a usage-less anchor omits prompt', () => {
+    const tallied = driveTimeline([
+      userMessage(1, [{ type: 'text', text: 'ctx' }], { kind: 'plugin', form: 'context', plugin: 'dsh-test' }),
+      compaction(2, 'prune', { shadowedTokenCount: 3 }),
+      assistantMessage(3, {}),
+    ]).state
+    assert.deepEqual(buildTimelineHead(tallied).counts, { turns: 1, steps: 1, events: 2, injects: 1, compactions: 0, prunes: 1, modelSwitches: 0, skills: 0 })
+    const anchorless = driveTimeline([
+      userMessage(1, [{ type: 'text', text: 'hi' }], { kind: 'user' }),
+      assistantMessage(2, { turn: 1, step: 1 }),
+    ])
+    const head = buildTimelineHead(anchorless.state)
+    assert.deepEqual(head.last, { seq: 2, total: anchorless.state.requests[0].total })
+    assert.ok(head.last !== undefined && !('prompt' in head.last), 'no undefined-valued prompt key')
+  })
+
+  test('the skills counter tallies DISTINCT loaded-skill names — the catalog digest never counts', () => {
+    const { state } = driveTimeline([
+      userMessage(1, [{ type: 'text', text: 'run' }], { kind: 'skill-invocation', form: 'skill', name: 'grilling' }),
+      toolCall(2, { callId: 'c1', name: 'skill' }),
+      toolResult(3, { callId: 'c1', content: [{ type: 'text', text: '<skill_content name="grilling">instructions</skill_content>' }] }),
+      userMessage(4, [{ type: 'text', text: 'catalog' }], { kind: 'skill-catalog', form: 'catalog' }),
+      userMessage(5, [{ type: 'text', text: 'again' }], { kind: 'skill-invocation', form: 'skill', name: 'ponytail' }),
+      userMessage(6, [{ type: 'text', text: 'once more' }], { kind: 'skill-invocation', form: 'skill', name: 'grilling' }),
+    ])
+    const head = buildTimelineHead(state)
+    assert.deepEqual(head.counts, { turns: 0, steps: 0, events: 5, injects: 5, compactions: 0, prunes: 0, modelSwitches: 0, skills: 2 })
+    assertPlainJson(head)
+  })
+
+  test('skillNameOf narrows hostile messages to no name (the activity fold’s reuse)', () => {
+    assert.equal(skillNameOf(null), '')
+    assert.equal(skillNameOf('text'), '')
+    assert.equal(skillNameOf(42), '')
+    assert.equal(skillNameOf({}), '')
+    assert.equal(skillNameOf({ content: [{ type: 'text', text: '<skill_content name="tdd">…' }] }), 'tdd')
+  })
+})
+
+describe('buildTimelineDetail', () => {
+  test('serves the revision and head, with collections detached from the fold state', () => {
+    const { state, view } = driveTimeline(canonicalLog())
+    const detail = buildTimelineDetail(state, resolveBounds({}))
+    assert.equal(detail.rev, 7)
+    assert.ok(detail.head !== undefined)
+    assert.deepEqual(detail.head.current, view.current)
+    assertPlainJson(detail)
+    assert.notEqual(detail.requests[0], state.requests[0])
+    assert.notEqual(detail.archive, state.archived)
+  })
+})
+
+describe('the split wire generation (definition slim flag)', () => {
+  test('each generation validates on the one schema, and the inline value is exactly the head plus the detail', () => {
+    const { state } = driveTimeline(canonicalLog())
+    const slim = timelineDef({}, true)
+    const slimView = slim.wire.view(state)
+    assert.equal(slim.wire.viewSchema.safeParse(slimView).success, true, 'the slim head validates')
+    assert.equal(typeof slimView.detailRev, 'number', 'the split marker is present')
+    assert.ok(slimView.counts !== undefined)
+    assert.deepEqual(slimView.nodes, [], 'collections stay off the wire value')
+    const inline = timelineDef({}, false)
+    const inlineView = inline.wire.view(state)
+    assert.equal(inline.wire.viewSchema.safeParse(inlineView).success, true, 'the inline value validates on the same schema')
+    assert.equal(inlineView.detailRev, undefined)
+    assert.ok(inlineView.nodes.length > 0)
+    assert.ok(inlineView.requests.length > 0)
+    const head = buildTimelineHead(state)
+    const detail = buildTimelineDetail(state, resolveBounds({}))
+    assert.deepEqual(inlineView.counts, head.counts, 'the inline value carries the full-session counters')
+    const { last: _last, detailRev: _rev, ...headScalars } = head
+    const { rev: _detailRev, head: _detailHead, ...collections } = detail
+    assert.deepEqual(inlineView, { ...headScalars, ...collections })
+  })
+})
+})
+
+describe('fold-developer', () => {
+
+const changes = [
+  { type: 'tool-addition', toolName: 'read_file' },
+  { type: 'tool-removal', toolName: 'shell' },
+]
+
+function developerMessage(seq: number, options: {
+  content?: unknown
+  source?: unknown
+  surfaceOp?: unknown
+} = {}): TimelineEvent {
+  return {
+    type: 'developer/message', seq, time: at(), surfaceOp: options.surfaceOp ?? 'append',
+    data: {
+      turn: 1, step: 1, headerSeq: 0,
+      message: {
+        role: 'developer',
+        source: options.source ?? { kind: 'tool-registry' },
+        content: options.content ?? changes,
+      },
+    },
+  }
+}
+
+describe('developer/message', () => {
+  test('tool-registry changes enter the surface, request composition and served detail', () => {
+    const result = driveTimeline([
+      userMessage(1, [{ type: 'text', text: 'hello' }]),
+      developerMessage(2),
+      assistantMessage(3, { turn: 1, step: 1 }),
+    ])
+    const node = result.state.surface.find(n => n.seq === 2)
+    assert.ok(node, 'the model-visible registry change must not disappear')
+    assert.equal(node.cat, 'inject')
+    assert.equal(node.tokens, 35)
+    assert.equal(node.name, 'tool-registry')
+    assert.equal(result.state.humanInputs, 1)
+    assert.equal(requestsOf(result.state)[0].inject, 35)
+    assert.equal(result.state.sums.inject, 35)
+    assert.equal(result.view.nodes.some(n => n.seq === 2 && n.tokens === 35), true)
+    assert.equal(result.state.events.find(e => e.seq === 2)?.kind, 'inject')
+    assertStatesPlainJson(result)
+    result.def.stateSchema.parse(result.state)
+    result.def.wire.viewSchema.parse(result.view)
+  })
+
+  test('compaction removes and archives registry nodes with the rest of the claimed surface', () => {
+    const result = driveTimeline([
+      userMessage(1, [{ type: 'text', text: 'hello' }]),
+      developerMessage(2),
+      assistantMessage(3, { turn: 1, step: 1 }),
+      compaction(4, 'summary', { shadowedSeqs: [1, 2, 3], shadowedTokenCount: 55 }),
+      userMessage(5, [{ type: 'text', text: 'summary' }], { kind: 'plugin', form: 'summary' }, {
+        surfaceOp: { op: 'replace', startSeq: 1, endSeq: 3 },
+      }),
+      assistantMessage(6, { turn: 2, step: 1 }),
+    ])
+    assert.equal(result.state.surface.some(n => n.seq === 2), false)
+    const archived = result.state.archived.find(n => n.seq === 2)
+    assert.equal(archived?.tokens, 35)
+    assert.equal(archived?.gone, 5)
+    assert.equal(requestsOf(result.state)[0].inject, 35)
+    assert.equal(requestsOf(result.state)[1].inject, 10)
+    assertStatesPlainJson(result)
+  })
+
+  test('a developer replacement archives the replaced injection and bumps the detail revision', () => {
+    const result = driveTimeline([
+      developerMessage(1),
+      developerMessage(2, {
+        content: [{ type: 'tool-removal', toolName: 'read_file' }],
+        surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 },
+      }),
+    ])
+    assert.deepEqual(result.state.surface.map(n => n.seq), [2])
+    assert.equal(result.state.archived[0].seq, 1)
+    assert.equal(result.state.archived[0].gone, 2)
+    assert.equal(result.state.sums.inject, result.state.surface[0].tokens)
+    assert.equal(result.state.detailRev, 2)
+    assert.equal(result.state.humanInputs, undefined)
+    assertStatesPlainJson(result)
+  })
+
+  test('empty content keeps its surface position without adding model tokens', () => {
+    const result = driveTimeline([developerMessage(1, { content: [] })])
+    assert.equal(result.state.surface[0].seq, 1)
+    assert.equal(result.state.surface[0].tokens, 0)
+    assert.equal(result.state.sums.inject, 0)
+    assert.equal(result.state.events[0].tokens, 0)
+  })
+
+  test('no developer source, whatever its shape, ever counts as a human input', () => {
+    for (const source of [undefined, null, {}, { kind: 'user' }]) {
+      const event = developerMessage(1)
+      const message = event.data!.message as Record<string, unknown>
+      if (source === undefined) delete message.source
+      else message.source = source
+      const result = driveTimeline([event])
+      assert.equal(result.state.surface[0].cat, 'inject', JSON.stringify(source))
+      assert.equal(result.state.sums.inject, 35)
+      assert.equal(result.state.humanInputs, undefined)
+      assert.equal(result.state.events[0].kind, 'inject')
+      assertStatesPlainJson(result)
+    }
+  })
+
+  test('a malformed nested message leaves the state unchanged', () => {
+    for (const data of [undefined, {}, { message: null }, { message: { content: 'invalid' } }]) {
+      const def = timelineDef()
+      const initial = def.init()
+      const event: TimelineEvent = { type: 'developer/message', seq: 1, time: at(), ...(data === undefined ? {} : { data }) }
+      assert.equal(def.apply(initial, event), initial, JSON.stringify(data))
+      def.stateSchema.parse(initial)
+    }
+  })
+})
 })

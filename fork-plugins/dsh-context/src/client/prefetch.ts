@@ -1,10 +1,11 @@
 import { useEffect } from 'react'
-import { asRecord } from './services'
+import { retentionOf } from './retention'
+import { asRecord, seatOf } from './services'
 import { detailStoreOf } from './timelineSource'
 
 const WARM_DELAY_MS = 900
 
-const MAX_PENDING = 32
+const MAX_PENDING = retentionOf('pendingWarm').maxEntries
 
 interface PendingWarm {
   timer: ReturnType<typeof setTimeout>
@@ -21,8 +22,9 @@ export function scheduleSessionWarm(sessionId: unknown, rev: number | null): voi
     return
   }
   const timer = setTimeout(() => {
+    const target = pending.get(sessionId) as PendingWarm
     pending.delete(sessionId)
-    detailStoreOf(sessionId).warm(rev)
+    detailStoreOf(sessionId).warm(target.rev)
   }, WARM_DELAY_MS)
   pending.set(sessionId, { timer, rev })
   while (pending.size > MAX_PENDING) {
@@ -33,7 +35,7 @@ export function scheduleSessionWarm(sessionId: unknown, rev: number | null): voi
   }
 }
 
-export function cancelSessionWarm(sessionId: string): void {
+function cancelSessionWarm(sessionId: string): void {
   const entry = pending.get(sessionId)
   if (entry === undefined) return
   clearTimeout(entry.timer)
@@ -45,10 +47,13 @@ export function resetSessionWarm(): void {
   pending.clear()
 }
 
+type ProjectionSeat = (key: string) => unknown
+
+const NO_PROJECTION: ProjectionSeat = () => undefined
+
 export function useSessionDetailWarm(sessionId: unknown, useProjection: unknown): void {
-  const head = typeof useProjection === 'function'
-    ? (useProjection as (key: string) => unknown)('contextTimeline')
-    : undefined
+  const read = seatOf(useProjection, NO_PROJECTION)
+  const head = read('contextTimeline')
   const rev = asRecord(head)?.detailRev
   const warmRev = typeof rev === 'number' && Number.isFinite(rev) && rev >= 0 ? rev : null
   useEffect(() => {

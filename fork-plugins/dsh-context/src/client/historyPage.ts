@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { lruTouch, lruTrim } from './lru'
+import { makeRetentionCache } from './retention'
 import type {
   ClientCtx, ContentFetcher, ConversationNodeLike, HeaderFetcher,
   HistoryEntryLike, SessionAddressLike, SessionPageFace,
@@ -204,25 +204,17 @@ function pageReaderOf(addressOf: () => SessionAddressLike): ((seq: number) => Pr
   }
 }
 
-const CONTENT_CACHE_MAX = 128
-
 export function makeContentFetcher(
   addressOf: () => SessionAddressLike,
 ): ContentFetcher | undefined {
   const read = pageReaderOf(addressOf)
   if (read === undefined) return undefined
-  const cache = new Map<number, ConversationNodeLike>()
+  const cache = makeRetentionCache<number, ConversationNodeLike>('historyContent')
   return async (seq) => {
     const hit = cache.get(seq)
-    if (hit !== undefined) {
-      lruTouch(cache, seq)
-      return hit
-    }
+    if (hit !== undefined) return hit
     const node = pageNodesOf(rowsOf(await read(seq))).get(seq) ?? null
-    if (node !== null) {
-      cache.set(seq, node)
-      lruTrim(cache, CONTENT_CACHE_MAX)
-    }
+    if (node !== null) cache.set(seq, node)
     return node
   }
 }
@@ -255,20 +247,15 @@ function headerContentOf(event: { type: string; data: Record<string, unknown> })
   return { tools }
 }
 
-const HEADER_CACHE_MAX = 12
-
 export function makeHeaderFetcher(
   addressOf: () => SessionAddressLike,
 ): HeaderFetcher | undefined {
   const read = pageReaderOf(addressOf)
   if (read === undefined) return undefined
-  const cache = new Map<number, HeaderEpochContent>()
+  const cache = makeRetentionCache<number, HeaderEpochContent>('historyHeader')
   return async (seq) => {
     const hit = cache.get(seq)
-    if (hit !== undefined) {
-      lruTouch(cache, seq)
-      return hit
-    }
+    if (hit !== undefined) return hit
     const rows = rowsOf(await read(seq))
     let picked: HeaderEpochContent | null = null
     for (const entry of rows) {
@@ -279,7 +266,6 @@ export function makeHeaderFetcher(
       cache.set(ev.seq, content)
       if (ev.seq === seq) picked = content
     }
-    lruTrim(cache, HEADER_CACHE_MAX)
     return picked
   }
 }

@@ -1,7 +1,9 @@
 import { asRecord } from './record'
+import { stringOf } from '../shared/decode'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SkillInfo } from '../shared/types'
-import { type ConnectionHostFace, registerPostRoute } from './connection'
+import { makeColdReadGate, type ColdReadGate } from './coldRead'
+import { mountPostRoute, reply } from './postRoute'
 
 export const SKILLS_ROUTE = '/api/dsh-context/skills'
 
@@ -9,10 +11,6 @@ const MAX_SKILLS = 500
 
 interface SkillRegistryLike {
   list(options: { cwd?: string; scope?: unknown }): Promise<unknown>
-}
-
-function stringOf(value: unknown): string | undefined {
-  return typeof value === 'string' && value !== '' ? value : undefined
 }
 
 async function disposeOf(resource: unknown): Promise<void> {
@@ -40,20 +38,28 @@ function skillInfoOf(value: unknown): SkillInfo | null {
   }
 }
 
-async function sessionViewOf(ctx: Context, sessionId: string | undefined): Promise<{ cwd?: string; agentPreset?: string }> {
+async function sessionViewOf(
+  ctx: Context,
+  sessionId: string | undefined,
+  coldReads: ColdReadGate,
+): Promise<{ cwd?: string; agentPreset?: string }> {
   if (sessionId === undefined) return {}
   const query = asRecord(ctx.get('sessionQuery'))
   if (typeof query?.observeSession !== 'function') return {}
   let observation: unknown
   try {
-    observation = await (query.observeSession as (id: string) => Promise<unknown>).call(query, sessionId)
+    observation = await coldReads.admit(() =>
+      (query.observeSession as (id: string, options: unknown) => Promise<unknown>)
+        .call(query, sessionId, { projectionMode: 'none' }))
   } catch {
     return {}
   }
+  if (observation === undefined) return {}
   try {
     const obs = asRecord(observation)
-    const cwd = stringOf(asRecord(obs?.header)?.cwd)
-    const agentPreset = stringOf(asRecord(asRecord(obs?.projections)?.values)?.agentPreset)
+    const header = asRecord(obs?.header)
+    const cwd = stringOf(header?.cwd)
+    const agentPreset = stringOf(header?.agentPreset)
     return {
       ...(cwd === undefined ? {} : { cwd }),
       ...(agentPreset === undefined ? {} : { agentPreset }),
@@ -101,16 +107,19 @@ async function resolveRegistry(
   return { registry: registry as unknown as SkillRegistryLike, scope, lease }
 }
 
-export function watchSkillCatalog(ctx: Context): void {
-  ctx.inject(['connection'], (c) => {
-
-    const handler = async (request: Request): Promise<Response> => {
+export function watchSkillCatalog(ctx: Context, coldReads: ColdReadGate = makeColdReadGate()): void {
+  mountPostRoute({
+    ctx,
+    deps: ['connection'],
+    path: SKILLS_ROUTE,
+    label: 'dsh-context: skills route',
+    handler: () => async (request: Request): Promise<Response> => {
       let value: { skills: SkillInfo[] } | null = null
       let lease: unknown
       try {
         const body = asRecord(await request.json())
         const sessionId = stringOf(body?.sessionId)
-        const view = await sessionViewOf(ctx, sessionId)
+        const view = await sessionViewOf(ctx, sessionId, coldReads)
         const cwd = view.cwd ?? stringOf(body?.cwd)
         const resolved = await resolveRegistry(ctx, sessionId, view.agentPreset)
         if (resolved !== null) {
@@ -132,9 +141,7 @@ export function watchSkillCatalog(ctx: Context): void {
       } finally {
         await disposeOf(lease)
       }
-      return Response.json({ ok: true, value }, { headers: { 'cache-control': 'no-store' } })
-    }
-
-    registerPostRoute(c, c.get('connection') as ConnectionHostFace | undefined, SKILLS_ROUTE, handler, 'dsh-context: skills route')
+      return reply({ ok: true, value })
+    },
   })
 }

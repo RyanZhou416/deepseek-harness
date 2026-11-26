@@ -1,9 +1,5 @@
-import { estimateTextTokens } from '../shared/estimate'
+import { BLOCK_OVERHEAD, CHARS_PER_TOKEN, ROLE_OVERHEAD, estimateTextTokens } from '../shared/estimate'
 import { estimateImageTokens } from '../shared/imageTokens'
-
-const CHARS_PER_TOKEN = 4
-const BLOCK_OVERHEAD = 4
-const ROLE_OVERHEAD = 4
 
 export function estimateToolsTotal(tools: unknown[]): number {
   return tools.length > 0
@@ -138,6 +134,10 @@ export interface MessageSource {
   summary?: string
   sections?: ({ name?: string } | null)[]
   changes?: ({ path?: string } | null)[]
+  senderSessionId?: string
+  senderId?: string
+  senderName?: string
+  references?: ({ sessionId?: string; label?: string } | null)[]
 }
 
 export function injectionSourceName(source: MessageSource | null | undefined): string {

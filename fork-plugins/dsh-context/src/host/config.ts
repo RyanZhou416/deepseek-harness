@@ -9,12 +9,30 @@ export const DEFAULT_BOUNDS = {
   maxArchiveNodes: 400,
   maxFileOps: 400,
   maxCommands: 400,
+  maxSpans: 2_000,
   maxCommandChars: 4096,
 }
 
-export type FoldBounds = typeof DEFAULT_BOUNDS
+export type FoldBounds = typeof DEFAULT_BOUNDS & {
+  headOnly?: boolean
+}
 
 export type Config = Partial<FoldBounds> & Partial<PluginSettings>
+
+export const HISTORY_LIMIT = Number.MAX_SAFE_INTEGER
+
+export function historyBounds(bounds: FoldBounds): FoldBounds {
+  return {
+    ...bounds,
+    maxRequestSteps: HISTORY_LIMIT,
+    maxKeptTurns: HISTORY_LIMIT,
+    maxEvents: HISTORY_LIMIT,
+    maxNodes: HISTORY_LIMIT,
+    maxArchiveNodes: HISTORY_LIMIT,
+    maxFileOps: HISTORY_LIMIT,
+    maxSpans: HISTORY_LIMIT,
+  }
+}
 
 export function volatileField<S extends z>(field: S): S {
   const volatile = (field as unknown as { volatile?: () => S }).volatile
@@ -33,18 +51,20 @@ export const Config = z.object({
   maxArchiveNodes: count(DEFAULT_BOUNDS.maxArchiveNodes),
   maxFileOps: count(DEFAULT_BOUNDS.maxFileOps),
   maxCommands: count(DEFAULT_BOUNDS.maxCommands),
+  maxSpans: count(DEFAULT_BOUNDS.maxSpans),
   maxCommandChars: count(DEFAULT_BOUNDS.maxCommandChars),
   defaultPlacement: volatileField(z.union(['all', 'tab', 'sidebar', 'hide']).default('all').loose()),
   defaultGranularity: volatileField(z.union(['step', 'turn']).default('step').loose()),
-  defaultTrendMode: volatileField(z.union(['total', 'delta']).default('total').loose()),
+  defaultTimelineMode: volatileField(z.union(['total', 'delta']).default('total').loose()),
   defaultDeltaBase: volatileField(z.union(['step', 'turn']).default('step').loose()),
   defaultToolSort: volatileField(z.union(['size', 'count', 'name']).default('count').loose()),
   defaultFileSort: volatileField(z.union(['count', 'lines', 'latest', 'path', 'name']).default('lines').loose()),
   insightsEntry: volatileField(z.union(['show', 'hide']).default('show').loose()),
   defaultDurationCurve: volatileField(z.union(['show', 'hide']).default('show').loose()),
   overviewAutoSteps: volatileField(z.union(['100', '200', '300', 'off']).default('100').loose()),
-  defaultOverviewRange: volatileField(z.union(['today', '7d', '30d', 'all']).default('30d').loose()),
+  defaultOverviewRange: volatileField(z.union(['today', '7d', '30d']).default('30d').loose()),
   fleetTab: volatileField(z.union(['show', 'hide']).default('show').loose()),
+  balanceSource: volatileField(z.union(['account', 'api']).default('account').loose()),
   promptPrefix: volatileField(z.string().default('').loose()),
   promptSuffix: volatileField(z.string().default('').loose()),
 })
@@ -59,6 +79,7 @@ export function resolveBounds(config: Config | undefined): FoldBounds {
     maxArchiveNodes: resolved.maxArchiveNodes,
     maxFileOps: resolved.maxFileOps,
     maxCommands: resolved.maxCommands,
+    maxSpans: resolved.maxSpans,
     maxCommandChars: resolved.maxCommandChars,
   }
 }

@@ -12,6 +12,7 @@ export interface HeatmapProps {
   selected?: string | null
   onSelect?: (day: string | null) => void
   today: string
+  pending?: boolean
 }
 
 interface HeatCell {
@@ -64,14 +65,14 @@ export function makeHeatmap(kit: ViewKit): (props: HeatmapProps) => ReactElement
     for (const column of columns) {
       for (const cell of column) {
         const entry = byKey[cell.key]
-        if (entry === undefined || (entry.tokens <= 0 && entry.requests <= 0)) continue
+        if (entry === undefined || (entry.tokens <= 0 && entry.sessions <= 0)) continue
         cell.entry = entry
         any = true
         if (entry.sessions > maxSessions) maxSessions = entry.sessions
         if (entry.tokens > maxTokens) maxTokens = entry.tokens
       }
     }
-    if (!any) return <div className="lc-empty">{t('ov.heat.empty')}</div>
+    if (!any && props.pending !== true) return <div className="lc-empty">{t('ov.heat.empty')}</div>
     const max = metric === 'sessions' ? maxSessions : maxTokens
     const metricValueOf = (entry: DayTotals): number => (metric === 'sessions' ? entry.sessions : entry.tokens)
     const weekdayLabels: Record<number, string> = { 1: t('ov.heat.wd.1'), 3: t('ov.heat.wd.3'), 5: t('ov.heat.wd.5') }

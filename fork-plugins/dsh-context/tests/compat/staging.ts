@@ -1,9 +1,10 @@
-import { spawnSync } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Baseline } from '../baselines'
+import { promisify } from 'node:util'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 export const DSH_REPO = process.env.DSH_REPO || join(homedir(), 'dev', 'deepseek-harness')
@@ -28,61 +29,69 @@ export function skipReasons(): string[] {
   return reasons
 }
 
+const execFileP = promisify(execFile)
+
+const GIT_MAX_BUFFER = 16 * 1024 * 1024
+
 export function dshShow(tag: string, path: string): string {
   const run = spawnSync('git', ['-C', DSH_REPO, 'show', `${tag}:${path}`], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
   if (run.status !== 0) throw new Error(`git show ${tag}:${path} failed: ${(run.stderr ?? '').trim().slice(0, 300)}`)
   return run.stdout
 }
 
-export function dshHasString(tag: string, pattern: string, pathspec: string): boolean {
-  const run = spawnSync('git', ['-C', DSH_REPO, 'grep', '-l', pattern, tag, '--', pathspec], { encoding: 'utf8' })
-  return run.status === 0 && run.stdout.trim() !== ''
+const hasStringCache = new Map<string, Promise<boolean>>()
+
+export function dshHasString(tag: string, pattern: string, pathspec: string): Promise<boolean> {
+  const key = `${tag}\u0000${pattern}\u0000${pathspec}`
+  let cached = hasStringCache.get(key)
+  if (cached === undefined) {
+    cached = execFileP('git', ['-C', DSH_REPO, 'grep', '-l', pattern, tag, '--', pathspec], { maxBuffer: GIT_MAX_BUFFER })
+      .then(run => run.stdout.trim() !== '', () => false)
+    hasStringCache.set(key, cached)
+  }
+  return cached
 }
 
 export function stageFile(baseline: Baseline, tagPath: string, localName: string): string {
+  return stageSource(baseline, localName, dshShow(baseline.tag, tagPath))
+}
+
+function stageSource(baseline: Baseline, localName: string, source: string): string {
   const dir = join(STAGE, baseline.id, dirname(localName))
   mkdirSync(dir, { recursive: true })
   const file = join(STAGE, baseline.id, localName)
-  writeFileSync(file, dshShow(baseline.tag, tagPath))
+  writeFileSync(file, source)
   return file
 }
 
-function fiberStateSource(baseline: Baseline): string | undefined {
-  let source: string
-  try {
-    source = dshShow(baseline.tag, 'vendor/cordis/src/fiber.ts')
-  } catch {
-    return undefined
+function constEnumMembers(tag: string, tagPath: string, name: string): Map<string, number> | undefined {
+  const match = new RegExp(`export const enum ${name}\\s*\\{([^}]*)\\}`).exec(dshShow(tag, tagPath))
+  if (match === null) return undefined
+  const members = new Map<string, number>()
+  let value = 0
+  for (const entry of match[1].split(',')) {
+    const [key, assigned] = entry.split('=').map(part => part.trim())
+    if (key === '') continue
+    if (assigned !== undefined) {
+      const parsed = Number(assigned)
+      if (!Number.isFinite(parsed)) throw new Error(`dsh-context compat: ${name}.${key} has a non-numeric initializer`)
+      value = parsed
+    }
+    members.set(key, value)
+    value += 1
   }
-  const body = source.match(/export const enum FiberState \{([\s\S]*?)\n\}/)?.[1]
-  if (body === undefined) return undefined
-  let next = 0
-  const members = body.split(',')
-    .map(part => part.trim())
-    .filter(part => part !== '' && !part.startsWith('//'))
-    .map((part) => {
-      const [name, value] = part.split('=').map(token => token.trim())
-      const numeric = value === undefined ? next : Number(value)
-      next = numeric + 1
-      return `${name}: ${numeric}`
-    })
-  return `export const FiberState = { ${members.join(', ')} } as const\n`
+  return members
 }
 
-export function stageRegistrySource(baseline: Baseline, tagPath: string, localName: string): string {
-  const text = dshShow(baseline.tag, tagPath)
-  const shim = fiberStateSource(baseline)
-  const match = text.match(/import \{([^}]*)\} from '@deepseek-ai\/cordis'\n/)
-  if (shim === undefined || match === null || !/\bFiberState\b/.test(match[1])) {
-    return stageFile(baseline, tagPath, localName)
-  }
-  const dir = join(STAGE, baseline.id, dirname(localName))
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'fiber-state-shim.ts'), shim)
-  const names = match[1].split(',').map(name => name.trim()).filter(name => name !== '' && name !== 'FiberState')
-  const file = join(STAGE, baseline.id, localName)
-  writeFileSync(file, text.replace(match[0], `import { ${names.join(', ')} } from '@deepseek-ai/cordis'\nimport { FiberState } from './fiber-state-shim.ts'\n`))
-  return file
+function inlineConstEnum(source: string, name: string, members: ReadonlyMap<string, number>): string {
+  const inlined = source.replace(new RegExp(`\\b${name}\\.([A-Za-z_$][\\w$]*)`, 'g'), (whole, member: string) => {
+    const value = members.get(member)
+    return value === undefined ? whole : String(value)
+  })
+  return inlined.replace(/(import\s*\{)([^}]*)(\}\s*from\s*'@deepseek-ai\/cordis')/g, (_whole, open: string, names: string, close: string) => {
+    const kept = names.split(',').map(part => part.trim()).filter(part => part !== name)
+    return `${open} ${kept.join(', ')} ${close}`
+  })
 }
 
 function stageFileIfPresent(baseline: Baseline, tagPath: string, localName: string): boolean {
@@ -110,16 +119,8 @@ export function ensureHostDeps(baseline: Baseline): void {
   }, null, 2))
   const missing = Object.keys(deps).filter(name => !existsSync(join(dir, 'node_modules', ...name.split('/'))))
   if (missing.length === 0) return
-  const npmArgs = ['install', '--no-audit', '--no-fund', '--loglevel=error']
-  const command = process.platform === 'win32' ? process.execPath : 'npm'
-  const args = process.platform === 'win32'
-    ? [join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...npmArgs]
-    : npmArgs
-  const run = spawnSync(command, args, { cwd: dir, encoding: 'utf8' })
-  if (run.status !== 0) {
-    const detail = run.error?.message ?? (run.stderr ?? '').trim()
-    throw new Error(`npm install ${JSON.stringify(deps)} failed: ${detail.slice(0, 300)}`)
-  }
+  const run = spawnSync('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: dir, encoding: 'utf8', shell: process.platform === 'win32' })
+  if (run.status !== 0) throw new Error(`npm install ${JSON.stringify(deps)} failed: ${(run.stderr ?? '').trim().slice(0, 300)}`)
 }
 
 export interface AdmissionReport {
@@ -143,15 +144,38 @@ process.stdout.write('ADMISSION-JSON ' + JSON.stringify({
 `
 }
 
-export function evaluateAdmission(baseline: Baseline): AdmissionReport {
-  ensureHostDeps(baseline)
-  stageFile(baseline, 'packages/boot/app-boot/src/plugin-compatibility.ts', join('boot', 'plugin-compatibility.ts'))
-  const driver = join(STAGE, baseline.id, 'admission.mjs')
-  writeFileSync(driver, admissionSource(`file://${join(REPO, 'package.json')}`, baseline.version, '0.1.7-rc.2'))
-  const run = spawnSync(process.execPath, [driver], { cwd: STAGE, encoding: 'utf8', timeout: 60_000 })
-  const line = (run.stdout ?? '').split('\n').find(l => l.startsWith('ADMISSION-JSON '))
-  if (line === undefined) throw new Error(`admission driver failed: ${(run.stderr ?? run.stdout ?? '').trim().slice(0, 400)}`)
-  return JSON.parse(line.slice('ADMISSION-JSON '.length)) as AdmissionReport
+const admissionCache = new Map<string, Promise<AdmissionReport>>()
+
+export function evaluateAdmission(baseline: Baseline): Promise<AdmissionReport> {
+  let cached = admissionCache.get(baseline.id)
+  if (cached === undefined) {
+    cached = (async () => {
+      ensureHostDeps(baseline)
+      stageFile(baseline, 'packages/boot/app-boot/src/plugin-compatibility.ts', join('boot', 'plugin-compatibility.ts'))
+      const driver = join(STAGE, baseline.id, 'admission.mjs')
+      writeFileSync(driver, admissionSource(`file://${join(REPO, 'package.json')}`, baseline.version, '0.1.7-rc.2'))
+      const stdout = await runNode(driver, 'admission driver failed')
+      return parseDriverOutput<AdmissionReport>(stdout, 'ADMISSION-JSON ', 'admission driver failed')
+    })()
+    admissionCache.set(baseline.id, cached)
+  }
+  return cached
+}
+
+async function runNode(script: string, what: string): Promise<string> {
+  try {
+    const run = await execFileP(process.execPath, [script], { cwd: STAGE, timeout: 60_000, maxBuffer: GIT_MAX_BUFFER })
+    return run.stdout
+  } catch (err) {
+    const run = err as { stderr?: string; stdout?: string }
+    throw new Error(`${what}: ${(run.stderr ?? run.stdout ?? '').trim().slice(0, 400)}`)
+  }
+}
+
+function parseDriverOutput<T>(stdout: string, marker: string, what: string): T {
+  const line = stdout.split('\n').find(l => l.startsWith(marker))
+  if (line === undefined) throw new Error(`${what}: no ${marker.trim()} output`)
+  return JSON.parse(line.slice(marker.length)) as T
 }
 
 export interface DriverReport {
@@ -160,10 +184,12 @@ export interface DriverReport {
   coldMatches: boolean
   developerTokens: number | null
   developerRequestTokens: number | null
+  developerInjectCount: number | null
   developerRestoreMatches: boolean
   hostileSnapshotOk: boolean
   hostilePrompt: number | null
   hostileCacheRead: number | null
+  hostileSteps: number | null
   poisonedEscapedDrive: number
   poisonedStarves: boolean
   poisonedSnapshotThrows: boolean
@@ -178,7 +204,7 @@ const plugin = await import(${JSON.stringify(pluginUrl)})
 const ctx = new Context()
 const registry = new SessionProjectionRegistry(ctx)
 ctx.sessionProjections = registry
-await plugin.apply(ctx, {})
+plugin.apply(ctx, {})
 const session = { seq: 0, header: { id: 'compat-session', cwd: '/tmp' }, events: [] }
 ctx.emit('session/created', session)
 const ev = (seq, type, data = {}) => ({ seq, time: 1700000000000 + seq * 1000, type, data })
@@ -209,12 +235,12 @@ const gate = snapshotJsonValue(registry.checkpoint(session))
 const cold = registry.restore({}, log, 0, session.header)
 
 let developerTokens = null
-let developerRequestTokens = null
+let developerInjectCount = null
 let developerRestoreMatches = false
 const ctxC = new Context()
 const registryC = new SessionProjectionRegistry(ctxC)
 ctxC.sessionProjections = registryC
-await plugin.apply(ctxC, {})
+plugin.apply(ctxC, {})
 const sessionC = { seq: 0, header: { id: 'registry-change-session', cwd: '/tmp' }, events: [] }
 ctxC.emit('session/created', sessionC)
 const registryLog = [
@@ -227,15 +253,20 @@ drive(ctxC, sessionC, registryLog)
 const values = registryC.snapshot(sessionC).values
 const node = values.contextTimeline.nodes.find(n => n.seq === 2)
 developerTokens = node ? node.tokens : null
-developerRequestTokens = values.contextTimeline.requests[0].inject
+const developerState = registryC.checkpoint(sessionC).contextTimeline.val
+developerInjectCount = typeof developerState.totals?.injects === 'number'
+  ? developerState.totals.injects
+  : Array.isArray(developerState.events) ? developerState.events.filter(e => e.kind === 'inject').length : null
 const rows = snapshotJsonValue(registryC.checkpoint(sessionC))
 const warm = registryC.restore(rows, registryLog, 0, sessionC.header)
 const oldLog = registryLog.map(e => e.type === 'developer/message' ? { ...e, type: 'todo/write' } : e)
 const oldRows = registryC.restore({}, oldLog, 0, sessionC.header).checkpoint
 oldRows.contextTimeline.ver = 24
 const rebuilt = registryC.restore(oldRows, registryLog, 0, sessionC.header)
-developerRestoreMatches = JSON.stringify(warm.snapshot.values) === JSON.stringify(values)
-  && JSON.stringify(rebuilt.snapshot.values) === JSON.stringify(values)
+const HEAD_VIEW_FIELDS = ['current', 'counts', 'cost', 'last', 'model', 'provider', 'reasoningEffort', 'contextWindow', 'maxOutputTokens', 'images', 'toolCalls', 'toolTally', 'programTally', 'commandStats', 'humanInputs', 'answers', 'lastUser', 'generatedReasoning', 'generatedAnswerTokens', 'generatedCallTokens', 'detailRev', 'timing', 'systems']
+const headViewOf = (view) => JSON.stringify(Object.fromEntries(HEAD_VIEW_FIELDS.filter(field => view?.[field] !== undefined).map(field => [field, view[field]])))
+developerRestoreMatches = headViewOf(warm.snapshot.values.contextTimeline) === headViewOf(values.contextTimeline)
+  && headViewOf(rebuilt.snapshot.values.contextTimeline) === headViewOf(values.contextTimeline)
 
 const hostile = [
   ev(12, 'step/start'),
@@ -244,13 +275,16 @@ const hostile = [
 )]
 drive(ctx, session, hostile)
 let hostileSnapshotOk = true
-let hostilePrompt = null
-let hostileCacheRead = null
+let hostileSteps = null
 try {
-  const hostileSnap = registry.snapshot(session)
-  const rec = hostileSnap.values.contextTimeline.requests.find(r => r.seq === 13)
-  hostilePrompt = rec ? rec.prompt : null
-  hostileCacheRead = rec ? rec.cacheRead : null
+  const hostileSnapshot = registry.snapshot(session).values
+  const hostileView = hostileSnapshot.contextTimeline
+  const hostileState = registry.checkpoint(session).contextTimeline.val
+  hostileSteps = typeof hostileView?.counts?.steps === 'number'
+    ? hostileView.counts.steps
+    : typeof hostileState.totals?.steps === 'number'
+      ? hostileState.totals.steps
+      : Array.isArray(hostileState.requests) ? hostileState.requests.length : null
 } catch {
   hostileSnapshotOk = false
 }
@@ -272,7 +306,7 @@ registryB.register({
     view: (state) => ({ uncached: state.uncached }),
   },
 })
-await plugin.apply(ctxB, {})
+plugin.apply(ctxB, {})
 const sessionB = { seq: 0, header: { id: 'poison-session', cwd: '/tmp' }, events: [] }
 ctxB.emit('session/created', sessionB)
 const notified = []
@@ -300,11 +334,10 @@ process.stdout.write('DRIVER-JSON ' + JSON.stringify({
   gateOk: gate !== undefined,
   coldMatches: JSON.stringify(cold.snapshot.values) === JSON.stringify(snapshot.values),
   developerTokens,
-  developerRequestTokens,
+  developerInjectCount,
   developerRestoreMatches,
   hostileSnapshotOk,
-  hostilePrompt,
-  hostileCacheRead,
+  hostileSteps,
   poisonedEscapedDrive,
   poisonedStarves: beforePoison > 0 && notified.length === beforePoison,
   poisonedSnapshotThrows,
@@ -312,25 +345,53 @@ process.stdout.write('DRIVER-JSON ' + JSON.stringify({
 `
 }
 
-export function runDriver(baseline: Baseline): DriverReport {
-  ensureHostDeps(baseline)
-  stageRegistrySource(baseline, 'packages/session/session-projection/src/index.ts', join('registry', 'index.ts'))
-  stageFile(baseline, 'packages/session/session-projection/src/types.ts', join('registry', 'types.ts'))
-  stageFile(baseline, 'packages/util/values/src/index.ts', join('dsh', 'index.ts'))
-  stageFileIfPresent(baseline, 'packages/util/values/src/partial-json.ts', join('dsh', 'partial-json.ts'))
-  const driver = join(STAGE, baseline.id, 'driver.mjs')
-  writeFileSync(driver, driverSource(`file://${join(REPO, 'lib', 'index.js')}`))
-  const run = spawnSync(process.execPath, [driver], { cwd: STAGE, encoding: 'utf8', timeout: 60_000 })
-  const line = (run.stdout ?? '').split('\n').find(l => l.startsWith('DRIVER-JSON '))
-  if (line === undefined) {
-    throw new Error(`driver failed: ${(run.stderr ?? run.stdout ?? '').trim().slice(0, 400)}`)
+const driverCache = new Map<string, Promise<DriverReport>>()
+
+export function runDriver(baseline: Baseline): Promise<DriverReport> {
+  let cached = driverCache.get(baseline.id)
+  if (cached === undefined) {
+    cached = (async () => {
+      ensureHostDeps(baseline)
+      const registryFile = 'packages/session/session-projection/src/index.ts'
+      const fiberState = constEnumMembers(baseline.tag, 'vendor/cordis/src/fiber.ts', 'FiberState')
+      const registry = dshShow(baseline.tag, registryFile)
+      stageSource(
+        baseline,
+        join('registry', 'index.ts'),
+        fiberState === undefined ? registry : inlineConstEnum(registry, 'FiberState', fiberState),
+      )
+      stageFile(baseline, 'packages/session/session-projection/src/types.ts', join('registry', 'types.ts'))
+      stageFile(baseline, 'packages/util/values/src/index.ts', join('dsh', 'index.ts'))
+      stageFileIfPresent(baseline, 'packages/util/values/src/partial-json.ts', join('dsh', 'partial-json.ts'))
+      const driver = join(STAGE, baseline.id, 'driver.mjs')
+      writeFileSync(driver, driverSource(`file://${join(REPO, 'lib', 'index.js')}`))
+      const stdout = await runNode(driver, 'driver failed')
+      return parseDriverOutput<DriverReport>(stdout, 'DRIVER-JSON ', 'driver failed')
+    })()
+    driverCache.set(baseline.id, cached)
   }
-  return JSON.parse(line.slice('DRIVER-JSON '.length)) as DriverReport
+  return cached
+}
+
+export function primeBaselines(baselines: readonly Baseline[]): void {
+  for (const baseline of baselines) {
+    runDriver(baseline).catch(() => {})
+    evaluateAdmission(baseline).catch(() => {})
+  }
+}
+
+export function moduleRequiresOf(source: string): string[] {
+  const callee = /factory\s*:\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)/.exec(source)?.[1] ?? 'require'
+  const calls = [...source.matchAll(/([A-Za-z_$][\w$]*)\("([^"]+)"\)/g)]
+    .filter(match => match[1] === callee)
+    .map(match => match[2])
+  return [...new Set(calls)]
 }
 
 export function bundleRequires(): string[] {
-  const source = readFileSync(join(REPO, 'lib', 'client.js'), 'utf8')
-  return [...new Set([...source.matchAll(/require\("([^"]+)"\)/g)].map(m => m[1]))]
+  const requires = moduleRequiresOf(readFileSync(join(REPO, 'lib', 'client.js'), 'utf8'))
+  if (requires.length === 0) throw new Error('lib/client.js declares no module-table requires; the scrape no longer matches the bundle format')
+  return requires
 }
 
 export const SLOT_SEAMS = [
@@ -353,12 +414,17 @@ export const ICON_SEAMS = [
   'IconDatabaseOutlineRegular',
   'IconClockOutlineRegular',
   'IconGaugeOutlineRegular',
-  'IconCompareSplitOutlineRegular',
   'IconBrowseOutlineRegular',
-  'IconContextInjectionOutlineRegular',
   'IconFolderOpenOutlineRegular',
   'IconApiOutlineRegular',
   'IconPluginPinwheelOutlineRegular',
+  'IconFlatListOutlineRegular',
+  'IconCompareSplitOutlineRegular',
+  'IconQueueOutlineRegular',
+  'IconAgentPresetOutlineRegular',
+  'IconUsersOutlineRegular',
+  'IconWorkspaceTreeOutlineRegular',
+  'IconSparkleRegular',
   'FileTypeIcon',
 ] as const
 

@@ -1,17 +1,15 @@
+// @vitest-environment node
+
 import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, test, vi } from 'vitest'
-import {
-  balanceEntryOf,
-  PLATFORM_BALANCE_STORAGE_KEY,
-  platformBalanceOf,
-  readPlatformBalance,
-  resetPlatformBalance,
-  setPlatformBalanceStorage,
-  type StorageFace,
-} from '../../src/client/balance'
-import type { PlatformBalance } from '../../src/shared/types'
+import { balanceEntryOf, PLATFORM_BALANCES_STORAGE_KEY, platformBalanceOf, platformBalancesOf, readPlatformBalances, resetPlatformBalances, setPlatformBalanceStorage, type StorageFace } from '../../src/client/balance'
+import { type PlatformBalances } from '../../src/shared/types'
+import { overviewValueOf } from '../../src/client/overviewSource'
+import { BASE_COVERAGE, daysValue, pageValue, summaryRaw, summaryValue, tallyValue } from './helpers/overviewWire'
 
-const WIRE_BALANCE = {
+describe('balance', () => {
+
+const ACCOUNT_BALANCE = {
   isAvailable: true,
   balances: [
     { currency: 'CNY', total: 110, granted: 10, toppedUp: 100 },
@@ -19,8 +17,18 @@ const WIRE_BALANCE = {
   ],
 }
 
-function wire(total: number): { isAvailable: boolean; balances: { currency: string; total: number; granted: number; toppedUp: number }[] } {
-  return { isAvailable: true, balances: [{ currency: 'CNY', total, granted: 0, toppedUp: total }] }
+const API_BALANCE = {
+  isAvailable: true,
+  balances: [
+    { currency: 'CNY', total: 90, granted: 20, toppedUp: 70 },
+    { currency: 'USD', total: 2, granted: 0.5, toppedUp: 1.5 },
+  ],
+}
+
+const WIRE_BALANCES = { account: ACCOUNT_BALANCE, api: API_BALANCE }
+
+function wire(total: number): PlatformBalances {
+  return { account: null, api: { isAvailable: true, balances: [{ currency: 'CNY', total, granted: 0, toppedUp: total }] } }
 }
 
 function stubRoute(body: unknown | undefined, mode: 'ok' | 'reject' | 'status' = 'ok'): { calls: () => number } {
@@ -41,7 +49,7 @@ function gatedRoute(): { release: () => void; calls: () => number } {
   vi.stubGlobal('fetch', async () => {
     n++
     await gate
-    return { ok: true, json: async () => ({ ok: true, value: WIRE_BALANCE }) }
+    return { ok: true, json: async () => ({ ok: true, value: WIRE_BALANCES }) }
   })
   return { release, calls: () => n }
 }
@@ -66,13 +74,15 @@ async function drain(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve()
 }
 
-function collector(): { seen: PlatformBalance[]; onRefresh: (v: PlatformBalance) => void } {
-  const seen: PlatformBalance[] = []
+function collector(): { seen: PlatformBalances[]; onRefresh: (v: PlatformBalances) => void } {
+  const seen: PlatformBalances[] = []
   return { seen, onRefresh: (v) => seen.push(v) }
 }
 
 function seededStorage(): FakeStorage {
-  const fake = new FakeStorage({ [PLATFORM_BALANCE_STORAGE_KEY]: JSON.stringify(WIRE_BALANCE) })
+  const fake = new FakeStorage({
+    [PLATFORM_BALANCES_STORAGE_KEY]: JSON.stringify({ at: Date.now(), balances: WIRE_BALANCES }),
+  })
   setPlatformBalanceStorage(fake)
   return fake
 }
@@ -85,12 +95,12 @@ function clearRealStorage(): void {
 }
 
 beforeEach(() => {
-  resetPlatformBalance()
+  resetPlatformBalances()
   clearRealStorage()
 })
 
 afterEach(() => {
-  resetPlatformBalance()
+  resetPlatformBalances()
   clearRealStorage()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
@@ -98,7 +108,7 @@ afterEach(() => {
 
 describe('platformBalanceOf', () => {
   test('a delivered wire balance parses whole; absent, shapeless, or entry-less payloads are no balance', () => {
-    assert.deepEqual(platformBalanceOf(WIRE_BALANCE), WIRE_BALANCE)
+    assert.deepEqual(platformBalanceOf(ACCOUNT_BALANCE), ACCOUNT_BALANCE)
     assert.equal(platformBalanceOf(undefined), null)
     assert.equal(platformBalanceOf(null), null)
     assert.equal(platformBalanceOf('balance'), null)
@@ -132,8 +142,36 @@ describe('platformBalanceOf', () => {
     })
     const hostile = new Proxy({}, { get() { throw new Error('hostile') } })
     assert.equal(platformBalanceOf({ balances: [hostile] }), null)
-    const mixed = platformBalanceOf({ balances: [hostile, WIRE_BALANCE.balances[0]] })
+    const mixed = platformBalanceOf({ balances: [hostile, ACCOUNT_BALANCE.balances[0]] })
     assert.deepEqual(mixed?.balances, [{ currency: 'CNY', total: 110, granted: 10, toppedUp: 100 }])
+  })
+})
+
+describe('platformBalancesOf', () => {
+  test('a delivered report parses both arms; an absent arm stays null', () => {
+    assert.deepEqual(platformBalancesOf(WIRE_BALANCES), WIRE_BALANCES)
+    assert.deepEqual(platformBalancesOf({ account: null, api: null }), { account: null, api: null })
+    assert.deepEqual(platformBalancesOf({ account: ACCOUNT_BALANCE, api: null }), { account: ACCOUNT_BALANCE, api: null })
+    assert.deepEqual(platformBalancesOf({ account: null, api: API_BALANCE }), { account: null, api: API_BALANCE })
+  })
+
+  test('a malformed or hostile non-null arm degrades to absent while the other arm survives', () => {
+    for (const bad of [undefined, null, 'balances', [], {}, { account: ACCOUNT_BALANCE }, { api: API_BALANCE }]) {
+      assert.equal(platformBalancesOf(bad), null, JSON.stringify(bad))
+    }
+    assert.deepEqual(
+      platformBalancesOf({ account: { isAvailable: true }, api: API_BALANCE }),
+      { account: null, api: API_BALANCE },
+      'a malformed account arm never blanks a readable API arm',
+    )
+    assert.deepEqual(
+      platformBalancesOf({ account: ACCOUNT_BALANCE, api: { balances: 'CNY' } }),
+      { account: ACCOUNT_BALANCE, api: null },
+    )
+    const hostile = new Proxy({}, { get() { throw new Error('hostile') } })
+    assert.deepEqual(platformBalancesOf({ account: hostile, api: API_BALANCE }), { account: null, api: API_BALANCE })
+    assert.deepEqual(platformBalancesOf({ account: ACCOUNT_BALANCE, api: hostile }), { account: ACCOUNT_BALANCE, api: null })
+    assert.deepEqual(platformBalancesOf({ account: undefined, api: undefined }), { account: null, api: null })
   })
 })
 
@@ -142,107 +180,119 @@ describe('balanceEntryOf', () => {
     assert.equal(balanceEntryOf(null, 'cny'), null)
     assert.equal(balanceEntryOf(undefined, 'usd'), null)
     assert.equal(balanceEntryOf({ isAvailable: true, balances: [] }, 'cny'), null)
-    assert.deepEqual(balanceEntryOf(WIRE_BALANCE, 'cny'), WIRE_BALANCE.balances[0])
-    assert.deepEqual(balanceEntryOf(WIRE_BALANCE, 'usd'), WIRE_BALANCE.balances[1])
+    assert.deepEqual(balanceEntryOf(ACCOUNT_BALANCE, 'cny'), ACCOUNT_BALANCE.balances[0])
+    assert.deepEqual(balanceEntryOf(ACCOUNT_BALANCE, 'usd'), ACCOUNT_BALANCE.balances[1])
     const eurOnly = platformBalanceOf({ balances: [{ currency: 'EUR', total: 2, granted: 0, toppedUp: 2 }] })
     assert.deepEqual(balanceEntryOf(eurOnly, 'usd'), eurOnly?.balances[0] ?? null)
   })
 })
 
-describe('readPlatformBalance', () => {
-  test('a landing figure reports through the refresh and is served from memory next time', async () => {
-    const { calls } = stubRoute({ ok: true, value: WIRE_BALANCE })
+describe('readPlatformBalances', () => {
+  test('a landing report reports through the refresh and is served from memory next time', async () => {
+    const { calls } = stubRoute({ ok: true, value: WIRE_BALANCES })
     const first = collector()
-    assert.equal(readPlatformBalance(first.onRefresh), null, 'the first open has nothing to paint')
+    assert.equal(readPlatformBalances(first.onRefresh), null, 'the first open has nothing to paint')
     await drain()
-    assert.deepEqual(first.seen, [WIRE_BALANCE])
+    assert.deepEqual(first.seen, [WIRE_BALANCES])
     assert.equal(calls(), 1)
 
     const second = collector()
-    assert.deepEqual(readPlatformBalance(second.onRefresh), WIRE_BALANCE, 'the memory figure paints at once')
+    assert.deepEqual(readPlatformBalances(second.onRefresh), WIRE_BALANCES, 'the memory report paints at once')
     await drain()
-    assert.deepEqual(second.seen, [WIRE_BALANCE])
+    assert.deepEqual(second.seen, [WIRE_BALANCES])
     assert.equal(calls(), 2, 'every open revalidates regardless of what it could paint')
   })
 
-  test('the stored figure paints before the read lands, then the live one replaces it', async () => {
+  test('the stored report paints before the read lands, then the live one replaces it', async () => {
     seededStorage()
     const fresh = wire(99)
     stubRoute({ ok: true, value: fresh })
     const { seen, onRefresh } = collector()
-    assert.deepEqual(readPlatformBalance(onRefresh), WIRE_BALANCE, 'the stored figure shows at once')
+    assert.deepEqual(readPlatformBalances(onRefresh), WIRE_BALANCES, 'the stored report shows at once')
     await drain()
     assert.deepEqual(seen, [fresh])
-    assert.deepEqual(readPlatformBalance(() => {}), fresh, 'memory now outranks storage')
+    assert.deepEqual(readPlatformBalances(() => {}), fresh, 'memory now outranks storage')
   })
 
   test('an open while a read is in flight joins that read and lands with it (issue #82)', async () => {
     const { release, calls } = gatedRoute()
     const a = collector()
     const b = collector()
-    assert.equal(readPlatformBalance(a.onRefresh), null)
-    assert.equal(readPlatformBalance(b.onRefresh), null, 'nothing remembered until a read lands')
+    assert.equal(readPlatformBalances(a.onRefresh), null)
+    assert.equal(readPlatformBalances(b.onRefresh), null, 'nothing remembered until a read lands')
     await Promise.resolve()
     release()
     await drain()
-    assert.deepEqual(a.seen, [WIRE_BALANCE], 'the open that started the read reports its figure')
-    assert.deepEqual(b.seen, [WIRE_BALANCE], 'the joining open takes the landing for its own too')
+    assert.deepEqual(a.seen, [WIRE_BALANCES], 'the open that started the read receives the report')
+    assert.deepEqual(b.seen, [WIRE_BALANCES], 'the joining open takes the landing for its own too')
     assert.equal(calls(), 1, 'one read serves both opens')
-    assert.deepEqual(readPlatformBalance(() => {}), WIRE_BALANCE, 'and the joined read is the memory figure afterwards')
+    assert.deepEqual(readPlatformBalances(() => {}), WIRE_BALANCES, 'and the joined read is the memory report afterwards')
   })
 
-  test('every absent answer notifies nobody and keeps the remembered figure', async () => {
+  test('every absent answer notifies nobody and keeps the remembered report', async () => {
     for (const [label, body, mode] of [
       ['route absent (404)', undefined, 'status'],
       ['transport down', undefined, 'reject'],
       ['definitive absence', { ok: true, value: null }, 'ok'],
       ['bad envelope', { ok: false }, 'ok'],
       ['value not a record', { ok: true, value: 'nope' }, 'ok'],
+      ['missing arm', { ok: true, value: { account: null } }, 'ok'],
     ] as [string, unknown, 'ok' | 'reject' | 'status'][]) {
-      resetPlatformBalance()
+      resetPlatformBalances()
       seededStorage()
       stubRoute(body, mode)
       const { seen, onRefresh } = collector()
-      assert.deepEqual(readPlatformBalance(onRefresh), WIRE_BALANCE, label)
+      assert.deepEqual(readPlatformBalances(onRefresh), WIRE_BALANCES, label)
       await drain()
       assert.equal(seen.length, 0, label)
-      assert.deepEqual(readPlatformBalance(() => {}), WIRE_BALANCE, label + ' — the figure survives the miss')
+      assert.deepEqual(readPlatformBalances(() => {}), WIRE_BALANCES, label + ' — the report survives the miss')
     }
   })
 
-  test('garbage in storage is no remembered figure', async () => {
-    stubRoute({ ok: true, value: WIRE_BALANCE })
-    for (const raw of ['not json', 'null', '"CNY"', '{"isAvailable":true}', '{"balances":[{"currency":"CNY"}]}']) {
-      resetPlatformBalance()
-      setPlatformBalanceStorage(new FakeStorage({ [PLATFORM_BALANCE_STORAGE_KEY]: raw }))
+  test('a definitive empty report replaces the remembered one and hides both arms', async () => {
+    seededStorage()
+    const empty = { account: null, api: null }
+    stubRoute({ ok: true, value: empty })
+    const { seen, onRefresh } = collector()
+    assert.deepEqual(readPlatformBalances(onRefresh), WIRE_BALANCES, 'the stored report paints first')
+    await drain()
+    assert.deepEqual(seen, [empty])
+    assert.deepEqual(readPlatformBalances(() => {}), empty, 'the empty report is the latest truth')
+  })
+
+  test('garbage in storage is no remembered report', async () => {
+    stubRoute({ ok: true, value: WIRE_BALANCES })
+    for (const raw of ['not json', 'null', '"CNY"', '{"isAvailable":true}', '{"balances":[{"currency":"CNY"}]}', '{"account":{"isAvailable":true}}']) {
+      resetPlatformBalances()
+      setPlatformBalanceStorage(new FakeStorage({ [PLATFORM_BALANCES_STORAGE_KEY]: raw }))
       const { onRefresh } = collector()
-      assert.equal(readPlatformBalance(onRefresh), null, raw)
+      assert.equal(readPlatformBalances(onRefresh), null, raw)
       await drain()
-      assert.deepEqual(readPlatformBalance(() => {}), WIRE_BALANCE)
+      assert.deepEqual(readPlatformBalances(() => {}), WIRE_BALANCES)
     }
   })
 
-  test('unreadable or unwritable storage costs the head start, never the live figure', async () => {
+  test('an unreadable or unwritable storage costs the head start, never the live report', async () => {
     const throwing = new FakeStorage()
     vi.spyOn(throwing, 'getItem').mockImplementation(() => { throw new Error('denied') })
     setPlatformBalanceStorage(throwing)
-    stubRoute({ ok: true, value: WIRE_BALANCE })
+    stubRoute({ ok: true, value: WIRE_BALANCES })
     const { seen, onRefresh } = collector()
-    assert.equal(readPlatformBalance(onRefresh), null, 'no remembered figure to paint')
+    assert.equal(readPlatformBalances(onRefresh), null, 'no remembered report to paint')
     await drain()
-    assert.deepEqual(seen, [WIRE_BALANCE])
+    assert.deepEqual(seen, [WIRE_BALANCES])
 
     const refusing = new FakeStorage()
     vi.spyOn(refusing, 'setItem').mockImplementation(() => { throw new Error('quota') })
     setPlatformBalanceStorage(refusing)
-    stubRoute({ ok: true, value: WIRE_BALANCE })
+    stubRoute({ ok: true, value: WIRE_BALANCES })
     const second = collector()
-    readPlatformBalance(second.onRefresh)
+    readPlatformBalances(second.onRefresh)
     await drain()
-    assert.deepEqual(second.seen, [WIRE_BALANCE], 'the live figure still lands')
+    assert.deepEqual(second.seen, [WIRE_BALANCES], 'the live report still lands')
   })
 
-  test('absent or refused storage is the same as empty storage: no remembered figure, no crash', async () => {
+  test('absent or refused storage is the same as empty storage: no remembered report, no crash', async () => {
     const real = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
     try {
       for (const descriptor of [
@@ -250,13 +300,13 @@ describe('readPlatformBalance', () => {
         { configurable: true, get() { throw new Error('denied') } },
       ]) {
         setPlatformBalanceStorage(undefined)
-        resetPlatformBalance()
+        resetPlatformBalances()
         Object.defineProperty(globalThis, 'localStorage', descriptor)
-        stubRoute({ ok: true, value: WIRE_BALANCE })
+        stubRoute({ ok: true, value: WIRE_BALANCES })
         const { seen, onRefresh } = collector()
-        assert.equal(readPlatformBalance(onRefresh), null)
+        assert.equal(readPlatformBalances(onRefresh), null)
         await drain()
-        assert.deepEqual(seen, [WIRE_BALANCE], 'the read is unaffected')
+        assert.deepEqual(seen, [WIRE_BALANCES], 'the read is unaffected')
         vi.unstubAllGlobals()
       }
     } finally {
@@ -264,22 +314,369 @@ describe('readPlatformBalance', () => {
     }
   })
 
-  test('a reset drops the remembered figure, its storage, the storage swap, and even a refused figure', async () => {
+  test('a reset drops the remembered report, its storage, the storage swap, and even a refused report', async () => {
     const fake = seededStorage()
-    stubRoute({ ok: true, value: WIRE_BALANCE })
-    readPlatformBalance(() => {})
+    stubRoute({ ok: true, value: WIRE_BALANCES })
+    readPlatformBalances(() => {})
     await drain()
-    resetPlatformBalance()
-    assert.equal(fake.store.has(PLATFORM_BALANCE_STORAGE_KEY), false, 'storage is emptied')
+    resetPlatformBalances()
+    assert.equal(fake.store.has(PLATFORM_BALANCES_STORAGE_KEY), false, 'storage is emptied')
     const { onRefresh } = collector()
-    assert.equal(readPlatformBalance(onRefresh), null, 'real storage is re-detected, and it is empty too')
+    assert.equal(readPlatformBalances(onRefresh), null, 'real storage is re-detected, and it is empty too')
 
     setPlatformBalanceStorage(null)
-    stubRoute({ ok: true, value: WIRE_BALANCE })
-    readPlatformBalance(() => {})
+    stubRoute({ ok: true, value: WIRE_BALANCES })
+    readPlatformBalances(() => {})
     await drain()
-    assert.deepEqual(readPlatformBalance(() => {}), WIRE_BALANCE)
-    resetPlatformBalance()
-    assert.equal(readPlatformBalance(() => {}), null, 'a reset over refused storage still clears the memory figure')
+    assert.deepEqual(readPlatformBalances(() => {}), WIRE_BALANCES)
+    resetPlatformBalances()
+    assert.equal(readPlatformBalances(() => {}), null, 'a reset over refused storage still clears the memory report')
   })
+})
+
+
+describe('platform balance storage ttl', () => {
+  test('a fresh envelope paints; a stale envelope is dropped and removed', async () => {
+    stubRoute({ ok: true, value: wire(5) })
+    const fresh = new FakeStorage()
+    setPlatformBalanceStorage(fresh)
+    const { onRefresh } = collector()
+    readPlatformBalances(onRefresh)
+    await drain()
+    const raw = fresh.store.get(PLATFORM_BALANCES_STORAGE_KEY)
+    assert.ok(raw !== undefined && JSON.parse(raw).at !== undefined, 'the write carries a timestamp')
+
+    const parsed = JSON.parse(raw) as { at: number; balances: unknown }
+    const replay = new FakeStorage({ [PLATFORM_BALANCES_STORAGE_KEY]: JSON.stringify(parsed) })
+    resetPlatformBalances()
+    setPlatformBalanceStorage(replay)
+    assert.deepEqual(readPlatformBalances(() => {}), wire(5), 'a fresh envelope paints at once')
+
+    const stale = new FakeStorage({ [PLATFORM_BALANCES_STORAGE_KEY]: JSON.stringify({ at: Date.now() - 11 * 60_000, balances: parsed.balances }) })
+    resetPlatformBalances()
+    setPlatformBalanceStorage(stale)
+    assert.equal(readPlatformBalances(() => {}), null, 'a stale envelope never paints')
+    assert.equal(stale.store.has(PLATFORM_BALANCES_STORAGE_KEY), false, 'the stale entry is removed')
+  })
+
+  test('a bare report without an envelope and the legacy single-source envelope both paint only when they parse', async () => {
+    stubRoute({ ok: true, value: WIRE_BALANCES })
+    setPlatformBalanceStorage(new FakeStorage({ [PLATFORM_BALANCES_STORAGE_KEY]: JSON.stringify(WIRE_BALANCES) }))
+    assert.deepEqual(readPlatformBalances(() => {}), WIRE_BALANCES, 'a bare report paints')
+
+    resetPlatformBalances()
+    setPlatformBalanceStorage(new FakeStorage({
+      [PLATFORM_BALANCES_STORAGE_KEY]: JSON.stringify({ at: Date.now(), balance: ACCOUNT_BALANCE }),
+    }))
+    assert.equal(readPlatformBalances(() => {}), null, 'an older single-source envelope never paints')
+  })
+})
+})
+
+describe('overviewValue', () => {
+
+describe('overviewValueOf', () => {
+  test('garbage, a missing revision, and a payload without a part reject', () => {
+    for (const bad of [null, undefined, 7, 'x', [], {}, { revision: '' }, { revision: 7 }, { revision: 'r1' }]) {
+      assert.equal(overviewValueOf(bad), null, `${JSON.stringify(bad)} decodes to null`)
+    }
+    assert.equal(overviewValueOf({ revision: 'r1', pricingReady: true }), null, 'no part selects nothing')
+    assert.equal(overviewValueOf({ revision: 'r1', pricingReady: true, other: 1 }), null)
+    assert.equal(overviewValueOf({ revision: 'r1', pricingReady: 'yes', days: [] }), null, 'pricingReady must be a boolean')
+    assert.equal(overviewValueOf({ revision: 'r1', unchanged: false, days: [] }), null, 'a false unchanged flag still needs pricingReady')
+  })
+
+  test('the unchanged reply decodes on its revision alone', () => {
+    assert.deepEqual(overviewValueOf({ revision: 'r2', unchanged: true }), { revision: 'r2', unchanged: true })
+    assert.deepEqual(
+      overviewValueOf({ revision: 'r2', unchanged: true, pricingReady: 'ignored', days: [] }),
+      { revision: 'r2', unchanged: true },
+      'an unchanged reply needs no part payload',
+    )
+  })
+
+  test('a valid summary normalizes every field', () => {
+    const decoded = overviewValueOf(summaryValue())
+    assert.deepEqual(decoded, {
+      revision: 'r1',
+      pricingReady: true,
+      summary: {
+        sessions: 2,
+        sessionsTotal: 3,
+        sessionsArchived: 1,
+        archivedScoped: 1,
+        tokens: 1800,
+        turns: 5,
+        costUsd: 0.5,
+        costSessions: 1,
+        usageSessions: 1,
+        cacheHit: '33.33',
+        tokenParts: [{ key: 'system', value: 100 }, { key: 'tools', value: 20 }],
+        timing: { wallMs: 1000, ttftMs: 0, genMs: 0, calls: 2, toolsMs: 0, toolCalls: 0, tools: {} },
+        windowTiming: { calls: 2, toolCalls: 0, toolsMs: 0, wallMs: 1000 },
+        coverage: BASE_COVERAGE,
+      },
+    })
+  })
+
+  test('a summary tolerates absent optional fields and a null cost', () => {
+    const decoded = overviewValueOf(summaryValue({
+      summary: {
+        sessions: 0,
+        sessionsTotal: 0,
+        tokens: 0,
+        turns: 0,
+        costUsd: null,
+        costSessions: 0,
+        usageSessions: 0,
+        windowTiming: { calls: 0, toolCalls: 0, toolsMs: 0, wallMs: 0 },
+        coverage: BASE_COVERAGE,
+      },
+    }))
+    assert.ok(decoded !== null && 'summary' in decoded)
+    assert.equal(decoded.summary.sessionsArchived, 0)
+    assert.equal(decoded.summary.archivedScoped, 0)
+    assert.equal(decoded.summary.cacheHit, null)
+    assert.equal(decoded.summary.tokenParts, null)
+    assert.equal(decoded.summary.timing, null)
+    const loose = overviewValueOf(summaryValue({
+      summary: summaryRaw({ cacheHit: 42, sessionsArchived: -1, tokenParts: { not: 'an array' }, timing: null }),
+    }))
+    assert.ok(loose !== null && 'summary' in loose)
+    assert.equal(loose.summary.cacheHit, null, 'a non-string hit rate reads absent')
+    assert.equal(loose.summary.sessionsArchived, 0, 'a hostile archived count floors to zero')
+    assert.equal(loose.summary.tokenParts, null)
+    assert.equal(loose.summary.timing, null)
+    const explicitNulls = overviewValueOf(summaryValue({ summary: summaryRaw({ cacheHit: null, tokenParts: null }) }))
+    assert.ok(explicitNulls !== null && 'summary' in explicitNulls)
+    assert.equal(explicitNulls.summary.cacheHit, null)
+    assert.equal(explicitNulls.summary.tokenParts, null)
+    const nonListParts = overviewValueOf(summaryValue({ summary: summaryRaw({ tokenParts: 'x' }) }))
+    assert.ok(nonListParts !== null && 'summary' in nonListParts)
+    assert.equal(nonListParts.summary.tokenParts, null, 'a non-list tokenParts reads absent')
+  })
+
+  test('hostile summary fields reject the whole summary part', () => {
+    const cases: [string, Record<string, unknown>][] = [
+      ['sessions', { sessions: '2' }],
+      ['sessions negative', { sessions: -1 }],
+      ['sessionsTotal', { sessionsTotal: undefined }],
+      ['tokens', { tokens: 'x' }],
+      ['turns', { turns: -2 }],
+      ['costSessions', { costSessions: null }],
+      ['usageSessions', { usageSessions: '1' }],
+      ['costUsd', { costUsd: 'free' }],
+      ['windowTiming absent', { windowTiming: undefined }],
+      ['windowTiming calls', { windowTiming: { calls: '1', toolCalls: 0, toolsMs: 0, wallMs: 0 } }],
+      ['windowTiming toolCalls', { windowTiming: { calls: 0, toolCalls: -1, toolsMs: 0, wallMs: 0 } }],
+      ['windowTiming toolsMs', { windowTiming: { calls: 0, toolCalls: 0, toolsMs: '1', wallMs: 0 } }],
+      ['windowTiming wallMs', { windowTiming: { calls: 0, toolCalls: 0, toolsMs: 0, wallMs: -1 } }],
+      ['coverage absent', { coverage: undefined }],
+      ['coverage complete', { coverage: { ...BASE_COVERAGE, complete: 'yes' } }],
+      ['coverage running', { coverage: { ...BASE_COVERAGE, running: 1 } }],
+      ['coverage remaining', { coverage: { ...BASE_COVERAGE, remaining: -1 } }],
+      ['coverage failed', { coverage: { ...BASE_COVERAGE, failed: 'x' } }],
+      ['coverage total', { coverage: { ...BASE_COVERAGE, total: null } }],
+      ['coverage covered', { coverage: { ...BASE_COVERAGE, covered: -1 } }],
+      ['coverage unsupported', { coverage: { ...BASE_COVERAGE, unsupported: 'x' } }],
+      ['coverage unreadable', { coverage: { ...BASE_COVERAGE, unreadable: 'x' } }],
+      ['coverage garbage', { coverage: 7 }],
+    ]
+    for (const [label, over] of cases) {
+      assert.equal(overviewValueOf(summaryValue({ summary: summaryRaw(over) })), null, `${label} rejects`)
+    }
+  })
+
+  test('summary coverage keeps the unreadable sessions it can decode', () => {
+    const decoded = overviewValueOf(summaryValue({
+      summary: summaryRaw({
+        coverage: {
+          ...BASE_COVERAGE,
+          complete: false,
+          unreadable: 2,
+          unreadableSessions: [
+            { id: 'a', reason: 'stored log is corrupt' },
+            { id: '', reason: 'missing id' },
+            { id: 'c' },
+            null,
+            { id: 'd', reason: 'host refused' },
+          ],
+        },
+      }),
+    }))
+    assert.ok(decoded !== null && 'summary' in decoded)
+    assert.deepEqual(decoded.summary.coverage.unreadableSessions, [
+      { id: 'a', reason: 'stored log is corrupt' },
+      { id: 'd', reason: 'host refused' },
+    ])
+    assert.equal(decoded.summary.coverage.unreadable, 2)
+    const blank = overviewValueOf(summaryValue({
+      summary: summaryRaw({ coverage: { ...BASE_COVERAGE, unreadableSessions: [] } }),
+    }))
+    assert.ok(blank !== null && 'summary' in blank)
+    assert.equal(blank.summary.coverage.unreadableSessions, undefined)
+  })
+
+  test('a summary tokenParts list drops malformed entries and keeps usable keys', () => {
+    const decoded = overviewValueOf(summaryValue({
+      summary: summaryRaw({
+        tokenParts: [
+          { key: 'system', value: 5 },
+          null,
+          { key: '', value: 3 },
+          { value: 4 },
+          { key: 'tools' },
+          { key: 'user', value: Number.NaN },
+          { key: 'assistant', value: 0 },
+        ],
+      }),
+    }))
+    assert.ok(decoded !== null && 'summary' in decoded)
+    assert.deepEqual(decoded.summary.tokenParts, [
+      { key: 'system', value: 5 },
+      { key: 'assistant', value: 0 },
+    ])
+  })
+
+  test('a valid days part filters malformed entries and keeps null costs', () => {
+    const decoded = overviewValueOf(daysValue({
+      days: [
+        { key: '2026-09-16', tokens: 10, sessions: 1, costUsd: 0.1 },
+        { key: '2026-09-15', tokens: 0, sessions: 0, costUsd: null },
+        null,
+        { tokens: 1, sessions: 1 },
+        { key: '', tokens: 1, sessions: 1 },
+        { key: '2026-09-14', tokens: -1, sessions: 1 },
+        { key: '2026-09-13', tokens: 1, sessions: -1 },
+        { key: '2026-09-12', tokens: 1, sessions: 1, costUsd: 'x' },
+      ],
+    }))
+    assert.ok(decoded !== null && 'days' in decoded)
+    assert.deepEqual(decoded.days, [
+      { key: '2026-09-16', tokens: 10, sessions: 1, costUsd: 0.1 },
+      { key: '2026-09-15', tokens: 0, sessions: 0, costUsd: null },
+      { key: '2026-09-12', tokens: 1, sessions: 1, costUsd: null },
+    ])
+    assert.equal(overviewValueOf(daysValue({ days: {} })), null, 'days must be a list')
+  })
+
+  test('a valid page part decodes rows, groups, and the scope total', () => {
+    const decoded = overviewValueOf(pageValue())
+    assert.ok(decoded !== null && 'page' in decoded)
+    assert.equal(decoded.pricingReady, false)
+    assert.deepEqual(decoded.page.items, [{
+      id: 's1',
+      title: 'one',
+      cwd: '/repo',
+      updatedAt: 5,
+      running: true,
+      archived: false,
+      group: 'w',
+      tokens: 10,
+      turns: 2,
+      steps: 3,
+      parts: [{ key: 'system', value: 7 }],
+      total: 7,
+      contextWindow: 100,
+      maxOutputTokens: 50,
+      model: 'm',
+      lastUser: 'hi',
+      costUsd: 0.25,
+      createdDay: '2026-09-10',
+    }])
+    assert.deepEqual(decoded.page.groups, [{ key: 'w', count: 1 }])
+    assert.equal(decoded.page.scopeTotal, 4)
+  })
+
+  test('a page part defaults optional row fields, drops malformed rows, and falls back to its own total', () => {
+    const decoded = overviewValueOf(pageValue({
+      page: {
+        items: [
+          { id: 's2', title: 'two', updatedAt: 1, parts: [], costUsd: null },
+          null,
+          { title: 'no id', updatedAt: 1, parts: [] },
+          { id: 'no title', updatedAt: 1, parts: [] },
+          { id: 'no stamp', title: 'x', parts: [] },
+          { id: 'no parts', title: 'x', updatedAt: 1 },
+          { id: 'bad parts', title: 'x', updatedAt: 1, parts: 'x' },
+          { id: 'hostile parts', title: 'x', updatedAt: 1, parts: [null, { key: '' }] },
+        ],
+        index: 0,
+        count: 1,
+        total: 7,
+      },
+    }))
+    assert.ok(decoded !== null && 'page' in decoded)
+    assert.deepEqual(decoded.page.items, [
+      { id: 's2', title: 'two', updatedAt: 1, running: false, archived: false, tokens: 0, turns: 0, parts: [], total: 0, costUsd: null },
+      { id: 'hostile parts', title: 'x', updatedAt: 1, running: false, archived: false, tokens: 0, turns: 0, parts: [], total: 0, costUsd: null },
+    ])
+    assert.deepEqual(decoded.page.groups, [])
+    assert.equal(decoded.page.scopeTotal, 7)
+  })
+
+  test('hostile page containers reject the page part', () => {
+    const bads: [string, Record<string, unknown>][] = [
+      ['items', { page: { items: 'x', index: 0, count: 1, total: 1 } }],
+      ['index', { page: { items: [], index: -1, count: 1, total: 1 } }],
+      ['count', { page: { items: [], index: 0, count: '1', total: 1 } }],
+      ['total', { page: { items: [], index: 0, count: 1, total: null } }],
+      ['page record', { page: 7 }],
+    ]
+    for (const [label, over] of bads) {
+      assert.equal(overviewValueOf(pageValue(over)), null, `${label} rejects`)
+    }
+    const hostileGroups = overviewValueOf(pageValue({
+      page: { items: [], index: 0, count: 1, total: 0, scopeTotal: 0, groups: [null, { key: '' }, { key: 'w' }, { key: 'w', count: -1 }, { key: 'ok', count: 2 }] },
+    }))
+    assert.ok(hostileGroups !== null && 'page' in hostileGroups)
+    assert.deepEqual(hostileGroups.page.groups, [{ key: 'ok', count: 2 }])
+    const nonList = overviewValueOf(pageValue({ page: { items: [], index: 0, count: 1, total: 0, groups: {} } }))
+    assert.ok(nonList !== null && 'page' in nonList)
+    assert.deepEqual(nonList.page.groups, [])
+  })
+
+  test('a valid tally decodes; a hostile tally rejects', () => {
+    const decoded = overviewValueOf(tallyValue())
+    assert.deepEqual(decoded, {
+      revision: 'r1',
+      pricingReady: true,
+      tally: { field: 'tools', stats: [{ name: 'read', n: 2, sessions: 1, last: 5 }] },
+    })
+    const filtered = overviewValueOf(tallyValue({
+      tally: {
+        field: 'skills',
+        stats: [
+          { name: 'tdd', n: 1, sessions: 1, last: 1 },
+          null,
+          { name: '', n: 1, sessions: 1, last: 1 },
+          { n: 1, sessions: 1, last: 1 },
+          { name: 'a', n: -1, sessions: 1, last: 1 },
+          { name: 'b', n: 1, sessions: 'x', last: 1 },
+          { name: 'c', n: 1, sessions: 1, last: 'x' },
+        ],
+      },
+    }))
+    assert.ok(filtered !== null && 'tally' in filtered)
+    assert.deepEqual(filtered.tally.stats, [{ name: 'tdd', n: 1, sessions: 1, last: 1 }])
+    const bads: [string, Record<string, unknown>][] = [
+      ['tally record', { tally: 7 }],
+      ['stats list', { tally: { field: 'tools', stats: {} } }],
+      ['field', { tally: { field: 'other', stats: [] } }],
+    ]
+    for (const [label, over] of bads) {
+      assert.equal(overviewValueOf(tallyValue(over)), null, `${label} rejects`)
+    }
+  })
+
+  test('a malformed selected part rejects instead of falling through to another part', () => {
+    assert.equal(overviewValueOf({ revision: 'r1', pricingReady: true, summary: null, days: [] }), null)
+    assert.equal(overviewValueOf({ revision: 'r1', pricingReady: true, days: null, tally: { field: 'tools', stats: [] } }), null)
+    assert.equal(overviewValueOf({ revision: 'r1', pricingReady: true, page: null, tally: { field: 'tools', stats: [] } }), null)
+    assert.equal(overviewValueOf({ revision: 'r1', pricingReady: true, tally: null }), null)
+    const firstWins = overviewValueOf({ revision: 'r1', pricingReady: true, tally: null, page: pageValue().page })
+    assert.ok(firstWins !== null && 'page' in firstWins, 'the first present part wins')
+    assert.deepEqual(firstWins.page, pageValue().page)
+  })
+})
 })

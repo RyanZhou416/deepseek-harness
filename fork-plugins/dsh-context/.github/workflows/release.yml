@@ -17,8 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check the DeeSeek Harness plugin
-        # `dshVersion` defaults to `latest`, which serves the newest supported release (0.2.1-rc.2).
+      - name: Check the DeepSeek Harness plugin
+        # `dshVersion` defaults to npm `latest`, so this checks one line at a time; the per-line manual pass is in docs/compatibility.md (Verification).
         uses: bowenliang123/dsh-plugin-checker@v1
 
       # No `packageManager` field in this plugin's package.json, so both workflows pin the version explicitly.
@@ -55,7 +55,9 @@ jobs:
           git fetch --depth 1 -q origin \
             refs/tags/dsh-v0.2.0-rc.2:refs/tags/dsh-v0.2.0-rc.2 \
             refs/tags/dsh-v0.2.1-rc.2:refs/tags/dsh-v0.2.1-rc.2 \
-            refs/tags/dsh-v0.2.2-rc.1:refs/tags/dsh-v0.2.2-rc.1
+            refs/tags/dsh-v0.2.2-rc.1:refs/tags/dsh-v0.2.2-rc.1 \
+            refs/tags/dsh-v0.2.2-rc.3:refs/tags/dsh-v0.2.2-rc.3 \
+            refs/tags/dsh-v0.2.3-alpha.2:refs/tags/dsh-v0.2.3-alpha.2
 
       - name: Test
         run: DSH_REPO="$PWD/.tmp/dsh-repo" pnpm test

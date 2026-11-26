@@ -1,6 +1,8 @@
 import type { AgentHead } from './agentHeads'
 import type { PartsPart } from './categories'
-import type { ContextBreakdown, ContextPressure, ContextTimeline, SessionCostUsage, TokenUsage } from '../shared/types'
+import type {
+  ContextBreakdown, ContextPressure, ContextTimeline, SessionCostRead, SessionCostUsage, TokenUsage,
+} from '../shared/types'
 import { mergeCostUsage } from './cost'
 import { headlineOf, occupancyPercent, type Headline } from './headline'
 import { asRecord, contextBreakdownOf, contextPressureOf, numOf, timelineOf, tokenUsageOf, activeMsOf } from './services'
@@ -24,17 +26,17 @@ export interface AgentRow {
   projections?: Record<string, unknown>
 }
 
-export interface AgentIdentity {
+interface AgentIdentity {
   mode: 'one-shot' | 'continuable'
   label?: string
 }
 
-export interface AgentStats {
+interface AgentStats {
   head: Headline | null
-  pressureKnown?: boolean
   requests: number
   billed: number | null
   costUsage: SessionCostUsage | null
+  costRead?: SessionCostRead | null
   durationMs: number | null
   identity: AgentIdentity | null
   model?: string
@@ -46,6 +48,7 @@ export interface AgentSelfStats {
   billed: number | null
   requests: number
   costUsage?: SessionCostUsage | null
+  costRead?: SessionCostRead | null
   durationMs?: number | null
 }
 
@@ -69,6 +72,7 @@ export interface AgentForest {
 }
 
 export const AGENT_CARD_H = 116
+export const AGENT_CARD_COMPACT_H = 92
 const SLOT_MAX = 276
 const SLOT_MIN = 190
 const CARD_GUTTER = 12
@@ -166,10 +170,10 @@ export function agentStatsOf(values: Record<string, unknown> | undefined): Agent
   }
   return {
     head,
-    pressureKnown: pressure !== null,
     requests: timeline !== null ? (timeline.counts?.steps ?? timeline.requests.length) : 0,
     billed: billedOf(usage),
     costUsage: timeline?.cost ?? null,
+    costRead: timeline?.costRead ?? null,
     durationMs: agentDurationOf(values?.subagentTiming),
     identity: agentIdentityOf(values?.subagent),
     ...(timeline !== null && typeof timeline.model === 'string' ? { model: timeline.model } : {}),
@@ -177,20 +181,21 @@ export function agentStatsOf(values: Record<string, unknown> | undefined): Agent
   }
 }
 
-function fetchedValuesOf(head: unknown): Record<string, unknown> {
-  const values = asRecord(head)
-  return {
-    ...(timelineOf(values?.timeline) === null ? {} : { contextTimeline: values?.timeline }),
-    ...(contextPressureOf(values?.pressure) === null ? {} : { contextPressure: values?.pressure }),
-    ...(contextBreakdownOf(values?.breakdown) === null ? {} : { contextBreakdown: values?.breakdown }),
-    ...(tokenUsageOf(values?.usage) === null ? {} : { tokenUsage: values?.usage }),
-  }
-}
-
 function billedOf(usage: TokenUsage | null): number | null {
   return usage !== null
     ? numOf(usage.uncachedInputTokens) + numOf(usage.outputTokens) + numOf(usage.cacheReadTokens) + numOf(usage.cacheWriteTokens)
     : null
+}
+
+// DeepSeek Harness fork modification: merge a fetched head's detail views into
+// the row values, keeping the row's own values first.
+function fetchedValuesOf(head: AgentHead): Record<string, unknown> {
+  return {
+    contextTimeline: head.timeline,
+    ...(head.pressure === null ? {} : { contextPressure: head.pressure }),
+    ...(head.breakdown === null ? {} : { contextBreakdown: head.breakdown }),
+    ...(head.usage === null ? {} : { tokenUsage: head.usage }),
+  }
 }
 
 export function agentSelfOf(
@@ -204,11 +209,12 @@ export function agentSelfOf(
     billed: billedOf(usage),
     requests: timeline.counts?.steps ?? timeline.requests.length,
     costUsage: timeline.cost ?? null,
+    costRead: timeline.costRead ?? null,
     durationMs: timeline.timing != null && timeline.timing.wallMs > 0 ? activeMsOf(timeline.timing) : null,
   }
 }
 
-export function catalogOrderOf(values: Record<string, unknown> | undefined): Map<string, number> | null {
+function catalogOrderOf(values: Record<string, unknown> | undefined): Map<string, number> | null {
   const cat = values?.subagentCatalog
   if (!Array.isArray(cat)) return null
   const order = new Map<string, number>()
@@ -220,7 +226,7 @@ export function catalogOrderOf(values: Record<string, unknown> | undefined): Map
   return order.size > 0 ? order : null
 }
 
-export interface AgentChild {
+interface AgentChild {
   id: string
   row: AgentRow
 }
@@ -241,7 +247,7 @@ export function agentForestOf(
   snapshot: unknown,
   currentId: string | undefined,
   self?: AgentSelfStats,
-  fetched?: ReadonlyMap<string, unknown>,
+  fetched?: ReadonlyMap<string, AgentHead>,
 ): AgentForest | null {
   const byId = asRecord(asRecord(snapshot)?.byId)
   if (byId === null || currentId === undefined || currentId === '') return null
@@ -301,6 +307,7 @@ export function agentForestOf(
       stats.billed = self.billed ?? stats.billed
       stats.requests = self.requests > 0 ? self.requests : stats.requests
       stats.costUsage = self.costUsage ?? stats.costUsage
+      stats.costRead = self.costRead ?? stats.costRead
       stats.durationMs = self.durationMs ?? stats.durationMs
     }
     const subagent = row.origin === 'subagent' || identity !== null
@@ -360,10 +367,11 @@ export function sessionTitlesOf(snapshot: unknown): Map<string, string> {
   return titles
 }
 
-export interface SubagentCostFold {
+interface SubagentCostFold {
   usage: SessionCostUsage | null
   cold: string[]
   count: number
+  costRead: SessionCostRead | null
 }
 
 export function subagentCostFoldOf(
@@ -372,7 +380,9 @@ export function subagentCostFoldOf(
   landed?: ReadonlyMap<string, AgentHead>,
 ): SubagentCostFold {
   const byId = asRecord(asRecord(snapshot)?.byId)
-  if (byId === null || currentId === undefined || currentId === '') return { usage: null, cold: [], count: 0 }
+  if (byId === null || currentId === undefined || currentId === '') {
+    return { usage: null, cold: [], count: 0, costRead: null }
+  }
   const rows = new Map<string, AgentRow>()
   for (const key of Object.keys(byId)) {
     const row = agentRowOf(byId[key])
@@ -383,34 +393,58 @@ export function subagentCostFoldOf(
   const cold: string[] = []
   const seen = new Set<string>([currentId])
   const queue = [currentId]
+  let usd = 0
+  let usdAny = false
+  let complete = true
+  let sawRead = false
+  const reads: SessionCostRead[] = []
   for (let i = 0; i < queue.length; i++) {
     const id = queue[i]
     for (const kid of childrenOf.get(id) ?? []) {
       if (seen.has(kid.id)) continue
       seen.add(kid.id)
-      const head = landed?.get(kid.id)?.timeline
+      const head = landed?.get(kid.id)
       const values = kid.row.projections
+      let timeline: ContextTimeline | null = null
       if (values?.contextTimeline === undefined) {
         if (head === undefined) cold.push(kid.id)
-        else if (head.cost !== undefined) parts.push(head.cost)
+        else timeline = head.timeline
       } else {
-        const cost = timelineOf(values.contextTimeline)?.cost
-        if (cost !== undefined) parts.push(cost)
+        timeline = timelineOf(values.contextTimeline)
+      }
+      if (timeline?.cost !== undefined) parts.push(timeline.cost)
+      const read = timeline?.costRead
+      if (read !== undefined) {
+        sawRead = true
+        reads.push(read)
+        if (!read.ready) complete = false
+        if (read.usd !== null) {
+          usd += read.usd
+          usdAny = true
+        }
       }
       queue.push(kid.id)
     }
   }
-  return { usage: parts.length > 0 ? mergeCostUsage(...parts) : null, cold, count: seen.size - 1 }
+  const costRead: SessionCostRead | null = sawRead || cold.length === 0
+    ? {
+      usd: usdAny ? usd : null,
+      ready: complete && cold.length === 0,
+      ...(reads.some(read => read.faces !== undefined) ? { faces: reads.flatMap(read => read.faces ?? []) } : {}),
+      ...(reads.some(read => read.misses !== undefined) ? { misses: reads.flatMap(read => read.misses ?? []) } : {}),
+    }
+    : null
+  return { usage: parts.length > 0 ? mergeCostUsage(...parts) : null, cold, count: seen.size - 1, costRead }
 }
 
-export interface AgentPoint {
+interface AgentPoint {
   id: string
   x: number
   y: number
   depth: number
 }
 
-export interface AgentLink {
+interface AgentLink {
   to: string
   running: boolean
   color: string
@@ -420,7 +454,7 @@ export interface AgentLink {
   y2: number
 }
 
-export interface AgentLayout {
+interface AgentLayout {
   width: number
   height: number
   cardW: number
@@ -428,7 +462,13 @@ export interface AgentLayout {
   links: AgentLink[]
 }
 
-export function layoutForest(forest: AgentForest, stageWidth = 0): AgentLayout {
+export function layoutForest(forest: AgentForest, stageWidth = 0, compact = false): AgentLayout {
+  const cardH = compact ? AGENT_CARD_COMPACT_H : AGENT_CARD_H
+  const slotMax = compact ? 232 : SLOT_MAX
+  const slotMin = compact ? 160 : SLOT_MIN
+  const gutter = compact ? 10 : CARD_GUTTER
+  const levelH = compact ? cardH + 44 : LEVEL_H
+  const padY = compact ? 32 : PAD_Y
   const childrenOf = new Map<string, AgentNode[]>()
   for (const n of forest.nodes) {
     if (n.parentId === undefined) continue
@@ -461,17 +501,17 @@ export function layoutForest(forest: AgentForest, stageWidth = 0): AgentLayout {
   /* v8 ignore next 1 */
   if (forest.nodes.length > 0) place(forest.nodes[0])
 
-  const perLevel = stageWidth > 0 ? Math.max(1, Math.floor(stageWidth / SLOT_MIN)) : 0
+  const perLevel = stageWidth > 0 ? Math.max(1, Math.floor(stageWidth / slotMin)) : 0
 
   if (perLevel > 0 && leafSlots > perLevel) {
-    const bandSlot = Math.min(SLOT_MAX, stageWidth / perLevel)
+    const bandSlot = Math.min(slotMax, stageWidth / perLevel)
     const width = perLevel * bandSlot
     const points: AgentPoint[] = []
     let row = 0
     const emitBand = (nodes: AgentNode[], depth: number): void => {
       const inset = (width - nodes.length * bandSlot) / 2
       nodes.forEach((node, i) => {
-        points.push({ id: node.id, x: inset + (i + 0.5) * bandSlot, y: PAD_Y + row * LEVEL_H, depth })
+        points.push({ id: node.id, x: inset + (i + 0.5) * bandSlot, y: padY + row * levelH, depth })
       })
       row++
       let band: AgentNode[] = []
@@ -496,28 +536,28 @@ export function layoutForest(forest: AgentForest, stageWidth = 0): AgentLayout {
     if (forest.nodes.length > 0) emitBand([forest.nodes[0]], 0)
     return {
       width,
-      height: PAD_Y + (row - 1) * LEVEL_H + AGENT_CARD_H + 24,
-      cardW: bandSlot - CARD_GUTTER,
+      height: padY + (row - 1) * levelH + cardH + 24,
+      cardW: bandSlot - gutter,
       points,
-      links: linksOf(forest, points),
+      links: linksOf(forest, points, cardH),
     }
   }
 
-  const slot = stageWidth > 0 && leafSlots > 1 ? Math.min(SLOT_MAX, stageWidth / leafSlots) : SLOT_MAX
+  const slot = stageWidth > 0 && leafSlots > 1 ? Math.min(slotMax, stageWidth / leafSlots) : slotMax
   const points: AgentPoint[] = forest.nodes.map(node => ({
     id: node.id,
     /* v8 ignore next 1 */
     x: (slotOf.get(node.id) ?? 0) * slot + slot / 2,
-    y: PAD_Y + node.depth * LEVEL_H,
+    y: padY + node.depth * levelH,
     depth: node.depth,
   }))
   const maxDepth = points.reduce((max, p) => Math.max(max, p.depth), 0)
   return {
     width: leafSlots * slot,
-    height: PAD_Y + maxDepth * LEVEL_H + AGENT_CARD_H + 24,
-    cardW: slot - CARD_GUTTER,
+    height: padY + maxDepth * levelH + cardH + 24,
+    cardW: slot - gutter,
     points,
-    links: linksOf(forest, points),
+    links: linksOf(forest, points, cardH),
   }
 }
 
@@ -525,9 +565,9 @@ export function familyHue(index: number): string {
   return `hsl(${Math.round(index * 137.508) % 360} 58% 52%)`
 }
 
-export const BRAND_HUE = 'var(--dsw-alias-brand-primary, var(--color-blue-500))'
+export const LEAD_HUE = 'var(--dsw-alias-state-business-primary, rgb(65, 118, 230))'
 
-function linksOf(forest: AgentForest, points: AgentPoint[]): AgentLink[] {
+function linksOf(forest: AgentForest, points: AgentPoint[], cardH: number): AgentLink[] {
   const pointOf = new Map(points.map(p => [p.id, p]))
   const nodeOf = new Map(forest.nodes.map(n => [n.id, n]))
   const runningIds = new Set(forest.nodes.filter(n => n.running).map(n => n.id))
@@ -543,7 +583,7 @@ function linksOf(forest: AgentForest, points: AgentPoint[]): AgentLink[] {
       /* v8 ignore next 1 */
       color: familyHue(nodeOf.get(edge.to)?.family ?? 0),
       x1: from.x,
-      y1: from.y + AGENT_CARD_H,
+      y1: from.y + cardH,
       x2: to.x,
       y2: to.y,
     })
@@ -551,35 +591,39 @@ function linksOf(forest: AgentForest, points: AgentPoint[]): AgentLink[] {
   return links
 }
 
-export function lineageOf(forest: AgentForest, id: string | null): Set<string> | null {
+export function neighborhoodOf(forest: AgentForest, id: string | null): Set<string> | null {
   if (id === null) return null
-  const byId = new Map(forest.nodes.map(n => [n.id, n]))
-  const start = byId.get(id)
-  if (start === undefined) return null
-  const childrenOf = new Map<string, string[]>()
+  const related = new Set<string>([id])
+  let found = false
   for (const n of forest.nodes) {
-    if (n.parentId === undefined) continue
-    const kids = childrenOf.get(n.parentId) ?? []
-    kids.push(n.id)
-    childrenOf.set(n.parentId, kids)
-  }
-  const lit = new Set<string>()
-  let cur: AgentNode | undefined = start
-  while (cur !== undefined) {
-    lit.add(cur.id)
-    cur = cur.parentId !== undefined ? byId.get(cur.parentId) : undefined
-  }
-  const queue = [id]
-  for (let i = 0; i < queue.length; i++) {
-    for (const kid of childrenOf.get(queue[i]) ?? []) {
-      lit.add(kid)
-      queue.push(kid)
+    if (n.id === id) {
+      found = true
+      if (n.parentId !== undefined) related.add(n.parentId)
+    } else if (n.parentId === id) {
+      related.add(n.id)
     }
   }
-  return lit
+  return found ? related : null
 }
 
-export interface BarSeg {
+export function runningOnlyForestOf(forest: AgentForest): AgentForest {
+  const parentOf = new Map(forest.nodes.map(node => [node.id, node.parentId]))
+  const keep = new Set<string>()
+  const keepChainOf = (id: string | undefined): void => {
+    for (let cur = id; cur !== undefined && !keep.has(cur); cur = parentOf.get(cur)) keep.add(cur)
+  }
+  for (const node of forest.nodes) {
+    if (node.running) keepChainOf(node.id)
+  }
+  keepChainOf(forest.nodes.find(node => node.isCurrent)?.id)
+  return {
+    nodes: forest.nodes.filter(node => keep.has(node.id)),
+    edges: forest.edges.filter(edge => keep.has(edge.from) && keep.has(edge.to)),
+    solo: forest.solo,
+  }
+}
+
+interface BarSeg {
   key: string
   color: string
   share: number
@@ -618,6 +662,7 @@ export function barSegments(parts: PartsPart[], pct: number | null, fallbackColo
 }
 
 export function sessionsFaceOf(ctx: { get(name: string): unknown }): SessionsFaceLike | null {
+  if (typeof ctx.get !== 'function') return null
   const rec = asRecord(ctx.get('sessions'))
   if (rec === null) return null
   const list = asRecord(rec.list)

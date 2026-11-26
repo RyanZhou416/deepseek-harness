@@ -2,10 +2,15 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { referenceModelPriceOf, usesLongContextPrice } from '../../src/shared/modelPricing'
-import { priceOf, estimateSessionCost, mergeCostUsage, priceIndexOf, type ModelPrices } from '../../src/client/cost'
-import { usageTotalsOf } from '../../src/client/overview'
+import {
+  calculateSessionCost,
+  estimateSessionCost,
+  mergeCostUsage,
+  priceOf,
+  type ModelPrices,
+} from '../../src/shared/pricing'
 
-const bookOf = (prices: ModelPrices) => ({ prices, index: priceIndexOf(prices, {}) })
+const bookOf = (prices: ModelPrices) => ({ prices, canonicalIds: {} })
 
 describe('subscription API-equivalent prices', () => {
   test.each([
@@ -27,7 +32,7 @@ describe('subscription API-equivalent prices', () => {
     assert.equal(referenceModelPriceOf('claude', 'gpt-6-sol'), undefined)
     assert.equal(referenceModelPriceOf('codex', 'gpt-6-sol-other'), undefined)
     assert.equal(priceOf(null, 'unknown', 'gpt-6-sol'), null)
-    assert.equal(priceOf(null, 'claude', 'claude-opus-5-5', true), null)
+    assert.equal(priceOf(null, 'claude', 'claude-opus-5-5', true), null, 'a model without a long tier has no long rate')
     assert.equal(usesLongContextPrice('claude', 'claude-opus-5-5', 900_000), false)
   })
 
@@ -47,13 +52,17 @@ describe('subscription API-equivalent prices', () => {
     assert.deepEqual(priceOf(null, provider, model, true), price)
   })
 
-  test('keeps short and long requests distinct while merging agent costs and token totals', () => {
+  test('keeps short and long requests distinct while merging agent costs', () => {
     const short = { codex: { 'gpt-6-sol': { peak: { uncached: 150_000, cacheRead: 0, cacheWrite: 0, output: 1_000 } } } }
     const long = { codex: { 'gpt-6-sol': { long: { uncached: 1_000, cacheRead: 300_000, cacheWrite: 0, output: 1_000 } } } }
     const merged = mergeCostUsage(short, short, long)
     assert.ok(merged)
-    assert.equal(usageTotalsOf(merged)?.total, 604_000)
-    assert.ok(Math.abs((estimateSessionCost(merged, null, 'usd') ?? 0) - 0.759) < 1e-12)
+    assert.ok(Math.abs((calculateSessionCost(merged, null) ?? 0) - 0.759) < 1e-12)
     assert.equal(long.codex['gpt-6-sol'].long.cacheRead, 300_000)
+  })
+
+  test('an unpriced or failed resolution leaves the session cost unknown', () => {
+    assert.equal(calculateSessionCost(null, null), null)
+    assert.equal(calculateSessionCost({ unknown: { mystery: { peak: { uncached: 1_000_000, cacheRead: 0, cacheWrite: 0, output: 0 } } } }, null), null)
   })
 })

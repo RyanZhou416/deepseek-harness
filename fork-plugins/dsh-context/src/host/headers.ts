@@ -86,31 +86,38 @@ function recordOf(event: SessionEvent): StoredHeaderRecord | null {
   return record
 }
 
+export function headerRecordsOf(
+  state: HeadersState,
+  resolve?: (name: string) => string | undefined,
+): HeaderRecord[] {
+  return state.headers.map((h): HeaderRecord => {
+    const record: HeaderRecord = {
+      seq: h.seq,
+      time: h.time,
+      tools: h.tools.map((t): HeaderTool => {
+        const entry: HeaderTool = { name: t.name, tokens: t.tokens }
+        const plugin = t.plugin ?? (resolve !== undefined ? resolve(t.name) : undefined)
+        if (plugin !== undefined) entry.plugin = plugin
+        return entry
+      }),
+    }
+    const systemTokens = h.systemTokens
+      ?? (typeof h.system === 'string' && h.system !== '' ? estimateSystemTokens(h.system) : undefined)
+    if (systemTokens !== undefined) record.systemTokens = systemTokens
+    return record
+  })
+}
+
 export function createContextHeadersDefinition(
   resolve?: (name: string) => string | undefined,
 ): WiredProjection<'contextHeaders', HeadersState> {
   const view = (state: HeadersState): ContextHeaders => ({
-    headers: state.headers.map((h): HeaderRecord => {
-      const record: HeaderRecord = {
-        seq: h.seq,
-        time: h.time,
-        tools: h.tools.map((t): HeaderTool => {
-          const entry: HeaderTool = { name: t.name, tokens: t.tokens }
-          const plugin = t.plugin ?? (resolve !== undefined ? resolve(t.name) : undefined)
-          if (plugin !== undefined) entry.plugin = plugin
-          return entry
-        }),
-      }
-      const systemTokens = h.systemTokens
-        ?? (typeof h.system === 'string' && h.system !== '' ? estimateSystemTokens(h.system) : undefined)
-      if (systemTokens !== undefined) record.systemTokens = systemTokens
-      return record
-    }),
+    headers: headerRecordsOf(state, resolve).slice(-HEADERS_MAX),
   })
   const definition: WiredProjection<'contextHeaders', HeadersState> = {
     key: 'contextHeaders',
     stateSchema: contextHeadersStateSchema,
-    wire: { viewSchema: contextHeadersSchema, view },
+    wire: { viewSchema: contextHeadersSchema, view, summary: false },
     init: (): HeadersState => ({ headers: [] }),
     apply: (state: HeadersState, event: SessionEvent): HeadersState => {
       const record = recordOf(event)

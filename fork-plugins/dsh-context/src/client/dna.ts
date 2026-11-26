@@ -1,7 +1,10 @@
-import type { Category, SurfaceNode } from '../shared/types'
-import type { Assembled } from './assemble'
+import type { Category, ContextHeaders, ContextTimeline, RequestRecord, SurfaceNode } from '../shared/types'
+import { assembleCached } from './components/derivedCache'
+import { headerAt, systemAt } from '../shared/assemble'
+import type { Assembled } from '../shared/assemble'
 import { CAT_COLOR } from './categories'
 import type { Translate } from './i18n'
+import { formLabelOf } from './labels'
 
 export type DnaItem =
   | { key: string; cat: 'system' | 'tools'; tokens: number; time?: number }
@@ -29,12 +32,12 @@ export function dnaOf(view: Assembled): DnaItem[] {
   return items
 }
 
-export type TrendBand =
+export type TimelineBand =
   | { key: string; cat: 'system' | 'tools'; tokens: number; off: number; color: string }
   | { key: string; cat: Category; tokens: number; off: number; color: string; node: SurfaceNode }
 
-export function trendBandsOf(view: Assembled): TrendBand[] {
-  const bands: TrendBand[] = []
+export function timelineBandsOf(view: Assembled): TimelineBand[] {
+  const bands: TimelineBand[] = []
   let off = 0
   for (const it of dnaOf(view)) {
     if ('node' in it) {
@@ -56,7 +59,7 @@ export interface DnaDelta {
   down: DeltaBand[]
 }
 
-export function deltaTotalsOf(bands: readonly TrendBand[], prev: readonly TrendBand[] | null): { up: number; down: number } {
+export function deltaTotalsOf(bands: readonly TimelineBand[], prev: readonly TimelineBand[] | null): { up: number; down: number } {
   if (prev === null) return { up: 0, down: 0 }
   const before = new Map<string, number>()
   for (const b of prev) before.set(b.key, b.tokens)
@@ -75,7 +78,7 @@ export function deltaTotalsOf(bands: readonly TrendBand[], prev: readonly TrendB
   return { up, down }
 }
 
-export function deltaBandsOf(bands: TrendBand[], prev: TrendBand[] | null): DnaDelta {
+export function deltaBandsOf(bands: TimelineBand[], prev: TimelineBand[] | null): DnaDelta {
   if (prev === null) return { up: [], down: [] }
   const before = new Map(prev.map(b => [b.key, b.tokens] as const))
   const after = new Map(bands.map(b => [b.key, b.tokens] as const))
@@ -102,11 +105,121 @@ export function deltaBandsOf(bands: TrendBand[], prev: TrendBand[] | null): DnaD
   return { up, down }
 }
 
-export function dnaBaseLabel(b: DnaItem | TrendBand | DeltaBand, t: Translate, catLabel: (key: string) => string): string {
+export interface DeltaMaxima {
+  up: number
+  down: number
+}
+
+export function bandsMaximaOf(bandsPerRequest: readonly TimelineBand[][]): DeltaMaxima {
+  let up = 0
+  let down = 0
+  let prev: TimelineBand[] | null = null
+  for (const bands of bandsPerRequest) {
+    const totals = deltaTotalsOf(bands, prev)
+    if (totals.up > up) up = totals.up
+    if (totals.down > down) down = totals.down
+    prev = bands
+  }
+  return { up, down }
+}
+
+function surfaceMaximaOf(data: ContextTimeline, headers: ContextHeaders | null, requests: readonly RequestRecord[]): DeltaMaxima {
+  let up = 0
+  let down = 0
+  let nodeAt = 0
+  let prevSys: number | undefined
+  let prevTools: Map<string, number> | null = null
+  for (let i = 0; i < requests.length; i++) {
+    const seq = requests[i].seq
+    if (i === 0) {
+      while (nodeAt < data.nodes.length && data.nodes[nodeAt].seq < seq) nodeAt += 1
+      const system = systemAt(data, headerAt(headers, seq), seq)
+      prevSys = system === null ? undefined : system.tokens
+      const header = headerAt(headers, seq)
+      if (header !== null) {
+        prevTools = new Map(header.tools.map(tool => ['tool:' + tool.name, tool.tokens] as const))
+      }
+      continue
+    }
+    let stepUp = 0
+    let stepDown = 0
+    while (nodeAt < data.nodes.length && data.nodes[nodeAt].seq < seq) {
+      stepUp += data.nodes[nodeAt].tokens
+      nodeAt += 1
+    }
+    const system = systemAt(data, headerAt(headers, seq), seq)
+    const sysTokens = system === null ? undefined : system.tokens
+    const sysDelta = (sysTokens ?? 0) - (prevSys ?? 0)
+    if (sysDelta > 0) stepUp += sysDelta
+    else if (sysDelta < 0) stepDown -= sysDelta
+    const header = headerAt(headers, seq)
+    const tools = new Map<string, number>()
+    if (header !== null) {
+      for (const tool of header.tools) tools.set('tool:' + tool.name, tool.tokens)
+    }
+    if (prevTools !== null || tools.size > 0) {
+      const before = prevTools ?? new Map<string, number>()
+      for (const [key, tokens] of tools) {
+        const delta = tokens - (before.get(key) ?? 0)
+        if (delta > 0) stepUp += delta
+        else if (delta < 0) stepDown -= delta
+        before.delete(key)
+      }
+      for (const tokens of before.values()) {
+        if (tokens > 0) stepDown += tokens
+        else if (tokens < 0) stepUp -= tokens
+      }
+    }
+    if (stepUp > up) up = stepUp
+    if (stepDown > down) down = stepDown
+    prevTools = tools
+    prevSys = sysTokens
+  }
+  return { up, down }
+}
+
+export function dnaDeltaMaximaOf(
+  data: ContextTimeline,
+  headers: ContextHeaders | null,
+  requests: readonly RequestRecord[],
+): DeltaMaxima {
+  const fallback = (): DeltaMaxima => bandsMaximaOf(requests.map(req => timelineBandsOf(assembleCached(data, headers, req.seq))))
+  if (requests.length === 0) return { up: 0, down: 0 }
+  if (data.archive.length > 0) return fallback()
+  let sorted = true
+  for (const node of data.nodes) {
+    if (node.tokens < 0) {
+      sorted = false
+      break
+    }
+  }
+  for (let i = 1; sorted && i < data.nodes.length; i++) {
+    if (data.nodes[i].seq < data.nodes[i - 1].seq) {
+      sorted = false
+      break
+    }
+  }
+  if (!sorted) return fallback()
+  for (let i = 1; i < requests.length; i++) {
+    if (requests[i].seq < requests[i - 1].seq) return fallback()
+  }
+  if (headers !== null) {
+    for (const entry of headers.headers) {
+      const names = new Set<string>()
+      for (const tool of entry.tools) {
+        if (names.has(tool.name)) return fallback()
+        names.add(tool.name)
+      }
+    }
+  }
+  return surfaceMaximaOf(data, headers, requests)
+}
+
+export function dnaBaseLabel(b: DnaItem | TimelineBand | DeltaBand, t: Translate, catLabel: (key: string) => string): string {
   if (!('node' in b)) return b.cat === 'system' ? catLabel('system') : b.key.slice('tool:'.length)
   const n = b.node
   return n.skill !== undefined ? t('node.skillTag', { name: n.skill })
     : n.cat === 'tool' ? (n.tool ?? '?')
-      : n.cat === 'inject' ? t('form.' + (n.form || 'context'))
+      : n.cat === 'inject' ? formLabelOf(t, n.form)
         : catLabel(n.cat)
 }

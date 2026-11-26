@@ -40,7 +40,7 @@ jobs:
         run: pnpm run typecheck
 
       # `pnpm test`'s compat project boots the BUILT plugin against the REAL harness sources at every baseline tag
-      # (tests/baselines.ts is the source of truth — keep in step); it skips SILENTLY without the tags, so fetch BEFORE Test.
+      # (tests/baselines.ts is the source of truth — keep in step); a missing tag fails the run, so fetch BEFORE Test.
       - name: Fetch the dsh baseline tags
         run: |
           mkdir -p .tmp/dsh-repo
@@ -50,7 +50,9 @@ jobs:
           git fetch --depth 1 -q origin \
             refs/tags/dsh-v0.2.0-rc.2:refs/tags/dsh-v0.2.0-rc.2 \
             refs/tags/dsh-v0.2.1-rc.2:refs/tags/dsh-v0.2.1-rc.2 \
-            refs/tags/dsh-v0.2.2-rc.1:refs/tags/dsh-v0.2.2-rc.1
+            refs/tags/dsh-v0.2.2-rc.1:refs/tags/dsh-v0.2.2-rc.1 \
+            refs/tags/dsh-v0.2.2-rc.3:refs/tags/dsh-v0.2.2-rc.3 \
+            refs/tags/dsh-v0.2.3-alpha.2:refs/tags/dsh-v0.2.3-alpha.2
 
       # `pnpm test` is the vitest run only: all three projects plus the per-file coverage thresholds; typecheck is its own step above.
       - name: Test

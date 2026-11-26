@@ -1,32 +1,40 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactElement } from 'react'
-import { IconWorkspaceTreeOutlineRegular, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconAgentPresetOutlineRegular, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import { CATS } from '../categories'
 import type { AgentHeads } from '../agentHeads'
 import { makeAgentHeads } from '../agentHeads'
-import { billedTokensOf, displayCurrencyOf, estimateSessionCost, formatCost, type CostCurrency, type ModelBook } from '../cost'
-import { useModelPrices } from '../modelPrices'
+import { billedTokensOf, displayCurrencyOf, formatCost, toCurrency, type CostCurrency } from '../cost'
+import { avatarLabelsOf, avatarNameOf, type CommsAgent, type CommsRole } from '../commsModel'
 import { containHorizontalOverscroll } from '../overscroll'
-import { scrollIntoViewIfPossible } from '../revealScroll'
+import { scrollIntoViewIfPossible, scrollToPos } from '../revealScroll'
 import { openSessionVia, type ClientCtx } from '../services'
 import type { ViewKit } from '../viewkit'
 import type { FleetDetail } from '../../shared/types'
 import { useFleetModel } from '../fleetModel'
-import { teammateNameOf, teamMemberOf, type FleetTeam } from '../fleetTeam'
+import { teammateNameOf, teamMemberOf, type FleetTeam, type FleetTeamMember } from '../fleetTeam'
 import type { AgentForest, AgentNode, AgentSelfStats } from '../agentTree'
 import {
-  BRAND_HUE,
+  AGENT_CARD_COMPACT_H,
+  AGENT_CARD_H,
+  LEAD_HUE,
   barSegments,
   familyHue,
   fmtDurationCompact,
   layoutForest,
-  lineageOf,
+  neighborhoodOf,
   pressureColorOf,
+  runningOnlyForestOf,
 } from '../agentTree'
 import { AgentInspector } from './agentInspector'
-import { memberStyle } from './memberBoard'
+import { AgentAvatar } from './commsAgent'
+import { useElementSize, useScrollMetrics } from './useElementMetrics'
+function memberStyle(hue: string): CSSProperties {
+  return { '--lc-member-hue': hue } as CSSProperties
+}
 
 export interface AgentGraphProps {
   sessionId?: string
+  compact?: boolean
   self?: AgentSelfStats
   forest?: AgentForest | null
   team?: FleetTeam | null
@@ -40,10 +48,25 @@ export interface AgentGraphProps {
 
 const STAGGER_CAP = 8
 const STAGE_H = 560
+const GRAPH_OVERSCAN = 320
+const GRAPH_WINDOW_SEED = 60
+
+function hueOf(node: AgentNode, team: FleetTeam | null, members: readonly FleetTeamMember[]): string {
+  const member = teamMemberOf(team, node.id)
+  return member?.role === 'lead' ? LEAD_HUE
+    : member !== null ? familyHue(members.indexOf(member))
+      : node.isCurrent ? LEAD_HUE : familyHue(node.family)
+}
 
 function linkPath(x1: number, y1: number, x2: number, y2: number): string {
   const k = Math.min(96, Math.max(24, (y2 - y1) * 0.5))
   return `M ${x1} ${y1} C ${x1} ${y1 + k}, ${x2} ${y2 - k}, ${x2} ${y2}`
+}
+
+function avatarIdentityOf(team: FleetTeam | null, node: AgentNode, t: ViewKit['t']): { name: string; role: CommsRole } {
+  const member = teamMemberOf(team, node.id)
+  const role: CommsRole = member === null ? (node.isCurrent ? 'agent' : 'subagent') : member.role
+  return { name: avatarNameOf(member === null ? node.label : member.name, role, t), role }
 }
 
 export function makeAgentGraph(
@@ -62,35 +85,23 @@ export function makeAgentGraph(
 
     const [internalHover, setInternalHover] = useState<string | null>(null)
     const [showAll, setShowAll] = useState(false)
-    useEffect(() => { setShowAll(false) }, [sessionId])
+    const [runningOnly, setRunningOnly] = useState(false)
+    useEffect(() => { setShowAll(false); setRunningOnly(false) }, [sessionId])
+    const viewForest = useMemo(
+      () => (forest !== null && runningOnly ? runningOnlyForestOf(forest) : forest),
+      [forest, runningOnly],
+    )
     const hoverId = props.hoverId !== undefined ? props.hoverId : internalHover
     const focusId = hoverId ?? (props.focusId ?? null)
+    const pinnedId = props.pinnedId ?? null
+    const litId = hoverId ?? pinnedId ?? props.focusId ?? null
     const onHover = props.onHover ?? setInternalHover
-    const { book } = useModelPrices()
     const currency = displayCurrencyOf(ctx.locale)
 
     const stageRef = useRef<HTMLDivElement | null>(null)
     const heardFocus = props.focusId ?? null
-    useEffect(() => {
-      if (heardFocus === null) return
-      /* v8 ignore next 1 */
-      const card = stageRef.current?.querySelector<HTMLElement>(`[data-agent="${CSS.escape(heardFocus)}"]`) ?? null
-      scrollIntoViewIfPossible(card, { block: 'center', behavior: 'smooth' })
-    }, [heardFocus])
-    const [stageWidth, setStageWidth] = useState(0)
-    const [stageHeight, setStageHeight] = useState(0)
-    useEffect(() => {
-      /* v8 ignore start */
-      const el = stageRef.current
-      if (el === null || typeof ResizeObserver !== 'function') return
-      const observer = new ResizeObserver(([entry]) => {
-        setStageWidth(entry.contentRect.width)
-        if (!showAll) setStageHeight(entry.contentRect.height)
-      })
-      observer.observe(el)
-      return () => { observer.disconnect() }
-      /* v8 ignore stop */
-    }, [showAll])
+    const stageSize = useElementSize(stageRef, 'content', viewForest !== null)
+    const stageScroll = useScrollMetrics(stageRef, viewForest !== null)
     useEffect(() => {
       const el = stageRef.current
       /* v8 ignore next 1 */
@@ -98,22 +109,62 @@ export function makeAgentGraph(
       return containHorizontalOverscroll(el)
     }, [])
 
-    const layout = useMemo(() => (forest !== null ? layoutForest(forest, stageWidth) : null), [forest, stageWidth])
+    const layout = useMemo(
+      () => (viewForest !== null ? layoutForest(viewForest, stageSize.width, props.compact === true) : null),
+      [viewForest, props.compact, stageSize.width],
+    )
+    const avatarLabels = useMemo(
+      () => viewForest === null
+        ? null
+        : avatarLabelsOf(viewForest.nodes.map(node => ({ id: node.id, name: avatarIdentityOf(team, node, t).name }))),
+      [viewForest, team, t],
+    )
+    const cardHeight = props.compact === true ? AGENT_CARD_COMPACT_H : AGENT_CARD_H
+    const seededHeight = !stageScroll.measured && viewForest !== null && viewForest.nodes.length > GRAPH_WINDOW_SEED ? STAGE_H : 0
+    const viewportHeight = stageScroll.height > 0 ? stageScroll.height : seededHeight
+    const band = viewportHeight > 0
+      ? { from: stageScroll.scrollTop - GRAPH_OVERSCAN, to: stageScroll.scrollTop + viewportHeight + GRAPH_OVERSCAN }
+      : null
+    const graph = useMemo(() => {
+      if (viewForest === null || layout === null) return null
+      const points = new Map(layout.points.map(point => [point.id, point]))
+      const nodes = new Map(viewForest.nodes.map(node => [node.id, node]))
+      const entries = viewForest.nodes.map(node => ({ node, hue: hueOf(node, team, members) }))
+      const hues = new Map(entries.map(entry => [entry.node.id, entry.hue]))
+      const visible = band === null ? entries : entries.filter(({ node }) => {
+        const point = points.get(node.id)
+        return point !== undefined && point.y <= band.to && point.y + cardHeight >= band.from
+      })
+      return {
+        points,
+        nodes,
+        hues,
+        visible,
+        lit: neighborhoodOf(viewForest, litId),
+        links: band === null
+          ? layout.links
+          : layout.links.filter(link => Math.min(link.y1, link.y2) - cardHeight <= band.to && Math.max(link.y1, link.y2) >= band.from),
+      }
+    }, [band?.from, band?.to, cardHeight, viewForest, layout, litId, members, team])
+    useEffect(() => {
+      if (heardFocus === null || graph === null) return
+      const point = graph.points.get(heardFocus)
+      const el = stageRef.current
+      /* v8 ignore next 1 */
+      if (point !== undefined && el !== null && (point.y < el.scrollTop || point.y + cardHeight > el.scrollTop + el.clientHeight)) {
+        scrollToPos(el, { top: Math.max(0, point.y - 24) })
+      }
+      /* v8 ignore next 1 */
+      const card = stageRef.current?.querySelector<HTMLElement>(`[data-agent="${CSS.escape(heardFocus)}"]`) ?? null
+      scrollIntoViewIfPossible(card, { block: 'center', behavior: 'smooth' })
+    }, [cardHeight, graph, heardFocus])
 
-    if (forest === null || layout === null) return null
+    if (forest === null || viewForest === null || layout === null || graph === null) return null
     const tallFamily = layout.height > STAGE_H
-    const overflowsStage = showAll || (tallFamily && layout.height > stageHeight)
-    const byId = new Map(forest.nodes.map(n => [n.id, n]))
-    const hueOf = (node: AgentNode): string => {
-      const member = teamMemberOf(team, node.id)
-      return member?.role === 'lead' ? BRAND_HUE
-        : member !== null ? familyHue(members.indexOf(member))
-          : node.isCurrent ? BRAND_HUE : familyHue(node.family)
-    }
-    const hues = new Map(forest.nodes.map(node => [node.id, hueOf(node)]))
+    const overflowsStage = showAll || (tallFamily && layout.height > stageSize.height)
+    const byId = graph.nodes
     /* v8 ignore next 1 */
-    const current = forest.nodes.find(n => n.isCurrent) ?? forest.nodes[0]
-    const pinnedId = props.pinnedId ?? null
+    const current = viewForest.nodes.find(n => n.isCurrent) ?? viewForest.nodes[0]
     const pinnedNode = pinnedId !== null ? byId.get(pinnedId) : undefined
     const hoverNode = focusId !== null ? byId.get(focusId) : undefined
     const inspected = pinnedNode ?? hoverNode ?? current
@@ -121,7 +172,7 @@ export function makeAgentGraph(
     let totalTokens = 0
     for (const n of forest.nodes) totalTokens += n.head !== null ? n.head.tokens : 0
 
-    const lit = lineageOf(forest, focusId)
+    const lit = graph.lit
 
     const open = (id: string): void => {
       if (id === current.id) return
@@ -154,13 +205,33 @@ export function makeAgentGraph(
     )
 
     return (
-      <div className="lc-card lc-agents">
+      <div className={'lc-card lc-agents' + (props.compact === true ? ' lc-agents-compact' : '')}>
         <div className="lc-card-title">
           <span className="lc-card-title-text">
-            <IconWorkspaceTreeOutlineRegular size={14} />
+            <IconAgentPresetOutlineRegular size={14} />
             {t('agents.title')}
           </span>
-          <span className="lc-card-sub">{t(select !== undefined ? 'agents.subSelect' : 'agents.sub')}</span>
+          <span className="lc-agents-tools">
+            <span className="lc-card-sub">{t(select !== undefined ? 'agents.subSelect' : 'agents.sub')}</span>
+            <span className="lc-gran" role="group" aria-label={t('agents.filterLabel')}>
+              <button
+                type="button"
+                className={'lc-gran-btn' + (!runningOnly ? ' lc-gran-on' : '')}
+                aria-pressed={!runningOnly}
+                onClick={() => { setRunningOnly(false) }}
+              >
+                {t('agents.filterAll')}<span className="lc-kind-n">{forest.nodes.length}</span>
+              </button>
+              <button
+                type="button"
+                className={'lc-gran-btn' + (runningOnly ? ' lc-gran-on' : '')}
+                aria-pressed={runningOnly}
+                onClick={() => { setRunningOnly(true) }}
+              >
+                {t('agents.filterRunning')}<span className="lc-kind-n">{runningCount}</span>
+              </button>
+            </span>
+          </span>
         </div>
 
         <div className="lc-agents-chips">
@@ -222,10 +293,11 @@ export function makeAgentGraph(
                   height={layout.height}
                   viewBox={`0 0 ${layout.width} ${layout.height}`}
                 >
-                  {layout.links.map((link) => {
+                  {graph.links.map((link) => {
                     const d = linkPath(link.x1, link.y1, link.x2, link.y2)
-                    const on = lit !== null && lit.has(link.to)
-                    const color = hues.get(link.to)
+                    const parentId = graph.nodes.get(link.to)?.parentId
+                    const on = lit !== null && parentId !== undefined && lit.has(link.to) && lit.has(parentId)
+                    const color = graph.hues.get(link.to)
                     return (
                       <g key={link.to} className={on ? 'lc-agents-on' : undefined}>
                         <path
@@ -235,7 +307,7 @@ export function makeAgentGraph(
                           fill="none"
                         />
                         {link.running
-                          ? <path className="lc-agents-flow animate-lc-agent-flow fill-none stroke-2" d={d} stroke={color} />
+                          ? <path className="lc-agents-flow animate-lc-agent-flow motion-reduce:animate-none fill-none stroke-2" d={d} stroke={color} />
                           : null}
                         <circle className="lc-agents-joint" cx={link.x1} cy={link.y1} r={2} fill={color} />
                         <circle className="lc-agents-joint" cx={link.x2} cy={link.y2} r={3} fill={color} />
@@ -243,8 +315,8 @@ export function makeAgentGraph(
                     )
                   })}
                 </svg>
-                {forest.nodes.map((node, index) => {
-                  const point = layout.points.find(p => p.id === node.id)
+                {graph.visible.map(({ node, hue }, index) => {
+                  const point = graph.points.get(node.id)
                   /* v8 ignore next 2 */
                   if (point === undefined) return null
                   return (
@@ -254,18 +326,25 @@ export function makeAgentGraph(
                       x={point.x}
                       y={point.y}
                       width={layout.cardW}
-                      hue={hueOf(node)}
+                      hue={hue}
                       index={index}
                       hovered={focusId === node.id}
                       on={lit !== null && lit.has(node.id)}
+                      dimmed={runningOnly && !node.running && !node.isCurrent}
                       pinned={pinnedId === node.id}
                       onHover={onHover}
                       onOpen={open}
                       onSelect={select}
                       onKeyOpen={keyOpen(node.id)}
-                      book={book}
                       currency={currency}
                       memberName={teammateNameOf(team, node)}
+                      avatar={{
+                        id: node.id,
+                        ...avatarIdentityOf(team, node, t),
+                        self: node.isCurrent,
+                        hue,
+                        initials: avatarLabels?.get(node.id),
+                      }}
                       t={t}
                       fmt={fmt}
                     />
@@ -274,7 +353,8 @@ export function makeAgentGraph(
               </div>
             </div>
 
-            {forest.solo ? <div className="lc-empty lc-agents-solo">{t('agents.solo')}</div> : null}
+            {forest.solo ? <div className="lc-empty lc-agents-solo">{t('agents.solo')}</div>
+              : runningOnly && runningCount === 0 ? <div className="lc-empty lc-agents-solo">{t('agents.filterEmpty')}</div> : null}
           </div>
 
           {props.inspector === false ? null : inspector}
@@ -304,14 +384,15 @@ interface CardProps {
   index: number
   hovered: boolean
   on: boolean
+  dimmed: boolean
   pinned: boolean
   onHover: (id: string | null) => void
   onOpen: (id: string) => void
   onSelect?: (id: string) => void
   onKeyOpen: (ev: KeyboardEvent) => void
-  book: ModelBook | null
   currency: CostCurrency
   memberName?: string
+  avatar: CommsAgent
   t: ViewKit['t']
   fmt: ViewKit['fmt']
 }
@@ -322,10 +403,12 @@ function AgentCard(props: CardProps): ReactElement {
   const segs = node.head !== null ? barSegments(node.head.parts, pct, pressureColorOf(pct)) : []
   const consumed = node.billed !== null && node.billed > 0 ? node.billed
     : node.costUsage !== null ? billedTokensOf(node.costUsage) : null
-  const cost = estimateSessionCost(node.costUsage, props.book, props.currency)
+  const costRead = node.costRead ?? null
+  const usd = costRead !== null && costRead.ready && costRead.usd !== null ? costRead.usd : null
+  const cost = usd === null ? null : formatCost(toCurrency(usd, props.currency), props.currency)
   const metricBits: string[] = []
   if (consumed !== null && consumed > 0) metricBits.push(props.fmt(consumed))
-  if (cost !== null) metricBits.push(formatCost(cost, props.currency))
+  if (cost !== null) metricBits.push(cost)
   const meta: string[] = []
   if (node.durationMs !== null) meta.push(fmtDurationCompact(node.durationMs))
   if (node.requests > 0) meta.push(props.t('agents.steps', { n: node.requests }))
@@ -334,6 +417,7 @@ function AgentCard(props: CardProps): ReactElement {
     + (node.isCurrent ? ' lc-agent-self' : '')
     + (props.hovered ? ' lc-agent-hover' : '')
     + (props.on ? ' lc-agent-on' : '')
+    + (props.dimmed ? ' lc-agent-dimmed' : '')
     + (props.pinned ? ' lc-agent-pinned' : '')
     + (selectable || !node.isCurrent ? ' lc-agent-clickable' : '')
   return (
@@ -355,21 +439,14 @@ function AgentCard(props: CardProps): ReactElement {
       onBlur={() => { props.onHover(null) }}
     >
       <div className="lc-agent-card-head">
+        <AgentAvatar agent={props.avatar} size="sm" t={props.t} />
         {node.running || node.completed
           ? <StateDot state={node.running ? 'ongoing' : 'done'} size={11} className="lc-agent-state" />
           : null}
-        <div className="lc-agent-label">
-          {props.memberName === undefined
-            ? node.label
-            : (
-              <>
-                <b className="lc-agent-member">{props.memberName}</b>
-                <span className="lc-agent-duty" title={node.label}>{node.label}</span>
-              </>
-            )}
-        </div>
+        <div className="lc-agent-label" title={props.memberName ?? node.label}>{props.memberName ?? node.label}</div>
         {node.isCurrent ? <span className="lc-agents-badge lc-agent-self-badge">{props.t('agents.self')}</span> : null}
       </div>
+      {props.memberName !== undefined ? <div className="lc-agent-duty" title={node.label}>{node.label}</div> : null}
       <div className="lc-agent-metric">
         <span className="lc-agent-tokens">{metricBits.length > 0 ? metricBits.join(' · ') : '—'}</span>
       </div>

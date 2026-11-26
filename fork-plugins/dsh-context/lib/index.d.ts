@@ -1,21 +1,24 @@
 /**
- * dsh-context v0.78.2-dsh022rc1.1
+ * dsh-context v0.87.2-dsh023a2.1
  * A DeepSeek Harness plugin for context insight and management, with context dashboard and context command, for understanding how the context is made of, and how it evolves.
  * @author bowenliang123
  * @license Apache-2.0
  * @homepage https://github.com/bowenliang123/dsh-context
- * @built 2026-11-07T06:12:41-05:00
- * @commit b1adc59a8f8b (dirty working tree) on merge/dsh-v0.2.2-rc.1
- * @commit-date 2026-11-07T05:52:07-05:00
+ * @built 2026-11-26T16:44:06-05:00
+ * @commit 0d08a8f15251 (dirty working tree) on merge/dsh-v0.2.3-alpha.2
+ * @commit-date 2026-11-26T16:03:33-05:00
  */
 
-import { z } from "zod";
+import "zod";
 import "@deepseek-ai/dsh-session";
 import z$1 from "@deepseek-ai/schemastery";
+import { MessagePort } from "node:worker_threads";
 import { Context } from "@deepseek-ai/cordis";
 interface ToolStart {
   start: number;
   day: string;
+  name?: string;
+  transport?: true;
 }
 interface ActivityState {
   days: Record<string, ActivityDay>;
@@ -46,6 +49,13 @@ interface HeadersState {
 interface CommandStateRecord extends CommandRecord {
   call?: string;
 }
+interface AgentAlias {
+  catalogName?: string;
+  memberName?: string;
+  catalogLabel?: string;
+}
+type WorkflowTodoStatus = 'pending' | 'in_progress' | 'completed';
+type WorkflowTeamTaskStatus = WorkflowTodoStatus | 'deleted';
 interface TimelineState {
   surface: SurfaceNode[];
   sums: Record<Category, number>;
@@ -61,8 +71,9 @@ interface TimelineState {
   lastModel?: string;
   contextWindow?: number;
   maxOutputTokens?: number;
-  requests: RequestRecord[];
+  requests: SlimRequestRecord[];
   turnRuns?: number;
+  totals?: CumulativeTotals;
   events: ContextEventRecord[];
   archived: SurfaceNode[];
   cost?: SessionCostUsage;
@@ -93,6 +104,7 @@ interface TimelineState {
     name: string;
     start: number;
     argsRaw?: string;
+    transport?: true;
   }>;
   pendingShadowedSeqs?: number[];
   pendingShadowEventSeq?: number;
@@ -101,8 +113,27 @@ interface TimelineState {
   commands: CommandStateRecord[];
   commandsFloor?: number;
   commandStats?: CommandStats;
+  toolTally?: Record<string, number>;
+  programTally?: Record<string, number>;
+  commandCalls?: string[];
+  commandCallsOverflow?: boolean;
+  agents?: Record<string, AgentAlias>;
+  todoItems?: Record<string, WorkflowTodoStatus>;
+  teamTasks?: Record<string, WorkflowTeamTaskStatus>;
   pendingCodeCmds?: Record<string, CommandStateRecord[]>;
   pendingCodeOps?: Record<string, FileOpRecord[]>;
+  pendingCodeStarts?: Record<string, number>;
+}
+interface CumulativeTotals {
+  turns: number;
+  steps: number;
+  events: number;
+  injects: number;
+  compactions: number;
+  prunes: number;
+  modelSwitches: number;
+  skills: Record<string, true>;
+  lastTurn?: number;
 }
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
@@ -129,11 +160,17 @@ interface TimelineCounts {
   compactions: number;
   prunes: number;
   skills?: number;
+  events?: number;
+  modelSwitches?: number;
 }
 interface TimelineLast {
   seq: number;
   total: number;
   prompt?: number;
+}
+interface ActivityTally {
+  n: number;
+  last: number;
 }
 interface ActivityDay {
   tokens: number;
@@ -143,10 +180,9 @@ interface ActivityDay {
   toolCalls?: number;
   toolsMs?: number;
   wallMs?: number;
-  skills?: Record<string, {
-    n: number;
-    last: number;
-  }>;
+  skills?: Record<string, ActivityTally>;
+  tools?: Record<string, ActivityTally>;
+  cmds?: Record<string, ActivityTally>;
 }
 interface ContextActivity {
   days: Record<string, ActivityDay>;
@@ -158,7 +194,7 @@ interface SkillInfo {
   source?: string;
 }
 type DefaultGranularity = 'step' | 'turn';
-type DefaultTrendMode = 'total' | 'delta';
+type DefaultTimelineMode = 'total' | 'delta';
 type DefaultDeltaBase = 'step' | 'turn';
 type DefaultFileSort = 'count' | 'lines' | 'latest' | 'path' | 'name';
 type DefaultToolSort = 'size' | 'count' | 'name';
@@ -166,12 +202,12 @@ type DefaultPlacement = 'all' | 'tab' | 'sidebar' | 'hide';
 type InsightsEntry = 'show' | 'hide';
 type DefaultDurationCurve = 'show' | 'hide';
 type OverviewAutoSteps = 'off' | '100' | '200' | '300';
-type DefaultOverviewRange = 'today' | '7d' | '30d' | 'all';
+type DefaultOverviewRange = 'today' | '7d' | '30d';
 type FleetTab = 'show' | 'hide';
 interface PluginSettings {
   defaultPlacement: DefaultPlacement;
   defaultGranularity: DefaultGranularity;
-  defaultTrendMode: DefaultTrendMode;
+  defaultTimelineMode: DefaultTimelineMode;
   defaultDeltaBase: DefaultDeltaBase;
   defaultToolSort: DefaultToolSort;
   defaultFileSort: DefaultFileSort;
@@ -180,10 +216,18 @@ interface PluginSettings {
   overviewAutoSteps: OverviewAutoSteps;
   defaultOverviewRange: DefaultOverviewRange;
   fleetTab: FleetTab;
+  balanceSource: BalanceSource;
   promptPrefix: string;
   promptSuffix: string;
 }
-interface Snapshot {
+interface SurfaceNodeWindow {
+  nodes: SurfaceNode[];
+  droppedNodes: number;
+  archive: SurfaceNode[];
+  surfaceFloor?: number;
+  archiveFloor?: number;
+}
+interface Snapshot extends SurfaceNodeWindow {
   ok: boolean;
   unsupported?: {
     current: string;
@@ -212,6 +256,8 @@ interface Snapshot {
   generatedAnswerTokens?: number;
   generatedCallTokens?: number;
   toolCalls?: number;
+  toolTally?: Record<string, number>;
+  programTally?: Record<string, number>;
   humanInputs?: number;
   answers?: number;
   lastUser?: string;
@@ -223,28 +269,48 @@ interface Snapshot {
   cost?: SessionCostUsage;
   timing?: TimingTotals;
   systems?: SystemPromptNode[];
-  nodes: SurfaceNode[];
-  droppedNodes: number;
-  archive: SurfaceNode[];
-  surfaceFloor?: number;
-  archiveFloor?: number;
   fileOps?: FileOpRecord[];
   fileOpsFloor?: number;
   commands?: CommandRecord[];
   commandsFloor?: number;
   commandStats?: CommandStats;
   spans?: TimingSpan[];
+  costRead?: SessionCostRead;
 }
-interface ContextTimelineDetail {
+interface CostPriceRate {
+  hit: number;
+  miss: number;
+  write: number;
+  out: number;
+}
+type CostConfidence = 'high' | 'medium' | 'low';
+interface CostPriceFace {
+  provider: string;
+  model: string;
+  rate: CostPriceRate;
+  via: string;
+  confidence: CostConfidence;
+  canonical?: string;
+  /** The model billed whole requests at its long-context tier. */
+  long?: true;
+}
+interface CostPriceMiss {
+  provider: string;
+  model: string;
+  reason: string;
+  candidates?: number;
+}
+interface SessionCostRead {
+  usd: number | null;
+  ready: boolean;
+  faces?: CostPriceFace[];
+  misses?: CostPriceMiss[];
+}
+interface ContextTimelineDetail extends SurfaceNodeWindow {
   rev: number;
   head?: ContextTimeline;
   requests: RequestRecord[];
   events: ContextEventRecord[];
-  nodes: SurfaceNode[];
-  droppedNodes: number;
-  archive: SurfaceNode[];
-  surfaceFloor?: number;
-  archiveFloor?: number;
   fileOps?: FileOpRecord[];
   fileOpsFloor?: number;
   commands?: CommandRecord[];
@@ -252,8 +318,9 @@ interface ContextTimelineDetail {
   commandStats?: CommandStats;
   spans?: TimingSpan[];
   /**
-   * Set when the detail covers only a bounded tail window of the durable log; `fromSeq` is the
-   * first durable event the payload covers, so earlier history is not loaded.
+   * Set when the detail covers only a bounded tail window of the durable log;
+   * `fromSeq` is the first durable event the payload covers, so earlier
+   * history is not loaded.
    */
   partial?: {
     fromSeq: number;
@@ -265,7 +332,7 @@ interface CommandRecord {
   resultSeq?: number;
   time: number;
   tool: string;
-  cmd: string;
+  cmd?: string;
   cmdTruncated?: true;
   description?: string;
   cwd?: string;
@@ -384,37 +451,44 @@ interface SurfaceNode {
   err?: boolean;
   skill?: string;
   calls?: string[];
+  agent?: string;
 }
-interface RequestRecord {
+interface SlimRequestRecord {
   turn?: number;
   step?: number;
   time: number;
   seq: number;
+  total: number;
+  prompt?: number;
+  activeMs?: number;
+}
+interface RequestRecord extends SlimRequestRecord {
   system: number;
   tools: number;
   user: number;
   inject: number;
   assistant: number;
   tool: number;
-  total: number;
-  prompt?: number;
   skill?: number;
   cacheRead?: number;
   output?: number;
-  activeMs?: number;
   stepCount?: number;
   net?: number;
 }
 interface ContextEventRecord {
   seq: number;
+  ord?: number;
   time: number;
-  kind: 'compaction' | 'prune' | 'inject' | 'model' | 'mode';
+  kind: 'compaction' | 'prune' | 'inject' | 'model' | 'mode' | 'agent' | 'goal-create' | 'goal-complete' | 'todo-add' | 'todo-done' | 'ask' | 'team-task-create' | 'team-task-complete';
   form?: string;
   tokens?: number;
+  grossTokens?: number;
   count?: number;
   sub?: string;
   name?: string;
+  agent?: string;
   detail?: string;
+  items?: string[];
   from?: string;
   to?: string;
   fromTurn?: number;
@@ -446,6 +520,7 @@ interface PlatformBalance {
   isAvailable: boolean;
   balances: PlatformBalanceEntry[];
 }
+type BalanceSource = 'account' | 'api';
 declare const DEFAULT_BOUNDS: {
   maxRequestSteps: number;
   maxKeptTurns: number;
@@ -454,9 +529,12 @@ declare const DEFAULT_BOUNDS: {
   maxArchiveNodes: number;
   maxFileOps: number;
   maxCommands: number;
+  maxSpans: number;
   maxCommandChars: number;
 };
-type FoldBounds = typeof DEFAULT_BOUNDS;
+type FoldBounds = typeof DEFAULT_BOUNDS & {
+  headOnly?: boolean;
+};
 export type Config = Partial<FoldBounds> & Partial<PluginSettings>;
 export declare const Config: z$1<Schemastery.ObjectS<NoInfer<{
   maxRequestSteps: z$1<number, number, "defined">;
@@ -466,18 +544,20 @@ export declare const Config: z$1<Schemastery.ObjectS<NoInfer<{
   maxArchiveNodes: z$1<number, number, "defined">;
   maxFileOps: z$1<number, number, "defined">;
   maxCommands: z$1<number, number, "defined">;
+  maxSpans: z$1<number, number, "defined">;
   maxCommandChars: z$1<number, number, "defined">;
   defaultPlacement: z$1<"all" | "hide" | "sidebar" | "tab", "all" | "hide" | "sidebar" | "tab", "defined">;
   defaultGranularity: z$1<"step" | "turn", "step" | "turn", "defined">;
-  defaultTrendMode: z$1<"delta" | "total", "delta" | "total", "defined">;
+  defaultTimelineMode: z$1<"delta" | "total", "delta" | "total", "defined">;
   defaultDeltaBase: z$1<"step" | "turn", "step" | "turn", "defined">;
   defaultToolSort: z$1<"count" | "name" | "size", "count" | "name" | "size", "defined">;
   defaultFileSort: z$1<"count" | "latest" | "lines" | "name" | "path", "count" | "latest" | "lines" | "name" | "path", "defined">;
   insightsEntry: z$1<"hide" | "show", "hide" | "show", "defined">;
   defaultDurationCurve: z$1<"hide" | "show", "hide" | "show", "defined">;
   overviewAutoSteps: z$1<"100" | "200" | "300" | "off", "100" | "200" | "300" | "off", "defined">;
-  defaultOverviewRange: z$1<"30d" | "7d" | "all" | "today", "30d" | "7d" | "all" | "today", "defined">;
+  defaultOverviewRange: z$1<"30d" | "7d" | "today", "30d" | "7d" | "today", "defined">;
   fleetTab: z$1<"hide" | "show", "hide" | "show", "defined">;
+  balanceSource: z$1<"account" | "api", "account" | "api", "defined">;
   promptPrefix: z$1<string, string, "defined">;
   promptSuffix: z$1<string, string, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
@@ -488,22 +568,26 @@ export declare const Config: z$1<Schemastery.ObjectS<NoInfer<{
   maxArchiveNodes: z$1<number, number, "defined">;
   maxFileOps: z$1<number, number, "defined">;
   maxCommands: z$1<number, number, "defined">;
+  maxSpans: z$1<number, number, "defined">;
   maxCommandChars: z$1<number, number, "defined">;
   defaultPlacement: z$1<"all" | "hide" | "sidebar" | "tab", "all" | "hide" | "sidebar" | "tab", "defined">;
   defaultGranularity: z$1<"step" | "turn", "step" | "turn", "defined">;
-  defaultTrendMode: z$1<"delta" | "total", "delta" | "total", "defined">;
+  defaultTimelineMode: z$1<"delta" | "total", "delta" | "total", "defined">;
   defaultDeltaBase: z$1<"step" | "turn", "step" | "turn", "defined">;
   defaultToolSort: z$1<"count" | "name" | "size", "count" | "name" | "size", "defined">;
   defaultFileSort: z$1<"count" | "latest" | "lines" | "name" | "path", "count" | "latest" | "lines" | "name" | "path", "defined">;
   insightsEntry: z$1<"hide" | "show", "hide" | "show", "defined">;
   defaultDurationCurve: z$1<"hide" | "show", "hide" | "show", "defined">;
   overviewAutoSteps: z$1<"100" | "200" | "300" | "off", "100" | "200" | "300" | "off", "defined">;
-  defaultOverviewRange: z$1<"30d" | "7d" | "all" | "today", "30d" | "7d" | "all" | "today", "defined">;
+  defaultOverviewRange: z$1<"30d" | "7d" | "today", "30d" | "7d" | "today", "defined">;
   fleetTab: z$1<"hide" | "show", "hide" | "show", "defined">;
+  balanceSource: z$1<"account" | "api", "account" | "api", "defined">;
   promptPrefix: z$1<string, string, "defined">;
   promptSuffix: z$1<string, string, "defined">;
 }>>, "plain">;
+type FoldPort = Pick<MessagePort, 'on' | 'postMessage'>;
+export declare function startFoldWorkerChannel(port?: FoldPort | null): void;
 export declare const name = "dsh-context";
 export declare const inject: string[];
-export declare function apply(ctx: Context, config: Config): Promise<void>;
+export declare function apply(ctx: Context, config: Config): void;
 export type { ActivityDay, ActivityState, Category, ContextActivity, ContextEventRecord, ContextHeaders, ContextTimeline, ContextTimelineDetail, HeaderRecord, HeaderTool, HeadersState, PlatformBalance, PlatformBalanceEntry, RequestRecord, SkillInfo, Snapshot, SurfaceNode, TimelineCounts, TimelineLast, TimelineState };

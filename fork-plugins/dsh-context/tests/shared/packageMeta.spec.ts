@@ -1,4 +1,5 @@
 import { readFile, readdir } from 'node:fs/promises'
+import { DICTS } from '../../src/client/i18n'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 
@@ -9,30 +10,38 @@ interface PackageManifest {
 }
 
 const manifest = JSON.parse(await readFile('package.json', 'utf8')) as PackageManifest
+const locales = Object.keys(DICTS).sort()
 
 describe('package meta localization', () => {
-  test('the locale dictionaries ship, resolve, and carry well-formed meta', async () => {
+  test('every supported locale ships, resolves, and carries well-formed meta', async () => {
     const names = (await readdir('locale')).filter(name => name.endsWith('.json')).sort()
-    assert.ok(names.includes('en.json'), 'en.json is the fallback dictionary and gates the meta scan')
+    assert.deepEqual(names, locales.map(locale => `${locale}.json`).sort())
     for (const name of names) {
       assert.match(name, /^en\.json$|^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*\.json$/, `${name}: language-id filename`)
       const parsed = JSON.parse(await readFile(`locale/${name}`, 'utf8')) as {
-        meta?: { title?: unknown; description?: unknown }
+        meta?: { title?: unknown; description?: unknown; detail?: unknown }
       }
       assert.equal(typeof parsed.meta?.title, 'string', `${name}: meta.title`)
       assert.equal(typeof parsed.meta?.description, 'string', `${name}: meta.description`)
+      const detail = parsed.meta?.detail
+      assert.ok(typeof detail === 'string', `${name}: meta.detail`)
+      assert.equal(detail, name === 'zh.json' ? 'README.md' : `README_${name.slice(0, -5)}.md`, `${name}: meta.detail`)
+      await readFile(detail, 'utf8')
     }
     assert.equal(manifest.exports['./locale/*.json'], './locale/*.json', 'the locale exports pattern')
     assert.equal(manifest.exports['./package.json'], './package.json', 'the meta reader resolves the manifest itself')
     assert.ok(manifest.files.includes('locale/*.json'), 'the dictionaries ship')
+    assert.ok(manifest.files.includes('README*.md'), 'the localized READMEs ship')
   })
 
-  test('the zh dictionary is a real translation of the en one', async () => {
+  test('every localized dictionary translates the complete English meta shape', async () => {
     const en = JSON.parse(await readFile('locale/en.json', 'utf8')) as { meta: Record<string, string> }
-    const zh = JSON.parse(await readFile('locale/zh.json', 'utf8')) as { meta: Record<string, string> }
-    assert.deepEqual(Object.keys(zh.meta).sort(), Object.keys(en.meta).sort())
-    for (const field of Object.keys(en.meta)) {
-      assert.notEqual(zh.meta[field], en.meta[field], `zh ${field} is translated`)
+    for (const locale of locales.filter(locale => locale !== 'en')) {
+      const dict = JSON.parse(await readFile(`locale/${locale}.json`, 'utf8')) as { meta: Record<string, string> }
+      assert.deepEqual(Object.keys(dict.meta).sort(), Object.keys(en.meta).sort(), locale)
+      for (const field of Object.keys(en.meta).filter(field => field !== 'detail')) {
+        assert.notEqual(dict.meta[field], en.meta[field], `${locale} ${field} is translated`)
+      }
     }
   })
 

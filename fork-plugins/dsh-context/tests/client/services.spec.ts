@@ -71,6 +71,32 @@ describe('numOf', () => {
   })
 })
 
+describe('timelineOf — head tallies on the safe path', () => {
+  test('narrows tool/program tallies and command stats, dropping hostile members', () => {
+    const out = timelineOf({
+      current: { system: 1 },
+      requests: 'nope',
+      toolTally: { bash: 2, bad: 'x', '__proto__': 1, empty: -1 },
+      programTally: { ls: 3.9 },
+      commandStats: { runs: 3, failed: 'x', ms: 0, bg: 1 },
+    })
+    assert.deepEqual(out?.toolTally, { bash: 2, '__proto__': 0 })
+    assert.deepEqual(out?.programTally, { ls: 3 })
+    assert.deepEqual(out?.commandStats, { runs: 3, failed: 0, ms: 0, bg: 1 })
+    const longKey = 'y'.repeat(130)
+    const many: Record<string, number> = {}
+    for (let i = 0; i < 140; i++) many['k' + i] = i
+    const clamped = timelineOf({ current: { system: 1 }, requests: 'nope', toolTally: { [longKey]: 2, ...many } })
+    assert.equal(Object.keys(clamped?.toolTally ?? {}).length, 128)
+    assert.equal(clamped?.toolTally?.['y'.repeat(120)], 2)
+    assert.equal(Object.keys(clamped?.toolTally ?? {}).some(key => key.length > 120), false)
+    const empty = timelineOf({ current: { system: 1 }, requests: 'nope', toolTally: {}, programTally: null, commandStats: null })
+    assert.equal(empty?.toolTally, undefined)
+    assert.equal(empty?.programTally, undefined)
+    assert.equal(empty?.commandStats, undefined)
+  })
+})
+
 describe('timelineOf', () => {
   const current = { system: 1, tools: 2, user: 3, inject: 4, skill: 0, assistant: 5, assistantReasoning: 3, assistantAnswerTokens: 2, assistantCallTokens: 1, tool: 6, total: 7 }
 
@@ -269,9 +295,9 @@ describe('timelineOf', () => {
     const noStats = timelineOf({ current, commandStats: 'junk' })
     assert.ok(noStats !== null && !('commandStats' in noStats))
 
-    const partial = timelineOf({ current, counts: { turns: 2, steps: 'many' }, last: { seq: 'x' }, detailRev: 'r', answers: 'many' })
+    const partial = timelineOf({ current, counts: { turns: 2, steps: 'many', events: 3, modelSwitches: 4 }, last: { seq: 'x' }, detailRev: 'r', answers: 'many' })
     assert.ok(partial !== null)
-    assert.deepEqual(partial.counts, { turns: 2, steps: 0, injects: 0, compactions: 0, prunes: 0, skills: 0 })
+    assert.deepEqual(partial.counts, { turns: 2, steps: 0, events: 3, modelSwitches: 4, injects: 0, compactions: 0, prunes: 0, skills: 0 })
     assert.ok(!('answers' in partial), 'a wrong-typed answers tally drops like any other scalar')
     assert.ok(!('last' in partial), 'a wrong-typed seq drops the anchor whole')
     assert.ok(!('detailRev' in partial), 'a wrong-typed revision drops the marker (reads as the inline generation)')
@@ -764,6 +790,34 @@ describe('activityOf', () => {
         '2026-09-19': { tokens: 1, requests: 1 },
       },
     }, 'non-record and empty-after-scrubbing tables drop whole; the days survive')
+  })
+
+  test('the tool and command tables repair like the skill table', () => {
+    const clean = {
+      days: {
+        '2026-09-16': {
+          tokens: 1,
+          requests: 1,
+          tools: { read: { n: 2, last: 5 } },
+          cmds: { git: { n: 1, last: 6 } },
+        },
+      },
+    }
+    assert.ok(activityOf(clean) === (clean as never), 'clean tables ride the pass-through')
+    const dirty = activityOf({
+      days: {
+        '2026-09-16': {
+          tokens: 1,
+          requests: 1,
+          tools: { read: { n: 1 }, 'bad-name': { n: -1, last: 2 } },
+          cmds: { git: { n: 2, last: 3 } },
+        },
+        '2026-09-17': { tokens: 1, requests: 1, tools: { read: { n: 2, last: 4 } }, cmds: [1] },
+      },
+    })
+    assert.deepEqual(dayOf(dirty).tools, undefined, 'no readable tool tally leaves no table')
+    assert.deepEqual(dayOf(dirty).cmds, { git: { n: 2, last: 3 } })
+    assert.deepEqual(dayOf(dirty, '2026-09-17'), { tokens: 1, requests: 1, tools: { read: { n: 2, last: 4 } } }, 'a malformed command table drops alone')
   })
 
   test('the daily tallies ride the pass-through and the sanitized copy; malformed figures drop alone', () => {

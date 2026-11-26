@@ -1,4 +1,4 @@
-import type { Category, ContextEventRecord, FileOpRecord, RequestRecord, SurfaceNode, SystemPromptNode, TimingSpan } from '../shared/types'
+import type { Category, ContextEventRecord, FileOpRecord, RequestRecord, SlimRequestRecord, SurfaceNode, SystemPromptNode, TimingSpan } from '../shared/types'
 import { estimateSystemContent } from '../shared/estimate'
 import type { FoldBounds } from './config'
 import {
@@ -12,12 +12,12 @@ import {
   injectionSourceName,
   isInjection,
   toolCallNames,
+  type MessageSource,
 } from './pricing'
-import type { ContentBlock, MessageSource } from './pricing'
 import { deriveEventMessage } from '@deepseek-ai/dsh-session'
-import { firstTokenTimeOfStream, replaceRangeOf, streamTimingOf } from './logShapes'
+import { firstTokenTimeOfStream, replaceRangeOf, streamTimingOf, type DecodeSpan } from './logShapes'
 import { opBearingTool, opsOfCall, parseCallArgs, rawArgsNeeded } from '../shared/fileOps'
-import { commandArgsOf, commandTool, markersOfText, outcomeOfMarkers } from '../shared/commands'
+import { commandArgsOf, commandArgsRecordOf, commandProgramsOf, commandTool, markersOfText, outcomeOfMarkers } from '../shared/commands'
 import {
   bumpBg,
   commandRecordOf,
@@ -30,10 +30,10 @@ import {
   setCommand,
   tallyRun,
 } from './foldCommands'
-import { countTurnRuns, trimState } from './foldState'
-import type { CommandStateRecord, TimelineEvent, TimelineState } from './foldState'
-import { accumulateCost, addDecode, bumpToolTotals, carveWindows, DECODE_KINDS, durOf, ensureTiming, idleGapWindows, mergeWindows, tokenCountOf } from './foldMetering'
-import type { UsageLike } from './foldMetering'
+import { TALLY_NAME_CHARS_MAX, TALLY_NAMES_MAX, countCompaction, countInject, countModelSwitch, countStep, countTurnRuns, noteCommandCall, noteSkillName, noteTurn, pushEvent, slimSurfaceNode, trimState, type CommandStateRecord, type TimelineEvent, type TimelineState } from './foldState'
+import { agentOfInjection, applyCatalogEvent, messageOf, skillNameOf, type MessageLike } from './foldInjections'
+import { applyWorkflowEvent, askRecordOf } from './foldWorkflow'
+import { accumulateCost, addDecodeSpan, bumpToolTotals, carveWindows, durOf, ensureTiming, idleGapWindows, mergeWindows, tokenCountOf, type UsageLike } from './foldMetering'
 
 function categoryOf(type: string, message: { source?: MessageSource } | undefined): Category {
   if (type === 'assistant/message') return 'assistant'
@@ -68,6 +68,8 @@ const PENDING_CODE_OPS_MAX = 200
 
 const PENDING_CODE_CMDS_MAX = 200
 
+const PENDING_CODE_STARTS_MAX = 200
+
 function argsRawOf(value: unknown): string | undefined {
   if (typeof value === 'string') return value
   if (value === undefined || value === null) return undefined
@@ -78,8 +80,37 @@ function argsRawOf(value: unknown): string | undefined {
   }
 }
 
+export function dispatchedSkillOf(data: unknown): string {
+  const args = commandArgsRecordOf((data as { arguments?: unknown } | null | undefined)?.arguments)
+  const name = args?.name
+  return typeof name === 'string' && name !== '' ? name : skillNameOf(data)
+}
+
 function pushFileOps(st: TimelineState, ops: FileOpRecord[]): void {
   for (const op of ops) st.fileOps.push(op)
+}
+
+function tallyName(map: Record<string, number> | undefined, name: string): Record<string, number> | undefined {
+  if (name === '' || name === '__proto__') return undefined
+  const key = name.length > TALLY_NAME_CHARS_MAX ? name.slice(0, TALLY_NAME_CHARS_MAX) : name
+  const next = { ...(map ?? {}) }
+  if (!Object.hasOwn(next, key) && Object.keys(next).length >= TALLY_NAMES_MAX) return undefined
+  next[key] = (next[key] ?? 0) + 1
+  return next
+}
+
+function tallyTool(st: TimelineState, name: string): void {
+  const next = tallyName(st.toolTally, name)
+  if (next !== undefined) st.toolTally = next
+}
+
+function tallyPrograms(st: TimelineState, tool: Parameters<typeof commandProgramsOf>[0], cmd: string): void {
+  let tally = st.programTally
+  for (const name of commandProgramsOf(tool, cmd)) {
+    const next = tallyName(tally, name)
+    if (next !== undefined) tally = next
+  }
+  if (tally !== undefined && tally !== st.programTally) st.programTally = tally
 }
 
 function bufferCodeOps(st: TimelineState, rootCallId: string, ops: FileOpRecord[]): void {
@@ -90,7 +121,8 @@ function bufferCodeOps(st: TimelineState, rootCallId: string, ops: FileOpRecord[
   st.pendingCodeOps = { ...pending, [rootCallId]: [...(pending[rootCallId] ?? []), ...ops] }
 }
 
-function archiveRemoved(st: TimelineState, removed: SurfaceNode[], goneSeq: number): void {
+function archiveRemoved(st: TimelineState, removed: SurfaceNode[], goneSeq: number, bounds: FoldBounds): void {
+  if (bounds.headOnly === true) return
   for (const n of removed) st.archived.push({ ...n, gone: goneSeq })
 }
 
@@ -100,12 +132,23 @@ function applyLiveSubsets(st: TimelineState, node: SurfaceNode, sign: 1 | -1): v
   if (node.callTokens !== undefined) st.assistantCallTokens += sign * node.callTokens
 }
 
-function removeSurfaceSeqs(st: TimelineState, claimed: ReadonlySet<number>, goneSeq: number): SurfaceNode[] {
-  if (claimed.size === 0) return []
+function surfaceNodeOf(node: SurfaceNode, bounds: FoldBounds): SurfaceNode {
+  return bounds.headOnly === true ? slimSurfaceNode(node) : node
+}
+
+interface SurfaceRemoval {
+  removed: SurfaceNode[]
+  insertAt: number
+}
+
+function removeSurfaceSeqs(st: TimelineState, claimed: ReadonlySet<number>, goneSeq: number, bounds: FoldBounds): SurfaceRemoval {
+  if (claimed.size === 0) return { removed: [], insertAt: st.surface.length }
   const kept: SurfaceNode[] = []
   const removed: SurfaceNode[] = []
+  let insertAt = -1
   for (const n of st.surface) {
     if (claimed.has(n.seq)) {
+      if (insertAt < 0) insertAt = kept.length
       st.sums[n.cat] -= n.tokens
       applyLiveSubsets(st, n, -1)
       removed.push(n)
@@ -113,46 +156,19 @@ function removeSurfaceSeqs(st: TimelineState, claimed: ReadonlySet<number>, gone
       kept.push(n)
     }
   }
-  archiveRemoved(st, removed, goneSeq)
+  archiveRemoved(st, removed, goneSeq, bounds)
   st.surface = kept
-  return removed
+  return { removed, insertAt: insertAt < 0 ? kept.length : insertAt }
 }
 
 type SurfaceEventLike = Pick<TimelineEvent, 'seq' | 'time' | 'surfaceOp'>
-
-interface MessageLike {
-  content?: ContentBlock[]
-  source?: MessageSource
-  isError?: unknown
-}
-
-function messageOf(data: Record<string, unknown> | undefined): MessageLike | null {
-  const message = data?.message
-  return message !== null && typeof message === 'object' ? message : null
-}
-
-function firstFullText(blocks: unknown): string {
-  if (!Array.isArray(blocks)) return ''
-  for (const item of blocks) {
-    if (item === null || typeof item !== 'object') continue
-    const block = item as ContentBlock
-    if (block.type === 'text' && typeof block.text === 'string' && block.text !== '') return block.text
-  }
-  return ''
-}
-
-export function skillNameOf(msg: unknown): string {
-  const content = msg !== null && typeof msg === 'object' ? (msg as MessageLike).content : undefined
-  const text = firstFullText(content)
-  const match = text.match(/<skill_content\s+name="([^"]+)"/)
-  return match === null ? '' : match[1]
-}
 
 function applySurface(
   st: TimelineState,
   ev: SurfaceEventLike,
   type: string,
   message: MessageLike | null | undefined,
+  bounds: FoldBounds,
 ): SurfaceNode {
   const cat = categoryOf(type, message ?? undefined)
   const node: SurfaceNode = {
@@ -172,8 +188,7 @@ function applySurface(
   const imgs = imageCountOf(message?.content)
   if (imgs > 0) node.imgs = imgs
   const source = message?.source
-  const form = source?.form
-  if (typeof form === 'string') node.form = form
+  if (typeof source?.form === 'string') node.form = source.form
   if (type === 'assistant/message') {
     const text = firstText(message?.content)
     if (text !== '') node.text = text
@@ -186,17 +201,17 @@ function applySurface(
     const toolEntry = typeof srcId === 'string' && Object.hasOwn(st.callNames, srcId) ? st.callNames[srcId] : undefined
     if (toolEntry !== undefined) {
       node.tool = toolEntry.name
-      const timing = ensureTiming(st)
-      const dur = durOf(toolEntry.start, ev.time)
-      timing.toolsMs += dur
-      timing.toolCalls += 1
-      bumpToolTotals(timing, toolEntry.name, dur)
-      if (st.stepStart !== undefined) {
-        st.stepSpans = [...(st.stepSpans ?? []), { kind: 'tools', start: toolEntry.start, end: ev.time }]
+      if (toolEntry.transport !== true) {
+        const timing = ensureTiming(st)
+        const dur = durOf(toolEntry.start, ev.time)
+        timing.toolsMs += dur
+        timing.toolCalls += 1
+        bumpToolTotals(timing, toolEntry.name, dur)
       }
+      if (st.stepStart !== undefined) st.stepSpans = [...(st.stepSpans ?? []), { kind: 'tools', start: toolEntry.start, end: ev.time }]
     }
     if (typeof srcId === 'string') {
-      const kept: Record<string, { name: string; start: number }> = {}
+      const kept: Record<string, { name: string; start: number; argsRaw?: string; transport?: true }> = {}
       for (const k in st.callNames) {
         if (k !== srcId) kept[k] = st.callNames[k]
       }
@@ -226,14 +241,20 @@ function applySurface(
   const op = replaceRangeOf(ev.surfaceOp)
   if (op !== null) {
     if (Array.isArray(shadowedSeqs) && shadowedSeqs.length > 0) {
-      const removed = removeSurfaceSeqs(st, new Set(shadowedSeqs), ev.seq)
+      const { removed, insertAt } = removeSurfaceSeqs(st, new Set(shadowedSeqs), ev.seq, bounds)
       st.sums[cat] += node.tokens
       applyLiveSubsets(st, node, 1)
-      st.surface.push(node)
+      st.surface.splice(insertAt, 0, surfaceNodeOf(node, bounds))
       if (shadowEventSeq !== undefined) {
         const removedSum = removed.reduce((sum, n) => sum + n.tokens, 0)
         const i = st.events.findIndex(e => e.seq === shadowEventSeq)
-        if (i >= 0) st.events[i] = { ...st.events[i], tokens: Math.max(0, removedSum - node.tokens) }
+        if (i >= 0) {
+          st.events[i] = {
+            ...st.events[i],
+            tokens: Math.max(0, removedSum - node.tokens),
+            ...(st.events[i].kind === 'compaction' ? { grossTokens: removedSum } : {}),
+          }
+        }
       }
       return node
     }
@@ -244,8 +265,8 @@ function applySurface(
       if (st.surface[i].seq === op.end) { ei = i; break }
     }
     if (si >= 0 && ei >= si) {
-      const removed = st.surface.splice(si, ei - si + 1, node)
-      archiveRemoved(st, removed, ev.seq)
+      const removed = st.surface.splice(si, ei - si + 1, surfaceNodeOf(node, bounds))
+      archiveRemoved(st, removed, ev.seq, bounds)
       for (const r of removed) {
         st.sums[r.cat] -= r.tokens
         applyLiveSubsets(st, r, -1)
@@ -255,7 +276,7 @@ function applySurface(
       return node
     }
   }
-  st.surface.push(node)
+  st.surface.push(surfaceNodeOf(node, bounds))
   st.sums[cat] += node.tokens
   applyLiveSubsets(st, node, 1)
   return node
@@ -263,14 +284,15 @@ function applySurface(
 
 const ASK_USER_TOOL = 'ask_user_question'
 
-type CloneKey = 'surface' | 'sums' | 'requests' | 'events' | 'archived' | 'callNames' | 'fileOps' | 'timing' | 'commands'
+type CloneKey = 'surface' | 'sums' | 'requests' | 'events' | 'archived' | 'callNames' | 'fileOps' | 'timing' | 'commands' | 'commandCalls'
 
-const CLONE_ALL: readonly CloneKey[] = ['surface', 'sums', 'requests', 'events', 'archived', 'callNames', 'fileOps', 'timing', 'commands']
+const CLONE_ALL: readonly CloneKey[] = ['surface', 'sums', 'requests', 'events', 'archived', 'callNames', 'fileOps', 'timing', 'commands', 'commandCalls']
 
 const STEP_BEATS_MAX = 1024
 
 export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds: FoldBounds): TimelineState {
-  if (state.stepStart === undefined || state.stepBeatsFull === true
+  if (event.type === 'subagent/catalog' || event.type === 'team/member'
+    || state.stepStart === undefined || state.stepBeatsFull === true
     || !Number.isFinite(event.time) || event.time < 0) {
     return applyTimelineEvent(state, event, bounds)
   }
@@ -295,9 +317,17 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
       else if (key === 'callNames') st.callNames = { ...state.callNames }
       else if (key === 'fileOps') st.fileOps = [...state.fileOps]
       else if (key === 'commands') st.commands = [...state.commands]
+      else if (key === 'commandCalls' && state.commandCalls !== undefined) st.commandCalls = [...state.commandCalls]
       else if (state.timing !== undefined) st.timing = { ...state.timing, tools: { ...state.timing.tools } }
     }
     return st
+  }
+
+  const bumpTrimmedCommand = (callId: string): TimelineState | undefined => {
+    if (bounds.headOnly !== true || (state.commandCallsOverflow !== true && state.commandCalls?.includes(callId) !== true)) return undefined
+    const s = ensure([])
+    bumpDetailRev(s)
+    return s
   }
 
   const data = event.data
@@ -325,7 +355,8 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           delete s.maxOutputTokens
         }
         if ((data?.reason === 'change' || data?.reason === 'resume') && s.model && s.lastModel && s.model !== s.lastModel) {
-          s.events.push({ seq: event.seq, time: event.time, kind: 'model', from: s.lastModel, to: s.model })
+          pushEvent(s, { seq: event.seq, time: event.time, kind: 'model', from: s.lastModel, to: s.model })
+          countModelSwitch(s)
           bumpDetailRev(s)
         }
         if (s.model) s.lastModel = s.model
@@ -343,23 +374,34 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           for (const n of s.surface) {
             if (n.seq >= op.start && n.seq <= op.end) claimed.add(n.seq)
           }
-          if (removeSurfaceSeqs(s, claimed, event.seq).length > 0) bumpDetailRev(s)
+          if (removeSurfaceSeqs(s, claimed, event.seq, bounds).removed.length > 0) bumpDetailRev(s)
         }
         pushSystem(s, { seq: event.seq, time: event.time, tokens: estimateSystemContent(messageOf(data)?.content) })
         break
       }
       case 'request/context': {
+        const contextWindow = data && typeof data.contextWindow === 'number' ? data.contextWindow : undefined
+        const model = data && typeof data.model === 'string' ? data.model : undefined
+        const provider = data && typeof data.provider === 'string' ? data.provider : undefined
+        if (contextWindow === undefined && model === undefined && provider === undefined) return state
+        if ((contextWindow ?? state.contextWindow) === state.contextWindow
+          && (model ?? state.model) === state.model
+          && (provider ?? state.provider) === state.provider) return state
         const s = ensure([])
-        if (data && typeof data.contextWindow === 'number') s.contextWindow = data.contextWindow
-        if (data && typeof data.model === 'string') s.model = data.model
-        if (data && typeof data.provider === 'string') s.provider = data.provider
+        if (contextWindow !== undefined) s.contextWindow = contextWindow
+        if (model !== undefined) s.model = model
+        if (provider !== undefined) s.provider = provider
         break
       }
       case 'tool/call': {
         if (data && typeof data.callId === 'string' && typeof data.name === 'string') {
           const cmdTool = commandTool(data.name)
-          const s = ensure(cmdTool === null ? ['callNames'] : ['callNames', 'commands'])
-          const argsRaw = rawArgsNeeded(data.name) ? argsRawOf(data.arguments) : undefined
+          const ask = data.name === ASK_USER_TOOL ? askRecordOf(event.seq, event.time, data) : undefined
+          const keys: CloneKey[] = cmdTool === null ? ['callNames'] : ['callNames', 'commands']
+          if (ask !== undefined) keys.push('events')
+          if (cmdTool !== null && bounds.headOnly === true) keys.push('commandCalls')
+          const s = ensure(keys)
+          const argsRaw = bounds.headOnly === true || !rawArgsNeeded(data.name) ? undefined : argsRawOf(data.arguments)
           if (data.callId !== '__proto__') {
             s.callNames[data.callId] = {
               name: data.name,
@@ -378,10 +420,16 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
                 turn: data.turn,
                 step: data.step,
                 call: data.callId,
-              }))
+              }, bounds.headOnly === true))
+              tallyPrograms(s, cmdTool, parsed.cmd)
+              if (bounds.headOnly === true) noteCommandCall(s, data.callId)
               if (parsed.background === true) bumpBg(s)
               bumpDetailRev(s)
             }
+          }
+          if (ask !== undefined) {
+            pushEvent(s, ask)
+            bumpDetailRev(s)
           }
         }
         break
@@ -397,9 +445,11 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           bumpDetailRev(s)
           break
         }
-        if (state.pendingCodeCmds === undefined) return state
+        if (state.pendingCodeCmds === undefined) return bumpTrimmedCommand(callId) ?? state
         const s = ensure([])
-        if (!patchBufferedCommand(s, state.pendingCodeCmds, callId, rec => ({ ...rec, start: startedAt }))) return state
+        if (!patchBufferedCommand(s, state.pendingCodeCmds, callId, rec => ({ ...rec, start: startedAt }))) {
+          return bumpTrimmedCommand(callId) ?? state
+        }
         break
       }
       case 'job/settled': {
@@ -416,22 +466,43 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           break
         }
         const pendingCmds = state.pendingCodeCmds
-        if (pendingCmds === undefined) return state
+        if (pendingCmds === undefined) return bumpTrimmedCommand(callId) ?? state
         const s = ensure([])
-        if (!patchBufferedCommand(s, pendingCmds, callId, rec => jobOutcomePatch(rec, status, finishedAt, data?.detail))) return state
+        if (!patchBufferedCommand(s, pendingCmds, callId, rec => jobOutcomePatch(rec, status, finishedAt, data?.detail))) {
+          return bumpTrimmedCommand(callId) ?? state
+        }
         break
       }
       case 'tool/ptc-dispatch-start': {
         const rootCallId = data?.rootCallId
+        const parentCallId = data?.parentCallId
         const subCallId = data?.subCallId
-        const cmdTool = commandTool(typeof data?.name === 'string' ? data.name : undefined)
-        if (typeof rootCallId !== 'string' || typeof subCallId !== 'string' || cmdTool === null) return state
-        const parsed = commandArgsOf(cmdTool, data?.arguments, bounds.maxCommandChars)
-        if (parsed === null) return state
+        const name = typeof data?.name === 'string' ? data.name : undefined
+        if (typeof rootCallId !== 'string' || typeof subCallId !== 'string') return state
+        const cmdTool = commandTool(name)
+        const parsed = cmdTool === null ? null : commandArgsOf(cmdTool, data?.arguments, bounds.maxCommandChars)
         const pending = state.pendingCodeCmds ?? {}
         let total = 0
         for (const k in pending) total += pending[k].length
-        if (total + 1 > PENDING_CODE_CMDS_MAX) return state
+        const buffered = cmdTool !== null && parsed !== null && total + 1 <= PENDING_CODE_CMDS_MAX
+        const starts = state.pendingCodeStarts ?? {}
+        const withStart = Number.isFinite(event.time) ? { ...starts, [subCallId]: event.time } : starts
+        const overCap = Object.keys(withStart).length > PENDING_CODE_STARTS_MAX
+        const bounded = overCap
+          ? Object.fromEntries(Object.entries(withStart).slice(1))
+          : withStart
+        const transportParent = typeof parentCallId === 'string' && Object.hasOwn(state.callNames, parentCallId)
+          && state.callNames[parentCallId].transport !== true
+          && Object.hasOwn(bounded, subCallId)
+          ? parentCallId
+          : undefined
+        if (!buffered && transportParent === undefined && bounded === starts) return state
+        const s = ensure(buffered && bounds.headOnly === true ? ['commandCalls'] : [])
+        if (bounded !== starts) s.pendingCodeStarts = bounded
+        if (transportParent !== undefined) {
+          s.callNames = { ...state.callNames, [transportParent]: { ...state.callNames[transportParent], transport: true } }
+        }
+        if (!buffered) break
         const rec: CommandStateRecord = commandRecordOf({
           seq: event.seq,
           time: event.time,
@@ -439,56 +510,70 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           parsed,
           codeMode: true,
           call: subCallId,
-        })
-        const s = ensure([])
+        }, bounds.headOnly === true)
         if (parsed.background === true) bumpBg(s)
+        tallyPrograms(s, cmdTool, parsed.cmd)
+        if (bounds.headOnly === true) noteCommandCall(s, subCallId)
         s.pendingCodeCmds = { ...pending, [rootCallId]: [...(pending[rootCallId] ?? []), rec] }
         break
       }
       case 'tool/ptc-dispatch': {
         const rootCallId = data?.rootCallId
         const name = data?.name
-        if (typeof rootCallId === 'string' && typeof name === 'string') {
-          const subCallId = data?.subCallId
-          const bufferedCmds = typeof subCallId === 'string' ? state.pendingCodeCmds?.[rootCallId] : undefined
-          const cmdIndex = bufferedCmds?.findIndex(r => r.call === subCallId) ?? -1
-          const argsRaw = opBearingTool(name) ? argsRawOf(data?.arguments) : undefined
-          const ops = opsOfCall({
-            seq: event.seq,
-            time: event.time,
-            tool: name,
-            argsRaw,
-            err: data?.isError === true,
-          })
-          if (ops.length > 0 || (bufferedCmds !== undefined && cmdIndex >= 0)) {
-            const s = ensure([])
-            if (ops.length > 0) bufferCodeOps(s, rootCallId, ops)
-            if (bufferedCmds !== undefined && cmdIndex >= 0) {
-              const prev = bufferedCmds[cmdIndex]
-              const texts = resultTextsOf(data?.content)
-              const markers = markersOfText(texts.at(-1) ?? '')
-              const isError = data?.isError === true
-              const next: CommandStateRecord = {
-                ...prev,
-                ...resultPatchOf(texts, markers),
-                err: isError,
-              }
-              if (markers.backgroundAck === true) {
-                next.background = true
-                if (prev.background !== true) bumpBg(s)
-              } else {
-                const outcome = outcomeOfMarkers(markers, isError)
-                next.status = outcome.status
-                if (outcome.exit !== undefined) next.exit = outcome.exit
-                if (outcome.exitInferred === true) next.exitInferred = true
-                next.end = event.time
-                next.derived = true
-              }
-              const list = [...bufferedCmds]
-              list[cmdIndex] = next
-              s.pendingCodeCmds = { ...state.pendingCodeCmds, [rootCallId]: list }
-            }
+        if (typeof rootCallId !== 'string' || typeof name !== 'string') return state
+        const subCallId = data?.subCallId
+        const starts = state.pendingCodeStarts
+        const start = typeof subCallId === 'string' && starts !== undefined && Object.hasOwn(starts, subCallId)
+          ? starts[subCallId]
+          : undefined
+        const bufferedCmds = typeof subCallId === 'string' ? state.pendingCodeCmds?.[rootCallId] : undefined
+        const cmdIndex = bufferedCmds?.findIndex(r => r.call === subCallId) ?? -1
+        const ops = bounds.headOnly === true ? [] : opsOfCall({
+          seq: event.seq,
+          time: event.time,
+          tool: name,
+          argsRaw: opBearingTool(name) ? argsRawOf(data?.arguments) : undefined,
+          err: data?.isError === true,
+        })
+        const skill = name === 'skill' && data?.isError !== true ? dispatchedSkillOf(data) : ''
+        const s = ensure(['timing'])
+        if (start !== undefined && starts !== undefined && typeof subCallId === 'string') {
+          const timing = ensureTiming(s)
+          const dur = durOf(start, event.time)
+          timing.toolsMs += dur
+          timing.toolCalls += 1
+          bumpToolTotals(timing, name, dur)
+          const kept = Object.fromEntries(Object.entries(starts).filter(([id]) => id !== subCallId))
+          if (Object.keys(kept).length > 0) s.pendingCodeStarts = kept
+          else delete s.pendingCodeStarts
+        }
+        tallyTool(s, name)
+        if (skill !== '') noteSkillName(s, skill)
+        if (ops.length > 0) bufferCodeOps(s, rootCallId, ops)
+        if (bufferedCmds !== undefined && cmdIndex >= 0) {
+          const prev = bufferedCmds[cmdIndex]
+          const texts = resultTextsOf(data?.content)
+          const markers = markersOfText(texts.at(-1) ?? '')
+          const isError = data?.isError === true
+          const next: CommandStateRecord = {
+            ...prev,
+            ...resultPatchOf(texts, markers),
+            err: isError,
           }
+          if (markers.backgroundAck === true) {
+            next.background = true
+            if (prev.background !== true) bumpBg(s)
+          } else {
+            const outcome = outcomeOfMarkers(markers, isError)
+            next.status = outcome.status
+            if (outcome.exit !== undefined) next.exit = outcome.exit
+            if (outcome.exitInferred === true) next.exitInferred = true
+            next.end = event.time
+            next.derived = true
+          }
+          const list = [...bufferedCmds]
+          list[cmdIndex] = next
+          s.pendingCodeCmds = { ...state.pendingCodeCmds, [rootCallId]: list }
         }
         break
       }
@@ -556,7 +641,7 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           cursor = span.end
         }
         idleMs += carveWindows(flushed, 'other', cursor, event.time, residueIdle)
-        s.spans = [...state.spans, ...flushed]
+        if (bounds.headOnly !== true) s.spans = [...state.spans, ...flushed]
         let toolBusyMs = 0
         for (const span of flushed) {
           if (span.kind === 'tools') toolBusyMs += span.end - span.start
@@ -593,6 +678,12 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
         else delete s.stepApprovals
         break
       }
+      case 'subagent/catalog':
+      case 'team/member': {
+        const next = applyCatalogEvent(state, event.type, event.seq, event.time, data)
+        if (next !== undefined) st = next
+        break
+      }
       case 'user/message':
       case 'developer/message': {
         const developer = event.type === 'developer/message'
@@ -600,7 +691,7 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
         if (developer && (msg === null || !Array.isArray(msg.content))) return state
         const s = ensure(['surface', 'sums', 'archived', 'events'])
         bumpDetailRev(s)
-        const node = applySurface(s, event, event.type, msg)
+        const node = applySurface(s, event, event.type, msg, bounds)
         const source = msg?.source
         if (developer || isInjection(source)) {
           const rec: ContextEventRecord = {
@@ -609,6 +700,11 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
             kind: 'inject',
             form: typeof source?.form === 'string' && source.form !== '' ? source.form : 'context',
             tokens: node.tokens,
+          }
+          const agent = agentOfInjection(source, msg?.content, state)
+          if (agent !== undefined) {
+            rec.agent = agent
+            node.agent = agent
           }
           if (source?.kind === 'skill-invocation') {
             rec.sub = 'skill'
@@ -623,7 +719,9 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
               rec.detail = source.summary
             }
           }
-          s.events.push(rec)
+          pushEvent(s, rec)
+          countInject(s)
+          if (rec.sub === 'skill' && typeof rec.name === 'string') noteSkillName(s, rec.name)
         } else {
           s.humanInputs = (s.humanInputs ?? 0) + 1
           if (node.text !== undefined && node.text !== '') s.lastUser = node.text
@@ -635,27 +733,29 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
         const msgSource = toolMsg?.source as { callId?: unknown } | undefined
         const srcId = msgSource?.callId
         const pendingEntry = typeof srcId === 'string' && Object.hasOwn(state.callNames, srcId) ? state.callNames[srcId] : undefined
-        const buffered = typeof srcId === 'string' ? state.pendingCodeOps?.[srcId] : undefined
+        const buffered = bounds.headOnly === true || typeof srcId !== 'string' ? undefined : state.pendingCodeOps?.[srcId]
         const bufferedCmds = typeof srcId === 'string' ? state.pendingCodeCmds?.[srcId] : undefined
         const commandCall = pendingEntry !== undefined && commandTool(pendingEntry.name) !== null
         const s = ensure(['surface', 'sums', 'archived', 'events', 'fileOps', 'timing',
           ...((bufferedCmds?.length ?? 0) > 0 || commandCall ? ['commands' as const] : [])])
         bumpDetailRev(s)
-        const node = applySurface(s, event, event.type, toolMsg)
+        const node = applySurface(s, event, event.type, toolMsg, bounds)
         if (node.tool === ASK_USER_TOOL) s.humanInputs = (s.humanInputs ?? 0) + 1
         if (pendingEntry !== undefined && pendingEntry.name === ASK_USER_TOOL && state.stepStart !== undefined) {
           s.stepWaits = [...(state.stepWaits ?? []), { start: pendingEntry.start, end: event.time }]
         }
         if (pendingEntry !== undefined) {
-          const ops = opsOfCall({
-            seq: event.seq,
-            time: event.time,
-            tool: pendingEntry.name,
-            argsRaw: pendingEntry.argsRaw,
-            meta: data?.meta,
-            err: toolMsg?.isError === true,
-          })
-          pushFileOps(s, ops)
+          if (bounds.headOnly !== true) {
+            const ops = opsOfCall({
+              seq: event.seq,
+              time: event.time,
+              tool: pendingEntry.name,
+              argsRaw: pendingEntry.argsRaw,
+              meta: data?.meta,
+              err: toolMsg?.isError === true,
+            })
+            pushFileOps(s, ops)
+          }
           if (typeof srcId === 'string' && commandTool(pendingEntry.name) !== null) {
             const index = findCommandIndex(s.commands, srcId)
             if (index >= 0) {
@@ -724,8 +824,18 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
             s.sums.tool -= node.tokens
             node.cat = 'skill'
             s.sums.skill += node.tokens
-            s.events.push({ seq: event.seq, time: event.time, kind: 'inject', form: 'instructions', sub: 'skill', name, tokens: node.tokens })
+            pushEvent(s, { seq: event.seq, time: event.time, kind: 'inject', form: 'instructions', sub: 'skill', name, tokens: node.tokens })
+            countInject(s)
+            noteSkillName(s, name)
+            if (bounds.headOnly === true) {
+              const i = s.surface.findIndex(n => n.seq === node.seq)
+              /* v8 ignore next 1 */
+              if (i >= 0) s.surface[i] = surfaceNodeOf(node, bounds)
+            }
           }
+        }
+        if ((node.cat === 'tool' || node.cat === 'skill') && node.tool !== undefined && node.tool !== '') {
+          tallyTool(s, node.tool)
         }
         break
       }
@@ -734,18 +844,20 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
         const s = ensure(['surface', 'sums', 'archived', 'events', 'requests', 'timing'])
         bumpDetailRev(s)
         const total = s.systemTokens + s.toolsTokens + s.sums.user + s.sums.inject + s.sums.skill + s.sums.assistant + s.sums.tool
-        const record: RequestRecord = {
-          time: event.time,
-          seq: event.seq,
-          system: s.systemTokens,
-          tools: s.toolsTokens,
-          user: s.sums.user,
-          inject: s.sums.inject,
-          skill: s.sums.skill,
-          assistant: s.sums.assistant,
-          tool: s.sums.tool,
-          total,
-        }
+        const slim: SlimRequestRecord = { time: event.time, seq: event.seq, total }
+        const full: RequestRecord | null = bounds.headOnly === true
+          ? null
+          : {
+            ...slim,
+            system: s.systemTokens,
+            tools: s.toolsTokens,
+            user: s.sums.user,
+            inject: s.sums.inject,
+            skill: s.sums.skill,
+            assistant: s.sums.assistant,
+            tool: s.sums.tool,
+          }
+        const record = full ?? slim
         if (data && typeof data.turn === 'number') record.turn = data.turn
         if (data && typeof data.step === 'number') record.step = data.step
         if (state.stepStart !== undefined) s.stepRequestSeq = record.seq
@@ -757,8 +869,10 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           output = tokenCountOf(usage.outputTokens)
           if (input !== null || cacheRead !== null || cacheWrite !== null || output !== null) {
             record.prompt = (input ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0)
-            if (cacheRead !== null) record.cacheRead = cacheRead
-            if (output !== null) record.output = output
+            if (full !== null) {
+              if (cacheRead !== null) full.cacheRead = cacheRead
+              if (output !== null) full.output = output
+            }
             accumulateCost(s, event.time, {
               uncached: input ?? 0,
               cacheRead: cacheRead ?? 0,
@@ -773,6 +887,8 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           + (prevLast === undefined
             ? (record.turn !== undefined ? 1 : 0)
             : (record.turn === prevLast.turn ? 0 : 1))
+        countStep(s)
+        noteTurn(s, record.turn)
         const timing = ensureTiming(s)
         timing.calls += 1
         const stepStart = state.stepStart
@@ -780,28 +896,34 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           const streamTiming = streamTimingOf(data?.stream, event.time)
           const firstToken = stepStart.firstToken ?? streamTiming.firstToken
           if (firstToken !== undefined) {
-            const decodeBlocks = streamTiming.spans
-            let decodeStart = firstToken
-            for (const block of decodeBlocks) decodeStart = Math.min(decodeStart, block.start)
-            timing.ttftMs += durOf(stepStart.time, decodeStart)
-            timing.genMs += durOf(decodeStart, event.time)
-            const modelSpans: TimingSpan[] = [{ kind: 'ttft', start: stepStart.time, end: decodeStart }]
-            for (const block of decodeBlocks) {
+            timing.ttftMs += durOf(stepStart.time, firstToken)
+            timing.genMs += durOf(firstToken, event.time)
+            const decodeSpans: DecodeSpan[] = []
+            let opened = false
+            let cursor = firstToken
+            for (const block of streamTiming.spans) {
               const to = Math.min(event.time, block.end)
-              if (to <= block.start) continue
-              modelSpans.push({ kind: block.kind, start: modelSpans.length === 1 ? decodeStart : block.start, end: to })
+              if (to <= block.start || to <= firstToken) continue
+              const from = opened ? Math.max(cursor, block.start) : firstToken
+              if (to <= from) continue
+              decodeSpans.push({ kind: block.kind, start: from, end: to })
+              cursor = to
+              opened = true
             }
-            s.stepSpans = [...(s.stepSpans ?? []), ...modelSpans]
+            s.stepSpans = [
+              ...(s.stepSpans ?? []),
+              { kind: 'ttft', start: stepStart.time, end: firstToken },
+              ...decodeSpans,
+            ]
             if (output !== null) {
               timing.speedMs = (timing.speedMs ?? 0) + durOf(firstToken, event.time)
               timing.speedTokens = (timing.speedTokens ?? 0) + output
             }
-            const tally = streamTiming.tally
-            for (const kind of DECODE_KINDS) addDecode(timing, kind, tally.spans[kind], tally.blocks[kind])
+            for (const span of decodeSpans) addDecodeSpan(timing, span.kind, durOf(span.start, span.end))
           }
         }
         const asstMsg = deriveEventMessage(event as never) as MessageLike | null
-        const asstNode = applySurface(s, event, event.type, asstMsg)
+        const asstNode = applySurface(s, event, event.type, asstMsg, bounds)
         if (asstNode.text !== undefined) s.answers = (s.answers ?? 0) + 1
         const providerReasoning = usage !== null && typeof usage === 'object' ? tokenCountOf(usage.reasoningTokens) : null
         const generated = providerReasoning === null
@@ -826,11 +948,16 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
       case 'plan/mode': {
         if (data && typeof data.active === 'boolean') {
           const s = ensure(['events'])
-          s.events.push({ seq: event.seq, time: event.time, kind: 'mode', name: data.active ? 'plan.on' : 'plan.off' })
+          pushEvent(s, { seq: event.seq, time: event.time, kind: 'mode', name: data.active ? 'plan.on' : 'plan.off' })
           bumpDetailRev(s)
         }
         break
       }
+      case 'goal/change':
+      case 'todo/write':
+      case 'team/task':
+        st = applyWorkflowEvent(state, event)
+        break
       case 'compaction/summary':
       case 'compaction/prune': {
         const s = ensure(['events'])
@@ -839,7 +966,8 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
           s.pendingShadowedSeqs = data.shadowedSeqs.filter((x): x is number => typeof x === 'number')
           s.pendingShadowEventSeq = event.seq
         }
-        s.events.push({
+        countCompaction(s, event.type === 'compaction/summary' ? 'compaction' : 'prune')
+        pushEvent(s, {
           seq: event.seq,
           time: event.time,
           kind: event.type === 'compaction/summary' ? 'compaction' : 'prune',
@@ -864,8 +992,7 @@ function applyTimelineEvent(state: TimelineState, event: TimelineEvent, bounds: 
   return state
 }
 
-export { createTimelineState, trimToLastTurns } from './foldState'
-export type { TimelineEvent, TimelineState } from './foldState'
-export { addBilledUsage, isBeijingPeak, tokenCountOf } from './foldMetering'
-export type { BilledUsage, UsageLike } from './foldMetering'
+export { skillNameOf }
+export { createTimelineState, trimToLastTurns, type TimelineEvent, type TimelineState } from './foldState'
+export { addBilledUsage, isBeijingPeak, tokenCountOf, type BilledUsage, type UsageLike } from './foldMetering'
 export { buildTimelineDetail, buildTimelineHead, buildTimelineView } from './foldWire'

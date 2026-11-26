@@ -1,111 +1,20 @@
-import { act, createElement as h } from 'react'
+import { act, createElement as h, type ReactElement } from 'react'
 import assert from 'node:assert/strict'
-import { afterEach, beforeEach, describe, test, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { makeAgentGraph } from '../../../src/client/components/agentGraph'
 import { DICT_EN } from '../../../src/client/i18n'
-import { resetModelPrices, setModelPricesLoader } from '../../../src/client/modelPrices'
-import { familyHue, type AgentSelfStats } from '../../../src/client/agentTree'
+import { LEAD_HUE, agentForestOf, familyHue, type AgentNode } from '../../../src/client/agentTree'
 import { TestClientCtx, asClientCtx } from '../helpers/harness'
-import { blur, click, flush, focus, hover, makeKit, mount, query, queryAll, text, unhover, until, wheel } from '../helpers/kit'
+import { blur, click, flush, focus, hover, makeKit, mount, query, queryAll, text, unhover, until, wheel, silenceWindowErrors, keydown, press } from '../helpers/kit'
+import { FakeSessions, family, filterFamily, makeView, selfStats, timeline } from '../helpers/agentGraphFixtures'
+import { makeErrorBoundary } from '../../../src/client/components/errorBoundary'
+import { useEscapeClose } from '../../../src/client/components/escapeClose'
+
+describe('agentGraph', () => {
 
 const kit = makeKit()
-
-beforeEach(() => {
-  resetModelPrices()
-  setModelPricesLoader(() => new Promise(() => {}))
-})
-
-afterEach(() => {
-  resetModelPrices()
-})
-
-const PROVIDERS = {
-  deepseek: { models: { 'deepseek-v4-flash': { cost: { input: 0.15, output: 0.6, cache_read: 0.003 } } } },
-}
-
-function timeline(total: number, requests = 0): unknown {
-  return {
-    ok: true,
-    contextWindow: 1000,
-    current: { system: 10, tools: 20, user: total, inject: 0, assistant: 0, tool: 0, total: total + 30 },
-    requests: Array.from({ length: requests }, (_, i) => ({
-      seq: i + 1, time: 0, system: 0, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total: 1,
-    })),
-    events: [],
-    nodes: [],
-    droppedNodes: 0,
-    archive: [],
-  }
-}
-
-class FakeSessions {
-  opened: string[] = []
-  private listeners = new Set<() => void>()
-  state: unknown
-
-  constructor(byId: Record<string, unknown>) {
-    this.state = { byId }
-  }
-
-  readonly list = {
-    getSnapshot: (): unknown => this.state,
-    subscribe: (fn: () => void): () => void => {
-      this.listeners.add(fn)
-      return () => this.listeners.delete(fn)
-    },
-  }
-
-  openSession(id: string): void {
-    this.opened.push(id)
-  }
-
-  setState(byId: Record<string, unknown>): void {
-    this.state = { byId }
-    for (const fn of this.listeners) fn()
-  }
-}
-
-function makeView(sessions: unknown, options: { locale?: 'en' | 'zh' } = {}) {
-  const nav = { openSession: (id: string) => (sessions as { openSession?: (id: string) => void }).openSession?.(id) }
-  const ctx = new TestClientCtx({ locale: options.locale, services: { sessions, uiWorkspace: nav } })
-  return makeAgentGraph(asClientCtx(ctx), options.locale === 'zh' ? makeKit('zh') : kit)
-}
-
-function selfStats(over: Partial<AgentSelfStats> = {}): AgentSelfStats {
-  return {
-    head: { tokens: 500, window: 1000, pct: 50, parts: [{ key: 'user', color: '#22c55e', value: 500 }] },
-    billed: 1200,
-    requests: 3,
-    durationMs: 387_000,
-    ...over,
-  }
-}
-
-function family(): Record<string, unknown> {
-  return {
-    root: {
-      displayTitle: 'Main Agent', running: true, updatedAt: 10,
-      projectionValues: { contextTimeline: timeline(200, 2) },
-    },
-    worker: {
-      parentId: 'root', origin: 'subagent', running: true, updatedAt: 8,
-      projectionValues: {
-        contextTimeline: timeline(800, 5),
-        subagent: { mode: 'continuable', label: 'worker-bee' },
-        subagentTiming: { settledMs: 42000 },
-        tokenUsage: { uncachedInputTokens: 100, outputTokens: 40, cacheReadTokens: 10, cacheWriteTokens: 0 },
-      },
-    },
-    done: {
-      parentId: 'root', origin: 'subagent', running: false, updatedAt: 6,
-      projectionValues: {
-        contextPressure: { projectedTokens: 950, contextWindow: 1000 },
-        subagent: { mode: 'one-shot' },
-        subagentTiming: { settledMs: 9000, lastTurnCompleted: true },
-      },
-    },
-  }
-}
 
 describe('AgentGraph — degrade arms', () => {
   test('renders nothing without a sessions face or a session id', async () => {
@@ -274,7 +183,7 @@ describe('AgentGraph — the family tree', () => {
     const focused = await mount(h(View, { sessionId: 'root', self: selfStats(), focusId: 'done' }))
     const done = query(focused.container, '[data-agent="done"]')
     assert.ok(done.classList.contains('lc-agent-hover'), 'the focused card lights like a pointed-at one')
-    assert.ok(done.classList.contains('lc-agent-on'), 'its lineage lights too')
+    assert.ok(done.classList.contains('lc-agent-on'), 'its direct relations light too')
     assert.ok(query(focused.container, '[data-agent="root"]').classList.contains('lc-agent-on'))
     assert.ok(query(focused.container, '.lc-agents-canvas').classList.contains('lc-agents-focus'))
     assert.equal(queryAll(focused.container, 'g.lc-agents-on').length, 1)
@@ -387,30 +296,30 @@ describe('AgentGraph — the family tree', () => {
   })
 
   const COST_LEDGER = { 'deepseek-official': { 'deepseek-v4-flash': { peak: { uncached: 1_000_000, cacheRead: 0, cacheWrite: 0, output: 500_000 } } } }
+  const COST_READ = { usd: 0.9, ready: true }
 
-  test('the headline prices the consumed tokens once the price book lands', async () => {
-    setModelPricesLoader(() => Promise.resolve(PROVIDERS))
+  test('the headline shows the host cost read; a non-ready read leaves the tokens alone', async () => {
     const rows = family() as {
       worker: { projectionValues: Record<string, unknown> }
     }
-    rows.worker.projectionValues.contextTimeline = { ...(timeline(800, 5) as Record<string, unknown>), cost: COST_LEDGER }
+    rows.worker.projectionValues.contextTimeline = { ...(timeline(800, 5) as Record<string, unknown>), cost: COST_LEDGER, costRead: COST_READ }
     const byId: Record<string, unknown> = {
       ...rows,
       cold: {
         parentId: 'root', origin: 'subagent', running: false, updatedAt: 4,
-        projectionValues: { contextTimeline: { ...(timeline(100, 0) as Record<string, unknown>), cost: COST_LEDGER } },
+        projectionValues: { contextTimeline: { ...(timeline(100, 0) as Record<string, unknown>), cost: COST_LEDGER, costRead: COST_READ } },
       },
     }
     const View = makeView(new FakeSessions(byId))
     const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
-    await until(() => text(query(m.container, '[data-agent="worker"]')).includes('$0.90'), 'worker cost estimate')
+    await until(() => text(query(m.container, '[data-agent="worker"]')).includes('$0.90'), 'worker cost read')
     assert.ok(text(query(m.container, '[data-agent="worker"]')).includes('150 · $0.90'))
     assert.ok(text(query(m.container, '[data-agent="cold"]')).includes('1.5M · $0.90'))
     await m.unmount()
 
     const ViewZh = makeView(new FakeSessions(byId), { locale: 'zh' })
     const mz = await mount(h(ViewZh, { sessionId: 'root', self: selfStats() }))
-    await until(() => text(query(mz.container, '[data-agent="worker"]')).includes('¥6.00'), 'zh cost estimate')
+    await until(() => text(query(mz.container, '[data-agent="worker"]')).includes('¥6.00'), 'zh cost read')
     assert.ok(text(mz.container).includes('Agent 网络'), 'the zh title')
     assert.ok(text(mz.container).includes('当前'), 'the zh self marker')
     assert.ok(text(mz.container).includes('4 个 Agent'), 'the zh kit localizes the chips')
@@ -425,6 +334,103 @@ describe('AgentGraph — the family tree', () => {
     const mb = await mount(h(makeAgentGraph(asClientCtx(bare), kit), { sessionId: 'root', self: selfStats() }))
     await until(() => text(query(mb.container, '[data-agent="worker"]')).includes('$0.90'), 'usd fallback')
     await mb.unmount()
+
+    const pending = family() as {
+      worker: { projectionValues: Record<string, unknown> }
+    }
+    pending.worker.projectionValues.contextTimeline = { ...(timeline(800, 5) as Record<string, unknown>), cost: COST_LEDGER, costRead: { usd: null, ready: false } }
+    const pendingById: Record<string, unknown> = {
+      ...pending,
+      cold: {
+        parentId: 'root', origin: 'subagent', running: false, updatedAt: 4,
+        projectionValues: { contextTimeline: { ...(timeline(100, 0) as Record<string, unknown>), cost: COST_LEDGER, costRead: { usd: null, ready: false } } },
+      },
+    }
+    const mp = await mount(h(makeView(new FakeSessions(pendingById)), { sessionId: 'root', self: selfStats() }))
+    await flush()
+    assert.ok(text(query(mp.container, '[data-agent="worker"]')).includes('150'), 'the token figure stays')
+    assert.ok(!text(query(mp.container, '[data-agent="worker"]')).includes('$'), 'a non-ready read hides the money figure')
+    assert.ok(text(query(mp.container, '[data-agent="cold"]')).includes('1.5M'))
+    await mp.unmount()
+  })
+})
+
+describe('AgentGraph — running-only filter', () => {
+  test('the top-right selector shows full counts for both a family and a solo agent', async () => {
+    const face = new FakeSessions(family())
+    const View = makeView(face)
+    const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+    const gran = queryAll(m.container, '.lc-agents-tools .lc-gran-btn')
+    assert.equal(gran.length, 2)
+    assert.equal(gran[0].textContent, 'All3')
+    assert.equal(gran[1].textContent, 'Running2')
+    assert.ok(text(m.container).includes('3 agents'))
+    assert.ok(text(m.container).includes('2 running'))
+    await m.unmount()
+
+    const solo = await mount(h(
+      makeView(new FakeSessions({ root: { displayTitle: 'Main Agent', running: true, updatedAt: 10 } })),
+      { sessionId: 'root', self: selfStats() },
+    ))
+    const soloGran = queryAll(solo.container, '.lc-agents-tools .lc-gran-btn')
+    assert.equal(soloGran.length, 2)
+    assert.equal(soloGran[0].textContent, 'All1')
+    assert.equal(soloGran[1].textContent, 'Running1')
+    await solo.unmount()
+  })
+
+  test('running-only keeps live nodes with their idle ancestors, dims the ancestors, and All restores every card', async () => {
+    const face = new FakeSessions(filterFamily())
+    const View = makeView(face)
+    const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+    assert.equal(queryAll(m.container, '.lc-agent-card').length, 4)
+
+    const gran = () => queryAll(m.container, '.lc-agents-tools .lc-gran-btn')
+    await click(gran()[1])
+    assert.equal(gran()[0].getAttribute('aria-pressed'), 'false')
+    assert.equal(gran()[1].getAttribute('aria-pressed'), 'true')
+    const cards = queryAll(m.container, '.lc-agent-card')
+    assert.deepEqual(cards.map(card => card.getAttribute('data-agent')), ['root', 'mate', 'mateSub'])
+    assert.ok(query(m.container, '[data-agent="mate"]').classList.contains('lc-agent-dimmed'))
+    assert.ok(!query(m.container, '[data-agent="root"]').classList.contains('lc-agent-dimmed'))
+    assert.ok(!query(m.container, '[data-agent="mateSub"]').classList.contains('lc-agent-dimmed'))
+    assert.equal(queryAll(m.container, 'path.lc-agents-link').length, 2)
+    assert.ok(text(m.container).includes('4 agents'), 'the chips keep the full family count')
+
+    await click(gran()[0])
+    assert.equal(gran()[0].getAttribute('aria-pressed'), 'true')
+    assert.equal(queryAll(m.container, '.lc-agent-card').length, 4)
+    assert.equal(queryAll(m.container, '.lc-agent-dimmed').length, 0)
+    await m.unmount()
+  })
+
+  test('running-only with nothing running keeps the current chain and adds the empty hint', async () => {
+    const still = family() as { root: { running: boolean }, worker: { running: boolean }, done: { running: boolean } }
+    still.root.running = false
+    still.worker.running = false
+    still.done.running = false
+    const face = new FakeSessions(still)
+    const View = makeView(face)
+    const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+
+    await click(queryAll(m.container, '.lc-agents-tools .lc-gran-btn')[1])
+    assert.deepEqual(queryAll(m.container, '.lc-agent-card').map(card => card.getAttribute('data-agent')), ['root'])
+    assert.equal(query(m.container, '.lc-empty.lc-agents-solo').textContent, 'No agents running')
+    assert.ok(text(m.container).includes('3 agents'))
+    await m.unmount()
+  })
+
+  test('switching sessions resets the filter to All', async () => {
+    const face = new FakeSessions(family())
+    const View = makeView(face)
+    const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+    await click(queryAll(m.container, '.lc-agents-tools .lc-gran-btn')[1])
+    assert.equal(queryAll(m.container, '.lc-agent-card').length, 2)
+
+    await m.update(h(View, { sessionId: 'worker', self: selfStats() }))
+    assert.equal(queryAll(m.container, '.lc-agent-card').length, 3)
+    assert.equal(query(m.container, '.lc-agents-tools .lc-gran-btn').getAttribute('aria-pressed'), 'true')
+    await m.unmount()
   })
 })
 
@@ -438,16 +444,20 @@ describe('AgentGraph — the Fleet seat', () => {
     const face = new FakeSessions(family())
     const View = makeView(face)
     const team = { ...TEAM, members: [...TEAM.members, { id: 'worker', name: 'architect', role: 'teammate' as const, phase: 'active' as const }] }
-    const m = await mount(h(View, { sessionId: 'root', self: selfStats(), team, pinnedId: 'worker', inspector: false }))
+    const m = await mount(h(View, { sessionId: 'root', self: selfStats(), team, pinnedId: 'worker', inspector: false, compact: true }))
+    assert.ok(query(m.container, '.lc-agents').classList.contains('lc-agents-compact'))
     assert.ok(text(m.container).includes('2 members'))
     assert.ok(query(m.container, '[data-agent="worker"]').className.includes('lc-agent-pinned'))
     const worker = query(m.container, '[data-agent="worker"]')
     assert.ok(worker.getAttribute('style')?.includes('--lc-member-hue'))
-    assert.equal(text(query(worker, '.lc-agent-member')), 'architect')
+    assert.equal(text(query(worker, '.lc-agent-label')), 'architect')
     assert.equal(text(query(worker, '.lc-agent-duty')), 'worker-bee')
+    assert.equal(text(query(worker, '.lc-comms-avatar')), 'AR', 'the card wears the roster initials')
     const self = query(m.container, '.lc-agent-card.lc-agent-self')
-    assert.ok(self.getAttribute('style')?.includes('--lc-member-hue: var(--dsw-alias-brand-primary'))
+    assert.ok(self.getAttribute('style')?.includes(`--lc-member-hue: ${LEAD_HUE}`))
     assert.equal(queryAll(self, '.lc-agent-duty').length, 0)
+    assert.equal(text(query(self, '.lc-comms-avatar')), 'LE', 'the lead card wears the shared role initials')
+    assert.ok(query(self, '.lc-comms-avatar')?.className.includes('lc-comms-avatar-self'), 'the self card rings its avatar')
     const done = query(m.container, '[data-agent="done"]')
     assert.ok(done.getAttribute('style')?.includes('--lc-member-hue'))
     assert.equal(text(query(done, '.lc-agent-label')), 'done')
@@ -456,6 +466,7 @@ describe('AgentGraph — the Fleet seat', () => {
     await m.unmount()
 
     const m2 = await mount(h(View, { sessionId: 'root', self: selfStats(), team: null }))
+    assert.ok(!query(m2.container, '.lc-agents').classList.contains('lc-agents-compact'))
     assert.ok(!text(m2.container).includes('members ·'))
     assert.ok(query(m2.container, '.lc-inspector') !== null)
     await m2.unmount()
@@ -471,6 +482,22 @@ describe('AgentGraph — the Fleet seat', () => {
     const targetHues = ['worker', 'done'].map(id => query(m.container, `[data-agent="${id}"]`).style.getPropertyValue('--lc-member-hue'))
     assert.deepEqual(queryAll(m.container, 'path.lc-agents-link').map(el => el.getAttribute('stroke')), targetHues)
     await m.unmount()
+  })
+
+  test('a controlled forest and hover stay independent of the internal model', async () => {
+    const face = new FakeSessions(family())
+    const View = makeView(face)
+    const forest = agentForestOf({ byId: family() }, 'root', selfStats())
+    const onHover = vi.fn()
+    const m = await mount(h(View, { sessionId: 'root', forest, hoverId: 'done', onHover, inspector: false }))
+    assert.ok(query(m.container, '[data-agent="done"]').className.includes('lc-agent-hover'))
+    await hover(query(m.container, '[data-agent="worker"]'))
+    expect(onHover).toHaveBeenCalledWith('worker')
+    assert.ok(query(m.container, '[data-agent="done"]').className.includes('lc-agent-hover'))
+    await m.unmount()
+    const hidden = await mount(h(View, { sessionId: 'root', forest: null }))
+    assert.equal(text(hidden.container), '')
+    await hidden.unmount()
   })
 
   test('select mode highlights instead of jumping, while open mode keeps the jump copy and the inert current card', async () => {
@@ -576,7 +603,7 @@ describe('AgentGraph — cold-relative composition fetch', () => {
     const { View, face } = makeFetchingView()
     const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
 
-    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:worker', 'api/dsh-context/detail:done'])
+    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:done'])
     assert.equal(query(m.container, '[data-agent="done"]').querySelectorAll('.lc-agent-bar-seg').length, 1)
 
     await act(async () => {
@@ -596,29 +623,29 @@ describe('AgentGraph — cold-relative composition fetch', () => {
       face.setState(family())
     })
     await flush()
-    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:worker', 'api/dsh-context/detail:done'])
+    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:done'])
 
     await m.unmount()
     const remounted = await mount(h(View, { sessionId: 'root', self: selfStats() }))
     await flush()
-    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:worker', 'api/dsh-context/detail:done'], 'the cache never re-fetches')
+    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:done'], 'the cache never re-fetches')
     const replayed = query(remounted.container, '[data-agent="done"]')
     assert.equal(replayed.querySelectorAll('.lc-agent-bar-seg').length, 6, 'the cached head replays into the fresh instance')
     await remounted.unmount()
   })
 
-  test('a failing fetch degrades to the pressure-only fill and never retries', async () => {
+  test('a failing fetch degrades to the pressure-only fill and retries only when the family changes', async () => {
     const rpc = detailFetch({ reject: true })
     const { View, face } = makeFetchingView()
     const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
     await flush()
-    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:worker', 'api/dsh-context/detail:done'])
+    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:done'])
     assert.equal(query(m.container, '[data-agent="done"]').querySelectorAll('.lc-agent-bar-seg').length, 1)
     await act(async () => {
       face.setState(family())
     })
     await flush()
-    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:worker', 'api/dsh-context/detail:done'], 'the sticky failure never re-fetches')
+    assert.deepEqual(rpc.calls, ['api/dsh-context/detail:done', 'api/dsh-context/detail:done'], 'a rejected read is not cached so the next cold tick retries')
     await m.unmount()
   })
 
@@ -628,7 +655,7 @@ describe('AgentGraph — cold-relative composition fetch', () => {
       const { View } = makeFetchingView()
       const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
       await flush()
-      assert.deepEqual(rpc.calls, ['api/dsh-context/detail:worker', 'api/dsh-context/detail:done'])
+      assert.deepEqual(rpc.calls, ['api/dsh-context/detail:done'])
       assert.equal(query(m.container, '[data-agent="done"]').querySelectorAll('.lc-agent-bar-seg').length, 1)
       assert.ok(text(query(m.container, '[data-agent="done"]')).includes('95%'))
       await m.unmount()
@@ -675,4 +702,234 @@ describe('AgentGraph — cold-relative composition fetch', () => {
     assert.ok(text(composed).includes('60%'), 'the fold total prices against the head window')
     await m.unmount()
   })
+})
+
+describe('AgentGraph — viewport windowing', () => {
+  function chain(count: number): { nodes: AgentNode[]; edges: { from: string; to: string }[] } {
+    const nodes: AgentNode[] = []
+    const edges: { from: string; to: string }[] = []
+    for (let index = 0; index < count; index++) {
+      const id = `step-${index}`
+      nodes.push({
+        id,
+        label: id,
+        ...(index > 0 ? { parentId: `step-${index - 1}` } : {}),
+        depth: index,
+        family: 0,
+        isCurrent: index === 0,
+        running: false,
+        completed: true,
+        subagent: index > 0,
+        updatedAt: index,
+        head: null,
+        requests: 0,
+        billed: null,
+        costUsage: null,
+        durationMs: null,
+        identity: null,
+      })
+      if (index > 0) edges.push({ from: `step-${index - 1}`, to: id })
+    }
+    return { nodes, edges }
+  }
+
+  test('renders only the cards in the stage band and reveals deeper cards on scroll', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.push(callback); return frames.length })
+    try {
+      const { nodes, edges } = chain(70)
+      const Graph = makeAgentGraph(asClientCtx(new TestClientCtx()), kit)
+      const m = await mount(h(Graph, { forest: { nodes, edges, solo: false }, team: null }))
+      assert.equal(queryAll(m.container, '.lc-agent-card').length, 70, 'an unmeasured stage keeps every card')
+      const stage = query<HTMLElement>(m.container, '.lc-agents-stage')
+      Object.defineProperty(stage, 'clientHeight', { configurable: true, value: 560 })
+      let scrollTop = 0
+      Object.defineProperty(stage, 'scrollTop', { configurable: true, get: () => scrollTop, set: (next: number) => { scrollTop = next } })
+      await act(async () => { stage.dispatchEvent(new Event('scroll')) })
+      await act(async () => { for (const frame of frames.splice(0)) frame(0) })
+      const visible = queryAll(m.container, '.lc-agent-card').length
+      assert.ok(visible < 70, 'the measured stage bounds the cards')
+      assert.ok(query(m.container, '[data-agent="step-0"]') !== null)
+      assert.equal(queryAll(m.container, '[data-agent="step-60"]').length, 0)
+      scrollTop = 10600
+      await act(async () => { stage.dispatchEvent(new Event('scroll')) })
+      await act(async () => { for (const frame of frames.splice(0)) frame(0) })
+      assert.ok(query(m.container, '[data-agent="step-60"]') !== null, 'a deep card appears after scrolling')
+      assert.equal(queryAll(m.container, '[data-agent="step-0"]').length, 0)
+      await m.unmount()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('AgentGraph — narrow inspector', () => {
+  test('the stacked rule declares border-box sizing', () => {
+    const css = readFileSync(join(process.cwd(), 'src/client/styles/agentGraph.css'), 'utf8')
+    const stackedRule = css.match(/@container lc-card[^{]*\{[\s\S]*?\.lc-agents-inspector\.lc-inspector\s*\{([^}]*)\}/)
+    assert.ok(stackedRule, 'the stacked container block still sizes the inspector')
+    assert.match(stackedRule[1], /(?:^|;)\s*width:\s*100%\s*(?=;|$)/)
+    assert.match(stackedRule[1], /(?:^|;)\s*box-sizing:\s*border-box\s*(?=;|$)/)
+  })
+})
+})
+
+describe('errorBoundary', () => {
+
+const kit = makeKit()
+const ErrorBoundary = makeErrorBoundary(kit.t)
+
+let consoleSpy: ReturnType<typeof vi.spyOn> | null = null
+let silenceErrors: (() => void) | null = null
+
+afterEach(() => {
+  consoleSpy?.mockRestore()
+  consoleSpy = null
+  silenceErrors?.()
+  silenceErrors = null
+})
+
+function silenceRenderErrors(): void {
+  consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  silenceErrors = silenceWindowErrors()
+}
+
+describe('ErrorBoundary', () => {
+  test('passes children through when nothing throws', async () => {
+    const m = await mount(h(ErrorBoundary, {}, h('div', { className: 'healthy' }, 'all good')))
+    assert.equal(text(m.container), 'all good')
+    await m.unmount()
+  })
+
+  test('a render error degrades to the error card; Retry resumes a healthy child', async () => {
+    silenceRenderErrors()
+    let shouldThrow = true
+    function Bomb() {
+      if (shouldThrow) throw new Error('kaboom')
+      return h('div', { className: 'healthy' }, 'recovered')
+    }
+    const m = await mount(h(ErrorBoundary, {}, h(Bomb, {})))
+    const card = query(m.container, '.lc-error')
+    assert.ok(text(card).includes('Failed to read context data:'))
+    assert.equal(query(card, '.lc-error-msg').textContent, 'kaboom')
+    const retry = query(card, '.lc-error-retry')
+    assert.equal(retry.textContent, 'Retry')
+    shouldThrow = false
+    await click(retry)
+    assert.equal(text(m.container), 'recovered')
+    await m.unmount()
+  })
+
+  test('a non-Error throw is stringified into the card', async () => {
+    silenceRenderErrors()
+    function Bomb(): never {
+      throw 'string failure'
+    }
+    const m = await mount(h(ErrorBoundary, {}, h(Bomb, {})))
+    assert.equal(query(m.container, '.lc-error-msg').textContent, 'string failure')
+    await m.unmount()
+  })
+})
+})
+
+describe('escapeClose', () => {
+
+function Overlay(props: { active: boolean; onClose: () => void; restore?: boolean }): ReactElement {
+  useEscapeClose(props.active, props.onClose, props.restore)
+  return h('div', { className: 'overlay' })
+}
+
+function field(tag: 'input' | 'textarea', marked: boolean, value: string): HTMLInputElement | HTMLTextAreaElement {
+  const el = document.createElement(tag)
+  if (marked) el.dataset.lcClearable = ''
+  el.value = value
+  document.body.append(el)
+  return el
+}
+
+describe('useEscapeClose', () => {
+  test('Escape yields to a marked field with typed content', async () => {
+    const closes: string[] = []
+    const m = await mount(h(Overlay, { active: true, onClose: () => closes.push('close') }))
+    const markedInput = field('input', true, 'x')
+    const filled = await press(markedInput, { key: 'Escape' })
+    assert.deepEqual(closes, [], 'the field keeps the key so it can clear itself')
+    assert.equal(filled.ev.defaultPrevented, false, 'the field handler owns preventDefault, not the overlay')
+    assert.equal(filled.reachedDocument, true)
+
+    markedInput.value = ''
+    const empty = await press(markedInput, { key: 'Escape' })
+    assert.deepEqual(closes, ['close'], 'an empty field lets the overlay close')
+    assert.equal(empty.reachedDocument, false, 'the overlay consumes the close it performs')
+
+    const plainInput = field('input', false, 'x')
+    await press(plainInput, { key: 'Escape' })
+    assert.equal(closes.length, 2, 'an unmarked field never withholds the overlay close')
+
+    const markedArea = field('textarea', true, 'x')
+    await press(markedArea, { key: 'Escape' })
+    assert.equal(closes.length, 2, 'a marked textarea with content keeps the key too')
+
+    markedInput.value = 'x'
+    const modified = await press(markedInput, { key: 'Escape', shiftKey: true })
+    assert.equal(closes.length, 2, 'a modified Escape is not the dismiss gesture')
+    assert.equal(modified.reachedDocument, true)
+
+    const composing = await press(markedInput, { key: 'Escape', isComposing: true })
+    assert.equal(closes.length, 2, 'composition keeps Escape with the IME')
+    assert.equal(composing.ev.defaultPrevented, false, 'the IME default action survives')
+    assert.equal(composing.reachedDocument, false, 'the overlay does not let the key leak to the harness')
+
+    await keydown('Escape')
+    assert.equal(closes.length, 3, 'a window-level Escape still closes')
+
+    markedInput.remove()
+    plainInput.remove()
+    markedArea.remove()
+    await m.unmount()
+  })
+
+  test('only the topmost open layer consumes Escape', async () => {
+    const closes: string[] = []
+    function Layers(props: { outer: boolean; inner: boolean }): ReactElement {
+      useEscapeClose(props.outer, () => closes.push('outer'))
+      useEscapeClose(props.inner, () => closes.push('inner'))
+      return h('div')
+    }
+    const m = await mount(h(Layers, { outer: true, inner: true }))
+    try {
+      await keydown('Escape')
+      assert.deepEqual(closes, ['inner'])
+      await m.update(h(Layers, { outer: true, inner: false }))
+      await keydown('Escape')
+      assert.deepEqual(closes, ['inner', 'outer'])
+    } finally {
+      await m.unmount()
+    }
+  })
+
+  test('a layer restores the pre-open focus on close unless it opted out', async () => {
+    const trigger = document.createElement('button')
+    document.body.append(trigger)
+    trigger.focus()
+    const closes: string[] = []
+    const m = await mount(h(Overlay, { active: true, onClose: () => closes.push('close') }))
+    try {
+      await keydown('Escape')
+      assert.deepEqual(closes, ['close'])
+      await m.update(h(Overlay, { active: false, onClose: () => closes.push('close') }))
+      assert.equal(document.activeElement, trigger, 'the Escape close restores focus')
+
+      await m.update(h(Overlay, { active: true, onClose: () => closes.push('close'), restore: false }))
+      const other = field('input', false, '')
+      other.focus()
+      await m.update(h(Overlay, { active: false, onClose: () => closes.push('close'), restore: false }))
+      assert.equal(document.activeElement, other, 'an opted-out layer leaves focus alone')
+      other.remove()
+    } finally {
+      await m.unmount()
+      trigger.remove()
+    }
+  })
+})
 })

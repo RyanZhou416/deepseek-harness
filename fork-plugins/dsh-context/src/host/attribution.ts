@@ -48,6 +48,16 @@ function rawInstanceOf(tools: unknown): unknown {
   return raw ?? tools
 }
 
+function isTracedView(receiver: unknown): boolean {
+  return rawInstanceOf(receiver) !== receiver
+}
+
+function receiverFiberNameOf(receiver: unknown): string | undefined {
+  if (!isTracedView(receiver)) return undefined
+  const name = (receiver as { ctx?: { fiber?: { name?: unknown } } }).ctx?.fiber?.name
+  return typeof name === 'string' ? name : undefined
+}
+
 const selfPackage = packageNameFrom(selfUrl)
 
 export function callerPackageFrom(stack: string | undefined): string | undefined {
@@ -92,7 +102,7 @@ interface ToolServiceLike {
   }
 }
 
-export function createToolAttribution(ctx: Context): ToolAttribution {
+export function createToolAttribution(ctx: Context, harnessVersion?: string): ToolAttribution {
   const live = new Map<string, string>()
   const wrapped = new WeakSet()
   const self = ctx.fiber.name
@@ -106,14 +116,14 @@ export function createToolAttribution(ctx: Context): ToolAttribution {
     wrapped.add(tools)
     const original = (register as { attributedOriginal?: unknown }).attributedOriginal ?? register
     if (typeof original !== 'function') return
-    const instance = tools as { register: (this: unknown, definition?: { name?: unknown }) => unknown }
-    const wrappedRegister = function (this: unknown, definition?: { name?: unknown }) {
+    const instance = tools as { register: (this: unknown, definition?: { name?: unknown }, ...args: unknown[]) => unknown }
+    const wrappedRegister = function (this: unknown, definition?: { name?: unknown }, ...args: unknown[]) {
       const toolName = definition?.name
-      let owner = lastReader
+      let owner = receiverFiberNameOf(this) ?? lastReader
       if (!owner || owner === 'root' || owner === self) {
         owner = callerPackageFrom(new Error().stack)
       }
-      const dispose = (original as (this: unknown, definition?: unknown) => unknown).call(this, definition)
+      const dispose: unknown = Reflect.apply(original, this, [definition, ...args])
       if (typeof toolName === 'string' && owner && owner !== 'root' && owner !== self && owner !== selfPackage) {
         live.set(toolName, owner)
         if (typeof dispose === 'function') {
@@ -159,7 +169,7 @@ export function createToolAttribution(ctx: Context): ToolAttribution {
   }
   return {
     ownerOf: name =>
-      mcpSourceOf(name) ?? live.get(name) ?? pinnedSourceOf(name)
+      mcpSourceOf(name) ?? live.get(name) ?? pinnedSourceOf(name, harnessVersion)
         ?? (boot.has(name) ? UNKNOWN_TOOL_SOURCE : undefined),
   }
 }

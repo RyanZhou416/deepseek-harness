@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: the grok route resolves to its xAI vendor.
 const MODELS_DEV_PROVIDER_IDS: Record<string, string> = {
   'deepseek-official': 'deepseek',
   'deepseek-account': 'deepseek',

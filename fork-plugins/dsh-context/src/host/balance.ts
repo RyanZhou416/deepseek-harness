@@ -1,7 +1,8 @@
 import { asRecord } from './record'
+import { amountOf } from '../shared/decode'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PlatformBalance, PlatformBalanceEntry } from '../shared/types'
-import { type ConnectionHostFace, registerPostRoute } from './connection'
+import { mountPostRoute, reply } from './postRoute'
 
 export const BALANCE_ROUTE = '/api/dsh-context/balance'
 
@@ -25,9 +26,8 @@ interface CredentialsHostFace {
   resolve?(ref: string): Promise<{ value?: unknown } | undefined>
 }
 
-function amountOf(value: unknown): number | null {
-  const n = typeof value === 'string' ? Number(value) : value
-  return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : null
+interface AccountHostFace {
+  getBalance?(client: { version: string; locale: string; timezoneOffsetSeconds: number }): Promise<unknown>
 }
 
 interface DeepSeekFacts { baseUrl: string; apiKey: string }
@@ -156,6 +156,52 @@ export function balanceOfPayload(value: unknown): PlatformBalance | null {
     : null
 }
 
+function walletAmountsOf(rows: unknown): Map<string, number> | null {
+  const amounts = new Map<string, number>()
+  if (!Array.isArray(rows)) return amounts
+  for (const row of rows) {
+    try {
+      const entry = asRecord(row)
+      if (entry === null) continue
+      const currency = entry.currency
+      const raw = entry.balance
+      const amount = typeof raw === 'string' ? Number(raw) : raw
+      if (typeof currency !== 'string' || currency === ''
+        || typeof amount !== 'number' || !Number.isFinite(amount)) continue
+      if (amount < 0) return null
+      if (!amounts.has(currency)) amounts.set(currency, amount)
+    } catch {
+      continue
+    }
+  }
+  return amounts
+}
+
+export function accountBalanceOf(value: unknown): PlatformBalance | null {
+  const result = asRecord(value)
+  if (result === null || result.status !== 'ready') return null
+  const toppedUp = walletAmountsOf(result.value)
+  const granted = walletAmountsOf(result.bonusWallets)
+  if (toppedUp === null || granted === null) return null
+  const currencies: string[] = []
+  for (const currency of [...toppedUp.keys(), ...granted.keys()]) {
+    if (!currencies.includes(currency)) currencies.push(currency)
+  }
+  const balances = currencies.map((currency) => {
+    const grantedAmount = granted.get(currency) ?? 0
+    const toppedUpAmount = toppedUp.get(currency) ?? 0
+    return {
+      currency,
+      total: grantedAmount + toppedUpAmount,
+      granted: grantedAmount,
+      toppedUp: toppedUpAmount,
+    }
+  })
+  return balances.length > 0
+    ? { isAvailable: balances.some(entry => entry.total > 0), balances }
+    : null
+}
+
 type BalanceFetcher = (url: string, init: RequestInit) => Promise<Response>
 
 const defaultFetcher: BalanceFetcher = (url, init) => fetch(url, init)
@@ -166,15 +212,17 @@ export function setBalanceFetcher(next: BalanceFetcher | null): void {
   fetcher = next ?? defaultFetcher
 }
 
-let inFlight: Promise<PlatformBalance | null> | null = null
+const inFlight = new Map<string, Promise<PlatformBalance | null>>()
 
 export function resetBalance(): void {
-  inFlight = null
+  inFlight.clear()
 }
 
 async function readBalance(facts: DeepSeekFacts): Promise<PlatformBalance | null> {
-  if (inFlight !== null) return inFlight
-  inFlight = (async () => {
+  const key = facts.baseUrl + '\u0000' + facts.apiKey
+  const pending = inFlight.get(key)
+  if (pending !== undefined) return pending
+  const promise = (async () => {
     let value: PlatformBalance | null = null
     try {
       const response = await fetcher(facts.baseUrl + '/user/balance', {
@@ -186,23 +234,42 @@ async function readBalance(facts: DeepSeekFacts): Promise<PlatformBalance | null
     }
     return value
   })()
-  const settled = inFlight
+  inFlight.set(key, promise)
   try {
-    return await settled
+    return await promise
   } finally {
-    inFlight = null
+    inFlight.delete(key)
   }
 }
 
-export function watchBalanceChannel(ctx: Context): void {
-  ctx.inject(['connection'], (c) => {
+async function readAccountBalance(ctx: Context, version: string): Promise<PlatformBalance | null> {
+  try {
+    const account = ctx.get('deepseekAccount') as AccountHostFace | undefined
+    const getBalance = typeof account?.getBalance === 'function' ? account.getBalance.bind(account) : undefined
+    if (getBalance === undefined) return null
+    return accountBalanceOf(await getBalance({ version, locale: 'en', timezoneOffsetSeconds: 0 }))
+  } catch {
+    return null
+  }
+}
 
-    const handler = async (): Promise<Response> => {
-      const facts = await resolveFacts(ctx)
-      const value = facts !== null ? await readBalance(facts) : null
-      return Response.json({ ok: true, value }, { headers: { 'cache-control': 'no-store' } })
-    }
+async function readApiBalance(ctx: Context): Promise<PlatformBalance | null> {
+  const facts = await resolveFacts(ctx)
+  return facts === null ? null : readBalance(facts)
+}
 
-    registerPostRoute(c, c.get('connection') as ConnectionHostFace | undefined, BALANCE_ROUTE, handler, 'dsh-context: balance route')
+export function watchBalanceChannel(ctx: Context, version = '0.0.0'): void {
+  mountPostRoute({
+    ctx,
+    deps: ['connection'],
+    path: BALANCE_ROUTE,
+    label: 'dsh-context: balance route',
+    handler: () => async (): Promise<Response> => {
+      const [account, api] = await Promise.all([
+        readAccountBalance(ctx, version),
+        readApiBalance(ctx),
+      ])
+      return reply({ ok: true, value: { account, api } })
+    },
   })
 }
