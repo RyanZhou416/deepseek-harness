@@ -63,7 +63,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-agent-default-model`
 
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/core/agent-default-model/src/index.ts:25`](../packages/core/agent-default-model/src/index.ts)
+- `source`: [`packages/core/agent-default-model/src/index.ts:35`](../packages/core/agent-default-model/src/index.ts)
 
 ```ts config-catalog
 /** Default model selection supplied by plugin configuration. */
@@ -74,6 +74,18 @@ export interface Config {
   model: Volatile<string>
   /** Adapter-owned reasoning effort; omission follows the provider default. */
   reasoningEffort: Volatile<string | undefined>
+  /** Optional forced route for the `session` create action; false inherits the call/global choice. */
+  sessionCreateModelOverride: Volatile<SessionCreateModelOverride | false>
+}
+
+/** One exact model route a deployment may force onto the `session` create action Sessions. */
+export interface SessionCreateModelOverride {
+  /** Registered provider route. */
+  provider: string
+  /** Provider-owned model id. */
+  model: string
+  /** Adapter-owned reasoning effort; omission follows the model default. */
+  reasoningEffort?: string
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-agent-default-model -->
@@ -231,7 +243,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-gateway`
 
 - `inject`: `typert` · `remoteAccess`
-- `source`: [`packages/api/gateway/src/index.ts:158`](../packages/api/gateway/src/index.ts)
+- `source`: [`packages/api/gateway/src/index.ts:160`](../packages/api/gateway/src/index.ts)
 
 ```ts config-catalog
 /** Gateway transport configuration. */
@@ -247,6 +259,12 @@ export interface Config {
   readonly streamOutboxBytes?: number
   /** Per-message compression for the Remote stream WebSocket; `'none'` disables the extension. @default 'deflate' */
   readonly websocketCompression?: 'none' | 'deflate'
+  /**
+   * Shortest outbound frame, in JSON text characters, the Host compresses when
+   * `websocketCompression` is `'deflate'`. Context takeover lets even small
+   * frames such as Assistant chunks compress to a few bytes. @default 1024
+   */
+  readonly websocketCompressionThreshold?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-gateway -->
@@ -276,15 +294,27 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-session-controller`
 
 - `inject`: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `fs` · `llm` · `remoteAccess` · `sessions` · `sessionProjections` · `sessionQuery` · `typert` · `typertGateway` · `workspaceRegistry`
-- `source`: [`packages/api/session-controller/src/index.ts:83`](../packages/api/session-controller/src/index.ts)
+- `source`: [`packages/api/session-controller/src/index.ts:86`](../packages/api/session-controller/src/index.ts)
 
 ```ts config-catalog
 /** Session Controller deployment policy. */
 export interface Config {
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
+  /** Milliseconds an owned, durable idle Session remains live after activity; zero disables eviction. */
+  readonly idleSessionRetentionMs?: number
   /** Positive integral milliseconds of list work before yielding between complete rows. */
   readonly listWorkSliceMs?: number
+  /** Projection keys the catalog omits before rendering its hint values. */
+  readonly listProjectionExcludeKeys?: string[]
+  /**
+   * Serialized UTF-8 bytes of records one history page may carry before it
+   * stops extending backwards at a message boundary. The budget overrides the
+   * caller's message and Turn minima and always keeps the newest message group;
+   * `0` disables the cap and keeps the message/Turn limits alone. It bounds one
+   * frame's client-side decode and parse cost, not a whole Session.
+   */
+  readonly historyPageMaxBytes?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-session-controller -->
@@ -1088,7 +1118,7 @@ export interface Config extends CuaConfig {
 ## `@deepseek-ai/dsh-deepseek-account`
 
 - `inject`: `credentials` · `authorization`
-- `source`: [`packages/account/deepseek-account/src/index.ts:39`](../packages/account/deepseek-account/src/index.ts)
+- `source`: [`packages/account/deepseek-account/src/index.ts:53`](../packages/account/deepseek-account/src/index.ts)
 
 ```ts config-catalog
 /** Deployment-specific platform and request deadlines. */
@@ -2076,7 +2106,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-host-frontend-static`
 
 - `inject`: `webServer` · `connection`
-- `source`: [`packages/host/frontend-static/src/index.ts:34`](../packages/host/frontend-static/src/index.ts)
+- `source`: [`packages/host/frontend-static/src/index.ts:43`](../packages/host/frontend-static/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the dist anchor. */
@@ -2214,7 +2244,7 @@ export interface TlsConfig {
 
 ## `@deepseek-ai/dsh-jobs-local`
 
-- `source`: [`packages/jobs/jobs-local/src/index.ts:47`](../packages/jobs/jobs-local/src/index.ts)
+- `source`: [`packages/jobs/jobs-local/src/index.ts:49`](../packages/jobs/jobs-local/src/index.ts)
 
 ```ts config-catalog
 /** Configuration for the process-local job registry. */
@@ -2234,6 +2264,10 @@ export interface Config {
   settledRetainBytes?: number
   /** Poll interval for a job's pull sources, in milliseconds; omission defaults to 150. */
   pumpPollMs?: number
+  /** Terminal-record idle retention in milliseconds; omission keeps records until owner or service disposal. */
+  terminalJobRetentionMs?: number
+  /** Target terminal records per exact owner; only model-read records are count-pruned. */
+  maxRetainedTerminalJobsPerOwner?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-jobs-local -->
@@ -2256,6 +2290,150 @@ export interface Config {
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-linear -->
+
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm-cc-pool -->
+<a id="deepseek-aidsh-llm-cc-pool"></a>
+
+## `@deepseek-ai/dsh-llm-cc-pool`
+
+- `inject`: `llm`
+- `refs`: [`PiAiCacheMarkerPolicy`](../packages/llm/llm-pi-ai/src/index.ts) · [`PiAiRequestLogProfile`](../packages/llm/llm-pi-ai/src/index.ts) · `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/llm/llm-cc-pool/src/config.ts:54`](../packages/llm/llm-cc-pool/src/config.ts)
+
+```ts config-catalog
+/** Loader configuration for the mac-pool route. */
+export interface Config {
+  /**
+   * Optional durable NDJSON sink for the same request/response diagnostics the
+   * plugin logger records. It is off by default: a pool route carrying session
+   * headers does not imply a file, because a deployment may collect the logger
+   * or another provider's sink instead. Configure `requestLog` — `enabled:
+   * true` or any field such as `path` — to turn it on. Without `path` the pool
+   * route writes to `$DSH_HOME/logs/llm-cc-pool-requests.jsonl`, its own file,
+   * so an enabled pi-ai sink on its default path never gains a second writer.
+   * `enabled: false` turns the file off, and `maxFileBytes` and `maxFiles`
+   * bound the retained set. Records carry identity and outcome only: the
+   * endpoint is reduced to its origin and path, and no message, cause, request
+   * body, credential, token count, or session title is written. Loader
+   * configuration is read when the plugin mounts.
+   */
+  requestLog?: PiAiRequestLogProfile
+  /**
+   * Prompt-cache TTL this route declares for a main or subagent request's
+   * `cache_control` markers: `1h` asks for the extended lifetime and `none`
+   * sends no marker. A helper request (`compaction`, `auxiliary`) always keeps
+   * the API's default five-minute lifetime whatever this field selects, so it
+   * sends `{type: "ephemeral"}` with no `ttl` and declares no extended beta.
+   * The default `1h` is the lifetime the route serves main and subagent
+   * requests now. `5m` is not a loader choice: the default
+   * {@link cacheMarkerPolicy} (`cc3`) always writes one-hour markers for those
+   * requests and requires `cacheTtl: "1h"`, so no loader configuration can
+   * serve it; a programmatic profile that omits the marker policy can still
+   * select it. `none` is this route's caching-disabled state: it has no marker
+   * placement, so the configured marker policy is not applicable and is dropped
+   * during resolution. Because that policy also owns the Claude Code identity
+   * system block, the pinned top-level field order, and the `metadata`
+   * placeholder, a `none` request omits all three along with the markers and
+   * the extended beta, and with {@link ccWireParity} it declares cache intent
+   * `off` instead of the worker's main plan. The value reaches the wire only
+   * through this route's profile, so no other provider's request changes.
+   */
+  cacheTtl: CcPoolLoaderCacheTtl
+  /**
+   * Declare `extended-cache-ttl-2025-04-11` on this route's Anthropic Messages
+   * requests. The default `true` is what the default `cacheTtl: 1h` and
+   * {@link cacheMarkerPolicy} require; an explicit `false` is refused instead
+   * of producing a request the provider would reject. A helper request keeps
+   * the API's default five-minute lifetime, so it declares no beta.
+   */
+  extendedCacheBeta: boolean
+  /**
+   * Prompt-cache marker placement this route asks pi-ai to perform. The
+   * default `cc3` places the Claude Code 2.1.288 layout — the client identity
+   * system block, the harness system block, and the last cacheable user content
+   * block — with `{type: "ephemeral", ttl: "1h"}` on each slot of a main or
+   * subagent request, and `{type: "ephemeral"}` — the API's default five-minute
+   * lifetime — on a helper (`compaction`, `auxiliary`) request, which declares no
+   * extended beta. It places no marker on any tool declaration or on a message
+   * before the last user turn. The policy owns placement, so it takes precedence
+   * over the lifetime {@link cacheTtl} selects, and it also writes the pinned
+   * client's top-level field order with an empty `metadata` placeholder in its
+   * canonical slot for the pool's `user_id` splice. It requires `cacheTtl: "1h"`
+   * and {@link extendedCacheBeta}: an impossible combination is refused at load
+   * and on a settings write, never at request time. A `cacheTtl` of `none` drops
+   * the policy, so the identity block, the pinned field order, and the
+   * `metadata` placeholder are absent with it. No other provider route reads
+   * this value.
+   */
+  cacheMarkerPolicy?: PiAiCacheMarkerPolicy
+  /**
+   * Ask this route for the CC wire parity wire. The request is a preference, not a
+   * grant: the route advertises wire parity on its profile only after the deployed
+   * pool's member endpoint answers `GET /v1/capabilities` with
+   * `{protocol: 2, ccWireParity: 1, buildId}` using this route's member credential.
+   * `buildId` is the pool build's own stable identity; the proof is kept only
+   * for the endpoint and build that answered, so an old pool or an unpackaged
+   * build that reports none binds nothing and leaves the route on the default
+   * wire. A missing credential, a refused or malformed answer, a timeout, or an
+   * unreachable endpoint leaves the route on its current three-marker bytes.
+   * Wire parity changes what the pi-ai adapter writes; this plugin only publishes
+   * the proved capability on the profile and never rewrites a request body or
+   * header. The profile keeps the configured cache policy alongside the flag,
+   * because a wire-parity-off request keeps that wire, and it also declares the
+   * cache intent the wire-parity-on request sends: {@link cacheTtl} `none` — the
+   * route's caching-disabled state — becomes intent `off`, so the worker writes
+   * no marker, no TTL, and no cache beta, while every other lifetime becomes
+   * intent `main`, the worker's own cache plan. The wire-parity body itself
+   * carries no marker in either case, so wire parity does not constrain which
+   * policy the route may configure. The default `false` keeps the current wire
+   * exactly. It does not disable the capability probe: a one-hour policy needs
+   * the pool build's live `aOffHipaaCache: "downgrade"` lease for the non-parity
+   * wire, so the same probe asks for both facts and a reply without that
+   * permission (or with one whose lease expired) refuses the one-hour A-off
+   * request before it reaches the pool. Only a caching-disabled
+   * (`cacheTtl: none`) route that also leaves this `false` sends no probe.
+   */
+  ccWireParity: boolean
+  /**
+   * The catalogue selector surfaces offer, replacing the built-in four-model
+   * catalogue wholesale. Absent, or reset through the settings service, serves
+   * the built-in catalogue. A provided list resolves through this package's
+   * strict catalogue check: at least one model, every non-empty id once,
+   * non-empty names, positive integer capacities, and a default effort among
+   * the five pool levels. Invalid input fails the plugin at load and is refused
+   * before a settings write persists.
+   */
+  models: Volatile<CcPoolModel[]>
+}
+
+/** One prompt-cache lifetime the loader admits; see {@link LOADER_CACHE_TTLS}. */
+export type CcPoolLoaderCacheTtl = (typeof LOADER_CACHE_TTLS)[number]
+
+/**
+ * A mac-pool model catalogue entry: the deployable facts of one wire model id.
+ * `defaultReasoning` is that model's default effort, materialized by the seam
+ * into a request that names none.
+ */
+export interface CcPoolModel {
+  /** Wire model id sent to the pool; non-empty and unique within the catalogue. */
+  id: string
+  /** Display name selector surfaces show; non-empty. */
+  name: string
+  /** Maximum combined request and response context in tokens. */
+  contextWindow: number
+  /** Maximum output tokens; also this model's per-request default cap. */
+  maxTokens: number
+  /** Default thinking level this model starts from; one of {@link REASONING_LEVELS}. */
+  defaultReasoning: CcPoolReasoningLevel
+}
+
+/**
+ * A default thinking level a pool model starts from. The pool offers the five
+ * escalating levels below; `off` and `minimal` are not part of its catalogue.
+ */
+export type CcPoolReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm-cc-pool -->
 
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm-deepseek-account -->
 <a id="deepseek-aidsh-llm-deepseek-account"></a>
@@ -2300,7 +2478,7 @@ export interface Config extends ProtocolConfig, ModelListingConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:257`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:467`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2311,6 +2489,36 @@ export interface Config {
    * and registers them the moment a settings section supplies profiles.
    */
   providers: Volatile<Record<string, PiAiProviderProfile>>
+  /**
+   * Provider routes whose requests carry the Claude Code session identity a
+   * conversation-aware endpoint reads: `X-Claude-Code-Session-Id` from the
+   * request's `sessionId`, `x-cc-session-name` from its display name when it has
+   * one, and one `x-client-request-id` per deliberate attempt, so a retry never
+   * resends the id the endpoint already recorded. These names are adapter-owned
+   * on such a route: a profile header spelled the same way in any casing is
+   * replaced rather than sent beside them. The display name is sanitized to the
+   * pool's accepted display set (no control, bidi, or zero-width scalars, and no
+   * reserved placeholder such as 空闲 or 未知) before it is encoded. One route
+   * name or a list of them; a route not named here is left alone. A name
+   * matching no configured route has no effect, because the route set is
+   * settings-owned and may be supplied after this composition layer.
+   */
+  sessionHeaders?: string | string[]
+  /**
+   * Optional durable NDJSON file for the same request diagnostics the plugin
+   * logger records. With no configuration, routes named by `sessionHeaders`
+   * still persist their records to `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`,
+   * so a pool route keeps client-side evidence without extra configuration;
+   * `enabled: true` extends persistence to every route, and `enabled: false`
+   * turns the file off entirely. The file never carries messages, request
+   * bodies, credentials, token counts, session titles, or provider failure
+   * text: an endpoint is reduced to its origin and path, and the process logger
+   * remains the place to read a failure's message and cause. Loader
+   * configuration is read when the plugin mounts, so a change takes effect at
+   * the next start. A fixed-route plugin owns its own file and default, which is
+   * why this one never writes the `llm-cc-pool` route's log.
+   */
+  requestLog?: PiAiRequestLogProfile
 }
 
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
@@ -2375,12 +2583,108 @@ export interface PiAiProviderProfile {
   defaultInput?: PiAiModality[]
   /** Provider request headers, validated against Fetch when the profile resolves; Harness attribution wins reserved names. */
   headers?: Record<string, string>
-  /** Provider-neutral pi-ai reasoning level. */
+  /**
+   * Route-level default pi-ai reasoning level: described as the default effort
+   * of every model on this route that configures no {@link PiAiModelProfile.reasoning}
+   * of its own, and materialized into a request that names no effort. A level
+   * describes only where the model offers it, so one model that cannot take it
+   * does not hide the rest; a request asking for such a level still fails
+   * before provider I/O.
+   */
   reasoning?: ModelThinkingLevel
   /** Token budgets used by reasoning providers that support them. */
   thinkingBudgets?: ThinkingBudgets
   /** Prompt-cache retention preference. */
   cacheRetention?: CacheRetention
+  /**
+   * Add `extended-cache-ttl-2025-04-11` to the `anthropic-beta` header of an
+   * Anthropic Messages request. Opt-in and independent of
+   * {@link cacheRetention}: `long` retention writes `ttl: "1h"` on the cache
+   * markers but does not declare the beta, so a route that needs the extended
+   * lifetime sets both. The beta joins the request's `betas` list before the
+   * Anthropic SDK serializes it, which keeps every automatic beta pi-ai derives
+   * for the route. On a `cc3` route it permits the one-hour lifetime that
+   * policy writes on a main or subagent request; a helper request keeps the API
+   * default five-minute lifetime and declares no beta. Refused when no model on
+   * the route speaks `anthropic-messages`.
+   */
+  extendedCacheBeta?: boolean
+  /**
+   * Prompt-cache marker placement this route's adapter performs on an Anthropic
+   * Messages request. Omission keeps pi-ai's placement from
+   * {@link cacheRetention}. `cc3` places the Claude Code 2.1.288 layout — the
+   * client's identity system block, the caller's filtered prompt block, and the
+   * last cacheable user content block — and discards every other marker on the
+   * route.
+   * The harness-describing sections (`harness:source`, `app:web-surface`) are
+   * never forwarded, and `harness:identity` is replaced by the pinned line, on
+   * every request class that states a matching section assembly; the caller's
+   * other sections are kept in assembly order. A main or subagent request marks
+   * each slot with
+   * `{type: "ephemeral", ttl: "1h"}`; a helper request (`compaction`,
+   * `auxiliary`) keeps the API's default five-minute lifetime with
+   * `{type: "ephemeral"}` and no extended beta. It marks no tool declaration and
+   * no message before the last user turn, and the billing block the pool places
+   * ahead of the identity block stays unmarked too. It owns placement outright,
+   * so it takes precedence over `cacheRetention` and over
+   * `compat.supportsCacheControlOnTools`; a request with no caller system prompt
+   * marks the identity and last-user slots. The policy also writes the pinned
+   * client's top-level field order with `stream` last, and an absent `metadata`
+   * gains the empty object a pool's `user_id` splice fills in its canonical
+   * slot. It adds no `scope` field and no scope beta, and
+   * {@link extendedCacheBeta} stays a separate explicit opt-in. Refused when no
+   * model on the route speaks `anthropic-messages`.
+   */
+  cacheMarkerPolicy?: PiAiCacheMarkerPolicy
+  /**
+   * Claude Code wire parity on this route's Anthropic Messages requests (default
+   * `false`): the member body and the three `x-cc-*` headers a wire-parity
+   * endpoint reads. The adapter builds `[identity, static, dynamic]` from the
+   * request's `systemSections` — the pinned interactive identity line, the
+   * reordered `stable` sections, then the session-specific remainder — and
+   * applies the pinned top-level field order, the `updates` thinking display,
+   * and the cache-beta removals while keeping a transport's
+   * `eager_input_streaming` flag — a model that withholds that per-tool field
+   * also has pi-ai's derived fine-grained tool-streaming beta removed, because
+   * the pinned client declares neither — with no
+   * `cache_control` of its own. The cache-beta removal covers both the request's
+   * `betas` list and a deployment `anthropic-beta` header, which pi-ai would
+   * otherwise send unchanged and from which it derives the list: non-cache betas
+   * stay, and a header with no remaining beta is removed rather than sent empty.
+   * A helper class (`compaction`, `auxiliary`)
+   * keeps the caller's non-harness system, layout `none`, and no markers, so it
+   * under-emits the subscription helper form (billing, identity, three five-minute
+   * markers) that the worker's frame does not admit. A helper that states no
+   * matching section assembly drops the exact DSH identity, source, and
+   * Web-surface paragraphs by their owned texts, leaving every other caller
+   * paragraph untouched; a main or
+   * subagent request that cannot state a real boundary, or that names no class
+   * at all, is served as the current non-wire-parity request instead of a
+   * partial wire-parity body. The three header names are adapter-owned on every
+   * route, and the flag replaces {@link cacheMarkerPolicy} `cc3` on a
+   * wire-parity request while a wire-parity-off request keeps that policy's
+   * body. {@link ccWireParityCache} selects the cache intent a main or subagent
+   * request declares. Resolution refuses the flag unless the plugin that
+   * probed the route's endpoint supplies a capability proof whose origin covers
+   * {@link baseURL}, so loader configuration cannot enable this wire; a proof
+   * for a different origin is refused rather than carried over. Refused when no
+   * model on the route speaks `anthropic-messages`.
+   */
+  ccWireParity?: boolean
+  /**
+   * Cache intent a wire-parity route's `main` and `subagent` requests declare
+   * (default `main`), and with it whether the pool's worker writes cache
+   * markers: `main` keeps the worker's main cache plan, while `off` is the
+   * wire-parity-on form of a deployment that disabled prompt caching — the same
+   * member body, class, and layout with `x-cc-cache-intent: off`, so the worker
+   * writes no marker, no TTL, and no cache beta. Both modes already send a body
+   * with no `cache_control` and no caller cache beta; `off` withholds the
+   * worker's plan instead of adding anything. Helpers always declare `helper`.
+   * The field is only meaningful with {@link ccWireParity}: resolution refuses
+   * it on a route that does not send the wire-parity headers, because no request
+   * would read it.
+   */
+  ccWireParityCache?: PiAiCcWireParityCache
   /** Streaming transport preference. */
   transport?: Transport
   /** HTTP/provider SDK timeout in milliseconds. */
@@ -2420,8 +2724,32 @@ export interface PiAiProviderProfile {
    * Omission uses the catalog budget converted to raw bytes, or 1 MiB without catalog metadata.
    */
   requestImageMaxBytes?: number
-  /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
+  /**
+   * Provider-owned model-request retry policy. Omission uses normal mode with
+   * five retries over the harness transient codes plus the pool codes this
+   * adapter classifies; a configured `retryableCodes` list is used exactly as
+   * written.
+   */
   retryPolicy?: RetryPolicyConfig
+}
+
+/**
+ * Durable request-diagnostic log settings.
+ *
+ * Records rotate by size and the retained set stays within 128 MiB: the
+ * effective per-file bound is the smaller of `maxFileBytes` and that total, and
+ * the effective file count is the smaller of `maxFiles` and the total divided
+ * by the per-file bound. The oldest rotation is deleted first.
+ */
+export interface PiAiRequestLogProfile {
+  /** Absolute NDJSON file path; defaults to `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`. */
+  path?: string
+  /** Bytes one file holds before it rotates (default 16 MiB). */
+  maxFileBytes?: number
+  /** Files retained including the active one (default 8). */
+  maxFiles?: number
+  /** Persist every route rather than only `sessionHeaders` routes (default false). */
+  enabled?: boolean
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -2459,6 +2787,14 @@ export interface PiAiModelProfile {
    * declares the offered levels and their wire spellings.
    */
   reasoningEfforts?: false | PiAiReasoningEfforts
+  /**
+   * Default thinking level for this model, preferred over the route-level
+   * `reasoning` when a caller names no effort. It must be a level the model
+   * offers — one declared in {@link reasoningEfforts}, or, when that field is
+   * absent, one the installed catalog entry declares — and only a reasoning
+   * model may set it. The seam materializes it as this model's `defaultEffort`.
+   */
+  reasoning?: ModelThinkingLevel
   /** pi-ai wire-compatibility switches for this model, winning over the route's per field; one its protocol does not declare is refused. */
   compat?: PiAiCompatProfile
 }
@@ -2567,6 +2903,12 @@ export interface PiAiCompatProfile {
 /** One request modality a pi-ai model may accept. */
 export type PiAiModality = Model<Api>['input'][number]
 
+/** One placement policy from {@link CACHE_MARKER_POLICIES}. */
+export type PiAiCacheMarkerPolicy = (typeof CACHE_MARKER_POLICIES)[number]
+
+/** One wire-parity cache intent from {@link CC_WIRE_PARITY_CACHE_MODES}. */
+export type PiAiCcWireParityCache = (typeof CC_WIRE_PARITY_CACHE_MODES)[number]
+
 /**
  * Selectable reasoning efforts for one model: each key is a level the model
  * offers (and selectors show), and its value is the wire spelling dispatch
@@ -2667,6 +3009,30 @@ export interface ReplayModelConfig {
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm-replay -->
+
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm-request-record -->
+<a id="deepseek-aidsh-llm-request-record"></a>
+
+## `@deepseek-ai/dsh-llm-request-record`
+
+- `inject`: `sessions`
+- `source`: [`packages/llm/llm-request-record/src/index.ts:76`](../packages/llm/llm-request-record/src/index.ts)
+
+```ts config-catalog
+/** Loader configuration of the recording service. */
+export interface Config {
+  /**
+   * Milliseconds a prepared record may wait for `SessionStore.flush` before its
+   * producer is told the record is not durable.
+   *
+   * Required, never defaulted: the bound is what keeps a stalled durability
+   * listener from holding a model request open indefinitely, so a deployment
+   * states it instead of inheriting a compiled-in number.
+   */
+  readonly flushTimeoutMs: number
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm-request-record -->
 
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm-retry -->
 <a id="deepseek-aidsh-llm-retry"></a>
@@ -3534,7 +3900,7 @@ export type SessionLogCompressionLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
 ## `@deepseek-ai/dsh-session-persistence-jsonl`
 
-- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:107`](../packages/session/session-persistence-jsonl/src/index.ts)
+- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:115`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config for the JSONL backend's root, physical encoding, and listing concurrency. */
@@ -3549,9 +3915,11 @@ export interface Config {
   root: string
   /** Physical encoding; defaults to checksummed Zstandard frames. */
   compression?: JsonlCompression
+  /** Idle milliseconds a decoded cold log stays reusable; zero disables the memo. Defaults to 10000. */
+  coldLogMemoRetentionMs?: number
   /**
    * Maximum directory, header, and stat reads in flight across all concurrent
-   * listings of this backend (`list()`, the root encoding check, and historical
+   * listings of this backend (`list()`/`listHeaders()` and historical
    * fingerprints). Defaults to 3.
    */
   listConcurrency?: number
@@ -3589,7 +3957,7 @@ export interface Config extends JsonlConfigOptions {
 ## `@deepseek-ai/dsh-session-projection-cache`
 
 - `inject`: `storageDomain` · `sessionProjections` · `sessions`
-- `source`: [`packages/session/session-projection-cache/src/index.ts:76`](../packages/session/session-projection-cache/src/index.ts)
+- `source`: [`packages/session/session-projection-cache/src/index.ts:97`](../packages/session/session-projection-cache/src/index.ts)
 
 ```ts config-catalog
 /**
@@ -3604,6 +3972,17 @@ export interface Config {
   writeEveryEvents: number
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
+  /**
+   * Largest total serialized checkpoint payload the cache keeps complete
+   * across all Sessions. At init the newest records (ranked by their highest
+   * checkpoint seq) stay complete until this budget is reached, and every
+   * remaining record is replaced by a lightweight record holding only its
+   * listing hint rows (`title`, `sessionListMetadata`) — or deleted when it
+   * has none. Dropping fold rows only costs a longer cold replay, never a
+   * value; the listing hints keep such a Session named and ordered in the
+   * list without opening it. Defaults to {@link DEFAULT_MAX_RETAINED_BYTES}.
+   */
+  maxRetainedBytes?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-session-projection-cache -->
@@ -3615,7 +3994,7 @@ export interface Config {
 
 - `inject`: `sessions` · `sessionProjections`
 - `refs`: [`SessionQueryConfig`](../packages/session-query/session-query/src/index.ts)
-- `source`: [`packages/session-query/session-query-sqlite/src/index.ts:92`](../packages/session-query/session-query-sqlite/src/index.ts)
+- `source`: [`packages/session-query/session-query-sqlite/src/index.ts:94`](../packages/session-query/session-query-sqlite/src/index.ts)
 
 ```ts config-catalog
 /** Combined session-query configuration backed by SQLite full-text search. */
@@ -3646,6 +4025,8 @@ export interface Config extends SessionQueryConfig {
   persistedReadConcurrency?: number
   /** Maximum cold prepared-Session observations the inherited reader retains for reuse. Defaults to 5. */
   preparedSessionCacheSize?: number
+  /** Maximum physical artifact size retained by the inherited cold reader. Defaults to 4 MiB. */
+  preparedSessionCacheMaxArtifactBytes?: number
 }
 
 /** SQLite module/handle opening phase; `never` disables full-text search entirely. */
@@ -3825,7 +4206,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-skill-filesystem`
 
 - `inject`: `skills`
-- `source`: [`packages/skill/skill-filesystem/src/index.ts:49`](../packages/skill/skill-filesystem/src/index.ts)
+- `source`: [`packages/skill/skill-filesystem/src/index.ts:50`](../packages/skill/skill-filesystem/src/index.ts)
 
 ```ts config-catalog
 /** Local filesystem skill provider configuration. */
@@ -4078,7 +4459,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 - `inject`: `workingDirectory` · `sessionProjections`
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/subagent/subagent/src/index.ts:188`](../packages/subagent/subagent/src/index.ts)
+- `source`: [`packages/subagent/subagent/src/index.ts:192`](../packages/subagent/subagent/src/index.ts)
 
 ```ts config-catalog
 /** Host configuration for continuable subagent capacity. */
@@ -4087,6 +4468,18 @@ export interface Config {
   maxActiveSubagents: Volatile<number>
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth: Volatile<number>
+  /** Forced model for new children except AgentTeams members; false disables it, unsupported backends reject while enabled. */
+  modelOverride: Volatile<SubagentModelOverride | false>
+}
+
+/** User-selected model configuration for newly created Harness-managed children. */
+export interface SubagentModelOverride {
+  /** Registered LLM provider id. */
+  readonly provider: string
+  /** Exact model id owned by that provider. */
+  readonly model: string
+  /** Explicit reasoning effort; omission selects this model's default without parent inheritance. */
+  readonly reasoningEffort?: string
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-subagent -->
@@ -4295,7 +4688,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-system-prompt`
 
 - `inject`: `sessionProjections`
-- `source`: [`packages/core/system-prompt/src/index.ts:316`](../packages/core/system-prompt/src/index.ts)
+- `source`: [`packages/core/system-prompt/src/index.ts:331`](../packages/core/system-prompt/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the deployment-authored fragment of the system prompt (see {@link Config.personaPrefix} for its contract). */
@@ -4626,7 +5019,7 @@ export type Config = Record<never, never>
 ## `@deepseek-ai/dsh-tool-ask-user`
 
 - `inject`: `tools` · `userQuestions`
-- `source`: [`packages/interaction/tool-ask-user/src/index.ts:16`](../packages/interaction/tool-ask-user/src/index.ts)
+- `source`: [`packages/interaction/tool-ask-user/src/index.ts:17`](../packages/interaction/tool-ask-user/src/index.ts)
 
 ```ts config-catalog
 /** Cordis row selecting the tool schema and its default foreground wait. */
@@ -4738,6 +5131,8 @@ export interface Config {
   readMaxLineLength?: number
   /** Maximum bytes returned for the selected lines of one `read` call. */
   readMaxBytes?: number
+  /** Maximum serialized bytes of the UI-only presentation meta persisted with one `read` result. */
+  readMaxMetaBytes?: number
   /** Files at or above this size stream instead of loading whole into memory. */
   readStreamMinSize?: number
 }
@@ -5252,6 +5647,23 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-typert-loader -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-unattended-mode -->
+<a id="deepseek-aidsh-unattended-mode"></a>
+
+## `@deepseek-ai/dsh-unattended-mode`
+
+- `refs`: `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/interaction/unattended-mode/src/index.ts:20`](../packages/interaction/unattended-mode/src/index.ts)
+
+```ts config-catalog
+/** Deployment configuration for the switch. */
+export interface Config {
+  /** Whether no human is available to answer. Defaults to false. */
+  enabled: Volatile<boolean>
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-unattended-mode -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-upstream-skills -->
 <a id="deepseek-aidsh-upstream-skills"></a>
 
@@ -5644,6 +6056,7 @@ export interface Config {
 | `@deepseek-ai/dsh-client-ui-session-status` | `remoteAccess` · `sessions` · `sessionPersistence` · `typert` | [`packages/client/ui-session-status/src/index.ts`](../packages/client/ui-session-status/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings` | — | [`packages/client/ui-settings/src/index.ts`](../packages/client/ui-settings/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings-agent-loop` | — | [`packages/client/ui-settings-agent-loop/src/index.ts`](../packages/client/ui-settings-agent-loop/src/index.ts) |
+| `@deepseek-ai/dsh-client-ui-settings-cc-pool` | — | [`packages/client/ui-settings-cc-pool/src/index.ts`](../packages/client/ui-settings-cc-pool/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings-general` | — | [`packages/client/ui-settings-general/src/index.ts`](../packages/client/ui-settings-general/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings-session-log` | — | [`packages/client/ui-settings-session-log/src/index.ts`](../packages/client/ui-settings-session-log/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings-shell` | — | [`packages/client/ui-settings-shell/src/index.ts`](../packages/client/ui-settings-shell/src/index.ts) |
@@ -5713,6 +6126,7 @@ export interface Config {
 | `@deepseek-ai/dsh-tool-schedule` | `tools` · `systemPrompt` | [`packages/schedule/tool-schedule/src/index.ts`](../packages/schedule/tool-schedule/src/index.ts) |
 | `@deepseek-ai/dsh-tool-session-control` | `tools` · `sessionController` · `workspaceRegistry` | [`packages/session/tool-session-control/src/index.ts`](../packages/session/tool-session-control/src/index.ts) |
 | `@deepseek-ai/dsh-tool-session-list` | `tools` · `sessions` · `sessionQuery` · `workspaceRegistry` · `sessionProjections` | [`packages/session-query/tool-session-list/src/index.ts`](../packages/session-query/tool-session-list/src/index.ts) |
+| `@deepseek-ai/dsh-tool-session-message` | `tools` · `agents` · `sessionController` · `sessionReferenceResolver` · `permissionPresets` · `agentDefaultModel` · `llm` | [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts) |
 | `@deepseek-ai/dsh-tools` | `systemPrompt` | [`packages/core/tools/src/index.ts`](../packages/core/tools/src/index.ts) |
 | `@deepseek-ai/dsh-user-questions` | — | [`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts) |
 | `@deepseek-ai/dsh-webhook` | `agents` · `agentDefaultModel` · `agentPresets` · `permissionPresets` · `sessionTitle` · `workspaceRegistry` | [`packages/experimental/webhook/src/index.ts`](../packages/experimental/webhook/src/index.ts) |

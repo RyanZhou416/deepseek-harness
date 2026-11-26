@@ -553,7 +553,7 @@ async traceEvent(request: SessionEventTraceRequest, signal?: AbortSignal): Promi
 async readEvent(request: SessionEventReadRequest, signal?: AbortSignal): Promise<SessionEventWindow>
 ```
 
-Types: [Session](session.zh.md) · [SessionId](core.zh.md) · [SessionTitleSnapshot](session-title.zh.md)
+Types: [Session](session.zh.md) · [SessionId](core.zh.md) · [SessionTitleSnapshot](session-title.zh.md) · [SessionWindowRequest](persistence.zh.md)
 
 Source: [`packages/session-query/session-query/src/index.ts`](../../packages/session-query/session-query/src/index.ts)
 <!-- END GENERATED cordis-surface -->

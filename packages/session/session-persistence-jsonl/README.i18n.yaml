@@ -24,26 +24,26 @@
   en: ee6b7741ed61f1d8
   zh: e13b6554d1770f0f
 /deepseek-ai-dsh-session-persistence-jsonl/use-this-package/on-disk-layout:
-  en: e20cf32540d7c785
-  zh: 67e182529e9211ca
+  en: 0f6f4885c4138440
+  zh: 28d4b9c83da8ab5e
 /deepseek-ai-dsh-session-persistence-jsonl/use-this-package/durability-and-crash-semantics:
   en: 96498792672f6d50
   zh: d767a9c69dced889
 /deepseek-ai-dsh-session-persistence-jsonl/use-this-package/reading-the-logs:
-  en: c9aff3ce6e32f790
-  zh: 1748bb565a366db6
+  en: 36e9ffe9c461f96d
+  zh: 84c4ce43878b873c
 /deepseek-ai-dsh-session-persistence-jsonl/understand-the-implementation:
   en: a35407bb25671e7e
   zh: 6a00f9510c85adcb
 /deepseek-ai-dsh-session-persistence-jsonl/understand-the-implementation/design-concept:
-  en: a422bd0f74a5b31a
-  zh: edc47e9530c87f67
+  en: 5eebde8ae467d71c
+  zh: ae9de6e3f65e8408
 /deepseek-ai-dsh-session-persistence-jsonl/understand-the-implementation/physical-encoding:
-  en: 5aaf80115840318f
-  zh: 0b0fb2b2e085a111
+  en: 1455874b4c677556
+  zh: fd2b09b48af4fe1c
 /deepseek-ai-dsh-session-persistence-jsonl/understand-the-implementation/source-map:
-  en: 2a4fd4bde1da0a1b
-  zh: d7a8cbdad7beee09
+  en: 1e49eaa93ee852a4
+  zh: b740fd843531956e
 /deepseek-ai-dsh-session-persistence-jsonl/further-exploration:
   en: 71fbff06a098440a
   zh: d3c07db42668ea18
@@ -63,8 +63,8 @@
   en: 53ce4da7ce68d21c
   zh: 10f40bc354100f77
 /deepseek-ai-dsh-session-persistence-jsonl/known-limitations-and-deferred-work:
-  en: c46c91a811abc547
-  zh: 41fb942d4e61e544
+  en: 9c3dc10f98ef7e7e
+  zh: a5aa51dcd051ff47
 /deepseek-ai-dsh-session-persistence-jsonl/known-limitations-and-deferred-work/dev-note:
   en: e67f633dc6fe7773
   zh: 3bb0c20c93f16f98

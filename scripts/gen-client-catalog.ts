@@ -48,9 +48,10 @@ const MAX_DECL_CHARS = 1200
  * share that hands down a subsystem instead of a share, and prose that grew
  * into a manual. Every report also lists one line per standard prop seat of its
  * scope, so the widest Session-scope slot (`tool.call.toolview`, with the
- * global and Session access seats and one occupant line per keyed tool view) sets the current 127.
+ * global and Session access seats, the `failureScope` register option, and one
+ * occupant line per keyed tool view) sets the current 131.
  */
-const MAX_ENTRY_LINES = 127
+const MAX_ENTRY_LINES = 131
 
 /** One register-call option as the catalog teaches it. */
 interface OptionDoc {

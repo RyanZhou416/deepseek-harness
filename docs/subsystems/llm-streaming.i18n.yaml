@@ -6,8 +6,8 @@
   en: 989057ec9786a505
   zh: 03e20367da473086
 /llm-streaming/content-blocks-and-messages:
-  en: 451f5a4094996447
-  zh: 2cbbb538d1159066
+  en: a0c796c5edfcc3ed
+  zh: 4d3d52291863583f
 /llm-streaming/streamchunk-the-raw-protocol:
   en: a18fe401763efde4
   zh: ef59a76d9c694654
@@ -15,8 +15,8 @@
   en: ab4ea0563524a379
   zh: fb1ba6e5a69adef7
 /llm-streaming/llmfailure:
-  en: 13415501869b4ca9
-  zh: 723c7533cce3d1d6
+  en: 5262835706bac991
+  zh: 3a7ed7ff4c6033fa
 /llm-streaming/request-image-pricing:
   en: 10598e1a98262415
   zh: 7fb85b22174a1497
@@ -50,3 +50,18 @@
 /llm-streaming/service-and-provider-contracts:
   en: 8dc79d4cc82824c2
   zh: 3ebabd3a117ad717
+/llm-streaming/prepared-request-recording:
+  en: ec649fce9b3ac461
+  zh: 83cc70a436b24a53
+/llm-streaming/prepared-request-recording/llmrequestrecordcontext:
+  en: 8f82f72fdce9f1f9
+  zh: 2670db0d850197c5
+/llm-streaming/prepared-request-recording/llmrequestrecordpayload:
+  en: 6259eab62deb4d50
+  zh: 4581e6236d73c0a4
+/llm-streaming/prepared-request-recording/llmrequestrecordoutcome:
+  en: 246b4ebcd60c99ff
+  zh: 237e7ea4ac32713d
+/llm-streaming/prepared-request-recording/llmrequestrecordfailurecode:
+  en: a4a3add9b53899d6
+  zh: e16cb98e1ad6dfc1

@@ -87,7 +87,7 @@ const gate: InventoryGate<UnknownCast> = {
 
 const importedGate: InventoryGate<UnknownCast> = { ...gate, baselinePath: importedBaselinePath }
 
-/** One recorded allowance's provenance: the official inventory, and the fork's inherited file. */
+/** Where one allowance is recorded: the official inventory, and the fork's inherited file. */
 interface AllowanceSplit {
   /** Count recorded in the official inventory. */
   official: number
@@ -130,7 +130,7 @@ function mergeAllowances(official: UnknownCastBaseline, inherited: UnknownCastBa
 function splitObserved(
   observed: UnknownCastBaseline,
   merged: ReadonlyMap<string, AllowanceSplit>,
-): { official: UnknownCastBaseline, inherited: UnknownCastBaseline } {
+): { official: UnknownCastBaseline; inherited: UnknownCastBaseline } {
   const official: UnknownCastBaseline = {}
   const inherited: UnknownCastBaseline = {}
   for (const [file, counts] of Object.entries(observed)) {

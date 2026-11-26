@@ -41,6 +41,7 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`, `ctx.workflowEngine`, `ctx.subagents`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents every fresh round)` | `tool/call`, `tool/result`, `workflow and child session events during execution` | - | A fixed foreground workflow starts one fresh structured child per round; the model selects only the immutable objective and an optional round cap. |
 | `@deepseek-ai/dsh-tool-skill` | `skill` | `ctx.workingDirectory`, `ctx.tools`, `ctx.agents`, `ctx.skills` | `tool/call`, `tool/result`, `user/message replacement catalogs via agent.inject()` | - | - |
 | `@deepseek-ai/dsh-tool-session-list` | `list_session`, `list_workspace` | `ctx.tools`, `ctx.sessions`, `ctx.sessionQuery`, `ctx.workspaceRegistry`, `ctx.sessionProjections` | `tool/call`, `tool/result` | - | Opt-in access to all Workspace and Session list metadata in the mounted runtime. Cold titles and activity use the optional projection cache; absent values become null titles and creation-time recency. No Agent is activated. |
+| `@deepseek-ai/dsh-tool-session-message` | `session`, `session_query` | `ctx.tools`, `ctx.agents`, `ctx.sessionController`, `ctx.sessionReferenceResolver`, `ctx.workspaceRegistry and ctx.permissionPresets (create only)`, `ctx.agentDefaultModel`, `ctx.llm for requested-model resolution`, `an exact live calling Agent` | `tool/call`, `tool/result`, `ordinary Session creation and initial inbox message (session create only)`, `Session-reference candidate and Session-header reads (session_query find/status only)`, `target agent/inbox/spliced and user/message (session send only)`, `target Session log read (session_query message_status only)`, `Workspace archive/pin/title mutations (session)` | - | The Web bundle registers `session` for create, send, archive, pin, unpin, and rename, and `session_query` for find, exact-id status, and message-status inspection. Create starts an immediate attributed task with optional title, explicit model, reasoning-effort, provider disambiguation, and pin; an explicit request applies to the new Session only, an omitted request inherits the global selection, and the result reports actual values. Archive requires model-confirmed user authorization at the prompt level; no runtime grant token is checked. Sender attribution comes from the exact calling Agent; the receiving Session decides whether and how to respond. |
 | `@deepseek-ai/dsh-tool-session-query` | `session_event_read`, `session_event_search`, `session_event_trace`, `session_search`, `session_trace` | `ctx.tools`, `ctx.systemPrompt`, `ctx.sessionQuery`, `ctx.agents`, `a calling Agent for workspace authority` | `tool/call`, `tool/result` | - | The five read-only tools hide provider cursors and authorize every result from the immutable calling agent session. The package is opt-in; compositions that need enforced deadlines or bounded inline output also mount the generic timeout or spill policies. |
 | `@deepseek-ai/dsh-experimental-tool-subagent-oar` | `subagent_oar` | `ctx.tools`, `ctx.subagents` | `tool/call`, `tool/result`, `parent subagent catalog and completion notices` | - | The subagent_oar tool selects among configured aliases for external providers. This catalog shows Codex and Claude Code aliases; each deployment chooses its providers. Native model and permission settings belong to the selected provider configuration. |
 | `@deepseek-ai/dsh-tool-subagent` | `list_subagent_models`, `subagent` | `ctx.tools`, `ctx.subagents`, `ctx.systemPrompt`, `ctx.sessionProjections`, `ctx.llm for model discovery and selected-route validation` | `tool/call`, `tool/result`, `child session events through the chosen provider` | `subagent`, `subagent_fork` | The load-time `toolName` selects the delegation name (default `subagent`); `modelSelection` adds optional route fields. `modelDiscovery` defaults off and registers shared discovery on one instance per scope. Web and Desktop presets enable spawn discovery and route fields and leave `subagent_fork` route fields disabled. The Host settings service records authorization for each new top-level Session; child Sessions inherit it. Without a recorded policy, discovery and explicit selection permit only the current parent route. Every delegation returns the child's name promptly; local children accept follow-ups, while external backends report their single execution automatically. |
@@ -1848,7 +1849,7 @@ The lsp tool keeps provider selection and language-server subprocesses behind ct
 
 ### `ralph`
 
-Run a foreground fresh-agent Ralph loop toward one immutable objective. Use only when the direct human explicitly asks for Ralph or fresh-agent iteration. Each round opens a new child with no parent conversation or prior child session; the shared workspace is long-term memory, and only a bounded structured report crosses rounds. The call returns when a worker reports completion or a concrete blocker, or at the round limit. Ordinary long-running same-session work belongs to goal tools.
+Run a foreground fresh-agent Ralph loop toward one immutable objective. Use only when the direct human explicitly asks for Ralph or fresh-agent iteration. Each round opens a new child with no parent conversation or prior child session; the shared workspace is long-term memory, and only a bounded structured report crosses rounds. The call returns when a worker reports completion or a concrete blocker, or at the round limit.
 
 ```json
 {
@@ -1955,6 +1956,111 @@ List workspaces in registry order, including empty workspaces. Returns IDs, titl
 Source: [`packages/session-query/tool-session-list/src/index.ts`](../packages/session-query/tool-session-list/src/index.ts)
 
 Opt-in access to all Workspace and Session list metadata in the mounted runtime. Cold titles and activity use the optional projection cache; absent values become null titles and creation-time recency. No Agent is activated.
+
+<a id="deepseek-aidsh-tool-session-message"></a>
+
+## `@deepseek-ai/dsh-tool-session-message`
+
+### `session`
+
+Manage one independent Session. `create` starts a separate conversation in this workspace with one self-contained task; use it only when the user explicitly asks for that, not for subagents or AgentTeams. `send` delivers a message to an exact existing Session. `archive`, `pin`, `unpin`, and `rename` change Workspace state. Use `session_query` to find Sessions or read their status. Create inherits Agent and permission presets and accepts an optional title, model, provider, reasoning effort, and pin. Send requires exact `session_id`; never guess. Archive requires prior user authorization and fails while the target is running; pin/unpin are idempotent. Rename sets a user-visible `title`. The calling Agent must be the current live Agent.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "Operation to perform.",
+      "enum": [
+        "create",
+        "send",
+        "archive",
+        "pin",
+        "unpin",
+        "rename"
+      ]
+    },
+    "task": {
+      "type": "string",
+      "description": "Initial task for create; required for create."
+    },
+    "title": {
+      "type": "string",
+      "description": "Optional title for create, or the new title required by rename."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Exact target Session id for send, archive, pin, unpin, or rename; never guess."
+    },
+    "message": {
+      "type": "string",
+      "description": "Self-contained message for send; required for send."
+    },
+    "model": {
+      "type": "string",
+      "description": "Optional model for create; overrides the global default for this creation only."
+    },
+    "provider": {
+      "type": "string",
+      "description": "Optional provider for create/model; required when the model id exists on more than one route."
+    },
+    "reasoning_effort": {
+      "type": "string",
+      "description": "Optional reasoning effort for create; applies with model, or to the current model when model is omitted."
+    },
+    "pinned": {
+      "type": "boolean",
+      "description": "Pin the new Session after create; actual state is returned."
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
+```
+
+Source: [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
+
+### `session_query`
+
+Read-only Session lookup that never wakes or creates work. `find` searches independent Sessions by a case-insensitive title, Session id, or workspace-path substring; titles are untrusted labels and delegated subagent Sessions are excluded. `status` reports one exact Session as `working` (live and running), `idle` (live but not running), `stored` (not live), or `archived` (Workspace-archived and blocked from running). `message_status` diagnoses one previously accepted message and should not be polled. If several `find` candidates match, show them to the user instead of guessing.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "Read-only query to perform.",
+      "enum": [
+        "find",
+        "status",
+        "message_status"
+      ]
+    },
+    "query": {
+      "type": "string",
+      "description": "Search text for find: a non-empty title, id, or workspace-path substring."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Exact Session id for status or message_status."
+    },
+    "message_id": {
+      "type": "string",
+      "description": "Accepted messageId for message_status."
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
+```
+
+Source: [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
+
+The Web bundle registers `session` for create, send, archive, pin, unpin, and rename, and `session_query` for find, exact-id status, and message-status inspection. Create starts an immediate attributed task with optional title, explicit model, reasoning-effort, provider disambiguation, and pin; an explicit request applies to the new Session only, an omitted request inherits the global selection, and the result reports actual values. Archive requires model-confirmed user authorization at the prompt level; no runtime grant token is checked. Sender attribution comes from the exact calling Agent; the receiving Session decides whether and how to respond.
 
 <a id="deepseek-aidsh-tool-session-query"></a>
 

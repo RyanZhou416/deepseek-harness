@@ -487,6 +487,15 @@ startActivation(spec: SubagentActivationSpec & { readonly childId: SessionId }):
 startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation>
 
 /**
+ * Read effective model options for tool validation. Creation resolves the current policy again.
+ * Providers without Agent-option support reject creation while the override is enabled.
+ * @param name - registered subagent backend.
+ * @param requested - caller-selected options before the user override.
+ * @returns detached effective options and the applied override.
+ */
+prepareModel(name: string, requested?: AgentOptions): PreparedSubagentModel
+
+/**
  * Resolve the root shared by an Agent and its other agents in its subagent tree.
  * @param caller - exact live Agent whose subagent ancestry selects the tree.
  * @returns the live root; ordinary Session forks lead independent trees.

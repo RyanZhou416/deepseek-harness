@@ -45,6 +45,7 @@
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`、`ctx.workflowEngine`、`ctx.subagents`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents every fresh round)` | `tool/call`、`tool/result`、`workflow and child session events during execution` | - | 固定的前台工作流会在每个 Round 启动一个全新的结构化子级；模型只能选择不可变目标和可选的 Round 上限。 |
 | `@deepseek-ai/dsh-tool-skill` | `skill` | `ctx.workingDirectory`、`ctx.tools`、`ctx.agents`、`ctx.skills` | `tool/call`、`tool/result`、`user/message replacement catalogs via agent.inject()` | - | - |
 | `@deepseek-ai/dsh-tool-session-list` | `list_session`、`list_workspace` | `ctx.tools`、`ctx.sessions`、`ctx.sessionQuery`、`ctx.workspaceRegistry`、`ctx.sessionProjections` | `tool/call`、`tool/result` | - | 选择启用后，可读取已挂载运行时中全部 Workspace 和 Session 的列表元数据。冷会话的标题和活动时间使用可选的投影缓存；值缺失时，标题为 null，最近活动时间取创建时间。不会激活 Agent。 |
+| `@deepseek-ai/dsh-tool-session-message` | `session`、`session_query` | `ctx.tools`、`ctx.agents`、`ctx.sessionController`、`ctx.sessionReferenceResolver`、`ctx.workspaceRegistry and ctx.permissionPresets (create only)`、`ctx.agentDefaultModel`、`ctx.llm for requested-model resolution`、`an exact live calling Agent` | `tool/call`、`tool/result`、`ordinary Session creation and initial inbox message (session create only)`、`Session-reference candidate and Session-header reads (session_query find/status only)`、`target agent/inbox/spliced and user/message (session send only)`、`target Session log read (session_query message_status only)`、`Workspace archive/pin/title mutations (session)` | - | Web bundle 为 create、send、archive、pin、unpin 和 rename 注册 `session`，为 find、精确 id 状态和消息状态检查注册 `session_query`。Create 会立即以带归属的任务启动，可附带 title、显式 model、reasoning-effort、provider 消歧和 pin；显式请求只作用于新 Session，省略请求则继承全局选择，结果报告实际值。Archive 需要模型确认的用户授权，在提示词层面完成；运行时不检查授权令牌。发送者归属来自精确的调用 Agent；接收 Session 自行决定是否回应以及如何回应。 |
 | `@deepseek-ai/dsh-tool-session-query` | `session_event_read`、`session_event_search`、`session_event_trace`、`session_search`、`session_trace` | `ctx.tools`、`ctx.systemPrompt`、`ctx.sessionQuery`、`a calling Agent for workspace authority` | `tool/call`、`tool/result` | - | 这 5 个只读工具会隐藏提供方游标，并根据不可变的调用 agent 会话为每个结果授权。该包需要选择启用；需要强制截止时间或限制行内输出的组合还会挂载通用超时或 spill 策略。 |
 | `@deepseek-ai/dsh-experimental-tool-subagent-oar` | `subagent_oar` | `ctx.tools`, `ctx.subagents` | `tool/call`, `tool/result`, `parent subagent catalog and completion notices` | - | subagent_oar 工具在为外部提供方配置的别名之间选择。本目录展示 Codex 和 Claude Code 别名；每个部署自行选择提供方。原生模型和权限设置由所选提供方的配置决定。 |
 | `@deepseek-ai/dsh-tool-subagent` | `list_subagent_models`、`subagent` | `ctx.tools`、`ctx.subagents`、`ctx.systemPrompt`、`ctx.sessionProjections`、`用于模型发现和所选路由校验的 ctx.llm` | `tool/call`、`tool/result`、`child session events through the chosen provider` | `subagent`、`subagent_fork` | 加载时的 `toolName` 选择委派名称（默认为 `subagent`）；`modelSelection` 增加可选路由字段。`modelDiscovery` 默认关闭，每个作用域由一个实例注册共享发现工具。Web 与 Desktop preset 启用 spawn 发现和路由字段，并为 `subagent_fork` 保持路由字段关闭。Host 设置服务为每个新顶层 Session 记录授权；子 Session 继承该授权。没有已记录策略时，发现和显式选择只允许当前父级路由。每次委派都会立即返回子代理的名称；本地子代理接受后续消息，外部后端自动汇报单次执行结果。 |
@@ -1854,7 +1855,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `ralph`
 
-围绕一个不可变目标运行使用全新 agent 的前台 Ralph 循环。仅当直接人类明确要求 Ralph 或使用全新 agent 迭代时使用。每个 Round 都会启动一个全新子级，该子级看不到父级对话或先前子会话；共享工作区充当长期记忆，Round 之间只传递有界的结构化报告。当工作进程报告完成、报告具体阻塞项或达到 Round 上限时，调用返回。普通的长期同会话工作应使用 goal 工具。
+围绕一个不可变目标运行使用全新 agent 的前台 Ralph 循环。仅当直接人类明确要求 Ralph 或使用全新 agent 迭代时使用。每个 Round 都会启动一个全新子级，该子级看不到父级对话或先前子会话；共享工作区充当长期记忆，Round 之间只传递有界的结构化报告。当工作进程报告完成、报告具体阻塞项或达到 Round 上限时，调用返回。
 
 ```json
 {
@@ -1961,6 +1962,111 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 来源：[`packages/session-query/tool-session-list/src/index.ts`](../packages/session-query/tool-session-list/src/index.ts)
 
 选择启用后，可读取已挂载运行时中全部 Workspace 和 Session 的列表元数据。冷会话的标题和活动时间使用可选的投影缓存；值缺失时，标题为 null，最近活动时间取创建时间。不会激活 Agent。
+
+<a id="deepseek-aidsh-tool-session-message"></a>
+
+## `@deepseek-ai/dsh-tool-session-message`
+
+### `session`
+
+管理一个独立 Session。`create` 在本工作区内以一项自包含任务开启独立对话；仅当用户明确要求时使用，不用于 subagent 或 AgentTeams。`send` 向一个精确存在的 Session 投递消息。`archive`、`pin`、`unpin` 和 `rename` 修改 Workspace 状态。用 `session_query` 查找 Session 或读取其状态。Create 继承 Agent 与权限预设，接受可选的 title、model、provider、reasoning effort 和 pin。Send 要求精确的 `session_id`；绝不猜测。Archive 需要事先的用户授权，目标正在运行时会失败；pin/unpin 幂等。Rename 设置用户可见的 `title`。调用 Agent 必须是当前 live Agent。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "Operation to perform.",
+      "enum": [
+        "create",
+        "send",
+        "archive",
+        "pin",
+        "unpin",
+        "rename"
+      ]
+    },
+    "task": {
+      "type": "string",
+      "description": "Initial task for create; required for create."
+    },
+    "title": {
+      "type": "string",
+      "description": "Optional title for create, or the new title required by rename."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Exact target Session id for send, archive, pin, unpin, or rename; never guess."
+    },
+    "message": {
+      "type": "string",
+      "description": "Self-contained message for send; required for send."
+    },
+    "model": {
+      "type": "string",
+      "description": "Optional model for create; overrides the global default for this creation only."
+    },
+    "provider": {
+      "type": "string",
+      "description": "Optional provider for create/model; required when the model id exists on more than one route."
+    },
+    "reasoning_effort": {
+      "type": "string",
+      "description": "Optional reasoning effort for create; applies with model, or to the current model when model is omitted."
+    },
+    "pinned": {
+      "type": "boolean",
+      "description": "Pin the new Session after create; actual state is returned."
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
+```
+
+来源：[`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
+
+### `session_query`
+
+只读的 Session 查询，不会唤醒或创建任何工作。`find` 按大小写不敏感的标题、Session id 或 workspace 路径子串搜索独立 Session；标题是不可信标签，被委派的 subagent Session 会被排除。`status` 报告某一个精确 Session 的状态：`working`（live 且运行中）、`idle`（live 但未运行）、`stored`（非 live）或 `archived`（已被 Workspace 归档且禁止运行）。`message_status` 诊断一条此前已接受的消息，不应轮询。若 `find` 命中多个候选，展示给用户，不要猜测。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "Read-only query to perform.",
+      "enum": [
+        "find",
+        "status",
+        "message_status"
+      ]
+    },
+    "query": {
+      "type": "string",
+      "description": "Search text for find: a non-empty title, id, or workspace-path substring."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Exact Session id for status or message_status."
+    },
+    "message_id": {
+      "type": "string",
+      "description": "Accepted messageId for message_status."
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
+```
+
+来源：[`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
+
+Web bundle 为 create、send、archive、pin、unpin 和 rename 注册 `session`，为 find、精确 id 状态和消息状态检查注册 `session_query`。Create 会立即以带归属的任务启动，可附带 title、显式 model、reasoning-effort、provider 消歧和 pin；显式请求只作用于新 Session，省略请求则继承全局选择，结果报告实际值。Archive 需要模型确认的用户授权，在提示词层面完成；运行时不检查授权令牌。发送者归属来自精确的调用 Agent；接收 Session 自行决定是否回应以及如何回应。
 
 <a id="deepseek-aidsh-tool-session-query"></a>
 

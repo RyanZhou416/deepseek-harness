@@ -66,6 +66,7 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 6. 上游冲突采用“官方结构优先、fork 行为逐项重做”。Session、API、schema、包布局、生成文件和 lockfile 不得整树保留旧 fork 版本。
 7. 外置 profile、preset、本地 tgz 和 DSH_HOME 不受 Git 保护；每次上游或插件更新前必须单独备份它们。
 8. 测试默认使用 focused batches；单批性能或压力测试保持在 20 秒内，除非用户明确授权更长测试。完整构建可以按实际耗时运行。
+9. 推送 fork 专属的源码、profile 或 plugin 改动前，先更新本文件的对应章节，记录该行为、合并保留规则和 focused 验证入口，使后续上游合并无法静默丢弃它。
 
 -----
 

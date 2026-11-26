@@ -37,7 +37,7 @@ Account login, credentials, and client-safe Remote operations.
 ```ts cordis-catalog
 /**
  * Read stored-account presence and the latest login attempt.
- * @returns a snapshot without credentials or PKCE secrets.
+ * @returns a snapshot without credentials or PKCE secrets; `needs-reauth` names a parked grant that was retained.
  */
 @Remote async getState(): Promise<AccountView>
 
@@ -46,21 +46,21 @@ Account login, credentials, and client-safe Remote operations.
  * A ready result whose stable profile ID first becomes available or changes notifies identity-enabled watch
  * consumers, so they re-read getPlatformSession; repeated IDs stay silent.
  * @param client - identity of the requesting UI for this call.
- * @returns profile outcome, or null if signed out or the grant changed during the query.
+ * @returns profile outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.
  */
 @Remote async getProfile(client: AccountClientMetadata): Promise<AccountDetails['profile'] | null>
 
 /**
  * Query Platform recharge and bonus wallet balances independently of profile data.
  * @param client - identity of the requesting UI for this call.
- * @returns balance outcome, or null if signed out or the grant changed during the query.
+ * @returns balance outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.
  */
 @Remote getBalance(client: AccountClientMetadata): Promise<AccountDetails['balance'] | null>
 
 /**
  * Query unconsumed account notifications in server order without reading profile data.
  * @param client - identity of the requesting UI for this call; its language selects the server-authored message.
- * @returns notifications with their next query delay, or null if signed out or the grant changed during the query.
+ * @returns notifications with their next query delay, or null if signed out, the grant changed during the query, or the stored grant is parked.
  */
 @Remote async getNotifications(client: AccountClientMetadata): Promise<AccountNotificationBatch | null>
 
@@ -68,7 +68,7 @@ Account login, credentials, and client-safe Remote operations.
  * Query localized content of a notification, including one already consumed.
  * @param id - notification whose content is requested.
  * @param client - identity of the requesting UI; its language selects the localized content.
- * @returns content without changing consumption, or null if signed out or the grant changed.
+ * @returns content without changing consumption, or null if signed out, the grant changed, or the stored grant is parked.
  */
 @Remote async getNotificationContent(id: AccountNotificationId, client: AccountClientMetadata): Promise<AccountNotification | null>
 
@@ -90,7 +90,7 @@ async getDeviceIdentity(): Promise<{ deviceId?: string; userId?: AccountUserId; 
 /**
  * Read credentials for the configured embedded-page origin, bound to their account environment, and
  * pair them with the account ID from the last successful profile read; no profile request is made.
- * @returns a Host-only snapshot, or null while signed out or when the credential changed during the read.
+ * @returns a Host-only snapshot, or null while signed out, parked, or when the credential changed during the read.
  */
 async getPlatformSession(): Promise<PlatformSession | null>
 
@@ -237,10 +237,10 @@ Source: [`packages/account/deepseek-account/src/types.ts`](../../packages/accoun
 
 #### `deepseek-account/session-expired` — emit
 
-Server rejection removed the current account credential; this notification is not replayed.
+Server rejection parked the current credential; the stored grant is retained. This notification is not replayed.
 
 ```ts cordis-catalog
-/** Server rejection removed the current account credential; this notification is not replayed.
+/** Server rejection parked the current credential; the stored grant is retained. This notification is not replayed.
  * @mode emit
  */
 'deepseek-account/session-expired'(): void
