@@ -3,8 +3,8 @@
  *
  * The relay injects one DSH cookie as the `Cookie` header of every proxied
  * request, so the minted name and signature must be exactly what
- * `packages/client/connection/src/browser-auth.ts` accepts. The signing secret
- * is the same durable record that module created under
+ * `packages/host/authentication-token/src/browser-auth.ts` accepts. The signing
+ * secret is the same durable record that module created under
  * `client-connection/browser-session`; it is read through the credential
  * service, never parsed out of `.credentials.yaml`.
  *

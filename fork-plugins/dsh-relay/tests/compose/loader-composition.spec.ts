@@ -1,7 +1,8 @@
 /**
  * Real-composition proof: the vendored Loader mounts the plugin beside the
- * shipped credential, web-server, and connection plugins, and the settings RPC
- * answers a real authenticated HTTP request.
+ * shipped credential, web-server, connection, and token plugins, and the
+ * settings RPC answers a real authenticated HTTP request. The token plugin owns
+ * browser-cookie verification, so the request only passes once it is mounted.
  */
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -12,6 +13,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { ModuleLoaderV2 } from '@deepseek-ai/cordis-plugin-loader'
 import { afterEach, describe, expect, it } from 'vitest'
 import * as connectionPlugin from '../../../../packages/client/connection/src/index.ts'
+import * as tokenPlugin from '../../../../packages/host/authentication-token/src/index.ts'
 import WebServer from '../../../../packages/host/webserver/src/index.ts'
 import { BROWSER_SESSION_KEY, browserSessionSecret, mintBrowserCookie } from '../../src/cookie.ts'
 import * as relayPlugin from '../../src/index.ts'
@@ -89,7 +91,8 @@ describe('dsh-relay through the shipped Loader', () => {
     }))
 
     await context.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-    await context.plugin(connectionPlugin, { cookieMaxAgeDays: 30 })
+    await context.plugin(connectionPlugin)
+    await context.plugin(tokenPlugin, { cookieMaxAgeDays: 30 })
     const port = await waitForPort(context)
 
     await context.loader.create({ name: 'dsh-relay' })

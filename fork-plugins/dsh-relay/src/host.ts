@@ -1,6 +1,6 @@
 /**
  * Host facts the relay tunnel needs: the DSH Web listener's loopback
- * authority and the connection plugin's configured cookie lifetime.
+ * authority and the configured browser-cookie lifetime.
  *
  * @module dsh-relay/host
  */
@@ -19,11 +19,15 @@ export interface HostWebServer {
   readonly protocol?: 'http:' | 'https:'
 }
 
-/** Default browser-cookie lifetime of the connection plugin, used when nothing overrides it. */
+/** Default browser-cookie lifetime of the token plugin, used when nothing overrides it. */
 export const DEFAULT_COOKIE_MAX_AGE_DAYS = 30
 
-/** Loader entry name of the plugin whose config carries `cookieMaxAgeDays`. */
-const CONNECTION_ENTRY_NAME = '@deepseek-ai/dsh-client-connection'
+/**
+ * Loader entry name of the plugin whose config carries `cookieMaxAgeDays`.
+ * Since 0.2.3-alpha.2 the token plugin owns browser authentication and its
+ * cookie lifetime; the connection plugin carries neither.
+ */
+const TOKEN_ENTRY_NAME = '@deepseek-ai/dsh-host-authentication-token'
 
 /** Structural face of one Loader entry this plugin reads. */
 interface LoaderEntryLike {
@@ -56,11 +60,11 @@ export function relayAuthority(port: number | undefined): string {
 }
 
 /**
- * Read the connection plugin's configured browser-cookie lifetime.
+ * Read the token plugin's configured browser-cookie lifetime.
  *
- * The connection plugin does not expose it as a service, so the value is read
- * from the Loader entry that mounted it. A deployment without the entry (or
- * without an override) falls back to the plugin's own default.
+ * The token plugin does not expose it as a service, so the value is read from
+ * the Loader entry that mounted it. A deployment without the entry (or without
+ * an override) falls back to the plugin's own default.
  * @param ctx - plugin context.
  * @returns a positive whole number of days.
  */
@@ -68,7 +72,7 @@ export function hostCookieMaxAgeDays(ctx: RelayHostContext): number {
   const loader = ctx.get('loader') as LoaderLike | undefined
   if (loader === undefined) return DEFAULT_COOKIE_MAX_AGE_DAYS
   for (const entry of loader.entries()) {
-    if (entry.options?.name !== CONNECTION_ENTRY_NAME) continue
+    if (entry.options?.name !== TOKEN_ENTRY_NAME) continue
     const config = entry.options.config
     if (typeof config !== 'object' || config === null) continue
     const value = (config as Record<string, unknown>).cookieMaxAgeDays

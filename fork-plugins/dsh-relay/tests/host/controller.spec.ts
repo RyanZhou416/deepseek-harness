@@ -52,7 +52,7 @@ interface Harness {
 interface HarnessOptions {
   /** `null` mounts no web server; omission mounts 3080. */
   port?: number | null
-  /** `null` mounts no Loader; omission mounts a connection entry at 30 days. */
+  /** `null` mounts no Loader; omission mounts the token entry at 30 days. */
   loaderDays?: number | null
   frpcPath?: string
   config?: RelayConfig
@@ -87,7 +87,10 @@ function hostContext(options: HarnessOptions): RelayHostContext {
         if (days === null) return undefined
         return {
           * entries() {
-            yield { options: { name: '@deepseek-ai/dsh-client-connection', config: { cookieMaxAgeDays: days } } }
+            // The connection plugin still mounts beside the token plugin but no
+            // longer owns the browser-cookie lifetime.
+            yield { options: { name: '@deepseek-ai/dsh-client-connection', config: { cookieMaxAgeDays: 90 } } }
+            yield { options: { name: '@deepseek-ai/dsh-host-authentication-token', config: { cookieMaxAgeDays: days } } }
           },
         }
       }
@@ -241,7 +244,15 @@ describe('relay controller', () => {
     expect(status.errorCode).toBe('web-server-unavailable')
   })
 
-  it('uses the connection default when no Loader entry overrides the cookie lifetime', async () => {
+  it('reads the cookie lifetime from the token entry and ignores the connection entry', async () => {
+    const { controller, requests } = await createHarness({ loaderDays: 10, frpcPath: await writeFakeFrpc() })
+    await controller.start()
+    const dsh = requests[0]?.body?.dsh as { cookie: string }
+    const decoded = decodeCookieBody(dsh.cookie)
+    expect(decoded.expiresAt - decoded.issuedAt).toBe(9 * DAY_MS)
+  })
+
+  it('uses the token default when no Loader entry overrides the cookie lifetime', async () => {
     const { controller, requests } = await createHarness({ loaderDays: null, frpcPath: await writeFakeFrpc() })
     await controller.start()
     const dsh = requests[0]?.body?.dsh as { cookie: string }

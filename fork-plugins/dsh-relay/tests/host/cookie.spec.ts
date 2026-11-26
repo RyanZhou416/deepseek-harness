@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
-import { BrowserAuth } from '../../../../packages/client/connection/src/browser-auth.ts'
+import { BrowserAuth } from '../../../../packages/host/authentication-token/src/browser-auth.ts'
 import {
   BROWSER_SESSION_KEY,
   DAY_MS,
@@ -39,7 +39,7 @@ async function seededCredentials(): Promise<{ credentials: MemoryCredentials; se
 describe('DSH browser-session cookie minting', () => {
   it('produces a cookie the real BrowserAuth accepts for the same authority', async () => {
     const { credentials, secret } = await seededCredentials()
-    const auth = await BrowserAuth.create(new Context().root, credentials, 30)
+    const auth = await BrowserAuth.create(new Context()[Context.root], credentials, 30)
     const authority = '127.0.0.1:3080'
     const cookie = mintBrowserCookie(secret, authority, resolveCookieMaxAgeDays(30), Date.now())
     expect(cookie.header).toBe(`${cookie.name}=${cookie.value}`)
@@ -49,7 +49,7 @@ describe('DSH browser-session cookie minting', () => {
 
   it('binds the cookie to the reported authority', async () => {
     const { credentials, secret } = await seededCredentials()
-    const auth = await BrowserAuth.create(new Context().root, credentials, 30)
+    const auth = await BrowserAuth.create(new Context()[Context.root], credentials, 30)
     const cookie = mintBrowserCookie(secret, '127.0.0.1:3080', 29)
     expect(auth.isAuthenticated({ headers: { host: '127.0.0.1:3081', cookie: cookie.header } }, false)).toBe(false)
     expect(browserCookieName('127.0.0.1:3080')).not.toBe(browserCookieName('127.0.0.1:3081'))
@@ -74,7 +74,7 @@ describe('DSH browser-session cookie minting', () => {
 
   it('is rejected when the lifetime exceeds the Host maximum', async () => {
     const { credentials, secret } = await seededCredentials()
-    const auth = await BrowserAuth.create(new Context().root, credentials, 30)
+    const auth = await BrowserAuth.create(new Context()[Context.root], credentials, 30)
     const tooLong = mintBrowserCookie(secret, '127.0.0.1:3080', 31)
     expect(auth.isAuthenticated({ headers: { host: '127.0.0.1:3080', cookie: tooLong.header } }, false)).toBe(false)
   })
