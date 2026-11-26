@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 选择后端
 
-seam 随产品交付 [JSONL](../session-persistence-jsonl/README.zh.md) 后端。它为每个会话存储一份仅追加的 `.jsonl.zstd` 日志。第三方后端可以直接实现该服务；必须遵守的[后端约定](#understand-the-implementation)见下文。
+内置 profile 使用 [JSONL](../session-persistence-jsonl/README.zh.md) 后端，为每个会话存储一份仅追加的 `.jsonl.zstd` 日志。独立的 [SQLite 提供者](../session-persistence-sqlite/README.zh.md) 在数据库中保存逻辑事件，并在首次打开时导入现有 JSONL 历史。两个提供者暴露相同的服务和句柄方法。第三方后端可以直接实现该服务；必须遵守的[后端约定](#understand-the-implementation)见下文。
 
 ### 服务提供什么
 
@@ -48,6 +48,8 @@ await ctx.sessionPersistence.flush()                           // backend-wide d
 `listHeaders` 选出的集合与 `list` 完全相同——同样的排除项、同样包含已创建但未实体化的会话、同样不承诺顺序——但只返回每个会话的头部与 `formatStatus`。它存在的原因是修订号可能需要与存储语料规模成正比的代价：随产品交付的 JSONL 后端会把相关产物的身份折进历史会话的修订号。只建立头部索引的调用方不比较任何修订号，因此不该承担那次扫描；需要比较修订号的调用方继续使用 `list` 或 `stat`。
 
 服务级 `flush()` 排空每个活跃写句柄已路由的事件并把其会话实体化，效果与各句柄自己的 `flush` 完全相同；失败按会话聚合为一个 `AggregateError` 而不中途放弃清扫，清扫途中被关闭的句柄视同已 flush，因为 close 本身会持久排空。
+
+`create(header, { parentSource, inheritedEventCount })` 持久保存完整的 fork 历史后才返回写句柄。`parentSource.events` 从 seq 0 起：截至不包含末端位置的 `parentSource.endSeq` 的父会话已存储前缀，其后是子会话事件；`header.isSeeded` 为 true 时，这些事件在 `inheritedEventCount` 处包含继承标记。共享前缀的后端要求父会话存在且至少持久化了 `endSeq` 个事件，并只写入其余部分；复制的后端写入全部事件。父会话后续追加不会改变子会话。来源字段和创建失败见 [`SessionPersistenceCreateOptions`](src/index.ts)。
 
 后端还可以提供可选的 `readWindow(id, { beforeSeq?, maxEvents?, signal? })` 能力。它返回一个 `SessionWindow`——存储的 header、其精确继承数量、一段连续的持久事件、最后一个被表示的 `cursor`，以及是否仍有更早事件——而无需实体化完整 Session。`beforeSeq` 让窗口在该 seq 之前结束（省略则读取最新窗口），`maxEvents` 在后端默认值与上限内约束结果。窗口是用于打开历史与向后分页的只读优化：后端校验所选记录及其连续 `seq`，而非完整日志的跨事件关系，因此恢复、写入与导出仍使用 `open` 加完整读取。后端如何服务窗口由其自身存储设计决定：随产品交付的 JSONL 后端在每个当前 generation 旁持久化可重建的解码索引，并只读取所选段来应答 `beforeSeq`；没有此类索引的后端则对该请求返回 `undefined`。没有该能力的后端省略它，无法建立已校验窗口的后端返回 `undefined`；两种情况下消费方都必须回退到完整读取路径，而不是把缺失的窗口当作空历史。
 

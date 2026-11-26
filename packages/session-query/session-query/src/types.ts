@@ -14,13 +14,28 @@ import type {
   SessionSeq,
   OptionalSessionSeq,
   SurfaceEvent,
-} from '@deepseek-ai/dsh-session'
-import type { SessionWindow } from '@deepseek-ai/dsh-session-persistence'
+} from '@deepseek-ai/dsh-session/types'
 import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
-import type { SessionTitleSnapshot } from '@deepseek-ai/dsh-session-title'
+import type { SessionWindow } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionTitleSnapshot } from '@deepseek-ai/dsh-session-title/types'
 import type { SessionSearchCursor } from './cursor.ts'
 
 export type { SessionSearchCursor } from './cursor.ts'
+
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionMap {
+    /** Persisted facts used to summarize a Session without activating it. */
+    sessionListMetadata: SessionListMetadata
+  }
+}
+
+/** Persisted hints used to summarize a cold Session. */
+export interface SessionListMetadata {
+  /** Whether the folded prefix contains no turn. */
+  readonly blank: boolean
+  /** Latest human-authored prompt time in the folded prefix. */
+  readonly lastPromptAt: number | null
+}
 
 /** Whether an event is current model context, replaced context, or raw-log-only. */
 export type SessionEventSurface = 'current' | 'shadowed' | 'log-only'

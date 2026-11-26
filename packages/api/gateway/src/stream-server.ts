@@ -88,6 +88,8 @@ export interface RemoteStreamMuxServerOptions {
   readonly heartbeatIntervalMs: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails. */
   readonly streamInboxBytes: number
+  /** Queued, unwritten downlink bytes one connection may hold before its streams pause reading their sources. */
+  readonly streamOutboxBytes: number
   /** Whether accepted connections negotiate the `permessage-deflate` extension. */
   readonly compression: boolean
   /** Shortest outbound frame, in JSON text characters, compressed on a connection that negotiated the extension. */
@@ -99,6 +101,7 @@ export class RemoteStreamMuxServer {
   private readonly server: WebSocketServer
   private readonly heartbeatIntervalMs: number
   private readonly streamInboxBytes: number
+  private readonly streamOutboxBytes: number
   private readonly compression: boolean
   private readonly compressionThreshold: number
   private readonly connections = new Set<Promise<void>>()
@@ -108,7 +111,7 @@ export class RemoteStreamMuxServer {
   /**
    * @param open - Gateway stream dispatcher.
    * @param failure - Gateway error-to-wire mapper.
-   * @param options - heartbeat interval, uplink inbox bound, and compression setting for accepted connections.
+   * @param options - heartbeat interval, uplink inbox bound, downlink backlog bound, and compression setting for accepted connections.
    */
   constructor(
     private readonly open: RemoteStreamOpener,
@@ -117,6 +120,7 @@ export class RemoteStreamMuxServer {
   ) {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs
     this.streamInboxBytes = options.streamInboxBytes
+    this.streamOutboxBytes = options.streamOutboxBytes
     this.compression = options.compression
     this.compressionThreshold = options.compressionThreshold
     this.server = new WebSocketServer({
@@ -149,7 +153,8 @@ export class RemoteStreamMuxServer {
       const bound: BoundStreamOpener = (endpoint, payload, uplink, control, window) =>
         this.open(endpoint, payload, uplink, peer, control, window)
       const connection = new RemoteStreamMuxConnection(
-        websocket, bound, this.failure, this.streamInboxBytes, this.compression ? this.compressionThreshold : undefined, alive,
+        websocket, bound, this.failure, this.streamInboxBytes, this.streamOutboxBytes,
+        this.compression ? this.compressionThreshold : undefined, alive,
       )
       const done = connection.run().catch((error: unknown) => {
         console.error('[api-gateway] Remote stream connection failed:', error)
@@ -223,15 +228,24 @@ interface ActiveStream {
   done: Promise<void>
 }
 
+/**
+ * One WebSocket's logical streams. Every downlink frame enters one connection-wide write queue at the moment its
+ * stream's source produces it, so frames leave in production order across streams; a stream does not wait for its
+ * own previous frame to be written. Only the connection backlog pauses sources.
+ */
 class RemoteStreamMuxConnection {
   private readonly streams = new Map<string, ActiveStream>()
   private writes = Promise.resolve()
+  /** Encoded bytes queued and not yet written. */
+  private queuedBytes = 0
+  private drained: PromiseWithResolvers<void> | undefined
 
   constructor(
     private readonly socket: WebSocket,
     private readonly open: BoundStreamOpener,
     private readonly failure: RemoteStreamFailureMapper,
     private readonly streamInboxBytes: number,
+    private readonly streamOutboxBytes: number,
     /** Shortest frame compressed, or undefined when the server does not compress. */
     private readonly compressionThreshold: number | undefined,
     private readonly alive: () => void,
@@ -266,6 +280,9 @@ class RemoteStreamMuxConnection {
       })
     })
     await closed
+    // Sources paused on the backlog resume and observe their stop.
+    this.drained?.resolve()
+    this.drained = undefined
     const active = [...this.streams.values()]
     for (const stream of active) stream.stop(new Error('Remote stream socket closed'))
     await Promise.all(active.map(stream => stream.done))
@@ -340,9 +357,17 @@ class RemoteStreamMuxConnection {
         maxBytes: this.streamInboxBytes,
         frameOverheadBytes: Buffer.byteLength(JSON.stringify({ type: 'item', streamId, value: null }), 'utf8') - 'null'.length,
       })
+      let written: Promise<void> = Promise.resolve()
+      let writeFailure: { readonly error: unknown } | undefined
       for await (const value of source) {
-        await this.send({ type: 'item', streamId, value })
+        if (writeFailure !== undefined) throw writeFailure.error
+        written = this.send({ type: 'item', streamId, value })
+        written.catch((error: unknown) => { writeFailure ??= { error } })
+        await this.backlogDrained(active.abort.signal)
+        // A cancelled stream stops at once; it does not wait for other streams to drain the connection backlog.
+        if (active.abort.signal.aborted) break
       }
+      if (!active.abort.signal.aborted) await written
       outcome = { failed: false }
     } catch (error) {
       outcome = { failed: true, error }
@@ -380,15 +405,43 @@ class RemoteStreamMuxConnection {
     }
   }
 
+  /**
+   * Resolve once the connection backlog is within its bound, the socket has closed, or the stream is cancelled.
+   * @param signal - the waiting stream's cancellation.
+   */
+  private async backlogDrained(signal: AbortSignal): Promise<void> {
+    while (this.queuedBytes > this.streamOutboxBytes && this.socket.readyState === WebSocket.OPEN && !signal.aborted) {
+      this.drained ??= Promise.withResolvers<void>()
+      const cancelled = Promise.withResolvers<void>()
+      const onAbort = (): void => { cancelled.resolve() }
+      signal.addEventListener('abort', onAbort, { once: true })
+      await Promise.race([this.drained.promise, cancelled.promise])
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  /**
+   * Queue one frame behind every frame queued before it on this connection.
+   * @throws Error synchronously when the frame is not JSON serializable; nothing is queued.
+   */
   private send(message: RemoteStreamServerMessage): Promise<void> {
     let text: string
     try {
       text = JSON.stringify(message)
     } catch (cause) {
-      return Promise.reject(new Error('api gateway: Remote stream item is not JSON serializable', { cause }))
+      throw new Error('api gateway: Remote stream item is not JSON serializable', { cause })
+    }
+    const bytes = Buffer.byteLength(text, 'utf8')
+    this.queuedBytes += bytes
+    const settled = (): void => {
+      this.queuedBytes -= bytes
+      if (this.queuedBytes > this.streamOutboxBytes) return
+      this.drained?.resolve()
+      this.drained = undefined
     }
     const delivery = this.writes.then(() => new Promise<void>((resolve, reject) => {
       if (this.socket.readyState !== WebSocket.OPEN) {
+        settled()
         reject(new Error('api gateway: Remote stream socket is closed'))
         return
       }
@@ -396,6 +449,7 @@ class RemoteStreamMuxConnection {
       this.socket.send(text, {
         compress: this.compressionThreshold !== undefined && text.length >= this.compressionThreshold,
       }, (error) => {
+        settled()
         if (error) {
           reject(error)
           return
@@ -577,22 +631,4 @@ function sampleCarrierWrite(websocket: WebSocket, carrier: CarrierSocket): Carri
 function downlinkWriteProgressed(previous: CarrierWriteSample, current: CarrierWriteSample): boolean {
   const pending = previous.writableLength > 0 || previous.bufferedAmount > 0
   return pending && current.bytesWritten - previous.bytesWritten > PING_CONTROL_FRAME_BYTES
-}
-
-/**
- * Reject an upgrade without transferring socket ownership to ws.
- * @param socket - carrier socket that receives the HTTP rejection.
- * @param status - authentication or browser-trust rejection status.
- */
-export function rejectRemoteStreamUpgrade(socket: Duplex, status: 401 | 403 | 409): void {
-  const reason = status === 401 ? 'Unauthorized' : status === 403 ? 'Forbidden' : 'Conflict'
-  const body = reason.toLowerCase()
-  socket.end([
-    `HTTP/1.1 ${String(status)} ${reason}`,
-    'Connection: close',
-    'Content-Type: text/plain; charset=utf-8',
-    `Content-Length: ${String(Buffer.byteLength(body))}`,
-    '',
-    body,
-  ].join('\r\n'))
 }

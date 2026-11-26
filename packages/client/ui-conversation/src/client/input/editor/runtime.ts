@@ -1,6 +1,7 @@
 /** The Composer model's private Lexical editor, projections, and node operations. */
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { LexicalEditor, NodeKey } from 'lexical'
+import type { QuoteSummary } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   $addUpdateTag, $createParagraphNode, $createTextNode, $getAdjacentNode, $isTextNode,
   $getRoot, $getSelection, $getNodeByKey, $isRangeSelection,
@@ -10,6 +11,7 @@ import {
 } from 'lexical'
 import { registerPlainText } from '@lexical/plain-text'
 import { createEmptyHistoryState, registerHistory } from '@lexical/history'
+import type { HistoryState } from '@lexical/history'
 import { mergeRegister } from '@lexical/utils'
 import type { DraftQuote, DraftReference, ReferenceInsert } from '../../contract/draft-editor.ts'
 import type { CommandClaim } from '../../contract/input.ts'
@@ -70,8 +72,6 @@ export const DRAFT_SUBMITTED_TAG = 'dsh-draft-submitted'
 export class DraftEditorRuntime {
   /** The editor bound by the Composer's contenteditable host. */
   readonly editor: LexicalEditor
-  /** Shared undo/redo stacks, segmented per merge window by installUndoBoundary. */
-  private readonly history = createEmptyHistoryState()
   private projected: EditorProjection = {
     detectText: '', clipboardText: '', occurrences: [], quotes: [], selection: null, caret: null, command: undefined,
   }
@@ -81,6 +81,8 @@ export class DraftEditorRuntime {
   /** Live lexicon subscription disposer; undefined until the controller resolves. */
   private lexiconOff: (() => void) | undefined
   private lexiconSource: ObservableSnapshot<Lexicon> | undefined
+  /** Shared undo and redo state: `registerHistory` owns it and `installUndoBoundary` segments it per merge window. */
+  private readonly history: HistoryState = createEmptyHistoryState()
 
   /** @param deps - model callbacks used by editor listeners and transforms. */
   constructor(private readonly deps: DraftEditorRuntimeDeps) {
@@ -163,6 +165,19 @@ export class DraftEditorRuntime {
   }
 
   /**
+   * Run a top-level edit now, or in a microtask when called from inside an
+   * update of this editor (a key command handler). Nested edits and update
+   * callbacks both run while the editor still counts as updating, so the
+   * edit's revision would not be observable when it returns.
+   * @param fn - the edit, run outside any update.
+   */
+  afterUpdate(fn: () => void): void {
+    // Not an update onUpdate callback: it runs while the editor still commits, where a new update is unsafe.
+    if (this.editor._updating) queueMicrotask(fn)
+    else fn()
+  }
+
+  /**
    * Reconnect decorations when the optional trigger provider changes.
    * The rescan reads the current editor and does not replace its content.
    */
@@ -197,16 +212,19 @@ export class DraftEditorRuntime {
   /**
    * Replace the whole draft (persisted-draft seed and programmatic writes).
    * Placeholder-sanitized; newlines split paragraphs; the caret lands at the
-   * end. Merged into history so a seed is not an undoable step of its own.
+   * end. Merged into history so a seed is not an undoable step of its own,
+   * unless `undoable` makes the replacement its own undo step.
    * @param text - the full next draft.
+   * @param undoable - record the replacement as a separate undo step.
    */
-  setDraft(text: string): void {
+  setDraft(text: string, undoable = false): void {
     const clean = text.replace(REFERENCE_PLACEHOLDER_RE, '')
     if (clean === this.projection.clipboardText && this.projection.occurrences.length === 0 && this.projection.quotes.length === 0) return
+    if (undoable) this.keepUndoBaseline()
     this.editor.update(() => {
       $getRoot().clear()
       $appendParagraphs(clean)
-    }, { discrete: true, tag: HISTORY_MERGE_TAG })
+    }, { discrete: true, tag: undoable ? HISTORY_PUSH_TAG : HISTORY_MERGE_TAG })
   }
 
   /**
@@ -352,14 +370,15 @@ export class DraftEditorRuntime {
    * Insert one quote after the retained draft selection as an independent undo edit.
    * @param text - nonblank selected transcript text.
    * @param labels - current localized editor controls.
+   * @param summary - readable display shown instead of the text.
    * @returns whether the insertion position accepted the node.
    */
-  insertQuote(text: string, labels: QuoteNodeLabels): boolean {
+  insertQuote(text: string, labels: QuoteNodeLabels, summary?: QuoteSummary): boolean {
     let applied = false
     this.applyEdit(() => {
       const projection = $projectComposer(key => this.occurrenceIdOf(key))
       const at = projection.selection?.end ?? projection.detectText.length
-      applied = $replaceDetectSpanWithNodes({ start: at, end: at }, [$createQuoteNode(text, labels), $createTextNode(' ')])
+      applied = $replaceDetectSpanWithNodes({ start: at, end: at }, [$createQuoteNode(text, labels, summary), $createTextNode(' ')])
     }, PASTE_TAG)
     return applied
   }
@@ -455,7 +474,7 @@ export class DraftEditorRuntime {
         const occurrence = span.value
         appendText(draft.slice(cursor, occurrence.offset))
         if (span.kind === 'quote') {
-          paragraph.append($createQuoteNode(span.value.text, labels))
+          paragraph.append($createQuoteNode(span.value.text, labels, span.value.summary))
           cursor = occurrence.offset + occurrence.length
           continue
         }
@@ -472,6 +491,19 @@ export class DraftEditorRuntime {
       appendText(draft.slice(cursor))
       root.selectEnd()
     }, { discrete: true, tag: HISTORY_MERGE_TAG })
+  }
+
+  /**
+   * Make the current document the undo target of the next pushed step. A cut
+   * history (after a submission) has no current entry to undo to, and Lexical
+   * refuses to restore a root without a paragraph, so an empty root gains one first.
+   */
+  private keepUndoBaseline(): void {
+    if (this.history.current !== null) return
+    if (this.editor.getEditorState().read(() => $getRoot().isEmpty())) {
+      this.editor.update(() => { $getRoot().append($createParagraphNode()) }, { discrete: true, tag: HISTORY_MERGE_TAG })
+    }
+    this.history.current = { editor: this.editor, editorState: this.editor.getEditorState() }
   }
 
   /** Cut the editor's undo history after a committed clear or restoration. */

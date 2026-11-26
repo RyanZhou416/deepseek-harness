@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { SESSION_FORMAT_VERSION, SessionLogOffset as makeSessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { DatabaseSync } from 'node:sqlite'
 import { Context, Service, type Fiber } from '@deepseek-ai/cordis'
+import { brandString } from '@deepseek-ai/dsh-brand'
 import z from '@deepseek-ai/schemastery'
 import type { Session, SessionEvent, SessionHeader, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type SessionPersistence from '@deepseek-ai/dsh-session-persistence'
@@ -21,7 +22,6 @@ import SessionQueryEngine, {
   SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_MAX_ARTIFACT_BYTES,
   SESSION_QUERY_READ_WINDOW_MAX,
   SessionQueryError,
-  SessionSearchCursor,
   assertSessionHeadersCompatible,
   buildAppendedSessionEventSearchDocuments,
   buildSessionEventSearchDocuments,
@@ -258,7 +258,7 @@ interface CursorPayload {
 
 /** Concrete SQLite owner of the combined `ctx.sessionQuery` service. */
 export class SqliteSessionQueryEngine extends SessionQueryEngine {
-  static override inject = ['sessions']
+  static override inject = ['sessions', 'sessionProjections']
 
   static Config: z<Config> = z.object({
     path: z.string().required(),
@@ -328,7 +328,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   }
 
   /** Open eagerly only when activation owns the configured readiness boundary. */
-  protected async [Service.init](): Promise<void> {
+  protected override async [Service.init](): Promise<void> {
+    await super[Service.init]()
     if (this.config.openAt === 'startup') await this._ensureReady(undefined)
   }
 
@@ -426,7 +427,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     if (this._ready !== undefined) {
       try {
         await this._ready
-      } catch {
+      } catch (_openFailed) {
         // Opening already closed a partially-created handle; disposal only waits.
       }
     }
@@ -561,7 +562,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           /* v8 ignore next 5 -- ROLLBACK failure requires a SQLite double fault; the original failure remains actionable. */
           try {
             db.exec('ROLLBACK')
-          } catch {
+          } catch (_rollbackFailed) {
             // The original SQLite failure remains the actionable cause.
           }
         }
@@ -1181,7 +1182,7 @@ function cloneEventSearchPage(source: SessionEventSearchPage): SessionEventSearc
 }
 
 function encodeCursor(payload: CursorPayload): SessionSearchCursorValue {
-  return SessionSearchCursor(Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url'))
+  return brandString<SessionSearchCursorValue>(Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url'))
 }
 
 function decodeCursor(

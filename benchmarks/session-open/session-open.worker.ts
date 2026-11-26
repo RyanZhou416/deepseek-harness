@@ -1,5 +1,6 @@
 /** Isolated worker for cold Session phase, first-history, follow-level opening, Agent-resume, and history-window benchmarks. */
 
+import { brandString } from '@deepseek-ai/dsh-brand'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -10,7 +11,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import SessionStore, {
   interruptedTurnClosers,
-  SessionId,
+  type SessionId,
   SessionLogOffset,
   SessionPreparation,
 } from '@deepseek-ai/dsh-session'
@@ -371,7 +372,7 @@ function requireExpectedWindow(
   label: string,
 ): SessionWindow {
   if (window === undefined) throw new Error(`${label} returned no window; the fixture did not satisfy window validation`)
-  if (window.header.id !== SessionId(SYNTHETIC_SESSION_ID)) throw new Error(`${label} returned header ${window.header.id}`)
+  if (window.header.id !== brandString<SessionId>(SYNTHETIC_SESSION_ID)) throw new Error(`${label} returned header ${window.header.id}`)
   if (window.inheritedEventCount !== 0) throw new Error(`${label} reported inheritedEventCount ${String(window.inheritedEventCount)}`)
   if (window.hasMore !== (firstSeq > 0)) throw new Error(`${label} reported hasMore=${String(window.hasMore)} for first seq ${String(firstSeq)}`)
   if (window.events.length !== count) throw new Error(`${label} returned ${String(window.events.length)} events, expected ${String(count)}`)
@@ -469,7 +470,7 @@ class SessionBenchmarkHost {
    * an exact block without a deferred read. Runs before opening counters exist.
    */
   private async prepareCachedOpening(): Promise<void> {
-    const handle = await this.ctx.sessionPersistence.open(SessionId(SYNTHETIC_SESSION_ID), 'read')
+    const handle = await this.ctx.sessionPersistence.open(brandString<SessionId>(SYNTHETIC_SESSION_ID), 'read')
     let header: SessionHeader
     try {
       header = handle.header
@@ -561,7 +562,7 @@ class SessionBenchmarkHost {
     const persistence = this.ctx.sessionPersistence
     const readWindow = persistence.readWindow
     if (readWindow === undefined) throw new Error('Session persistence does not implement window reads')
-    return readWindow.call(persistence, SessionId(SYNTHETIC_SESSION_ID), {
+    return readWindow.call(persistence, brandString<SessionId>(SYNTHETIC_SESSION_ID), {
       ...request,
       maxEvents: WINDOW_BENCHMARK_MAX_EVENTS,
     })
@@ -639,7 +640,7 @@ class SessionBenchmarkHost {
     readonly phases: NonNullable<SessionOpenWorkerReport['phases']>
   }> {
     let phaseStarted = performance.now()
-    const handle = await this.ctx.sessionPersistence.open(SessionId(SYNTHETIC_SESSION_ID), 'read')
+    const handle = await this.ctx.sessionPersistence.open(brandString<SessionId>(SYNTHETIC_SESSION_ID), 'read')
     const openMs = performance.now() - phaseStarted
     phaseStarted = performance.now()
     const read = await handle.read()
@@ -648,7 +649,7 @@ class SessionBenchmarkHost {
     phaseStarted = performance.now()
     const repaired = [...read.events, ...interruptedTurnClosers(read.events)]
     const seed = repaired
-    const preparation = SessionPreparation.create(this.ctx.sessions.prepare(SessionId(SYNTHETIC_SESSION_ID), {
+    const preparation = SessionPreparation.create(this.ctx.sessions.prepare(brandString<SessionId>(SYNTHETIC_SESSION_ID), {
       seed,
       meta: structuredClone(handle.header),
       inheritedEventCount: handle.inheritedEventCount,
@@ -677,7 +678,7 @@ class SessionBenchmarkHost {
     const history = this.history
     if (history === undefined) throw new Error('first-history benchmark did not initialize its controller')
     const iterator = history.follow({
-      address: { kind: 'session', sessionId: SessionId(SYNTHETIC_SESSION_ID) },
+      address: { kind: 'session', sessionId: brandString<SessionId>(SYNTHETIC_SESSION_ID) },
     }, abort.signal)[Symbol.asyncIterator]()
     this.historyIterator = iterator as AsyncIterator<unknown>
     const first = await iterator.next()
@@ -701,7 +702,7 @@ class SessionBenchmarkHost {
     const abort = new AbortController()
     this.historyAbort = abort
     const iterator = history.follow({
-      address: { kind: 'session', sessionId: SessionId(SYNTHETIC_SESSION_ID) },
+      address: { kind: 'session', sessionId: brandString<SessionId>(SYNTHETIC_SESSION_ID) },
     }, abort.signal)[Symbol.asyncIterator]()
     this.historyIterator = iterator as AsyncIterator<unknown>
 
@@ -752,7 +753,7 @@ class SessionBenchmarkHost {
     const exactStarted = performance.now()
     const exactCpu = process.cpuUsage()
     const observation = await this.ctx.sessionQuery.observeSession(
-      SessionId(SYNTHETIC_SESSION_ID),
+      brandString<SessionId>(SYNTHETIC_SESSION_ID),
       { projectionMode: 'all' },
     )
     const exactProjectionsMs = performance.now() - exactStarted
@@ -788,7 +789,7 @@ class SessionBenchmarkHost {
 
   private async measureAgentResume(): Promise<{ readonly events: number }> {
     const handle = await this.ctx.agents.resume({
-      resumeSessionId: SessionId(SYNTHETIC_SESSION_ID),
+      resumeSessionId: brandString<SessionId>(SYNTHETIC_SESSION_ID),
       agentOptions: { provider: 'bench', model: 'bench' },
     })
     this.agentHandle = handle

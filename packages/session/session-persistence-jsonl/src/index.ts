@@ -21,7 +21,7 @@ import { scheduler } from 'node:timers/promises'
 import { createHash, randomBytes } from 'node:crypto'
 import pLimit, { type LimitFunction } from 'p-limit'
 import {
-  SessionPersistence, SessionPersistenceRevision, SessionFormatUnsupportedError,
+  SessionPersistence, SessionFormatUnsupportedError,
   SessionPersistenceCorruptionError,
   SessionAlreadyExistsError, SessionPersistenceNotFoundError,
   assertStoredId, materializeCreateHeader, sessionFormatVersionRefusal, adoptStoredEvent, assertStoredEventTypes,
@@ -36,7 +36,8 @@ import {
 import { JsonlBackendTracker, JsonlSessionHandle, type PendingSession, type StorageHandleState } from './storage.ts'
 import { SessionCatalog, type SessionCatalogEntry } from './catalog.ts'
 import { SessionWriteLease } from './lease.ts'
-import { SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import { SESSION_FORMAT_VERSION, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionHeader, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
 import {
   assertNoRetiredHeaderFields, encodeSegment, eventLines, generationLogFilename, generationLogPath, logPath, logSuffix,
@@ -60,6 +61,18 @@ import {
   type JsonlPhysicalIdentity,
   type PreparedJsonlMigration,
 } from './generation.ts'
+
+/** Logical JSONL history retained until its destination commits under write ownership. */
+interface LegacySessionSnapshot {
+  readonly header: SessionHeader
+  readonly inheritedEventCount: SessionLogOffsetType
+  readonly events: readonly SessionEvent[]
+}
+
+/** Prepared legacy history whose related sources are checked before destination publication. */
+interface PreparedLegacySession {
+  commit(publish: (snapshot: LegacySessionSnapshot) => Promise<void>): Promise<void>
+}
 
 export type { JsonlCompression } from './format.ts'
 
@@ -98,22 +111,6 @@ const DEFAULT_LIST_CONCURRENCY = 3
 /** The most one listing's directory discovery may reuse without a fresh readdir. */
 const PROJECT_LISTING_CACHE_LIMIT = 64
 
-/** Logical header paired with the catalog's selected physical-generation classification. */
-interface GenerationHeader {
-  readonly header: SessionHeader
-  readonly formatStatus: NonNullable<SessionPersistenceSnapshot['formatStatus']>
-}
-
-/** One selected stored artifact with the identity the scan already observed for it. */
-interface ScannedArtifact extends GenerationHeader {
-  readonly path: string
-  readonly sourceVersion: number
-  /** Log identity token observed while selecting this artifact. */
-  readonly revision: PersistenceRevision
-  /** Physical artifact size observed while selecting this artifact. */
-  readonly sizeBytes: number
-}
-
 /** Plugin config for the JSONL backend's root, physical encoding, and listing concurrency. */
 export interface Config {
   /**
@@ -140,6 +137,16 @@ export interface Config {
 interface GenerationHeader {
   readonly header: SessionHeader
   readonly formatStatus: NonNullable<SessionPersistenceSnapshot['formatStatus']>
+}
+
+/** One selected stored artifact with the identity the scan already observed for it. */
+interface ScannedArtifact extends GenerationHeader {
+  readonly path: string
+  readonly sourceVersion: number
+  /** Log identity token observed while selecting this artifact. */
+  readonly revision: PersistenceRevision
+  /** Physical artifact size observed while selecting this artifact. */
+  readonly sizeBytes: number
 }
 
 /** One stored event graph whose producer has established immutable sharing. */
@@ -250,6 +257,13 @@ interface CurrentRead extends SharedRead<CurrentStoredLog> {
   readonly sourceRevision: PersistenceRevision
 }
 
+/** One listed generation header and the file revision it was read from. */
+interface ListedHeader {
+  readonly revision: PersistenceRevision
+  /** `undefined` when the log is unreadable as a listed Session. */
+  readonly metadata: GenerationHeader | undefined
+}
+
 /** One backend-owned historical preparation shared by its current callers. */
 interface MigrationPreparation {
   readonly sourcePath: string
@@ -297,13 +311,27 @@ function highestGenerationIn(
 
 /** Build the stat-derived best-effort change token shared by full and lightweight reads. */
 function fileRevision(identity: JsonlPhysicalIdentity): PersistenceRevision {
-  return SessionPersistenceRevision([
+  return brandString<PersistenceRevision>([
     identity.dev,
     identity.ino,
     identity.size,
     identity.mtimeNs,
     identity.ctimeNs,
   ].join(':'))
+}
+
+/**
+ * Fingerprint a generation corpus independently of listing order.
+ * @param revisions - each generation path with its file revision or `missing`.
+ * @returns the hex digest.
+ */
+function corpusDigest(revisions: ReadonlyArray<readonly [string, string]>): string {
+  const hash = createHash('sha256')
+  const byPath = new Map(revisions)
+  for (const path of [...byPath.keys()].sort()) {
+    hash.update(JSON.stringify([path, byPath.get(path)]))
+  }
+  return hash.digest('hex')
 }
 
 /** Whether a filesystem error means absence; every non-ENOENT failure must surface. */
@@ -382,15 +410,12 @@ function waitWithAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<
 }
 
 /**
- * The JSONL backend registered as `ctx.sessionPersistence` by the plugin.
+ * JSONL Session persistence with historical-format migration.
  * Sessions materialize lazily: a created session is
  * visible to this process immediately, reaches disk on its first append or
  * flush, and never existed if the process crashes before that.
  */
-class JsonlSessionPersistence extends SessionPersistence {
-  /** Backend label for diagnostics and effects; shadows `Service.name` without changing the service key. */
-  override readonly name = 'session-persistence-jsonl'
-
+export class JsonlSessionPersistence extends SessionPersistence {
   private root: string
   private compression: JsonlCompression
   /**
@@ -412,12 +437,23 @@ class JsonlSessionPersistence extends SessionPersistence {
   private readonly coldLogMemoTimers = new Map<SessionId, NodeJS.Timeout>()
   /** Bounded parsed-index memo shared by this backend's warm backwards window pages. */
   private readonly windowIndexMemo = new WindowIndexMemo()
+  /**
+   * Generation headers observed by the latest complete listing, keyed by
+   * source path and guarded by the stat-derived revision, so a listing reads
+   * only the first frame of logs whose file changed. Each complete listing
+   * replaces the map, which drops deleted paths.
+   *
+   * Reuse relies on this backend never rewriting a generation's header line
+   * in place: publication creates a new file, append grows it, and repair
+   * truncates its tail, so every content change moves the revision. The
+   * revision is file metadata, not a byte checksum. A reused entry also
+   * reuses the path-identity check its first read passed.
+   */
+  private listedHeaders = new Map<string, ListedHeader>()
   /** One joinable decode/migration operation per selected historical Session file revision. */
   private readonly migrationPreparations = new Map<SessionId, MigrationPreparation>()
   /** One joinable decode per session while callers observe the same physical revision. */
   private readonly currentReads = new Map<SessionId, CurrentRead>()
-  /** One validated header per artifact path, guarded by its exact stat-derived revision. */
-  private readonly listedHeaders = new Map<string, { revision: PersistenceRevision; header: GenerationHeader }>()
   /**
    * One in-flight metadata scan per exclusion set, shared by every concurrent
    * caller that asked for the same one. Entries leave as their scan settles, so
@@ -433,7 +469,13 @@ class JsonlSessionPersistence extends SessionPersistence {
   /** Immutable-header cache reused across processes; rebuilt from log reads when absent or stale. */
   private readonly catalog: SessionCatalog
 
-  constructor(ctx: Context, public config: Config, private readonly tracker: JsonlBackendTracker) {
+  /**
+   * @param ctx - context used for scoped diagnostics and filesystem reads.
+   * @param config - JSONL root, physical encoding, and listing concurrency.
+   * @param tracker - handle bookkeeping; omitted creates bookkeeping for legacy reads.
+   */
+  constructor(ctx: Context, public config: Config,
+    private readonly tracker = new JsonlBackendTracker('session-persistence-jsonl')) {
     super(ctx)
     /* v8 ignore next 5 -- generated catalog and Session source share one build-time version owner. */
     if (sessionFormatCatalog.currentVersion !== SESSION_FORMAT_VERSION) {
@@ -476,20 +518,49 @@ class JsonlSessionPersistence extends SessionPersistence {
     return { kind: 'jsonl', path: logPath(this.root, meta.cwd, meta.id, this.compression) }
   }
 
+  /**
+   * Prepare logical history while the caller retains Session write ownership.
+   * @param id - stored Session identity.
+   * @param signal - optional cancellation for decoding and destination publication.
+   * @returns a commit operation that validates related sources before publishing the history.
+   */
+  async prepare(id: SessionId, signal?: AbortSignal): Promise<PreparedLegacySession> {
+    signal?.throwIfAborted()
+    const stored = await this.requireStoredLog(id, signal)
+    const snapshot = { header: stored.meta, inheritedEventCount: stored.inheritedEventCount, events: stored.events }
+    return { commit: async (publish) => {
+      signal?.throwIfAborted()
+      if (stored.status === 'prepared') await stored.validateRelatedSources()
+      signal?.throwIfAborted()
+      await publish(snapshot)
+    } }
+  }
+
+  /**
+   * Check whether a JSONL artifact occupies the Session identity.
+   * @param id - stored Session identity.
+   * @returns whether the artifact exists.
+   */
+  async hasStoredJsonl(id: SessionId): Promise<boolean> {
+    return await this.findLog(id) !== undefined
+  }
+
   // --- SessionPersistence service API ---
 
   /**
    * Create a new stored session and take its write ownership. The session is
    * visible to this process immediately; the physical artifact appears on the
-   * first append or flush.
+   * first append or flush. A fork source copies its complete history into
+   * the child artifact before creation resolves.
    * @param header - the immutable header to store; must be losslessly
    *   JSON-serializable with a non-negative safe-integer `createdAt`.
-   * @param options - optional cancellation.
+   * @param options - optional cancellation, inherited prefix length, and fork source.
    * @returns the owned write handle.
    */
   async create(header: SessionHeader, options?: SessionPersistenceCreateOptions): Promise<SessionHandle> {
     options?.signal?.throwIfAborted()
     const snapshot = materializeCreateHeader(header)
+    const seed = options?.parentSource?.events
     // Fail fast on a seeded/cut mismatch with the exact refusal the header
     // line encoder enforces at materialization.
     toHeaderLine(snapshot, options?.inheritedEventCount)
@@ -504,7 +575,17 @@ class JsonlSessionPersistence extends SessionPersistence {
     // before its first log bytes publish (ensureLease); an unmaterialized
     // session leaves no filesystem footprint at all.
     this.tracker.registerCreated(snapshot, inheritedEventCount)
-    return this.tracker.adopt(new JsonlSessionHandle(this, snapshot.id, snapshot, 'write', { cursor: 0, materialized: false, inheritedEventCount }))
+    const handle = this.tracker.adopt(new JsonlSessionHandle(this, snapshot.id, snapshot, 'write', { cursor: 0, materialized: false, inheritedEventCount }))
+    if (seed === undefined) return handle
+    try {
+      if (seed.length === 0) await handle.flush(options)
+      else await handle.append(seed, options)
+      return handle
+    } catch (error: unknown) {
+      try { await handle.close() }
+      catch (closeError: unknown) { throw new AggregateError([error, closeError], 'Fork creation and handle cleanup failed') }
+      throw error
+    }
   }
 
   /**
@@ -515,6 +596,8 @@ class JsonlSessionPersistence extends SessionPersistence {
    * @returns the open handle.
    */
   async open(id: SessionId, access: SessionAccess, options?: SessionPersistenceOpenOptions): Promise<SessionHandle> {
+    options?.signal?.throwIfAborted()
+    if (access === 'read') await this.tracker.closeCompletion(id)
     options?.signal?.throwIfAborted()
     const pending = this.tracker.pendingOf(id)
     if (access === 'read') {
@@ -626,7 +709,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       return {
         ...metadata,
         revision: selected.sourceVersion < SESSION_FORMAT_VERSION
-          ? SessionPersistenceRevision(`${fileRevision(identity)}:${await this.historicalCorpusRevision(options?.signal)}`)
+          ? brandString<PersistenceRevision>(`${fileRevision(identity)}:${await this.historicalCorpusRevision(options?.signal)}`)
           : fileRevision(identity),
         sizeBytes: Number(identity.size),
         location: { kind: 'jsonl', path: selected.sourcePath },
@@ -660,12 +743,13 @@ class JsonlSessionPersistence extends SessionPersistence {
       if (excludeSubagentSessions && artifact.header.origin === 'subagent') continue
       listed.add(artifact.header.id)
       snapshots.push({
-        header: artifact.header,
+        // Detached from the header the listing cache retains.
+        header: { ...artifact.header },
         formatStatus: artifact.formatStatus,
         // The scan already observed this artifact's identity, so a listing never
         // stats the same log twice.
         revision: artifact.sourceVersion < SESSION_FORMAT_VERSION
-          ? SessionPersistenceRevision(`${artifact.revision}:${corpusRevision}`)
+          ? brandString<PersistenceRevision>(`${artifact.revision}:${corpusRevision}`)
           : artifact.revision,
         sizeBytes: artifact.sizeBytes,
         location: { kind: 'jsonl', path: artifact.path },
@@ -700,7 +784,8 @@ class JsonlSessionPersistence extends SessionPersistence {
       options?.signal?.throwIfAborted()
       if (excludeSubagentSessions && artifact.header.origin === 'subagent') continue
       listed.add(artifact.header.id)
-      headers.push({ header: artifact.header, formatStatus: artifact.formatStatus })
+      // Detached from the header the listing cache retains.
+      headers.push({ header: { ...artifact.header }, formatStatus: artifact.formatStatus })
     }
     for (const [id, entry] of pending) {
       if (excluded?.has(id) === true) continue
@@ -838,6 +923,8 @@ class JsonlSessionPersistence extends SessionPersistence {
 
   /** Resolve and read one stored log, refusing loudly when the artifact is absent. */
   private async requireStoredLog(id: SessionId, signal?: AbortSignal): Promise<StoredLog> {
+    await this.tracker.closeCompletion(id)
+    signal?.throwIfAborted()
     const selected = await this.findLog(id, signal)
     if (selected === undefined) throw new SessionPersistenceNotFoundError(id)
     if (selected.sourceVersion < SESSION_FORMAT_VERSION) {
@@ -955,7 +1042,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       const sources = await children()
       const related = await prepareCatalogFacts(id, sources, this.compression, signal)
       for (const failure of related.failures) {
-        this.ctx.logger.warn(`${this.name}: session "${id}" catalog retained a child with unknown descriptor (raw log: ${failure.path}): ${String(failure.error)}`)
+        this.ctx.logger.warn(`${name}: session "${id}" catalog retained a child with unknown descriptor (raw log: ${failure.path}): ${String(failure.error)}`)
       }
       const membership = sources.map(source => source.path).sort()
       validateRelatedSources = async () => {
@@ -1120,6 +1207,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       if (this.currentReads.get(id) === selected) this.currentReads.delete(id)
     })
   }
+
   /** Decode and memoize one already-stable current physical snapshot. */
   private async decodeStoredLog(
     path: string,
@@ -1277,7 +1365,7 @@ class JsonlSessionPersistence extends SessionPersistence {
   async truncateTornTail(header: SessionHeader, truncateTo: number): Promise<void> {
     this.forgetStoredLog(header.id)
     await this.repair(header, truncateTo)
-    this.ctx.logger.warn(`${this.name}: session "${header.id}" recovered from a torn tail; incomplete tail bytes were discarded`)
+    this.ctx.logger.warn(`${name}: session "${header.id}" recovered from a torn tail; incomplete tail bytes were discarded`)
   }
 
   /**
@@ -1433,6 +1521,7 @@ class JsonlSessionPersistence extends SessionPersistence {
    * traversal after the directories of the projects before it.
    * @param task - per-directory operation; must not wait on the listing limiter.
    * @param signal - optional cancellation for directory listings.
+   * @param skipSegments - Session directories this listing need not read.
    * @returns per-directory results in traversal order.
    */
   private async mapSessionDirectories<R>(
@@ -1462,20 +1551,18 @@ class JsonlSessionPersistence extends SessionPersistence {
 
   /** Historical logical events depend on the corpus, including members with unreadable headers. */
   private async historicalCorpusRevision(signal?: AbortSignal): Promise<string> {
-    const paths = (await this.listGenerations(signal)).map(source => source.sourcePath).sort()
+    const paths = (await this.listGenerations(signal)).map(source => source.sourcePath)
     const entries = settledValues(await settleLimited(this.listLimit, paths, async (path) => {
       signal?.throwIfAborted()
       try {
-        return { path, revision: fileRevision(await stat(path, { bigint: true })) }
+        return [path, fileRevision(await stat(path, { bigint: true }))] as const
       } catch (error: unknown) {
         if (!isENOENT(error)) throw error
-        return { path, revision: 'missing' }
+        return [path, 'missing'] as const
       }
     }))
-    const hash = createHash('sha256')
-    for (const { path, revision } of entries) hash.update(JSON.stringify([path, revision]))
     signal?.throwIfAborted()
-    return hash.digest('hex')
+    return corpusDigest(entries)
   }
 
   /**
@@ -1551,21 +1638,11 @@ class JsonlSessionPersistence extends SessionPersistence {
           return { selected, metadata: cataloged, revision, sizeBytes }
         }
         const cached = this.listedHeaders.get(selected.sourcePath)
-        if (cached !== undefined && cached.revision === revision) {
-          this.recordCatalogEntry(segment, {
-            header: cached.header.header,
-            formatStatus: cached.header.formatStatus,
-            sizeBytes,
-            mtimeMs: Number(identity.mtimeMs),
-          })
-          return { selected, metadata: cached.header, revision, sizeBytes }
-        }
-        const metadata = await this.readGenerationHeader(selected, undefined, undefined)
-        if (metadata === undefined) {
-          this.listedHeaders.delete(selected.sourcePath)
-          return undefined
-        }
-        this.listedHeaders.set(selected.sourcePath, { revision, header: metadata })
+        const metadata = cached !== undefined && cached.revision === revision
+          ? cached.metadata
+          : await this.readListedHeader(selected, undefined)
+        this.listedHeaders.set(selected.sourcePath, { revision, metadata })
+        if (metadata === undefined) return undefined
         this.recordCatalogEntry(segment, {
           header: metadata.header,
           formatStatus: metadata.formatStatus,
@@ -1574,7 +1651,7 @@ class JsonlSessionPersistence extends SessionPersistence {
         })
         return { selected, metadata, revision, sizeBytes }
       } catch (error: unknown) {
-        if (isENOENT(error) || error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) {
+        if (isENOENT(error)) {
           this.listedHeaders.delete(selected.sourcePath)
           return undefined
         }
@@ -1607,6 +1684,22 @@ class JsonlSessionPersistence extends SessionPersistence {
     await this.persistCatalog()
     return artifacts
   }
+
+  /** Read one listed generation header; an unsupported or corrupt log is not a listed Session. */
+  private async readListedHeader(
+    selected: ResolvedJsonlGeneration,
+    signal?: AbortSignal,
+  ): Promise<GenerationHeader | undefined> {
+    try {
+      return await this.readGenerationHeader(selected, undefined, signal)
+    } catch (error: unknown) {
+      if (error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) {
+        return undefined
+      }
+      throw error
+    }
+  }
+
   /** Read and translate one selected generation header without inspecting its body. */
   private async readGenerationHeader(
     selected: ResolvedJsonlGeneration,
@@ -1684,12 +1777,12 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     return {
       version: SESSION_FORMAT_VERSION,
-      id: makeSessionId(header.id),
+      id: brandString<SessionId>(header.id),
       createdAt: header.createdAt,
       ...(header.cwd === undefined ? {} : { cwd: header.cwd }),
       ...(header.parentSession === undefined
         ? {}
-        : { parentSession: makeSessionId(header.parentSession) }),
+        : { parentSession: brandString<SessionId>(header.parentSession) }),
       isSeeded: header.isSeeded,
       ...(header.origin === undefined ? {} : { origin: header.origin }),
       delegationDepth: header.delegationDepth,
@@ -1756,7 +1849,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     // append. Swallow only the rm failure; nothing else of consequence runs here.
     try {
       await rm(tmp, { force: true })
-    } catch {
+    } catch (_redundantTempRemoveFailed) {
       /* v8 ignore next -- redundant temp link; publish already durable, rm failure is an unreachable IO edge */
     }
   }

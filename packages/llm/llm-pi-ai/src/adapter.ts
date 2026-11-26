@@ -44,7 +44,6 @@ import {
   errorChain,
   LlmAdapter,
   LlmError,
-  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -61,14 +60,18 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { brandString } from '@deepseek-ai/dsh-brand'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { CC_WIRE_PARITY_MEMBER_HEADERS, CC_WIRE_PARITY_OWNED_HEADERS } from './config.ts'
 import type { PiAiCcWireParityCache, ResolvedPiAiProviderProfile } from './config.ts'
 import { leadingSystemText, requestImageTarget, toPiContext } from './context.ts'
+import { resolveImageRequestBudget } from './image-policy.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
 import { ProviderErrorCapture } from './pool-error.ts'
 import { encodeSessionNameHeader, sanitizeSessionName } from './session-name.ts'
 import { toStreamChunks } from './stream.ts'
+import { bindThinkingToPrefix } from './prefix-binding.ts'
+import type { PrefixDigests } from './prefix-binding.ts'
 import type { PiAiRequestHeaderContext } from './types.ts'
 
 /**
@@ -368,6 +371,13 @@ export interface PiAiAdapterOptions {
    * conversion because its stored replay state is unusable by this build.
    */
   onReplayDegrade?: (detail: { provider: string; model: string; reason: string }) => void
+  /**
+   * Observe one request that sent replayed assistant messages without their
+   * signed Anthropic thinking because the request prefix changed or was never
+   * recorded. Stale messages stay omitted, so later requests of the
+   * conversation report them again.
+   */
+  onThinkingOmitted?: (detail: { provider: string; model: string; count: number }) => void
 }
 
 /** The two auth injectables a pi-ai collection is built with. */
@@ -1383,10 +1393,10 @@ function reasoningInfo(
   return {
     reasoning: {
       efforts: levels.map(level => ({
-        id: ReasoningEffortId(level),
+        id: brandString<ReasoningEffortIdType>(level),
         name: `${level.charAt(0).toUpperCase()}${level.slice(1)}`,
       })),
-      ...defaultLevel === undefined ? {} : { defaultEffort: ReasoningEffortId(defaultLevel) },
+      ...defaultLevel === undefined ? {} : { defaultEffort: brandString<ReasoningEffortIdType>(defaultLevel) },
     },
   }
 }
@@ -1563,9 +1573,9 @@ export class PiAiAdapter extends LlmAdapter {
 
   override imageRequestTarget(provider: string, model: string, image: ImageAttachmentRef) {
     const snapshot = this.current()
-    this.modelOf(snapshot, provider, model)
+    const selected = this.modelOf(snapshot, provider, model)
     const profile = this.profileOf(snapshot, provider)
-    return requestImageTarget(image, { maxPixels: profile.requestImagePixelBudget, maxBytes: profile.requestImageMaxBytes })
+    return requestImageTarget(image, resolveImageRequestBudget(selected, profile))
   }
 
   /**
@@ -1830,8 +1840,9 @@ export class PiAiAdapter extends LlmAdapter {
       const onReplayDegrade = (reason: string): void => {
         this.config.onReplayDegrade?.({ provider: options.provider, model: options.model, reason })
       }
-      const context = attachments === undefined
-        ? toPiContext(request, undefined, onReplayDegrade, updates.systemPromptUpdate === 'in-history')
+      const prefixDigests: PrefixDigests = new Map()
+      const converted = attachments === undefined
+        ? toPiContext(request, undefined, onReplayDegrade, updates.systemPromptUpdate === 'in-history', prefixDigests)
         : await toPiContext({ ...request, signal: watchdog.signal }, {
           attachments,
           resolveImageAccess: ref => this.config.resolveImageAccess?.(attachments, ref),
@@ -1839,13 +1850,12 @@ export class PiAiAdapter extends LlmAdapter {
           maxRequestImages: profile.maxRequestImages,
           imageOffloadCountQuantum: profile.imageOffloadCountQuantum,
           requestImagePolicy: {
-            maxPixels: profile.requestImagePixelBudget,
-            maxBytes: profile.requestImageMaxBytes,
+            ...resolveImageRequestBudget(model, profile),
             ...model.api === 'anthropic-messages'
               ? { maxDimension: (count: number) => count > 20 ? 2000 : 8000 }
               : {},
           },
-        }, onReplayDegrade, updates.systemPromptUpdate === 'in-history')
+        }, onReplayDegrade, updates.systemPromptUpdate === 'in-history', prefixDigests)
       // Profile headers are deployment-owned; attribution names are
       // Harness-owned and therefore win collisions. The session identity and the
       // wire-parity member headers are adapter-owned and replace a profile header
@@ -1878,6 +1888,11 @@ export class PiAiAdapter extends LlmAdapter {
           ),
         }
         : {}
+      const manualThinking = model.reasoning && reasoning !== undefined && reasoning !== 'off'
+        && (model as Model<'anthropic-messages'>).compat?.forceAdaptiveThinking !== true
+      const { context, digest } = bindThinkingToPrefix(converted, model.api, prefixDigests, manualThinking, (count) => {
+        this.config.onThinkingOmitted?.({ provider: options.provider, model: options.model, count })
+      })
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...payloadOptions,
@@ -1889,7 +1904,7 @@ export class PiAiAdapter extends LlmAdapter {
         headers,
       })
       const iterator = toStreamChunks(
-        events, model.contextWindow, options.signal, model.id, providerError,
+        events, model.contextWindow, options.signal, model.id, providerError, digest,
       )[Symbol.asyncIterator]()
       let exhausted = false
       try {

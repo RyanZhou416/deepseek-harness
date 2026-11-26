@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-当你需要读取或搜索会话历史、而不直接触碰会话服务或存储后端时，从应用代码使用 `ctx.sessionQuery`。该服务由具体后端插件提供——已发布组合挂载 `@deepseek-ai/dsh-session-query-sqlite`（[README](../session-query-sqlite/README.zh.md)）——因此本包从不单独挂载。一旦组合了后端，以下全部能力都可在 `ctx.sessionQuery` 上使用。
+当你需要读取或搜索会话历史、而不直接触碰会话服务或存储后端时，从应用代码使用 `ctx.sessionQuery`。该服务由具体后端插件提供——已发布组合挂载 `@deepseek-ai/dsh-session-query-sqlite`（[README](../session-query-sqlite/README.zh.md)）——因此本包从不单独挂载。一旦组合了后端，以下查询操作都可在 `ctx.sessionQuery` 上使用。
 
 ### 你可以做什么
 
@@ -34,6 +34,7 @@ kind: "package-reference"
 | `observeSession(id, options?)` | 一份精确、优先实时的不可变切点，附调用方持有的租约；冷读取会保留 prepared Session 直到释放 |
 | `observeSessionMetadata(id, options?)` | header 加上不读日志的投影提示：实时会话的当前切点，或存储会话为所请求键保留的检查点行；绝不打开始储日志 |
 | `listSessions()` | 每个逻辑会话，最新的在前，带 `live` 与 `persisted` 可用性标志及可选 `formatStatus`；显式 `excludeSessionIds` 会在任何持久化读取之前跳过这些 id（Host 用它传入归档集合），`excludeSubagentSessions` 则省略子智能体来源的会话（Host 默认列表这样做，因为子智能体行通过其母会话的目录访问）。持久化拉取使用头部清单，因此后端不会为引擎并不比较的快照修订号做推导 |
+| `getListMetadata(session)` | 实时或已准备的 Session 是否还没有 turn，及其最近一条人工提示词的时间 |
 | `readSession(id)` | 经过回放校验的完整原始事件日志，且不会让该会话变为实时 |
 | `readWindow(id, request?)` | 一个有界存储历史窗口，以及可用时其完整检查点投影基线；持久化或窗口能力缺失时为 `undefined` |
 | `filterSessions(filters)` | 匹配 AND 连接的元数据与可用性谓词的会话 |
@@ -98,6 +99,7 @@ kind: "package-reference"
 | [`src/index.ts`](src/index.ts) | 服务定义：抽象 `SessionQueryEngine`、具体读取、配置校验 |
 | [`src/corpus.ts`](src/corpus.ts) | 实时优先的语料库解析、可选持久化绑定、批量投影 |
 | [`src/observation.ts`](src/observation.ts) | 实时优先的定点观察，带按修订键控的有界 prepared-Session 缓存 |
+| [`src/list-metadata.ts`](src/list-metadata.ts) | Session 列表空白状态与人工提示词活动时间投影定义 |
 | [`src/cold-read.ts`](src/cold-read.ts) | 基于句柄的冷日志读取，附内存中的中断轮次闭合事件 |
 | [`src/types.ts`](src/types.ts) | 公共记录、过滤器、请求与分页类型 |
 | [`src/config.ts`](src/config.ts) | 继承配置与封闭的 `SessionQueryError` 分类体系 |
@@ -111,11 +113,18 @@ kind: "package-reference"
 
 `SessionCorpus` 通过 fiber 绑定可选的 `ctx.sessionPersistence`，并实时优先解析每次读取：已知实时目标直接快照，不查询持久化；否则先列出会话，再通过短生命周期的读取句柄完整读出日志，并在克隆前重新检查是否出现实时挂载。写入者在轮次中途崩溃的冷日志用 `interruptedTurnClosers` 在内存中补齐——读取从不修改持久化。列表与加载观察之间会断言 header 兼容性。批量标题读取执行一次元数据列表与有界并发读取，把逐会话失败隔离，而取消会拒绝整个批次。
 
+<a id="session-list-metadata"></a>
+### Session 列表元数据
+
+服务启动时注册记录 Session 空白状态与最近人工提示词时间的 `sessionListMetadata` 投影，释放服务时移除该注册；因此服务依赖 `sessionProjections`。`getListMetadata(session)` 同步读取实时或已准备 Session 的该投影。Session API 与可选的[列表工具](../tool-session-list/README.zh.md)通过 `ctx.sessionQuery` 读取。
+
 ### 观察缓存
 
 `observeSession` 不经过列表预检直接构建定点观察。实时观察以当前日志长度固定 cut，并在首次读取时才物化 `events`，因此只需要 header、cursor 或 projection 的消费者永远不会复制日志；日志只会追加，所以延后的首次读取得到的仍然正好是该前缀。冷路径先对存储会话执行 `stat`，再查询自有缓存，缓存键为持久化实例加 `stat` 修订：修订未变则复用已恢复的未发布 Session，不再重读日志；修订变化或持久化实例被替换则经句柄 seam 重新加载并替换条目。缓存至多保留 `preparedSessionCacheSize` 个未被租约钉住、且报告的物理文件大小不超过 `preparedSessionCacheMaxArtifactBytes` 的条目；未报告大小的后端仅受条目数限制。活跃观察租约保留精确 cut，直到释放；Session 转为实时状态时删除其冷缓存条目。物理文件大小限制的是复用，并非解码后的堆字节数；压缩日志在被活跃观察期间可能占用更多内存。
 
 `observeSessionMetadata` 是只需要冷会话 header 与少量投影值的消费者所用的免读日志路径。存储会话只付出一次持久化 `stat`，并在挂载投影缓存时对所请求的键做零 I/O 检查点读取；它绝不打开始储日志，也从不保留 prepared Session。返回值与检查点行同样可能过时，且当该行被丢弃或属于其他生命周期时缺席，因此消费方必须按键回退。实时会话返回其精确当前切点，因此只需要元数据的调用方在会话已挂载或冷态时行为一致。
+
+冷 `SessionObservation` 通过 `persistedEventCount` 区分 `events` 中已存储的前缀与内存中补出的中断轮次修复事件。fork 调用方将这些修复事件保留在孩子的后缀中。实时观察不带该字段，因为实时 log 没有读取时补出的修复。
 
 ### 读取与追踪
 

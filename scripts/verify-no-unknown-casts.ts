@@ -1,17 +1,27 @@
 /** Reject new assertions to unknown while retiring the recorded existing assertions. */
 
-import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import ts from 'typescript'
+import {
+  countInventory,
+  listInventorySources,
+  readInventoryBaseline,
+  syntaxFingerprint,
+  type InventoryBaseline,
+  type InventoryGate,
+} from './baseline-inventory.ts'
 
 const root = resolve(import.meta.dirname, '..')
-const baselinePath = 'scripts/no-unknown-casts.baseline.json'
+
+/**
+ * Allowances inherited from before a fork merge. They stay out of the official
+ * inventory so an upstream merge never edits upstream's recorded file.
+ */
 const importedBaselinePath = 'scripts/no-unknown-casts.imported-baseline.json'
 
 /** Existing assertion counts, keyed by repository path and syntax fingerprint. */
-export type UnknownCastBaseline = Record<string, Record<string, number>>
+export type UnknownCastBaseline = InventoryBaseline
 
 /** One direct assertion to unknown in authored source. */
 export interface UnknownCast {
@@ -21,17 +31,6 @@ export interface UnknownCast {
   line: number
   /** SHA-256 of the assertion's syntax tokens, excluding comments and whitespace. */
   fingerprint: string
-}
-
-function syntaxFingerprint(node: ts.Node, source: ts.SourceFile): string {
-  const tokens: string[] = []
-  const visit = (child: ts.Node): void => {
-    if (ts.isJSDoc(child)) return
-    if (ts.isToken(child)) tokens.push(child.getText(source))
-    else child.getChildren(source).forEach(visit)
-  }
-  visit(node)
-  return createHash('sha256').update(JSON.stringify(tokens)).digest('hex')
 }
 
 function assertsUnknown(type: ts.TypeNode): boolean {
@@ -66,12 +65,6 @@ export function findUnknownCasts(file: string, text: string): UnknownCast[] {
   return casts
 }
 
-function isSource(file: string): boolean {
-  return /\.(?:[cm]?[jt]s|[jt]sx)$/u.test(file)
-    && !file.startsWith('vendor/')
-    && !file.startsWith('.agents/notes/archived/')
-}
-
 /**
  * Scan tracked source and non-ignored new source, including tests and configuration files.
  * @param repoRoot - repository root containing the Git index.
@@ -79,47 +72,77 @@ function isSource(file: string): boolean {
  * @throws if discovery omits a required source area or an eligible path is a symlink.
  */
 export function scanUnknownCasts(repoRoot: string): UnknownCast[] {
-  const files = [...new Set(execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
-  }).split('\0').map(file => file.replaceAll('\\', '/')).filter(isSource))].sort()
-  const present = files.filter((file) => {
-    const stat = lstatSync(resolve(repoRoot, file), { throwIfNoEntry: false })
-    if (stat?.isSymbolicLink()) throw new Error(`verify-no-unknown-casts: source symlink is unsupported: ${file}`)
-    return stat?.isFile() === true
-  })
-  for (const area of ['packages/', 'apps/', 'scripts/', 'website/']) {
-    if (!present.some(file => file.startsWith(area))) {
-      throw new Error(`verify-no-unknown-casts: source discovery omitted ${area}`)
-    }
-  }
-  return present.flatMap(file => findUnknownCasts(file, readFileSync(resolve(repoRoot, file), 'utf8')))
+  return listInventorySources(repoRoot, 'verify-no-unknown-casts')
+    .flatMap(file => findUnknownCasts(file, readFileSync(resolve(repoRoot, file), 'utf8')))
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+const gate: InventoryGate<UnknownCast> = {
+  name: 'verify-no-unknown-casts',
+  baselinePath: 'scripts/no-unknown-casts.baseline.json',
+  scan: scanUnknownCasts,
+  rejection: 'new assertions to unknown are forbidden. Use a typed value or narrow the input.',
+  describe: cast => `${cast.file}:${String(cast.line)} (${cast.fingerprint})`,
+  success: count => `verify-no-unknown-casts: no new assertions; ${String(count)} existing assertions remain.`,
 }
 
-function readBaseline(repoRoot: string, path: string): UnknownCastBaseline {
-  const value: unknown = JSON.parse(readFileSync(resolve(repoRoot, path), 'utf8'))
-  if (!isRecord(value)) throw new Error('verify-no-unknown-casts: baseline must be a file-to-counts object')
-  const baseline: UnknownCastBaseline = {}
-  for (const [file, counts] of Object.entries(value)) {
-    if (!isSource(file) || file.startsWith('/') || file.includes('\\') || file.split('/').includes('..')
-      || !isRecord(counts) || Object.keys(counts).length === 0) {
-      throw new Error(`verify-no-unknown-casts: invalid baseline file: ${file}`)
-    }
-    const parsed: Record<string, number> = {}
+const importedGate: InventoryGate<UnknownCast> = { ...gate, baselinePath: importedBaselinePath }
+
+/** One recorded allowance's provenance: the official inventory, and the fork's inherited file. */
+interface AllowanceSplit {
+  /** Count recorded in the official inventory. */
+  official: number
+  /** Count recorded in the inherited inventory. */
+  inherited: number
+}
+
+/** Identity of one allowance across both inventories. */
+function allowanceKey(file: string, fingerprint: string): string {
+  return `${file}\u0000${fingerprint}`
+}
+
+/** The inherited inventory, or no allowance when the fork recorded none. */
+function readInheritedBaseline(repoRoot: string): UnknownCastBaseline {
+  return existsSync(resolve(repoRoot, importedBaselinePath))
+    ? readInventoryBaseline(importedGate, repoRoot)
+    : {}
+}
+
+/** Combine both inventories so one assertion may draw on either. */
+function mergeAllowances(official: UnknownCastBaseline, inherited: UnknownCastBaseline): Map<string, AllowanceSplit> {
+  const merged = new Map<string, AllowanceSplit>()
+  for (const [file, counts] of Object.entries(official)) {
     for (const [fingerprint, count] of Object.entries(counts)) {
-      if (!/^[a-f0-9]{64}$/u.test(fingerprint) || typeof count !== 'number' || !Number.isSafeInteger(count) || count <= 0) {
-        throw new Error(`verify-no-unknown-casts: invalid baseline count: ${file}:${fingerprint}`)
-      }
-      parsed[fingerprint] = count
+      merged.set(allowanceKey(file, fingerprint), { official: count, inherited: 0 })
     }
-    baseline[file] = parsed
   }
-  return baseline
+  for (const [file, counts] of Object.entries(inherited)) {
+    for (const [fingerprint, count] of Object.entries(counts)) {
+      const key = allowanceKey(file, fingerprint)
+      const split = merged.get(key)
+      if (split === undefined) merged.set(key, { official: 0, inherited: count })
+      else split.inherited += count
+    }
+  }
+  return merged
+}
+
+/** Split observed counts back into each inventory's own recorded share. */
+function splitObserved(
+  observed: UnknownCastBaseline,
+  merged: ReadonlyMap<string, AllowanceSplit>,
+): { official: UnknownCastBaseline, inherited: UnknownCastBaseline } {
+  const official: UnknownCastBaseline = {}
+  const inherited: UnknownCastBaseline = {}
+  for (const [file, counts] of Object.entries(observed)) {
+    for (const [fingerprint, count] of Object.entries(counts)) {
+      const split = merged.get(allowanceKey(file, fingerprint))
+      const officialCount = Math.min(count, split?.official ?? 0)
+      if (officialCount > 0) (official[file] ??= {})[fingerprint] = officialCount
+      const inheritedCount = count - officialCount
+      if (inheritedCount > 0) (inherited[file] ??= {})[fingerprint] = inheritedCount
+    }
+  }
+  return { official, inherited }
 }
 
 /**
@@ -128,67 +151,51 @@ function readBaseline(repoRoot: string, path: string): UnknownCastBaseline {
  * @returns path and fingerprint counts in stable order for comparison and pruning.
  */
 export function countUnknownCasts(casts: readonly UnknownCast[]): UnknownCastBaseline {
-  const baseline: UnknownCastBaseline = {}
-  for (const { file, fingerprint } of casts) {
-    const counts = baseline[file] ??= {}
-    counts[fingerprint] = (counts[fingerprint] ?? 0) + 1
-  }
-  return Object.fromEntries(Object.entries(baseline).sort(([a], [b]) => a.localeCompare(b))
-    .map(([file, counts]) => [file, Object.fromEntries(Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)))]))
+  return countInventory(casts)
 }
 
 /**
  * Enforce the recorded assertion inventory, optionally deleting retired allowances.
+ *
+ * A finding may be allowed by either inventory; `--prune` writes each file's own
+ * remaining share so a merge never has to edit the official file.
+ *
  * @param repoRoot - repository root to scan.
  * @param prune - remove stale entries only after establishing that no new assertion exists.
  * @returns the number of existing assertions still present.
  * @throws for new assertions, malformed inventories, or stale entries without pruning.
  */
 export function verifyNoUnknownCasts(repoRoot: string, prune = false): number {
-  const official = readBaseline(repoRoot, baselinePath)
-  const imported = existsSync(resolve(repoRoot, importedBaselinePath))
-    ? readBaseline(repoRoot, importedBaselinePath) : {}
-  const baseline: UnknownCastBaseline = structuredClone(official)
-  for (const [file, counts] of Object.entries(imported)) {
-    const target = baseline[file] ??= {}
-    for (const [fingerprint, count] of Object.entries(counts)) {
-      target[fingerprint] = (target[fingerprint] ?? 0) + count
-    }
-  }
+  const official = readInventoryBaseline(gate, repoRoot)
+  const merged = mergeAllowances(official, readInheritedBaseline(repoRoot))
+  const remaining = new Map<string, number>([...merged].map(([key, split]) => [key, split.official + split.inherited] as const))
   const casts = scanUnknownCasts(repoRoot)
-  const current = countUnknownCasts(casts)
-  const remaining = structuredClone(baseline)
   const added: UnknownCast[] = []
   for (const cast of casts) {
-    const counts = remaining[cast.file]
-    const allowance = counts?.[cast.fingerprint] ?? 0
-    if (counts !== undefined && allowance > 0) counts[cast.fingerprint] = allowance - 1
+    const key = allowanceKey(cast.file, cast.fingerprint)
+    const allowance = remaining.get(key) ?? 0
+    if (allowance > 0) remaining.set(key, allowance - 1)
     else added.push(cast)
   }
   if (added.length > 0) {
-    throw new Error('verify-no-unknown-casts: new assertions to unknown are forbidden. Use a typed value or narrow the input.\n'
-      + added.map(cast => `  ${cast.file}:${String(cast.line)} (${cast.fingerprint})`).join('\n'))
+    throw new Error(`verify-no-unknown-casts: ${gate.rejection}\n`
+      + added.map(cast => `  ${gate.describe(cast)}`).join('\n'))
   }
-  const stale = Object.entries(remaining).flatMap(([file, counts]) => Object.entries(counts)
-    .filter(([, count]) => count > 0).map(([fingerprint]) => `  ${file} (${fingerprint})`))
+  const stale = [...remaining].filter(([, count]) => count > 0)
   if (stale.length > 0) {
     if (!prune) {
-      throw new Error('verify-no-unknown-casts: remove retired baseline entries with pnpm run verify-no-unknown-casts --prune.\n'
-        + stale.join('\n'))
+      throw new Error('verify-no-unknown-casts: remove retired baseline entries with '
+        + 'pnpm run verify-no-unknown-casts --prune.\n'
+        + stale.map(([key]) => {
+          const [file, fingerprint] = key.split('\u0000')
+          return `  ${file} (${fingerprint})`
+        }).join('\n'))
     }
-    const keptOfficial: UnknownCastBaseline = {}
-    const keptImported: UnknownCastBaseline = {}
-    for (const [file, counts] of Object.entries(current)) {
-      for (const [fingerprint, count] of Object.entries(counts)) {
-        const officialCount = Math.min(count, official[file]?.[fingerprint] ?? 0)
-        if (officialCount > 0) (keptOfficial[file] ??= {})[fingerprint] = officialCount
-        const importedCount = count - officialCount
-        if (importedCount > 0) (keptImported[file] ??= {})[fingerprint] = importedCount
-      }
-    }
-    writeFileSync(resolve(repoRoot, baselinePath), `${JSON.stringify(keptOfficial, null, 2)}\n`)
+    const observed = countUnknownCasts(casts)
+    const split = splitObserved(observed, merged)
+    writeFileSync(resolve(repoRoot, gate.baselinePath), `${JSON.stringify(split.official, null, 2)}\n`)
     if (existsSync(resolve(repoRoot, importedBaselinePath))) {
-      writeFileSync(resolve(repoRoot, importedBaselinePath), `${JSON.stringify(keptImported, null, 2)}\n`)
+      writeFileSync(resolve(repoRoot, importedBaselinePath), `${JSON.stringify(split.inherited, null, 2)}\n`)
     }
   }
   return casts.length
@@ -198,10 +205,9 @@ if (import.meta.filename === resolve(process.argv[1] ?? '')) {
   try {
     const args = process.argv.slice(2)
     if (args.length > 1 || (args.length === 1 && args[0] !== '--prune')) {
-      throw new Error('Usage: pnpm run verify-no-unknown-casts [--prune]')
+      throw new Error(`Usage: pnpm run ${gate.name} [--prune]`)
     }
-    const count = verifyNoUnknownCasts(root, args[0] === '--prune')
-    console.log(`verify-no-unknown-casts: no new assertions; ${String(count)} existing assertions remain.`)
+    console.log(gate.success(verifyNoUnknownCasts(root, args[0] === '--prune')))
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
     process.exitCode = 1

@@ -15,7 +15,7 @@ const SETTLING_HIDE_CAP_MS = 3000
  * @returns the unchanged root, Header, content, and width-control subtree.
  */
 export function ConversationMainPanel(props: ConversationSlotProps) {
-  const { sessionId, useSession, useSessions, useConversation, renderSlot, renderFactorySlot } = props
+  const { sessionId, useSession, useSessions, useConversation, renderSlot, renderFactorySlot, openWorkspace } = props
   const session = useSession(s => s)
   const conversation = useConversation(s => s)
   const shellPhase = session === undefined || conversation === undefined
@@ -33,15 +33,7 @@ export function ConversationMainPanel(props: ConversationSlotProps) {
   // The exemption is deliberately open-state-wide, not loading-only: a
   // summary-blank session is the hero before its open starts (`cold`) and
   // after one fails (`error`) for the same reason — there is no history.
-  // A restored continuable subagent waits for a Host summary to establish
-  // parent availability. This keeps the composer
-  // hidden instead of briefly rendering the parent-offline takeover.
-  const parentAvailabilityPending = session?.subagent?.address.mode === 'continuable'
-    && session.subagent.parentAvailable === undefined
-  const settling = sessionId !== undefined && (
-    (shellPhase === 'blank' && openState === 'loading' && summaryBlank !== true)
-    || parentAvailabilityPending
-  )
+  const settling = sessionId !== undefined && shellPhase === 'blank' && openState === 'loading' && summaryBlank !== true
   // A slow or stalled open must not leave the composer invisible forever: past
   // the cap the seat renders docked, and the phase self-corrects when the open lands.
   const [settlingExpired, setSettlingExpired] = useState(false)
@@ -62,6 +54,7 @@ export function ConversationMainPanel(props: ConversationSlotProps) {
         variant: 'main',
         phase,
         hero,
+        onWorkspaceSelected: openWorkspace,
       }, {
         slots: CONTENT_SLOTS,
       })}

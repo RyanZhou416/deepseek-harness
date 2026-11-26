@@ -1,183 +1,21 @@
-import {
-  memo, useCallback, useEffect, useMemo, useRef, useState,
-  type CSSProperties, type KeyboardEvent, type MouseEvent, type ReactNode,
-} from 'react'
+/** Breadcrumb switcher for subagent Sessions: the current title opens its siblings' tree. */
+import { useMemo, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import {
-  type SessionProjectionMap, type SessionSummary,
-  type SessionProjectionSnapshot,
-} from '@deepseek-ai/dsh-api-session-controller/client'
-import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import {
-  IconChevronDownOutlineRegular, IconChevronRightOutlineRegular, IconRefreshOutlineRegular, StateDot, Tooltip,
-} from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import { MenuSurface } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { InjectFace, PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { NS } from './locales.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type {} from '@deepseek-ai/dsh-token-meter/client'
-import css from './SubagentHeaderLineage.module.css'
+import {
+  CatalogTree, deriveCatalogs, entryName, levelPreparer, treeItems, type SubagentCatalogInjected, type SubagentCatalogSnapshot,
+} from './SubagentCatalog.tsx'
+import css from './SubagentCatalog.module.css'
 
-type SubagentCatalogEntry = SessionProjectionMap['subagentCatalog'][number]
-
-/**
- * One derived catalog level. Entries are the projection array itself, never a
- * per-entry copy, so an unchanged snapshot keeps both the array and every row
- * identity stable.
- */
-type SubagentCatalogSnapshot = Omit<SessionProjectionSnapshot, 'values' | 'state'> & {
-  state: 'loading' | 'ready' | 'migration-required' | 'error'
-  entries: readonly SubagentCatalogEntry[]
-}
-type Catalogs = Readonly<Record<SessionId, SubagentCatalogSnapshot>>
-/** Shared empty level so a switcher without a catalog keeps its props stable. */
-const EMPTY_CATALOG: SubagentCatalogSnapshot = { entries: [], state: 'loading', error: null }
-/** Shared empty membership list for the trigger count selector. */
-const EMPTY_ENTRIES: readonly SubagentCatalogEntry[] = []
-
-/** Business actions supplied by the slot registration. */
-export interface SubagentCatalogInjected {
-  openChild: (address: SubagentAddress) => void
-  openChildAside: (address: SubagentAddress) => void
-  refreshProjection: (parentSessionId: SessionId) => void
-}
+export type { SubagentCatalogInjected } from './SubagentCatalog.tsx'
 
 /** Full props for the session-header lineage renderer. */
 export type SubagentHeaderLineageProps =
-  PropsRuntime<'conversation.session.header.lineage'> & SubagentCatalogInjected & PropsLocale<typeof NS>
-
-interface CatalogRowsProps {
-  parentSessionId: SessionId
-  currentSessionId: SessionId | undefined
-  catalog: SubagentCatalogSnapshot
-  catalogs: Catalogs
-  summaries: Readonly<Record<SessionId, SessionSummary>>
-  expanded: ReadonlySet<SessionId>
-  level: number
-  openChild: (address: SubagentAddress) => void
-  openChildAside: (address: SubagentAddress) => void
-  refreshProjection: (parentSessionId: SessionId) => void
-  toggleBranch: (childSessionId: SessionId) => void
-  closeCatalog: () => void
-  useSessionStatus: SubagentHeaderLineageProps['useSessionStatus']
-}
-
-function treeItems(root: HTMLDivElement | null): HTMLElement[] {
-  return root === null
-    ? []
-    : Array.from(root.querySelectorAll<HTMLElement>('[role="treeitem"]:not([aria-disabled="true"])'))
-}
-
-/** Compact token count shared in shape with the conversation stats strip. */
-function formatTokens(value: number, t: TranslateNS<typeof NS>): string {
-  const scaled = (next: number): string => next >= 100
-    ? String(Math.round(next))
-    : String(Math.round(next * 10) / 10)
-  if (value < 1_000) return String(value)
-  if (value < 1_000_000) return t('tokens.thousand', { value: scaled(value / 1_000) })
-  return t('tokens.million', { value: scaled(value / 1_000_000) })
-}
-
-/** Sum the four disjoint durable provider-usage buckets. */
-function tokenTotal(
-  usage: SessionProjectionMap['tokenUsage'] | undefined,
-): number | undefined {
-  return usage === undefined
-    ? undefined
-    : usage.uncachedInputTokens + usage.outputTokens
-      + usage.cacheReadTokens + usage.cacheWriteTokens
-}
-
-/** Exact whole-second active-turn duration for one catalog row. */
-function activityDuration(
-  summary: SessionSummary | undefined,
-  activity: 'running' | 'inactive',
-  now: number,
-): number | undefined {
-  if (summary === undefined) return undefined
-  const timing: SessionProjectionMap['subagentTiming'] | undefined
-    = summary.projectionValues?.subagentTiming
-  if (timing === undefined) return undefined
-  if (timing.active === undefined) return timing.settledMs
-  const end = activity === 'running'
-    ? now
-    : timing.active.through
-  return timing.settledMs + Math.max(0, end - timing.active.since)
-}
-
-interface DurationParts {
-  seconds: number
-  minutes: number
-  hours: number
-  days: number
-  totalMinutes: number
-  totalHours: number
-}
-
-function splitDuration(ms: number): DurationParts {
-  const totalSeconds = Math.floor(Math.max(0, ms) / 1_000)
-  const totalMinutes = Math.floor(totalSeconds / 60)
-  const totalHours = Math.floor(totalMinutes / 60)
-  return {
-    seconds: totalSeconds % 60,
-    minutes: totalMinutes % 60,
-    hours: totalHours % 24,
-    days: Math.floor(totalHours / 24),
-    totalMinutes,
-    totalHours,
-  }
-}
-
-/** Format a duration with decreasing visual precision at larger scales. */
-function formatDuration(ms: number, t: TranslateNS<typeof NS>): string {
-  const { seconds, minutes, hours, days, totalMinutes, totalHours } = splitDuration(ms)
-  if (days >= 365) {
-    const years = Math.floor(days / 365)
-    const months = Math.floor((days % 365) / 30)
-    return months === 0
-      ? t('duration.years', { years })
-      : t('duration.yearsMonths', { years, months })
-  }
-  if (days >= 30) {
-    const months = Math.floor(days / 30)
-    const remainingDays = days % 30
-    return remainingDays === 0
-      ? t('duration.months', { months })
-      : t('duration.monthsDays', { months, days: remainingDays })
-  }
-  if (days > 0) {
-    return hours === 0
-      ? t('duration.days', { days })
-      : t('duration.daysHours', { days, hours })
-  }
-  if (totalHours > 0) {
-    return t('duration.hours', {
-      hours: totalHours,
-      minutes: String(minutes).padStart(2, '0'),
-      seconds: String(seconds).padStart(2, '0'),
-    })
-  }
-  if (totalMinutes > 0) {
-    return t('duration.minutes', {
-      minutes: totalMinutes,
-      seconds: String(seconds).padStart(2, '0'),
-    })
-  }
-  return t('duration.seconds', { seconds })
-}
-
-/** Preserve exact whole seconds for hover and accessible naming. */
-function formatExactDuration(ms: number, t: TranslateNS<typeof NS>): string {
-  const { seconds, minutes, hours, days } = splitDuration(ms)
-  return days === 0
-    ? formatDuration(ms, t)
-    : t('duration.exactDays', {
-      days,
-      hours: String(hours).padStart(2, '0'),
-      minutes: String(minutes).padStart(2, '0'),
-      seconds: String(seconds).padStart(2, '0'),
-    })
-}
+  PropsRuntime<'conversation.session.header.lineage'> & InjectFace<SubagentCatalogInjected> & PropsLocale<typeof NS>
 
 function SubagentSwitcherIcon() {
   return (
@@ -202,741 +40,181 @@ function SubagentSwitcherIcon() {
   )
 }
 
-/** Render catalog loading without inventing child membership. */
-function CatalogLoadingRows({ t }: { t: TranslateNS<typeof NS> }) {
-  return <div className={css.notice}>{t('loading.label')}</div>
-}
 
-/** A child becomes a known leaf only after its own authoritative catalog loads empty. */
-function isKnownLeaf(catalog: SubagentCatalogSnapshot | undefined): boolean {
-  return catalog?.state === 'ready' && catalog.entries.length === 0
-}
-
-/** Derive one catalog level from a projection snapshot without copying entries. */
-function catalogView(snapshot: SessionProjectionSnapshot): SubagentCatalogSnapshot {
-  const projected = snapshot.values.subagentCatalog
-  const state = snapshot.state === 'idle'
-    ? projected === undefined ? 'loading' : 'ready'
-    : snapshot.state === 'migration-required' && projected !== undefined ? 'ready' : snapshot.state
-  return { state, error: snapshot.error, entries: projected ?? [] }
-}
-
-/**
- * Advance one row's clock only while that row reports a running child. Every
- * running row owns a timer, so inactive rows never re-render on the tick.
- * @param active - whether this row's child is currently running.
- * @returns the current time, refreshed once per second while active.
- */
-function useActivityNow(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now())
-  const wasActive = useRef(active)
-  useEffect(() => {
-    const becameActive = active && !wasActive.current
-    wasActive.current = active
-    if (!active) return
-    // Only a transition to running refreshes the base time; a row that mounts
-    // already running already holds a current initial value.
-    if (becameActive) setNow(Date.now())
-    const timer = setInterval(() => { setNow(Date.now()) }, 1_000)
-    return () => { clearInterval(timer) }
-  }, [active])
-  return now
-}
-
-interface CatalogRowProps {
-  parentSessionId: SessionId
-  entry: SubagentCatalogEntry
-  summary: SessionSummary | undefined
-  childCatalog: SubagentCatalogSnapshot | undefined
-  canExpand: boolean
-  isExpanded: boolean
-  isCurrent: boolean
-  index: number
-  count: number
-  level: number
-  reserveDisclosure: boolean
-  /** Nested level content, built only while this row is expanded. */
-  branch: ReactNode
-  useSessionStatus: SubagentHeaderLineageProps['useSessionStatus']
-  openChild: (address: SubagentAddress) => void
-  openChildAside: (address: SubagentAddress) => void
-  toggleBranch: (childSessionId: SessionId) => void
-  closeCatalog: () => void
-  t: TranslateNS<typeof NS>
-}
-
-/**
- * One mounted tree row. The row reads its own activity through the status
- * selector and owns its duration tick; an unrelated session status or catalog
- * update therefore reconciles this element without re-rendering it.
- */
-const CatalogRow = memo(function CatalogRow({
-  parentSessionId, entry, summary, childCatalog, canExpand, isExpanded, isCurrent,
-  index, count, level, reserveDisclosure, branch, useSessionStatus,
-  openChild, openChildAside, toggleBranch, closeCatalog, t,
-}: CatalogRowProps) {
-  const statusRunning = useSessionStatus(statuses => statuses.get(entry.id)?.running)
-  const running = statusRunning ?? summary?.running === true
-  const now = useActivityNow(running)
-  const external = entry.mode === 'external'
-  const requiresOpening = summary?.formatStatus === 'migration-required'
-    || childCatalog?.state === 'migration-required'
-  const childLoading = childCatalog === undefined
-    || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
-  const label = entry.label ?? entry.id
-  const mode = external ? t('mode.external') : entry.mode === 'unknown' ? t('mode.unknown')
-    : entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
-  const completed = !external && !running
-    && summary?.projectionValues?.subagentTiming?.lastTurnCompleted === true
-  const activity = external ? undefined : running
-    ? t('activity.running')
-    : completed
-      ? t('activity.completed')
-      : t('activity.inactive')
-  const secondary = [summary?.title, requiresOpening ? t('catalog.migrationRequired') : mode, activity]
-    .filter(value => value !== undefined)
-    .join(' · ')
-  const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)
-  const durationMs = activityDuration(summary, running ? 'running' : 'inactive', now)
-  const tokenMetric = totalTokens === undefined
-    ? undefined
-    : t('tokens.total', { value: formatTokens(totalTokens, t) })
-  const durationMetric = durationMs === undefined
-    ? undefined
-    : {
-      compact: formatDuration(durationMs, t),
-      exact: formatExactDuration(durationMs, t),
-    }
-  const metrics = [tokenMetric, durationMetric?.exact]
-    .filter(value => value !== undefined)
-    .join(' · ')
-
-  const open = (): void => {
-    if (external) return
-    openChild({
-      parentSessionId,
-      childSessionId: entry.id,
-      mode: entry.mode,
-    })
-    closeCatalog()
-  }
-  const handleKey = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault()
-      event.stopPropagation()
-      open()
-    } else if (
-      (event.key === 'ArrowRight' && canExpand && !isExpanded)
-      || (event.key === 'ArrowLeft' && isExpanded)
-    ) {
-      event.preventDefault()
-      event.stopPropagation()
-      toggleBranch(entry.id)
-    }
-  }
-  const toggle = (event: MouseEvent<HTMLButtonElement>): void => {
-    event.preventDefault()
-    event.stopPropagation()
-    toggleBranch(entry.id)
-  }
-
-  return (
-    <div className={css.node}>
-      <div
-        role="treeitem"
-        tabIndex={external ? -1 : 0}
-        aria-disabled={external || undefined}
-        aria-level={level}
-        aria-setsize={count}
-        aria-posinset={index + 1}
-        aria-current={isCurrent || undefined}
-        aria-label={[label, secondary, metrics].filter(value => value !== '').join(' ')}
-        {...canExpand ? { 'aria-expanded': isExpanded } : {}}
-        className={css.row}
-        onClick={open}
-        onKeyDown={handleKey}
-      >
-        {!canExpand
-          ? reserveDisclosure && <span className={css.disclosureSpace} />
-          : (
-            <button
-              type="button"
-              tabIndex={-1}
-              className={`${css.disclosure} ${isExpanded ? css.disclosureOpen : ''}`}
-              aria-label={t(isExpanded ? 'branch.collapse' : 'branch.expand', { label })}
-              onClick={toggle}
-            >
-              <IconChevronRightOutlineRegular />
-            </button>
-          )}
-        <div className={css.clickarea}>
-          <span className={css.rowActivitySlot}>
-            <StateDot state={running ? 'ongoing' : completed ? 'done' : 'idle'} />
-          </span>
-          <span className={css.content}>
-            <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{label}</span>
-            <span className={css.summary}>{secondary}</span>
-          </span>
-          {metrics !== '' && (
-            <span className={css.metrics}>
-              {tokenMetric !== undefined && <span className={css.metricToken}>{tokenMetric}</span>}
-              {durationMetric !== undefined && (
-                <span
-                  className={css.metricDuration}
-                  title={t('duration.exactTitle', { duration: durationMetric.exact })}
-                >
-                  {durationMetric.compact}
-                </span>
-              )}
-            </span>
-          )}
-          {isCurrent || external
-            ? <span className={css.sidebarSpace} />
-            : (
-              <Tooltip label={t('open.sidebar')} side="bottom" align="end" portal>
-                <button
-                  type="button"
-                  className={css.sidebarButton}
-                  aria-label={t('open.sidebar.aria', { label })}
-                  onClick={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    openChildAside({ parentSessionId, childSessionId: entry.id, mode: entry.mode })
-                    closeCatalog()
-                  }}
-                  onKeyDown={(event) => { event.stopPropagation() }}
-                >
-                  <IconChevronRightOutlineRegular />
-                </button>
-              </Tooltip>
-            )}
-        </div>
-      </div>
-      {isExpanded && (
-        <div
-          role="group"
-          className={css.children}
-          aria-busy={childLoading || undefined}
-        >
-          {branch}
-        </div>
-      )}
-    </div>
-  )
-})
-
-/**
- * Render siblings newest-first and recurse only through explicitly expanded rows.
- * Child catalogs come from the shared snapshot-keyed derivation, so a level
- * whose projection did not change keeps every row identity stable.
- */
-function CatalogRows({
-  parentSessionId, currentSessionId, catalog, catalogs, summaries, expanded, level,
-  openChild, openChildAside, refreshProjection, toggleBranch, closeCatalog, useSessionStatus, t,
-}: CatalogRowsProps & { t: TranslateNS<typeof NS> }) {
-  const entries = useMemo(
-    () => [...catalog.entries].sort((left, right) => right.createdAt - left.createdAt),
-    [catalog.entries],
-  )
-  const emptyLoading = catalog.state === 'loading' && catalog.entries.length === 0
-  const reserveDisclosure = entries.some(entry =>
-    entry.mode !== 'external' && !isKnownLeaf(catalogs[entry.id])
-    && summaries[entry.id]?.formatStatus !== 'migration-required'
-    && catalogs[entry.id]?.state !== 'migration-required')
-  return (
-    <>
-      {emptyLoading && (
-        <CatalogLoadingRows t={t} />
-      )}
-      {catalog.state === 'error' && (
-        <div className={css.error}>
-          <span>{catalog.error?.message ?? t('load.error')}</span>
-          <button
-            type="button"
-            className={css.refresh}
-            onClick={() => { refreshProjection(parentSessionId) }}
-          >
-            <IconRefreshOutlineRegular size={14} />
-            {t('retry')}
-          </button>
-        </div>
-      )}
-      {entries.map((entry, index) => {
-        const childCatalog = catalogs[entry.id]
-        const requiresOpening = summaries[entry.id]?.formatStatus === 'migration-required'
-          || childCatalog?.state === 'migration-required'
-        const canExpand = entry.mode !== 'external'
-          && !isKnownLeaf(childCatalog) && !requiresOpening
-        const isExpanded = canExpand && expanded.has(entry.id)
-        const branch = !isExpanded
-          ? undefined
-          : childCatalog === undefined
-            ? <CatalogLoadingRows t={t} />
-            : (
-              <CatalogRows
-                parentSessionId={entry.id}
-                currentSessionId={currentSessionId}
-                catalog={childCatalog}
-                catalogs={catalogs}
-                summaries={summaries}
-                expanded={expanded}
-                level={level + 1}
-                openChild={openChild}
-                openChildAside={openChildAside}
-                refreshProjection={refreshProjection}
-                toggleBranch={toggleBranch}
-                closeCatalog={closeCatalog}
-                useSessionStatus={useSessionStatus}
-                t={t}
-              />
-            )
-        return (
-          <CatalogRow
-            key={entry.id}
-            parentSessionId={parentSessionId}
-            entry={entry}
-            summary={summaries[entry.id]}
-            childCatalog={childCatalog}
-            canExpand={canExpand}
-            isExpanded={isExpanded}
-            isCurrent={entry.id === currentSessionId}
-            index={index}
-            count={entries.length}
-            level={level}
-            reserveDisclosure={reserveDisclosure}
-            branch={branch}
-            useSessionStatus={useSessionStatus}
-            openChild={openChild}
-            openChildAside={openChildAside}
-            toggleBranch={toggleBranch}
-            closeCatalog={closeCatalog}
-            t={t}
-          />
-        )
-      })}
-    </>
-  )
-}
-
-interface CatalogDropdownSharedProps extends SubagentCatalogInjected {
-  /** Session whose direct catalog roots the tree. */
+interface SwitcherProps extends InjectFace<SubagentCatalogInjected> {
+  /** Parent Session whose direct catalog roots the tree. */
   rootSessionId: SessionId
+  /** Selected descendant highlighted in the tree. */
+  currentSessionId: SessionId
+  /** Visible title included in the switcher's hover target. */
+  displayTitle: string
+  /** Optional ancestor navigation when the combined title is clicked. */
+  openTitle?: () => void
   useSessions: SubagentHeaderLineageProps['useSessions']
   useSessionStatus: SubagentHeaderLineageProps['useSessionStatus']
   t: TranslateNS<typeof NS>
 }
 
-type CatalogDropdownProps = CatalogDropdownSharedProps & (
-  | {
-    /** Descendant-count control. */
-    variant: 'count'
-    currentSessionId?: never
-    displayTitle?: never
-    openTitle?: never
-  }
-  | {
-    /** Current-title sibling switcher. */
-    variant: 'switcher'
-    /** Selected descendant highlighted in the catalog. */
-    currentSessionId: SessionId
-    /** Visible title included in the switcher's hover target. */
-    displayTitle: string
-    /** Optional ancestor navigation when the combined title is clicked. */
-    openTitle?: () => void
-  }
-)
-
-const MENU_VIEWPORT_MARGIN = 16
-
-/** Place a portaled catalog below its trigger without crossing the viewport edge. */
-function catalogMenuPosition(trigger: HTMLButtonElement): CSSProperties {
-  const rect = trigger.getBoundingClientRect()
-  const width = Math.min(336, window.innerWidth - MENU_VIEWPORT_MARGIN * 2)
-  return {
-    top: rect.bottom + 5,
-    left: Math.min(
-      Math.max(MENU_VIEWPORT_MARGIN, rect.left),
-      window.innerWidth - width - MENU_VIEWPORT_MARGIN,
-    ),
-  }
-}
-
-/** One trigger-plus-tree dropdown over the catalog rooted at `rootSessionId`. */
-function CatalogDropdown({
-  rootSessionId, currentSessionId, displayTitle, openTitle, variant,
-  useSessions, useSessionStatus, openChild, openChildAside, refreshProjection, t,
-}: CatalogDropdownProps) {
-  const ancestorSwitcher = variant === 'switcher' && openTitle !== undefined
+/**
+ * Title-and-chevron dropdown over the parent's subagent tree. Hover opens it
+ * after 150ms and leaving both surfaces closes it after 120ms; a click pins it
+ * until an outside press or Escape. With `openTitle`, a click navigates to the
+ * ancestor instead. Hovering reads nothing; a pinning click or ArrowDown
+ * prepares the parent's level.
+ * @param props - tree root, current Session, title, Session hooks, actions, and copy.
+ * @returns the switcher.
+ */
+function Switcher({
+  rootSessionId, currentSessionId, displayTitle, openTitle,
+  useSessions, useSessionStatus, openChild, openChildAside, prepareCatalog, t,
+}: SwitcherProps) {
   const projections = useSessions(state => state.projectionsBySession)
   const summaries = useSessions(state => state.byId)
-  const [open, setOpen] = useState(false)
-  const [menuPosition, setMenuPosition] = useState<CSSProperties>()
-  const [expanded, setExpanded] = useState<ReadonlySet<SessionId>>(() => new Set())
+  const statuses = useSessionStatus(value => value)
+  const catalogs = useMemo(() => deriveCatalogs(projections, summaries, statuses), [projections, summaries, statuses])
+  const catalog: SubagentCatalogSnapshot = catalogs[rootSessionId] ?? { entries: [], state: 'idle', error: null }
+  const prepareLevel = levelPreparer(prepareCatalog)
+  const [open, setOpen] = useState<'closed' | 'hover' | 'pinned' | 'keyboard'>('closed')
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  const hoverOpenTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  // A click-opened (pinned) menu ignores hover-out; only explicit dismissal closes it.
-  const pinnedRef = useRef(false)
-  // Views are keyed by projection-snapshot identity, so a snapshot the manager
-  // reused also reuses its level object and every row prop derived from it.
-  const catalogCache = useRef<WeakMap<SessionProjectionSnapshot, SubagentCatalogSnapshot> | null>(null)
-  const catalogs = useMemo<Catalogs>(() => {
-    const cache = catalogCache.current ??= new WeakMap()
-    const next: Record<SessionId, SubagentCatalogSnapshot> = {}
-    const add = (id: SessionId): void => {
-      if (next[id] !== undefined) return
-      const snapshot = projections[id]
-      if (snapshot === undefined) return
-      let view = cache.get(snapshot)
-      if (view === undefined) {
-        view = catalogView(snapshot)
-        cache.set(snapshot, view)
-      }
-      next[id] = view
-    }
-    // Only the root level and explicitly expanded branches are rendered;
-    // their direct children still need a level object for disclosure state.
-    add(rootSessionId)
-    for (const id of expanded) add(id)
-    for (const level of Object.values(next)) {
-      for (const entry of level.entries) add(entry.id)
-    }
-    return next
-  }, [expanded, projections, rootSessionId])
-  const catalog = catalogs[rootSessionId]
-  const directChildren = catalog?.entries ?? EMPTY_ENTRIES
-  const directCount = directChildren.length
-  const runningCount = useSessionStatus(statuses => directChildren.reduce(
-    (count, entry) => (statuses.get(entry.id)?.running ?? summaries[entry.id]?.running) === true
-      ? count + 1
-      : count,
-    0,
-  ))
-  const currentEntry = currentSessionId === undefined
-    ? undefined
-    : directChildren.find(entry => entry.id === currentSessionId)
-  const switcherDisplayTitle = currentEntry !== undefined
-    ? currentEntry.label ?? currentEntry.id
-    : displayTitle
-  const totalCountKey = directCount === 1 ? 'count.total.one' : 'count.total.other'
-  const runningCountKey = runningCount === 1 ? 'count.running.one' : 'count.running.other'
-  const presentedCatalog: SubagentCatalogSnapshot | undefined = catalog
-    ?? (variant === 'switcher' ? EMPTY_CATALOG : undefined)
+  const anchorName = `--dsh-subagents-${useId().replaceAll(':', '')}`
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const currentEntry = catalog.entries.find(entry => entry.id === currentSessionId)
+  const title = currentEntry !== undefined ? currentEntry.label || entryName(currentEntry) : displayTitle
+  const shown = open !== 'closed'
 
-  const cancelHoverClose = useCallback((): void => {
-    if (hoverCloseTimer.current === undefined) return
-    clearTimeout(hoverCloseTimer.current)
-    hoverCloseTimer.current = undefined
-  }, [])
-
-  const cancelHoverOpen = useCallback((): void => {
-    if (hoverOpenTimer.current === undefined) return
-    clearTimeout(hoverOpenTimer.current)
-    hoverOpenTimer.current = undefined
-  }, [])
-
-  const changeOpen = useCallback((next: boolean, restoreFocus = false): void => {
-    cancelHoverOpen()
-    cancelHoverClose()
-    if (next) {
-      const trigger = triggerRef.current
-      /* v8 ignore next -- a queued callback can outlive the trigger */
-      if (trigger === null) return
-      setOpen(true)
-      setMenuPosition(catalogMenuPosition(trigger))
-    }
-    else {
-      pinnedRef.current = false
-      setOpen(false)
-      setMenuPosition(undefined)
-      setExpanded(new Set())
-    }
+  const cancelHover = (): void => {
+    clearTimeout(hoverTimer.current)
+    hoverTimer.current = undefined
+  }
+  const close = (restoreFocus = false): void => {
+    cancelHover()
+    setOpen('closed')
     if (restoreFocus) queueMicrotask(() => { triggerRef.current?.focus() })
-  }, [cancelHoverClose, cancelHoverOpen])
-
-  const closeCatalog = useCallback((): void => { changeOpen(false) }, [changeOpen])
-
-  const scheduleHoverOpen = (): void => {
-    cancelHoverOpen()
-    cancelHoverClose()
-    if (open) return
-    hoverOpenTimer.current = setTimeout(() => {
-      hoverOpenTimer.current = undefined
-      changeOpen(true)
-    }, 150)
   }
 
-  const scheduleHoverClose = (): void => {
-    cancelHoverOpen()
-    cancelHoverClose()
-    if (pinnedRef.current) return
-    hoverCloseTimer.current = setTimeout(() => {
-      hoverCloseTimer.current = undefined
-      changeOpen(false)
-    }, 120)
-  }
-
-  const expandedRef = useRef(expanded)
-  const catalogsRef = useRef(catalogs)
-  const refreshProjectionRef = useRef(refreshProjection)
   useEffect(() => {
-    expandedRef.current = expanded
-    catalogsRef.current = catalogs
-    refreshProjectionRef.current = refreshProjection
-  }, [catalogs, expanded, refreshProjection])
-
-  // Branch handlers stay identity-stable so an unrelated parent render cannot
-  // invalidate every mounted row's memo comparison.
-  const closeBranch = useCallback((root: SessionId): void => {
-    const openNow = expandedRef.current
-    const closing = new Set<SessionId>()
-    const visit = (parentSessionId: SessionId): void => {
-      if (closing.has(parentSessionId) || !openNow.has(parentSessionId)) return
-      closing.add(parentSessionId)
-      const branch = catalogsRef.current[parentSessionId]
-      for (const entry of branch?.entries ?? []) {
-        visit(entry.id)
-      }
-    }
-    visit(root)
-    setExpanded(current => new Set([...current].filter(id => !closing.has(id))))
-  }, [])
-
-  const toggleBranch = useCallback((childSessionId: SessionId): void => {
-    if (expandedRef.current.has(childSessionId)) {
-      closeBranch(childSessionId)
-      return
-    }
-    setExpanded(current => new Set(current).add(childSessionId))
-    refreshProjectionRef.current(childSessionId)
-  }, [closeBranch])
-
-  useEffect(() => {
-    if (!open) return
+    if (!shown) return
     const closeOutside = (event: PointerEvent): void => {
-      if (
-        event.target instanceof Node
-        && !rootRef.current?.contains(event.target)
-        && !menuRef.current?.contains(event.target)
-      ) {
-        changeOpen(false)
-      }
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) close()
+    }
+    const dismiss = (event: globalThis.KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      close(menuRef.current?.contains(document.activeElement) === true)
     }
     document.addEventListener('pointerdown', closeOutside)
-    return () => { document.removeEventListener('pointerdown', closeOutside) }
-  }, [changeOpen, open])
-
-  useEffect(() => {
-    if (!open) return
-    const placeMenu = (): void => {
-      const trigger = triggerRef.current
-      /* v8 ignore next -- native resize or scroll can outlive the trigger */
-      if (trigger === null) return
-      const next = catalogMenuPosition(trigger)
-      setMenuPosition(current => current !== undefined
-        && current.top === next.top && current.left === next.left
-        ? current
-        : next)
-    }
-    // Scrolling inside the catalog must not reposition it: only the page
-    // behind the portaled menu moving can change the trigger's viewport edge.
-    const onScroll = (event: Event): void => {
-      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return
-      placeMenu()
-    }
-    window.addEventListener('resize', placeMenu)
-    document.addEventListener('scroll', onScroll, true)
+    document.addEventListener('keydown', dismiss)
     return () => {
-      window.removeEventListener('resize', placeMenu)
-      document.removeEventListener('scroll', onScroll, true)
+      document.removeEventListener('pointerdown', closeOutside)
+      document.removeEventListener('keydown', dismiss)
     }
-  }, [open])
+  }, [shown])
+  useEffect(() => cancelHover, [])
 
-  useEffect(() => () => {
-    cancelHoverOpen()
-    cancelHoverClose()
-  }, [cancelHoverClose, cancelHoverOpen])
-
-  // Visibility needs catalog evidence of children or a failed load worth retrying.
-  // An empty loading catalog is not evidence of children.
-  const visible = presentedCatalog !== undefined
-    && (variant === 'switcher'
-      || presentedCatalog.state === 'error'
-      || presentedCatalog.entries.length > 0)
-  useEffect(() => {
-    if (visible) return
-    cancelHoverOpen()
-    cancelHoverClose()
-    if (!open) return
-    pinnedRef.current = false
-    setOpen(false)
-    setExpanded(new Set())
-  }, [cancelHoverClose, cancelHoverOpen, open, visible])
-
-  if (!visible) return null
-
-  const focusAt = (index: number): void => {
-    const items = treeItems(menuRef.current)
-    if (items.length === 0) return
-    items[(index + items.length) % items.length]?.focus()
+  const hoverIn = (pointerType: string): void => {
+    if (pointerType === 'touch') return
+    cancelHover()
+    if (shown) return
+    hoverTimer.current = setTimeout(() => { setOpen('hover') }, 150)
   }
-
-  const navigate = (event: KeyboardEvent<HTMLDivElement>): void => {
-    const items = treeItems(menuRef.current)
-    const index = items.indexOf(document.activeElement as HTMLElement)
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      changeOpen(false, true)
-    } else if (event.key === 'Home') {
-      event.preventDefault()
-      focusAt(0)
-    } else if (event.key === 'End') {
-      event.preventDefault()
-      focusAt(items.length - 1)
-    } else if (event.key === 'ArrowDown') {
-      event.preventDefault()
-      focusAt(index + 1)
-    } else if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      focusAt(index < 0 ? items.length - 1 : index - 1)
-    }
+  const hoverOut = (): void => {
+    cancelHover()
+    if (open !== 'hover') return
+    hoverTimer.current = setTimeout(() => { setOpen('closed') }, 120)
   }
 
   return (
-    <div
-      className={`${css.root} ${variant === 'switcher' ? css.switcherRoot : ''}`}
-      ref={rootRef}
-      onKeyDown={navigate}
-      onPointerLeave={scheduleHoverClose}
-    >
+    <div className={`${css.root} ${css.switcherRoot}`} ref={rootRef} data-subagent-action onPointerLeave={hoverOut}>
       <button
         ref={triggerRef}
-        onPointerEnter={(event) => {
-          if (event.pointerType !== 'touch') scheduleHoverOpen()
-        }}
+        style={{ anchorName }}
         type="button"
-        className={variant === 'switcher'
-          ? `${css.switcherTrigger} ${ancestorSwitcher ? css.ancestorSwitcherTrigger : ''}`
-          : css.trigger}
-        aria-haspopup="tree"
-        aria-expanded={open}
-        aria-label={variant === 'switcher'
-          ? t('switcher.aria', { title: switcherDisplayTitle })
-          : t(
-            runningCount > 0 ? runningCountKey : totalCountKey,
-            { count: runningCount > 0 ? runningCount : directCount },
-          )}
-        onClick={openTitle === undefined
-          ? () => {
-            cancelHoverOpen()
-            cancelHoverClose()
-            pinnedRef.current = true
-            if (!open) changeOpen(true)
-          }
-          : () => {
-            cancelHoverOpen()
-            if (open) changeOpen(false)
+        className={`${css.switcherTrigger} ${openTitle !== undefined ? css.ancestorSwitcherTrigger : ''}`}
+        aria-haspopup="dialog"
+        aria-expanded={shown}
+        aria-label={t('switcher.aria', { title })}
+        onPointerEnter={(event) => { hoverIn(event.pointerType) }}
+        onClick={() => {
+          cancelHover()
+          if (openTitle !== undefined) {
+            close()
             openTitle()
-          }}
+            return
+          }
+          setOpen('pinned')
+          prepareLevel(rootSessionId)
+          queueMicrotask(() => { menuRef.current?.focus() })
+        }}
         onKeyDown={(event) => {
           if (event.key !== 'ArrowDown') return
           event.preventDefault()
-          if (!open) changeOpen(true)
-          queueMicrotask(() => { focusAt(0) })
+          // The menu may have opened before its rows loaded, leaving focus here; the key then moves it into the menu.
+          const menu = menuRef.current
+          if (shown && menu !== null) {
+            (treeItems(menu)[0] ?? menu).focus()
+            return
+          }
+          setOpen('keyboard')
+          prepareLevel(rootSessionId)
         }}
       >
-        {variant === 'switcher'
-          ? <span className={css.switcherTitle}>{switcherDisplayTitle}</span>
-          : (
-            <>
-              {runningCount > 0 && (
-                <span className={css.activitySlot}>
-                  <StateDot state="ongoing" />
-                </span>
-              )}
-              <span className={css.count}>{t(totalCountKey, { count: directCount })}</span>
-            </>
-          )}
-        {variant === 'switcher'
-          ? <SubagentSwitcherIcon />
-          : <IconChevronDownOutlineRegular className={open ? css.triggerOpen : undefined} />}
+        <span className={css.switcherTitle}>{title}</span>
+        <SubagentSwitcherIcon />
       </button>
-      {open && createPortal((
-        <div
+      {shown && createPortal((
+        <MenuSurface
           ref={menuRef}
           className={css.menu}
-          style={menuPosition}
-          onPointerEnter={(event) => {
-            if (event.pointerType !== 'touch') cancelHoverClose()
+          style={{ positionAnchor: anchorName }}
+          role="dialog"
+          tabIndex={-1}
+          aria-label={t('tree.aria')}
+          data-subagent-panel
+          onKeyDown={(event) => {
+            // A pinned menu takes focus itself; the tree handles keys once a row has focus.
+            if (event.target !== event.currentTarget) return
+            const items = treeItems(event.currentTarget)
+            const row = event.key === 'ArrowDown' || event.key === 'Home' ? items[0]
+              : event.key === 'ArrowUp' || event.key === 'End' ? items.at(-1) : undefined
+            if (row === undefined) return
+            event.preventDefault()
+            row.focus()
           }}
-          onPointerLeave={scheduleHoverClose}
+          onPointerEnter={(event) => { if (event.pointerType !== 'touch') cancelHover() }}
+          onPointerLeave={hoverOut}
         >
-          <div className={css.menuBody} role="tree" aria-label={t('tree.aria')}>
-            <CatalogRows
-              parentSessionId={rootSessionId}
+          <div className={css.menuBody}>
+            <CatalogTree
+              rootSessionId={rootSessionId}
               currentSessionId={currentSessionId}
-              catalog={presentedCatalog}
+              catalog={catalog}
               catalogs={catalogs}
               summaries={summaries}
-              expanded={expanded}
-              level={1}
               openChild={openChild}
               openChildAside={openChildAside}
-              refreshProjection={refreshProjection}
-              toggleBranch={toggleBranch}
-              closeCatalog={closeCatalog}
-              useSessionStatus={useSessionStatus}
+              prepareLevel={prepareLevel}
+              onOpened={() => { close() }}
+              focusFirst={open === 'keyboard'}
               t={t}
             />
           </div>
-        </div>
+        </MenuSurface>
       ), document.body)}
     </div>
   )
 }
 
-/** Full props for the root-session catalog entry in the header actions band. */
-export type SubagentCatalogActionProps =
-  PropsRuntime<'conversation.session.header.actions'> & SubagentCatalogInjected & PropsLocale<typeof NS>
-
 /**
- * Session-header catalog action for root sessions: the descendant count and
- * its dropdown after the preset label in the header actions band. Child sessions render nothing
- * here — their breadcrumb switcher in the lineage slot owns the same
- * navigation.
- * @param props - Session standard props plus the catalog actions and translator.
- * @returns The count dropdown, or null on a child session.
- */
-export function SubagentCatalogAction({
-  sessionId, useSessions, useSessionStatus, openChild, openChildAside, refreshProjection, t,
-}: SubagentCatalogActionProps) {
-  const isChild = useSessions(state => state.byId[sessionId]?.origin === 'subagent')
-  if (isChild) return null
-  return (
-    <CatalogDropdown
-      key={sessionId}
-      rootSessionId={sessionId}
-      variant="count"
-      useSessions={useSessions}
-      useSessionStatus={useSessionStatus}
-      openChild={openChild}
-      openChildAside={openChildAside}
-      refreshProjection={refreshProjection}
-      t={t}
-    />
-  )
-}
-
-/**
- * Render one breadcrumb title together with its subagent navigation.
+ * Render one breadcrumb title together with its sibling switcher. The
+ * Session's own subagents are listed by the Session panel section.
  * @param props - Breadcrumb title, session standard props, and catalog actions.
  * @returns A title-and-chevron sibling switcher, or nothing on a root session.
  */
 export function SubagentHeaderLineage({
   lineageSessionId, displayTitle, openTitle,
-  useSessions, useSession, useSessionStatus, openChild, openChildAside, refreshProjection, t,
+  useSessions, useSession, useSessionStatus, openChild, openChildAside, refreshProjection, prepareCatalog, t,
 }: SubagentHeaderLineageProps) {
   const address = useSession(session => session.subagent?.address)
   const parentId = useSessions((state) => {
@@ -947,29 +225,21 @@ export function SubagentHeaderLineage({
     const summary = state.byId[lineageSessionId]
     return summary?.origin === 'subagent' ? summary.parentId : undefined
   })
-  const shared = { useSessions, useSessionStatus, openChild, openChildAside, refreshProjection, t }
-  // Root sessions carry no breadcrumb; their descendant count lives in the
-  // header actions band (SubagentCatalogAction).
   if (parentId === undefined) return null
   return (
-    <>
-      <CatalogDropdown
-        key={`switcher:${lineageSessionId}`}
-        rootSessionId={parentId}
-        currentSessionId={lineageSessionId}
-        variant="switcher"
-        displayTitle={displayTitle}
-        {...openTitle === undefined ? {} : { openTitle }}
-        {...shared}
-      />
-      {openTitle === undefined && (
-        <CatalogDropdown
-          key={`children:${lineageSessionId}`}
-          rootSessionId={lineageSessionId}
-          variant="count"
-          {...shared}
-        />
-      )}
-    </>
+    <Switcher
+      key={`switcher:${lineageSessionId}`}
+      rootSessionId={parentId}
+      currentSessionId={lineageSessionId}
+      displayTitle={displayTitle}
+      {...openTitle === undefined ? {} : { openTitle }}
+      useSessions={useSessions}
+      useSessionStatus={useSessionStatus}
+      openChild={openChild}
+      openChildAside={openChildAside}
+      refreshProjection={refreshProjection}
+      prepareCatalog={prepareCatalog}
+      t={t}
+    />
   )
 }

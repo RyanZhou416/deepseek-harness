@@ -14,12 +14,14 @@ describe('terminal client artifacts', () => {
     expect(existsSync(terminalPath)).toBe(true)
     const entry = readFileSync(entryPath, 'utf8')
     const terminal = readFileSync(terminalPath, 'utf8')
-    expect([...entry.matchAll(ASYNC_CHUNK)].map(match => match[2])).toEqual(['./client.terminal.js'])
-    expect([...entry.matchAll(SYNC_CHUNK)].map(match => match[2])).toEqual([])
-    expect([...terminal.matchAll(SYNC_CHUNK)].map(match => match[2])).toEqual([])
-    // Minified output drops the `//#region` comments that carried module paths,
-    // so the xterm CSS class bundled with the library marks its chunk instead.
-    expect(entry).not.toContain('xterm-screen')
-    expect(terminal).toContain('xterm-screen')
+    expect([...entry.matchAll(/require\.async\((["'`])(\.\/client[^"'`/]*\.js)\1\)/gu)].map(match => match[2]))
+      .toEqual(['./client.terminal.js'])
+    expect(entry).not.toMatch(/\brequire\((["'`])\.\/client[^"'`/]*\.js\1\)/u)
+    expect([...terminal.matchAll(/require\((["'`])(\.\/client[^"'`/]*\.js)\1\)/gu)].map(match => match[2]))
+      .toEqual([])
+    // Minification drops the module-path comments, so the maps name the bundled inputs.
+    const sources = (path: string): string[] => (JSON.parse(readFileSync(`${path}.map`, 'utf8')) as { sources: string[] }).sources
+    expect(sources(entryPath).some(source => source.includes('/@xterm+xterm@'))).toBe(false)
+    expect(sources(terminalPath).some(source => source.includes('/@xterm+xterm@'))).toBe(true)
   })
 })
