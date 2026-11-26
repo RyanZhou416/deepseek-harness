@@ -134,6 +134,14 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   }
   const captainNames = [...TEAM_TOOL_NAMES].sort()
   const header = async agent => { const assembled = await assemble(agent); return JSON.stringify({ system: renderPrompt(assembled), tools: assembled.tools }) }
+  // 0.2.3-alpha.2 defaults the mounted runtime to the scoped REPL program
+  // format: the tool result carries inspect() output and a trailing value is
+  // dropped. A function-body host returns explicitly. A plain statement
+  // sequence runs in either format.
+  const programOutput = (body, value) => {
+    const format = host.ptcRuntime?.programFormat ?? 'function-body'
+    return format === 'function-body' ? `${body}\nreturn ${value};` : `${body}\ninspect(${value});`
+  }
   // A dedicated Agent with the captain's identity carries one scoped PTC
   // presentation without disturbing the deployment executor of the others.
   const ptcCaptain = async () => {
@@ -248,7 +256,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
           assert.doesNotMatch(sdk, /agent_teams_open/)
           for (const name of TEAM_TOOL_NAMES) assert.ok(sdk.includes(name), name)
           const before = await header(presented)
-          const result = await execute(presented, 'run_code', { code: 'return await tools.agent_teams_status({});', description: 'Read current team state' })
+          const result = await execute(presented, 'run_code', { code: 'await tools.agent_teams_status({})', description: 'Read current team state' })
           assert.equal(result.isError, false, JSON.stringify(result))
           assert.equal(await header(presented), before)
         } finally { await presentation.restore() }
@@ -259,7 +267,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       const presented = presentation.agent
       try {
         const before = await header(presented)
-        const result = await execute(presented, 'run_code', { code: 'await tools.agent_teams_status({}); return "STATUS_OUTPUT_DISCARDED";', description: 'Inspect current team without returning the result' })
+        const result = await execute(presented, 'run_code', { code: programOutput('await tools.agent_teams_status({})', '"STATUS_OUTPUT_DISCARDED"'), description: 'Inspect current team without returning the result' })
         assert.equal(result.isError, false, JSON.stringify(result))
         assert.match(JSON.stringify(result.content), /STATUS_OUTPUT_DISCARDED/)
         assert.doesNotMatch(JSON.stringify(result.content), /attempt_id|captain protocol/)
@@ -324,7 +332,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
         const before = await header(presented)
         for (const name of ['agent_teams_create', 'agent_teams_status', 'agent_teams_delete']) {
           const result = await execute(presented, 'run_code', {
-            code: `return await tools.${name}(${JSON.stringify(args(name))})`,
+            code: `await tools.${name}(${JSON.stringify(args(name))})`,
             description: `Call ${name} through a program`,
           })
           assert.equal(result.isError, false, JSON.stringify(result))

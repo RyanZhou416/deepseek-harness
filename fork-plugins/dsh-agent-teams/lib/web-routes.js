@@ -58,7 +58,15 @@ export async function readJsonRequest(req, maxBytes = 1_000_000) {
     }
     return value;
 }
-/** Raw WebServer routes do not inherit Connection's authentication fence. */
+/**
+ * Require an admitted Connection peer before a raw WebServer route runs.
+ *
+ * Hosts through 0.2.2 do not inherit Connection's authentication fence for raw
+ * routes. 0.2.3-alpha.2 authorizes every registered route itself and defaults
+ * the policy to `required`; the wrapper still applies there so the panel keeps
+ * its own `401`/`403`/`503` JSON reports and one response contract across the
+ * declared generations.
+ */
 export function authenticatedWebRoutes(server, connection) {
     return {
         register(route) {
@@ -68,7 +76,8 @@ export function authenticatedWebRoutes(server, connection) {
                     const gate = connection();
                     // Missing/disposing Connection is an assembly failure, never an
                     // invitation to expose workspace state or accept plan mutations.
-                    const rejection = gate === undefined ? 503 : gate.requestRejection(req);
+                    const admission = gate?.admit(req);
+                    const rejection = admission === undefined ? 503 : 'rejection' in admission ? admission.rejection : undefined;
                     if (rejection !== undefined) {
                         res.writeHead(rejection, {
                             'content-type': 'application/json; charset=utf-8',

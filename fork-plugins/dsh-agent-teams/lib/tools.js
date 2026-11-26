@@ -392,10 +392,13 @@ async function stopTeamMemberActivations(ctx, captain, members, signal) {
     const memberIds = members.filter(member => member.id !== '').map(member => member.id);
     if (memberIds.length === 0)
         return;
-    // Every supported exact host has targeted recursive drain. Unlike interrupt,
-    // it closes admission and clears queued work before awaiting descendants.
+    // Hosts through 0.2.2 close admission for exactly these children and await
+    // their descendants; 0.2.3-alpha.2 only offers a tree-wide drain that would
+    // also stop unrelated delegation under the captain, so that generation
+    // cancels and interrupts each selected child and relies on the member
+    // admission guard.
     signal?.throwIfAborted();
-    await drainMemberChildren(ctx.subagents, captain, memberIds);
+    await drainMemberChildren(ctx, captain, memberIds);
 }
 export async function haltTeamWork(input) {
     const halted = await withTeamLock(teamLockKey(input.stateRoot, input.teamId), async () => {

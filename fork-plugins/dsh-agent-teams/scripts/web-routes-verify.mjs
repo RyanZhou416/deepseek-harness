@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Exercise raw plugin routes through the installed host's browser-auth service. */
+/** Exercise raw plugin routes through the installed host's admission service. */
 import assert from 'node:assert/strict'
 import { createServer, request } from 'node:http'
 import { once } from 'node:events'
@@ -10,11 +10,7 @@ import { authenticatedWebRoutes, readJsonRequest, RequestBodyError } from '../li
 const ctx = new Context()
 const routes = new Map()
 const server = createServer((req, res) => {
-  if (req.url.startsWith('/?token=')) {
-    ctx.connection.authorizeIndex(req, res)
-    return
-  }
-  const route = routes.get(req.url)
+  const route = routes.get(new URL(req.url, 'http://x').pathname)
   if (!route) { res.writeHead(404); res.end(); return }
   Promise.resolve(route.handler(req, res)).catch(() => {
     res.writeHead(500); res.end()
@@ -27,8 +23,8 @@ const webServer = {
     return () => routes.delete(route.path)
   },
 }
-// Only persistence is replaced: actual token exchange, signed cookies,
-// Host/Origin validation, and HTTP requests all use the target implementation.
+// Only persistence is replaced: actual Host/Origin validation, credential
+// verification, and HTTP requests all use the target implementation.
 let credentialRecord
 ctx.provide('credentials', {
   async modifyRecord(_key, update) {
@@ -66,9 +62,27 @@ const routePlugin = {
   },
 }
 
+/** Read one emitted header from either a Fetch Headers or a node header object. */
+function headerValue(headers, name) {
+  if (typeof headers?.get === 'function') return headers.get(name) ?? undefined
+  const value = headers?.[name]
+  return Array.isArray(value) ? value.join('; ') : value
+}
+
 try {
   await installConnection(ctx, {})
   gate = ctx.connection
+  // Host 0.2.3-alpha.2 moved launch-token exchange and cookie signing into
+  // `@deepseek-ai/dsh-host-authentication-token`, which registers itself as an
+  // authentication provider. This script owns the plugin's raw-route gate, not
+  // credential issuance, so a verifier for the test cookie stands in for it.
+  const COOKIE = 'agent-teams-route-verification=1'
+  const peer = gate.createPeer({ principal: { kind: 'owner' } })
+  ctx.connection.authentication.register({
+    authenticate(request) {
+      return headerValue(request.headers, 'cookie')?.includes(COOKIE) === true ? peer : undefined
+    },
+  })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   const base = `http://127.0.0.1:${server.address().port}`
@@ -82,13 +96,9 @@ try {
   }
   assert.equal(calls, 0, 'unauthenticated requests must not read or mutate team state')
 
-  const exchange = await fetch(gate.authenticatedUrl(base), { redirect: 'manual' })
-  assert.equal(exchange.status, 303)
-  const cookie = exchange.headers.getSetCookie().map(value => value.split(';')[0]).join('; ')
-  assert(cookie, 'real Connection must issue a browser cookie')
   for (const path of paths) {
     const response = await fetch(base + path, {
-      method: path.endsWith('/plan') ? 'POST' : 'GET', headers: { cookie, origin: base },
+      method: path.endsWith('/plan') ? 'POST' : 'GET', headers: { cookie: COOKIE, origin: base },
     })
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), { ok: true })
@@ -98,15 +108,15 @@ try {
   assert.equal(unauthenticatedUpload.status, 401, 'authentication runs before parsing request bodies')
   await unauthenticatedUpload.arrayBuffer()
   const oversized = await fetch(base + paths[1], {
-    method: 'POST', headers: { cookie, origin: base }, body: 'x'.repeat(65),
+    method: 'POST', headers: { cookie: COOKIE, origin: base }, body: 'x'.repeat(65),
   })
   assert.equal(oversized.status, 413, 'authorized oversized requests fail before mutating team state')
   await oversized.arrayBuffer()
   assert.equal(calls, 2)
   for (const headers of [
-    { cookie, origin: 'https://untrusted.invalid' },
-    { cookie, 'sec-fetch-site': 'cross-site' },
-    { cookie, host: 'untrusted.invalid' },
+    { cookie: COOKIE, origin: 'https://untrusted.invalid' },
+    { cookie: COOKIE, 'sec-fetch-site': 'cross-site' },
+    { cookie: COOKIE, host: 'untrusted.invalid' },
   ]) {
     // node:http preserves an explicitly hostile Host; Fetch may replace it.
     const status = await new Promise((resolve, reject) => {
@@ -122,7 +132,7 @@ try {
   assert.equal(calls, 2, 'rejected origins must not enter the mutation handler')
 
   gate = undefined
-  const unavailable = await fetch(base + paths[0], { headers: { cookie } })
+  const unavailable = await fetch(base + paths[0], { headers: { cookie: COOKIE } })
   assert.equal(unavailable.status, 503)
   await unavailable.arrayBuffer()
   assert.equal(calls, 2, 'missing Connection must fail closed')
@@ -134,7 +144,7 @@ try {
   await reloaded.inertia
   assert(paths.every(path => routes.has(path)), 'reload restores exactly one registration')
   await reloaded.dispose()
-  console.log('PASS Web routes: real Alpha.2 authentication, bounded bodies, trusted origins, fail-closed startup, disposal and reload')
+  console.log('PASS Web routes: host admission, bounded bodies, trusted origins, fail-closed startup, disposal and reload')
 } finally {
   await ctx.fiber.dispose()
   server.closeAllConnections()

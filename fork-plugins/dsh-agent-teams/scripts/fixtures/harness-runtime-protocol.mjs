@@ -13,6 +13,13 @@ const goal = 'Use AgentTeams to prepare a plan, then wait for my approval.';
 const cases = new Map(), requests = [];
 const model = { provider: 'runtime-lab', id: 'fixture-model', name: 'Protocol compatibility fixture', context: { contextWindow: 262144 }, defaultMaxTokens: 8192, reasoning: { efforts: [{ id: 'low', name: 'low' }], defaultEffort: 'low' } };
 let callSequence = 0;
+// 0.2.3-alpha.2 defaults the mounted runtime to the scoped REPL program format
+// (the value is the last expression); every earlier host evaluates a function
+// body and needs an explicit return.
+let programFormat = 'function-body';
+const program = (body, value) => programFormat === 'function-body' ? `${body}\nreturn ${value};` : `${body}\n${value};`;
+/** A receipt the model sees: a function body returns it, a scoped REPL inspects it. */
+const programOutput = (body, value) => programFormat === 'function-body' ? `${body}\nreturn ${value};` : `${body}\ninspect(${value});`;
 const hash = value => createHash('sha256').update(value).digest('hex');
 function record(value) { appendFileSync(process.env.LAB_TRACE, JSON.stringify(value) + '\n'); }
 function assertProtocol(system) {
@@ -69,18 +76,18 @@ class ProtocolAdapter extends LlmAdapter {
         if (scenario.phase === 'revise') {
             if (scenario.step++ === 0) {
                 const args = { operations: [{ action: 'update_task', task_id: 't1', subject: 'Recovered task' }] };
-                yield* scenario.ptc ? call('run_code', { code: `return await tools.agent_teams_edit_plan(${JSON.stringify(args)});`, description: 'Revise the existing staged task after history compaction' }) : call('agent_teams_edit_plan', args);
+                yield* scenario.ptc ? call('run_code', { code: program('', `await tools.agent_teams_edit_plan(${JSON.stringify(args)})`), description: 'Revise the existing staged task after history compaction' }) : call('agent_teams_edit_plan', args);
             } else yield* textChunks('EXISTING_PLAN_REVISED');
             return;
         }
         if (scenario.phase === 'archive') {
-            if (scenario.step++ === 0) yield* scenario.ptc ? call('run_code', { code: 'return await tools.agent_teams_delete({});', description: 'Archive the team at the user request' }) : call('agent_teams_delete', {});
+            if (scenario.step++ === 0) yield* scenario.ptc ? call('run_code', { code: program('', 'await tools.agent_teams_delete({})'), description: 'Archive the team at the user request' }) : call('agent_teams_delete', {});
             else yield* textChunks('TEAM_ARCHIVED');
             return;
         }
         if (scenario.ptc && scenario.step === 1) {
             scenario.step++;
-            yield* call('run_code', { code: 'await tools.agent_teams_status({}); return "STATUS_OUTPUT_DISCARDED\\n" + "historical-output ".repeat(1000);', description: 'Inspect current team status, retaining only a receipt' });
+            yield* call('run_code', { code: programOutput('await tools.agent_teams_status({})', '"STATUS_OUTPUT_DISCARDED\\n" + "historical-output ".repeat(1000)'), description: 'Inspect current team status, retaining only a receipt' });
             return;
         }
         if (scenario.ptc && scenario.step === 2) {
@@ -97,7 +104,7 @@ class ProtocolAdapter extends LlmAdapter {
         ];
         if (step >= actions.length) { yield* textChunks('STAGED_PLAN_READY'); return; }
         const [name, args] = actions[step];
-        yield* scenario.ptc ? call('run_code', { code: `return await tools.${name}(${JSON.stringify(args)});`, description: 'Build the user-reviewable staged plan' }) : call(name, args);
+        yield* scenario.ptc ? call('run_code', { code: program('', `await tools.${name}(${JSON.stringify(args)})`), description: 'Build the user-reviewable staged plan' }) : call(name, args);
     }
 }
 
@@ -107,6 +114,7 @@ export function apply(ctx) {
     ctx.llm.registerAdapter(['runtime-lab'], new ProtocolAdapter());
     void (async () => {
         await ctx.get('loader').await();
+        programFormat = ctx.get('ptcRuntime')?.programFormat ?? 'function-body';
         const send = async (agent, text) => {
             agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }));
             await agent.whenIdle();

@@ -32,7 +32,7 @@
 
 你只需用自然语言提出目标。插件会提供精简的固定团队协议、14 个业务工具、持久化状态、自动共享任务调度和实时 Web UI，不需要额外的 Workflow 引擎。
 
-> 本 fork 跟进上游 `v0.1.24`，私有版本为适配 DSH `0.2.2-rc.1` 的 `0.1.24-dsh022rc1.1`。真实 Web profile 以 `link:` 指向 `.build/fork-plugins/agent-teams` 的 staging 副本、不安装打包产物，详见 [`../README.zh.md`](../README.zh.md)；下方公开 npm 指令描述的是上游发布渠道。
+> 本 fork 跟进上游 `v0.1.24`，私有版本为适配 DSH `0.2.3-alpha.2` 的 `0.1.24-dsh023a2.1`。真实 Web profile 以 `link:` 指向 `.build/fork-plugins/agent-teams` 的 staging 副本、不安装打包产物，详见 [`../README.zh.md`](../README.zh.md)；下方公开 npm 指令描述的是上游发布渠道。
 
 <p align="center">
   <img src="./assets/readme/workspace.png" width="100%" alt="DeepSeek Harness 对话与 AgentTeams 实时活动面板，展示成员、任务依赖和回报">
@@ -40,7 +40,7 @@
 
 ## 版本更新
 
-[v0.1.24-dsh022rc1.1](./release-notes/v0.1.24-dsh022rc1.1.md) 把 fork 渠道推进到 Harness `0.2.2-rc.1`：成员路由改为跟随宿主按 Agent 持有的模型选择，请求失败后接受的备用路由从成员下一步开始生效。发布渠道为 npm `dsh022rc1`（预发布）；安装前请在 [npm 版本列表](https://www.npmjs.com/package/@nanmicoder/dsh-agent-teams?activeTab=versions) 确认发布状态。精确范围见 [compatibility.json](./compatibility.json)，验收范围见[迁移记录](./docs/harness-0.2.2-rc.1/README.md)。
+[v0.1.24-dsh023a2.1](./release-notes/v0.1.24-dsh023a2.1.md) 把 fork 渠道推进到 Harness `0.2.3-alpha.2`：成员按扁平激活参数、经宿主的 AgentTeams 成员入口创建，用户全局的子代理模型覆盖不会改写成员路由；停止成员也不再依赖宿主的树级 drain。发布渠道为 npm `dsh023a2`（预发布）；安装前请在 [npm 版本列表](https://www.npmjs.com/package/@nanmicoder/dsh-agent-teams?activeTab=versions) 确认发布状态。精确范围见 [compatibility.json](./compatibility.json)，验收范围见[迁移记录](./docs/harness-0.2.3-alpha.2/README.md)。
 
 ## 为什么需要 AgentTeams？
 
@@ -58,23 +58,23 @@
 
 ## 安装与版本选择
 
-**推荐组合：DeepSeek Harness `0.2.2-rc.1` + AgentTeams `0.1.24-dsh022rc1.1`。宿主仍为 RC 版本。**
+**推荐组合：DeepSeek Harness `0.2.2-rc.1` + AgentTeams `0.1.24-dsh023a2.1`。宿主仍为 RC 版本。**
 
 | 使用场景 | DeepSeek Harness | AgentTeams 插件 |
 | --- | --- | --- |
-| **推荐版本** | **`0.2.2-rc.1`** | **`0.1.24-dsh022rc1.1`** |
-| 上一推荐 RC | `0.2.1-rc.2`, `0.2.0-rc.2`, `0.1.7-rc.2` | `0.1.24-dsh022rc1.1` |
-| 保留旧 RC | `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.5-rc.3` | `0.1.24-dsh022rc1.1` |
-| 保留旧 RC | `0.1.2-rc.1` | `0.1.24-dsh022rc1.1` |
-| 开发者测试 Alpha | `0.1.2-alpha.5` | `0.1.24-dsh022rc1.1` |
-| 保留旧 Alpha | `0.1.2-alpha.2` | `0.1.24-dsh022rc1.1` |
+| **推荐版本** | **`0.2.2-rc.1`** | **`0.1.24-dsh023a2.1`** |
+| 上一推荐 RC | `0.2.1-rc.2`, `0.2.0-rc.2`, `0.1.7-rc.2` | `0.1.24-dsh023a2.1` |
+| 保留旧 RC | `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.5-rc.3` | `0.1.24-dsh023a2.1` |
+| 保留旧 RC | `0.1.2-rc.1` | `0.1.24-dsh023a2.1` |
+| 开发者测试 Alpha | `0.1.2-alpha.5` | `0.1.24-dsh023a2.1` |
+| 保留旧 Alpha | `0.1.2-alpha.2` | `0.1.24-dsh023a2.1` |
 
 ### 桌面端
 
 在应用侧栏打开「插件 → 添加插件」，输入 npm 包名和版本：
 
 ```text
-@nanmicoder/dsh-agent-teams@0.1.24-dsh022rc1.1
+@nanmicoder/dsh-agent-teams@0.1.24-dsh023a2.1
 ```
 
 安装完成后点击「立即启用」；宿主提示需要重启时，重启桌面应用。发布版请使用上面的包名，npm 或 GitHub 网页链接与 npm 包名不是同一种安装来源。从 Git 安装时，请选用包含下方所述已验证构建产物的提交。
@@ -95,7 +95,7 @@ dsh --version
 此版本发布后，从 npm 安装或升级插件（锁定精确预发布版本）：
 
 ```sh
-dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.24-dsh022rc1.1
+dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.24-dsh023a2.1
 ```
 
 CLI 管理的安装可将 `web` 换成实际使用的 CLI profile。**安装后，停止并重新启动该 profile 的 Harness 进程，再刷新浏览器。** 安装插件不会自动升级宿主；Harness 的 `latest` 与插件的 `latest` 是两个独立渠道。

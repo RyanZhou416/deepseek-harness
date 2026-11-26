@@ -766,7 +766,11 @@ export async function spawnMember(ctx, config, selections, llmSelection, captain
     // mirror what startContinuable would reject, with an actionable error.
     const provider = ctx.subagents.getProvider(config.provider);
     if (provider === undefined) {
-        throw new Error(`agent-teams: no subagent provider "${config.provider}" is registered (available: ${ctx.subagents.list().join(', ') || 'none'}) — `
+        // 0.2.3-alpha.2 publishes no provider enumeration; older hosts still name
+        // the registered providers in this diagnostic.
+        const list = ctx.subagents.list;
+        const available = typeof list === 'function' ? ` (available: ${list.call(ctx.subagents).join(', ') || 'none'})` : '';
+        throw new Error(`agent-teams: no subagent provider "${config.provider}" is registered${available} — `
             + 'check that the subagent provider row (e.g. subagent-spawn) is mounted in the composition');
     }
     if (provider.prepareContinuable === undefined) {

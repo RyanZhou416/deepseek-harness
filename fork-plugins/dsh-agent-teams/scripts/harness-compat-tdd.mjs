@@ -44,6 +44,24 @@ function modernRuntime() {
 }
 
 /**
+ * Install the host's `dsh.subagent.deliverPrompt` adapter on a runtime whose
+ * package no longer ships it. The fork host restores that adapter in
+ * `packages/subagent/subagent/src/internal.ts` (upstream removed the module in
+ * 0.2.3-alpha.2); this mirrors `startHostAgentTeamsMember`'s symbol protocol so
+ * the receiver, guard, and queue/steer wiring run against the real service.
+ */
+function installHostDeliveryAdapter(runtime) {
+  if (typeof runtime[deliverKey] === 'function') return
+  Object.defineProperty(runtime, deliverKey, {
+    configurable: true,
+    writable: true,
+    value: async function (parent, childId, body, provenance, cancel, delivery) {
+      return this.manager.deliverPrompt(childId, body, { parent, source: provenance, signal: cancel, delivery })
+    },
+  })
+}
+
+/**
  * Fake child Agent.
  *
  * The installed Harness owns model selection on each Agent (`Agent.model`): the
@@ -129,6 +147,11 @@ await test('native SubagentRuntime keeps its receiver through FIFO delivery and 
       accepted.push({ path: 'queue', parent, id, body, source: provenance })
       return 'accepted'
     },
+    async deliverPrompt(id, body, options) {
+      assert.equal(this, manager)
+      accepted.push({ path: options.delivery, parent: options.parent, id, body, source: options.source })
+      return 'accepted'
+    },
     async sendMessage(parent, id, body) {
       assert.equal(this, manager)
       accepted.push({ path: 'steer', parent, id, body })
@@ -139,6 +162,7 @@ await test('native SubagentRuntime keeps its receiver through FIFO delivery and 
   // service method still executes this.requireContinuations(), unlike old fakes.
   if (typeof runtime.startActivation === 'function') runtime.manager = manager
   else runtime.continuations = manager
+  installHostDeliveryAdapter(runtime)
   const captain = { id: 'captain', session: { header: {} } }
   const ctx = scope({ subagents: runtime })
   const methodKey = typeof runtime.followup === 'function' ? 'followup' : typeof runtime[deliverKey] === 'function' ? deliverKey : queueKey
@@ -450,21 +474,95 @@ await test('managed activations restore scoped persona and tools before fresh an
 await test('managed start strips retired options and guards native activation creation', async () => {
   const { startMember, guardSubagentCreation, drainMemberChildren } = await import('../lib/harness-compat.js')
   let received, drained
-  const runtime = {
-    async startActivation(spec) { assert.equal(this, runtime); received = spec; return { childId: 'child', result: Promise.resolve({}) } },
-    async drainChildren(parent, ids) { assert.equal(this, runtime); drained = ids },
+  const nested = {
+    async startActivation(spec) { assert.equal(this, nested); received = spec; return { childId: 'child', result: Promise.resolve({}) } },
+    async drainChildren(parent, ids) { assert.equal(this, nested); drained = ids },
   }
-  const ctx = scope({ subagents: runtime })
+  const ctx = scope({ subagents: nested })
   guardSubagentCreation(ctx, parent => { if (parent.id === 'member') throw Error('depth exceeded') })
   const spec = { provider: 'spawn', label: 'worker', signal, request: { parent: { id: 'captain' }, prompt: content, persona: 'role', toolFilter: { deny: [] } } }
-  assert.equal((await startMember(runtime, spec)).childId, 'child')
+  assert.equal((await startMember(nested, spec)).childId, 'child')
   assert.equal(received.delivery, 'parent')
   assert.ok(!('persona' in received.request)); assert.ok(!('toolFilter' in received.request))
-  await assert.rejects(runtime.startActivation({ ...spec, request: { ...spec.request, parent: { id: 'member' } } }), /depth exceeded/)
-  await drainMemberChildren(runtime, spec.request.parent, ['child'])
+  await assert.rejects(nested.startActivation({ ...spec, request: { ...spec.request, parent: { id: 'member' } } }), /depth exceeded/)
+  await drainMemberChildren(ctx, spec.request.parent, ['child'])
   assert.deepEqual(drained, ['child'])
   ctx.dispose()
-  await runtime.startActivation({ ...spec, request: { ...spec.request, parent: { id: 'member' } } })
+  // The targeted drain stays authoritative wherever the host publishes one.
+  await nested.startActivation({ ...spec, request: { ...spec.request, parent: { id: 'member' } } })
+})
+
+await test('0.2.3-alpha.2 flat activation keeps the top-level request and its member route', async () => {
+  const { startMember, guardSubagentCreation, usesManagedActivations } = await import('../lib/harness-compat.js')
+  let received
+  const flat = {
+    async startActivation(spec) {
+      assert.equal(this, flat); received = spec
+      return { childId: 'child', name: 'worker', result: Promise.resolve({ stopReason: 'completed' }) }
+    },
+  }
+  const activation = await startMember(flat, {
+    provider: 'spawn', label: 'worker', signal,
+    request: { parent: { id: 'captain' }, prompt: content, persona: 'role', toolFilter: { deny: [] } },
+  })
+  assert.equal(activation.childId, 'child')
+  // 0.2.3-alpha.2 reads the flattened task fields; the nested request stays for
+  // the 0.2.2 generation and carries no retired option.
+  assert.equal(received.provider, 'spawn')
+  assert.equal(received.label, 'worker')
+  assert.equal(received.delivery, 'parent')
+  assert.equal(received.parent.id, 'captain')
+  assert.deepEqual(received.prompt, content)
+  assert.ok(!('persona' in received)); assert.ok(!('toolFilter' in received))
+  assert.ok(!('persona' in received.request)); assert.ok(!('toolFilter' in received.request))
+  assert.equal(usesManagedActivations(flat), true)
+  const ctx = scope({ subagents: flat })
+  guardSubagentCreation(ctx, parent => { if (parent.id === 'member') throw Error('depth exceeded') })
+  await assert.rejects(flat.startActivation({ provider: 'spawn', label: 'nested', delivery: 'parent', signal, parent: { id: 'member' }, prompt: content }), /depth exceeded/)
+  ctx.dispose()
+})
+
+await test('0.2.3-alpha.2 AgentTeams entry creates members outside the subagent model override', async () => {
+  const { startMember, usesManagedActivations } = await import('../lib/harness-compat.js')
+  const startAgentTeamsMember = Symbol.for('dsh.subagent.startAgentTeamsMember')
+  let received, plainCalls = 0
+  const runtime = {
+    async startActivation() { plainCalls += 1; throw Error('ordinary creation must not create members') },
+    async [startAgentTeamsMember](spec) {
+      assert.equal(this, runtime); received = spec
+      return { childId: 'member', name: 'worker', result: Promise.reject(Error('member turn failed')) }
+    },
+  }
+  const activation = await startMember(runtime, {
+    provider: 'spawn', label: 'team:worker', signal,
+    request: { parent: { id: 'captain' }, prompt: content, agentOptions: { provider: 'primary', model: 'pinned' } },
+  })
+  assert.equal(activation.childId, 'member')
+  assert.equal(activation.name, 'worker')
+  assert.equal(plainCalls, 0, 'the AgentTeams entry owns member creation')
+  assert.equal(received.provider, 'spawn')
+  assert.equal(received.label, 'team:worker')
+  assert.equal(received.delivery, 'parent')
+  assert.equal(received.parent.id, 'captain')
+  assert.deepEqual(received.agentOptions, { provider: 'primary', model: 'pinned' })
+  assert.deepEqual(received.prompt, content)
+  assert.equal(usesManagedActivations(runtime), true)
+  // The member's native settlement is the fallback; its rejection must not leak.
+  await new Promise(resolve => setTimeout(resolve, 0))
+})
+
+await test('a host without a targeted drain cancels and interrupts exactly the selected members', async () => {
+  const { drainMemberChildren } = await import('../lib/harness-compat.js')
+  const interrupted = [], cancelled = []
+  const member = (id) => ({ id, cancel(cause) { cancelled.push([id, cause.kind]) } })
+  const runtime = {
+    interrupt(id, authority) { assert.equal(this, runtime); interrupted.push([id, authority.kind]) },
+    drainDescendants() { throw Error('a tree-wide drain would also stop unrelated delegation') },
+  }
+  const ctx = scope({ subagents: runtime, agents: { list: () => [], get: id => member(id) } })
+  await drainMemberChildren(ctx, { id: 'captain' }, ['one', 'two', 'one'])
+  assert.deepEqual(cancelled, [['one', 'user'], ['two', 'user']])
+  assert.deepEqual(interrupted, [['one', 'user'], ['two', 'user']])
 })
 
 await test('managed cold resume rejects missing setup and fresh failed persona rolls back tool scope', async t => {

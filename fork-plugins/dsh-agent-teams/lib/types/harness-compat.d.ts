@@ -1,11 +1,14 @@
 /**
- * The audited Harness 0.1.2 / 0.1.5 / 0.1.7 subagent boundary. Keep version-specific shapes
+ * The audited Harness 0.1.2 / 0.1.5 / 0.1.7 / 0.2.x subagent boundary. Keep version-specific shapes
  * here: API presence alone is not a promise of support for future versions.
  *
  * Alpha.2 owns followup/registerContinuableSetup; Alpha.5 and rc.1 own a
- * host-only FIFO queue; 0.1.5 uses a queue/steer deliverer. Both emit
- * synchronous agent/session-start with the explicit Agent. Their public
- * sendMessage instead steers a running Agent and must never carry team jobs.
+ * host-only FIFO queue; 0.1.5 uses a queue/steer deliverer. 0.2.2 nests the
+ * activation request and drains selected children; 0.2.3-alpha.2 flattens the
+ * activation request, replaces the targeted drain with a tree-wide one, and
+ * exposes the AgentTeams member entry that keeps the member route.
+ * Both emit synchronous agent/session-start with the explicit Agent. Their
+ * public sendMessage instead steers a running Agent and must never carry team jobs.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { type Agent, type AgentOptions, type ModelSelection } from '@deepseek-ai/dsh-agent';
@@ -200,6 +203,23 @@ export declare function memberToolFilter(maxDepth: number | undefined, knownTool
  * @returns the started member.
  */
 export declare function startMemberWithLenientFilter<T>(start: (filter: MemberToolFilter) => Promise<T>, filter: MemberToolFilter, relaxableDeny?: readonly string[]): Promise<T>;
-/** Targeted recursive cancellation renamed with the unified activation manager. */
-export declare function drainMemberChildren(runtime: Context['subagents'], parent: Agent, ids: readonly SessionId[]): Promise<void>;
+/**
+ * Stop the selected member activations.
+ *
+ * 0.2.2 and earlier expose a targeted drain that closes admission for exactly
+ * those children and awaits their descendants. 0.2.3-alpha.2 replaced it with a
+ * tree-wide drain whose admission cutoff lasts until the parent leaves the
+ * registry, so draining the captain would also stop unrelated delegation and
+ * block every later spawn of that session. On that generation each selected
+ * child is cancelled and interrupted instead: the cancel clears the member's
+ * queued work, the interrupt releases the host execution, and the host disposes
+ * the activation once the child reaches idle. The plugin's own per-step
+ * admission check and retired-id delivery guard already reject every later turn
+ * of a stopped member, and the durable task attempt is invalidated before this
+ * call.
+ * @param ctx - the plugin context (injects `subagents` and `agents`).
+ * @param parent - the exact live parent agent of the members.
+ * @param ids - child session ids to stop.
+ */
+export declare function drainMemberChildren(ctx: Context, parent: Agent, ids: readonly SessionId[]): Promise<void>;
 export {};

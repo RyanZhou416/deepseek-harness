@@ -10,11 +10,30 @@ const fixture = (version, tag) => ({
   version,
   publishConfig: { ...checkedIn.publishConfig, tag },
 })
+// A stable `latest` release must be cut from the recommended host, which is not
+// the checked-in preview baseline; move the whole development cohort there.
+const recommendCohort = (version) => {
+  const candidate = fixture(version, 'latest')
+  for (const name of Object.keys(candidate.devDependencies)) {
+    if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) {
+      candidate.devDependencies[name] = policy.recommendedHost
+    }
+  }
+  const workspace = structuredClone(workspacePolicy)
+  for (const name of Object.keys(workspace.overrides)) {
+    if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) {
+      workspace.overrides[name] = policy.recommendedHost
+    }
+  }
+  return { candidate, workspace }
+}
 
 test('stable latest requires the exact recommended host cohort', () => {
-  assert.deepEqual(releaseMetadata(fixture('0.1.16', 'latest')), {
+  const recommended = recommendCohort('0.1.16')
+  assert.deepEqual(releaseMetadata(recommended.candidate, policy, recommended.workspace), {
     value: '0.1.16', dist_tag: 'latest', prerelease: false,
   })
+  assert.throws(() => releaseMetadata(fixture('0.1.16', 'latest')), /recommended host/)
   const alphaOnly = fixture('0.1.16', 'latest')
   for (const name of Object.keys(alphaOnly.devDependencies)) {
     if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) alphaOnly.devDependencies[name] = '0.1.2-alpha.2'

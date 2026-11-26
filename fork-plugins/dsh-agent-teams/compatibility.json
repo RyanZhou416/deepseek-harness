@@ -4,6 +4,10 @@
   "previewTag": "next",
   "supportedHosts": [
     {
+      "version": "0.2.3-alpha.2",
+      "track": "preview"
+    },
+    {
       "version": "0.2.2-rc.1",
       "track": "recommended"
     },

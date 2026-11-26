@@ -1,11 +1,14 @@
 /**
- * The audited Harness 0.1.2 / 0.1.5 / 0.1.7 subagent boundary. Keep version-specific shapes
+ * The audited Harness 0.1.2 / 0.1.5 / 0.1.7 / 0.2.x subagent boundary. Keep version-specific shapes
  * here: API presence alone is not a promise of support for future versions.
  *
  * Alpha.2 owns followup/registerContinuableSetup; Alpha.5 and rc.1 own a
- * host-only FIFO queue; 0.1.5 uses a queue/steer deliverer. Both emit
- * synchronous agent/session-start with the explicit Agent. Their public
- * sendMessage instead steers a running Agent and must never carry team jobs.
+ * host-only FIFO queue; 0.1.5 uses a queue/steer deliverer. 0.2.2 nests the
+ * activation request and drains selected children; 0.2.3-alpha.2 flattens the
+ * activation request, replaces the targeted drain with a tree-wide one, and
+ * exposes the AgentTeams member entry that keeps the member route.
+ * Both emit synchronous agent/session-start with the explicit Agent. Their
+ * public sendMessage instead steers a running Agent and must never carry team jobs.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentOptions, type ModelSelection } from '@deepseek-ai/dsh-agent'
@@ -56,25 +59,74 @@ export interface MemberStartSpec {
   }
   signal: AbortSignal
 }
+/**
+ * AgentTeams-specific member creation entry the 0.2.3-alpha.2 host exposes from
+ * its unbundled internal module. Member routes are a user-declared exception to
+ * the global subagent model override, and only this entry skips that override,
+ * so member creation must not fall back to `startActivation` when it exists.
+ */
+const startAgentTeamsMember = Symbol.for('dsh.subagent.startAgentTeamsMember')
+/** Flat task fields of the 0.2.3-alpha.2 activation request. */
+interface MemberTaskRequest {
+  parent: Agent
+  prompt: ContentBlock[]
+  agentOptions?: AgentOptions
+}
+/** Flat activation spec the 0.2.3-alpha.2 host accepts. */
+interface FlatActivationSpec extends MemberTaskRequest {
+  provider: string
+  label: string
+  delivery: 'parent'
+  signal: AbortSignal
+}
+/** Activation request of the 0.2.2 generation, which nests the task fields. */
+interface NestedActivationSpec extends FlatActivationSpec {
+  request: MemberTaskRequest
+}
+interface StartedActivation {
+  childId: SessionId
+  result: Promise<unknown>
+}
 interface CreationBoundary {
   start?: (name: string, request: MemberStartSpec['request']) => Promise<unknown>
   startContinuable?: (spec: MemberStartSpec) => Promise<{ childId: SessionId }>
-  startActivation?: (spec: MemberStartSpec & { delivery: 'parent' }) => Promise<{
-    childId: SessionId
-    result: Promise<unknown>
-  }>
+  startActivation?: (spec: NestedActivationSpec) => Promise<StartedActivation>
+}
+/**
+ * The host's AgentTeams member creation, bound to the service, when this host
+ * generation provides it. Presence is the generation test: 0.2.2 and earlier
+ * have no such entry and create members through `startActivation`.
+ */
+function agentTeamsMemberCreator(runtime: Context['subagents']): ((spec: FlatActivationSpec) => Promise<StartedActivation>) | undefined {
+  const start = Reflect.get(runtime, startAgentTeamsMember) as unknown
+  if (typeof start !== 'function') return undefined
+  return spec => (start as (spec: FlatActivationSpec) => Promise<StartedActivation>).call(runtime, spec)
 }
 export function usesManagedActivations(runtime: Context['subagents']): boolean {
   return typeof (runtime as unknown as CreationBoundary).startActivation === 'function'
+    || agentTeamsMemberCreator(runtime) !== undefined
 }
 
 export async function startMember(runtime: Context['subagents'], spec: MemberStartSpec): Promise<{ childId: SessionId }> {
-  const host = runtime as unknown as CreationBoundary
-  if (typeof host.startActivation === 'function') {
-    const { persona: _persona, toolFilter: _filter, ...request } = spec.request
-    const activation = await host.startActivation.call(runtime, { ...spec, request, delivery: 'parent' })
+  const { persona: _persona, toolFilter: _filter, ...request } = spec.request
+  const createMember = agentTeamsMemberCreator(runtime)
+  if (createMember !== undefined) {
+    // The AgentTeams entry is the only creation path that neither applies the
+    // user's subagent model override nor needs the nested request.
+    const activation = await createMember({ ...request, provider: spec.provider, label: spec.label, delivery: 'parent', signal: spec.signal })
     // Preserve native settlement as the missing-report/error fallback on both
     // fresh and resumed activations. mailbox.ts deduplicates successful reports.
+    void activation.result.catch(() => undefined)
+    return activation
+  }
+  const host = runtime as unknown as CreationBoundary
+  if (typeof host.startActivation === 'function') {
+    // A host without that entry is either the 0.2.2 generation, which reads the
+    // nested `request`, or 0.2.3-alpha.2 without the entry (an upstream build),
+    // which reads the flattened top-level task fields. Both ignore the fields
+    // they do not use, so one spec serves either generation: persona and
+    // toolFilter stay behind at the 0.2.1-and-earlier creation seam.
+    const activation = await host.startActivation.call(runtime, { ...spec, ...request, request, delivery: 'parent' })
     void activation.result.catch(() => undefined)
     return activation
   }
@@ -92,8 +144,11 @@ export function guardSubagentCreation(ctx: Context, check: (parent: Agent) => vo
       if (typeof original !== 'function') continue
       const descriptor = Object.getOwnPropertyDescriptor(runtime, key)
       const guarded = async (...args: unknown[]): Promise<unknown> => {
-        const request = key === 'start' ? args[1] : (args[0] as MemberStartSpec).request
-        check((request as MemberStartSpec['request']).parent)
+        // `start` takes the request second; both activation generations carry the
+        // task fields at the top level once 0.2.3-alpha.2 flattens the spec.
+        const spec = (key === 'start' ? args[1] : args[0]) as { parent?: Agent; request?: { parent?: Agent } } | undefined
+        const parent = spec?.request?.parent ?? spec?.parent
+        if (parent !== undefined) check(parent)
         return Reflect.apply(original, ctx.subagents, args)
       }
       Object.defineProperty(runtime, key, { value: guarded, writable: true, configurable: true })
@@ -571,13 +626,39 @@ export async function startMemberWithLenientFilter<T>(
   }
 }
 
-/** Targeted recursive cancellation renamed with the unified activation manager. */
-export async function drainMemberChildren(runtime: Context['subagents'], parent: Agent, ids: readonly SessionId[]): Promise<void> {
+/**
+ * Stop the selected member activations.
+ *
+ * 0.2.2 and earlier expose a targeted drain that closes admission for exactly
+ * those children and awaits their descendants. 0.2.3-alpha.2 replaced it with a
+ * tree-wide drain whose admission cutoff lasts until the parent leaves the
+ * registry, so draining the captain would also stop unrelated delegation and
+ * block every later spawn of that session. On that generation each selected
+ * child is cancelled and interrupted instead: the cancel clears the member's
+ * queued work, the interrupt releases the host execution, and the host disposes
+ * the activation once the child reaches idle. The plugin's own per-step
+ * admission check and retired-id delivery guard already reject every later turn
+ * of a stopped member, and the durable task attempt is invalidated before this
+ * call.
+ * @param ctx - the plugin context (injects `subagents` and `agents`).
+ * @param parent - the exact live parent agent of the members.
+ * @param ids - child session ids to stop.
+ */
+export async function drainMemberChildren(ctx: Context, parent: Agent, ids: readonly SessionId[]): Promise<void> {
+  const runtime = ctx.subagents
   const host = runtime as unknown as {
     drainChildren?: (parent: Agent, ids: readonly SessionId[]) => Promise<void>
     drainContinuableChildren?: (parent: Agent, ids: readonly SessionId[]) => Promise<void>
+    interrupt?: (targetId: SessionId, authority: { kind: 'user' }) => void
   }
   const drain = host.drainChildren ?? host.drainContinuableChildren
-  if (typeof drain !== 'function') return unsupported('missing targeted child drain')
-  await drain.call(runtime, parent, ids)
+  if (typeof drain === 'function') {
+    await drain.call(runtime, parent, ids)
+    return
+  }
+  if (typeof host.interrupt !== 'function') return unsupported('missing targeted child drain')
+  for (const id of new Set(ids)) {
+    ctx.agents.get(id)?.cancel({ kind: 'user' })
+    host.interrupt.call(runtime, id, { kind: 'user' })
+  }
 }

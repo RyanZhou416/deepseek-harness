@@ -142,7 +142,13 @@ export function apply(ctx) {
     await assertMemberDenied('cold');
     record({ event: 'stability-reassign-passed', sameMember: true, staleInputExcluded: true });
     const liveWorker = ctx.agents.get(workerId);
-    const start = (parent, label) => (ctx.subagents.startActivation ?? ctx.subagents.startContinuable).call(ctx.subagents, { delivery: 'caller', provider: 'spawn', label, request: { parent, prompt: [{ type: 'text', text: label }], maxDepth: 3, agentOptions: { provider: 'runtime-lab', model: 'fixture-model' } }, signal: new AbortController().signal });
+    // Host generations differ in where the activation request sits: 0.2.3-alpha.2
+    // reads the flattened task fields, 0.2.2 reads the nested request. Both
+    // ignore the fields they do not use, so one spec serves either.
+    const start = (parent, label) => {
+      const task = { parent, prompt: [{ type: 'text', text: label }], maxDepth: 3, agentOptions: { provider: 'runtime-lab', model: 'fixture-model' } };
+      return (ctx.subagents.startActivation ?? ctx.subagents.startContinuable).call(ctx.subagents, { delivery: 'caller', provider: 'spawn', label, ...task, request: task, signal: new AbortController().signal });
+    };
     const grandchild = await start(liveWorker, 'historical-nested-branch');
     const sibling = await start(captain.agent, 'unrelated-sibling');
     await until(() => gates.has(grandchild.childId) && gates.has(sibling.childId), 'concurrent independent branches');
@@ -152,8 +158,16 @@ export function apply(ctx) {
     await run(cmd('delete'));
     assert.equal(existsSync(file), false);
     assert.ok(existsSync(join(root, 'archive/stability/team.json')));
-    assert.equal(ctx.agents.get(workerId), undefined);
-    assert.equal(ctx.agents.get(grandchild.childId), undefined);
+    const drainsSelectedChildren = typeof ctx.subagents.drainChildren === 'function' || typeof ctx.subagents.drainContinuableChildren === 'function';
+    if (drainsSelectedChildren) {
+      assert.equal(ctx.agents.get(workerId), undefined);
+      assert.equal(ctx.agents.get(grandchild.childId), undefined);
+    } else {
+      // 0.2.3-alpha.2 stops the selected members by cancelling and interrupting
+      // them; the host disposes each activation once its child reaches idle.
+      await until(() => ctx.agents.get(workerId) === undefined, 'stopped member settles');
+      await until(() => ctx.agents.get(grandchild.childId) === undefined, 'stopped member descendants settle');
+    }
     assert.equal(liveWorker.inbox.nextTurn.length + liveWorker.inbox.nextStep.length, 0);
     assert.equal(grandAgent.inbox.nextTurn.length + grandAgent.inbox.nextStep.length, 0);
     assert.equal(siblingAgent.status, 'running', 'unrelated sibling must survive selected teardown');
@@ -163,7 +177,13 @@ export function apply(ctx) {
       : typeof runtime[Symbol.for('dsh.subagent.deliverPrompt')] === 'function' ? runtime[Symbol.for('dsh.subagent.deliverPrompt')](captain.agent, workerId, content, { kind: 'user' }, signal, 'queue')
       : runtime[Symbol.for('dsh.subagent.queuePrompt')](captain.agent, workerId, content, { kind: 'user' }, signal), /retired/);
     assert.equal(requests.filter(r => r.sessionId !== captainId && r.sessionId !== sibling.childId).length, callsBefore);
-    await (ctx.subagents.drainChildren ?? ctx.subagents.drainContinuableChildren).call(ctx.subagents, captain.agent, [sibling.childId]);
+    if (drainsSelectedChildren) {
+      await (ctx.subagents.drainChildren ?? ctx.subagents.drainContinuableChildren).call(ctx.subagents, captain.agent, [sibling.childId]);
+    } else {
+      siblingAgent.cancel({ kind: 'user' });
+      ctx.subagents.interrupt(sibling.childId, { kind: 'user' });
+      await until(() => ctx.agents.get(sibling.childId) === undefined, 'unrelated sibling stopped for cleanup');
+    }
     await captain.agent.whenIdle();
     record({ event: 'stability-archive-passed', pendingMessagesCleared: 32, descendantsStopped: true, siblingPreserved: true, retiredResumeRejected: true });
     const beforeBatchRequests = requests.filter(r => r.sessionId !== captainId).length;
