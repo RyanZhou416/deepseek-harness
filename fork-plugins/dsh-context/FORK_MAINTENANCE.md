@@ -89,6 +89,12 @@ The build precedes the suite because `tests/host/foldWorkerBuilt.spec.ts` loads 
 
 `tests/host/detail-cold.spec.ts` pins the stored-session detail rungs: a head read costs one metadata stat and no log read, a missing cached head or malformed header serves null, the bounded window is marked `partial` and a complete window is not, `full: true` folds the whole log once and replays it by revision, and cancellation answers the aborted envelope. `tests/host/headViews.spec.ts` pins the live-snapshot and degraded head-view reads. `tests/host/model-pricing.spec.ts` and `tests/shared/modelPricing.spec.ts` pin the `long` bucket and the reference table, `tests/host/cost.spec.ts` pins reference pricing with a cold catalogue and the long price tag, and `tests/client/components/statsContext.spec.ts` pins the dated disclosure and long-context tag. `tests/client/agentHeads.spec.ts` pins the head views and the activity-keyed cache. The compat matrix runs when `DSH_REPO` names a DeepSeek Harness checkout carrying the `dsh-v0.2.0-rc.2`, `dsh-v0.2.1-rc.2`, `dsh-v0.2.2-rc.1`, `dsh-v0.2.2-rc.3`, and `dsh-v0.2.3-alpha.2` tags; per baseline it stages that tag's real sources (synthesizing the `FiberState` object the published cordis erases from its `const enum`), boots the BUILT plugin into the tag's registry, and probes the host and client seams. Its first run per baseline installs that tag's cordis and session packages into `.tmp/compat`, so pre-install them if a cold run exceeds the hook timeout. Store the packed artifact's uppercase SHA-256 beside it and inspect the tarball manifest and its embedded `package.json` version before installation.
 
+## Untracked upstream demo video
+
+Upstream ships `docs/video/dsh-context-demo-video.mp4` (109 MB). GitHub rejects any pushed file above 100 MB, so this fork does not track it: `.gitignore` excludes `docs/video/`, the file stays on disk in the working copy, and the commit that imported upstream v0.87.2 was rewritten before the first push to drop it. No source or document references the video.
+
+**Preservation rule.** Keep `docs/video/` ignored; an upstream update must not re-add the video to the index.
+
 ## Updating upstream
 
 Confirm the repository worktree contains no unrelated changes, then import a reviewed upstream tag through the existing subtree:

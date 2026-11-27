@@ -44,3 +44,6 @@ yarn-error.log*
 .env.local
 # macOS Finder metadata
 .DS_Store
+
+# Upstream demo video (109 MB): above GitHub's 100 MB file limit, kept on disk only.
+docs/video/
