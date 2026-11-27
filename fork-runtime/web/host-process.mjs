@@ -18,8 +18,20 @@
 // SeDebugPrivilege (an administrator Task Manager or terminal) still can. The
 // owner keeps WRITE_DAC, so code that deliberately rewrites the DACL can undo
 // the entry: this guards against accidental kills, not against hostile code.
+//
+// Exit evidence (all platforms, Windows signals only on Windows): when
+// DSH_DIAGNOSTICS is set (run.cmd sets it), the Host appends one line per
+// lifecycle fact to host-exits.log there: its start and launcher pid, its exit
+// code, a closed console (SIGHUP), a Ctrl+Break (SIGBREAK), and its launcher
+// process disappearing while the Host still runs. A Host that ends without its
+// own shutdown leaves no other record, because a closed console, Ctrl+Break, or
+// an elevated forced kill skips every exit hook. Ctrl+Break is ignored with a
+// notice instead of ending the Host; Ctrl+C still stops it. A closed console
+// starts the ordinary SIGTERM shutdown, which Windows ends about ten seconds later.
+import { appendFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { constants, setPriority } from 'node:os'
+import { join } from 'node:path'
 
 const LEVELS = {
   normal: constants.priority.PRIORITY_NORMAL,
@@ -48,6 +60,48 @@ if (protection === 'on' && process.platform === 'win32') {
   } catch (error) {
     process.emitWarning(`could not protect the DSH Host from termination: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+/** Interval between checks that the launching process is still alive. */
+const LAUNCHER_POLL_MS = 2000
+const exitLog = process.env.DSH_DIAGNOSTICS ? join(process.env.DSH_DIAGNOSTICS, 'host-exits.log') : undefined
+
+/** Append one lifecycle fact; evidence never fails the Host. */
+function recordLifecycle(message) {
+  if (exitLog === undefined) return
+  try {
+    appendFileSync(exitLog, `${new Date().toISOString()} pid ${String(process.pid)}: ${message}\n`)
+  } catch (_unwritableLog) {
+    // A missing or locked diagnostics directory loses this line only.
+  }
+}
+
+const launcherPid = process.ppid
+recordLifecycle(`started; launcher pid ${String(launcherPid)}`)
+process.on('exit', (code) => {
+  recordLifecycle(`exited with code ${String(code)} after ${String(Math.round(process.uptime()))} s`)
+})
+if (process.platform === 'win32') {
+  process.on('SIGBREAK', () => {
+    recordLifecycle('Ctrl+Break reached the console; ignored')
+    process.stderr.write('DSH: Ctrl+Break ignored; press Ctrl+C to stop the Host.\n')
+  })
+  process.on('SIGHUP', () => {
+    recordLifecycle('console closed (SIGHUP); starting the SIGTERM shutdown')
+    if (process.listenerCount('SIGTERM') > 0) process.emit('SIGTERM', 'SIGTERM')
+    else process.exit(129)
+  })
+  const launcherWatch = setInterval(() => {
+    try {
+      process.kill(launcherPid, 0)
+    } catch (error) {
+      // EPERM: the launcher exists but this process may not open it.
+      if (error?.code === 'EPERM') return
+      clearInterval(launcherWatch)
+      recordLifecycle(`launcher pid ${String(launcherPid)} is gone while the Host keeps running`)
+    }
+  }, LAUNCHER_POLL_MS)
+  launcherWatch.unref()
 }
 
 /** Prepend a deny-PROCESS_TERMINATE entry for Everyone to this process's DACL. */

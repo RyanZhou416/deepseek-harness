@@ -829,6 +829,15 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 
 `run.cmd` 与 `run-safe.cmd` 都给主 Host 32 GiB heap；只有 `run-safe.cmd` 负责记录退出并停在人工恢复提示。Node reports 排除 env/network 并写入 diagnostics。保留堆与 RSS 的双重保护、原有 worker 限额和手动恢复规则；聚焦验证 `scripts/fork-windows-launchers.spec.ts` 覆盖实际子进程的堆上限、带空格路径及覆盖配置存在／缺席两条启动路径。
 
+### Host exit evidence and console signals
+
+2026-11-26 至 11-27 的三次 Host 异常结束（pid 21072、44456、15200）都没有崩溃报告、WER 事件、看门狗重启或 `stopped` 记录，`run.cmd` 窗口随之消失。Host 的进程 DACL 拒绝同用户终止，但 `run.cmd` 的 cmd.exe 与控制台宿主不受保护，且 Host 的子进程运行器和订阅插件的 bun 与 Host 共用这个控制台：Ctrl+Break 或控制台被关闭时，Node 的默认处理直接结束 Host，不经过任何退出钩子；原来的 `if errorlevel 1` 又把负退出码（强制终止、Ctrl+Break）当成成功，窗口直接关闭。
+
+`fork-runtime/web/host-process.mjs` 现在在 `DSH_DIAGNOSTICS` 存在时向 `host-exits.log` 追加启动、退出码、Ctrl+Break（SIGBREAK，记录后忽略，Ctrl+C 仍可停止）、控制台关闭（SIGHUP，转为正常 SIGTERM 关闭流程，Windows 约 10 秒后强制结束）以及启动它的 cmd.exe 消失。`run.cmd` 记录 Host 的退出码，只有 0 才关窗口，其余（包括负数）停在错误提示。`run.cmd` 中直到 Host 启动行为止的字节保持不变，正在运行的 cmd.exe 在 Host 退出后从原偏移继续读取新内容。
+
+**Preservation rule.** 保留 SIGBREAK 忽略、SIGHUP 转 SIGTERM、生命周期记录与 `run.cmd` 的非零即失败判断；修改 `run.cmd` 时不得改动 Host 启动行及其之前的字节。
+
+**Focused verification.** `node_modules/.bin/vitest run scripts/fork-windows-launchers.spec.ts`（退出码 0/−1/7、启动行前字节稳定、Ctrl+Break 与控制台关闭、启动器消失记录）。
 ### Web profile inventory
 
 | Package | Installed | Runtime state | Preserve rule |

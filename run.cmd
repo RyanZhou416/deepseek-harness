@@ -53,7 +53,11 @@ if not defined DSH_CLI_ENTRY if not exist "%~dp0.dsh-build\client-build-environm
 
 set "DSH_STEP=starting DeepSeek Harness"
 node --expose-internals --import "%DSH_HOST_PRELOAD%" "%DSH_BUILT_ENTRY%" web %DSH_DIAGNOSTICS_PATCH_ARG% %DSH_MEMORY_PATCH_ARGS% %DSH_PERF_PATCH_ARG%
-if errorlevel 1 goto :failed
+rem Record every Host exit. A negative code (forced termination, a closed console,
+rem Ctrl+Break) is a failure too, so the window stays open and shows it.
+set "DSH_EXIT_CODE=%errorlevel%"
+>>"%DSH_DIAGNOSTICS%\host-exits.log" echo %date% %time% run.cmd: Host exited with code %DSH_EXIT_CODE%
+if not "%DSH_EXIT_CODE%"=="0" goto :failed
 exit /b 0
 
 :source_launch
@@ -66,7 +70,9 @@ call "%~dp0scripts\fork-windows-pnpm.cmd" --version
 if errorlevel 1 goto :failed
 set "DSH_STEP=starting DeepSeek Harness from source"
 call "%~dp0scripts\fork-windows-pnpm.cmd" exec node --expose-internals --import "%DSH_HOST_PRELOAD%" --import tsx/esm "%~dp0apps\cli\src\bin.ts" web %DSH_DIAGNOSTICS_PATCH_ARG% %DSH_MEMORY_PATCH_ARGS% %DSH_PERF_PATCH_ARG%
-if errorlevel 1 goto :failed
+set "DSH_EXIT_CODE=%errorlevel%"
+>>"%DSH_DIAGNOSTICS%\host-exits.log" echo %date% %time% run.cmd: Host exited with code %DSH_EXIT_CODE%
+if not "%DSH_EXIT_CODE%"=="0" goto :failed
 exit /b 0
 
 :missing_node
@@ -76,7 +82,7 @@ echo Check the network or set DSH_NODE_MIRROR to a reachable Node.js download mi
 goto :pause_and_exit
 
 :failed
-set "DSH_EXIT_CODE=%errorlevel%"
+if not defined DSH_EXIT_CODE set "DSH_EXIT_CODE=%errorlevel%"
 echo.
 echo ERROR: Failed while %DSH_STEP% ^(exit code %DSH_EXIT_CODE%^).
 echo Review the messages above for details.

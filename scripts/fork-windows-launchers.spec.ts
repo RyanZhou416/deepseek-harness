@@ -279,6 +279,91 @@ describe('Windows fork launchers', () => {
     expect(invalid.stderr).toContain('DSH_PROCESS_PRIORITY must be one of')
   })
 
+  it.skipIf(process.platform !== 'win32').each([
+    { code: '0', status: 0, failure: false },
+    { code: '-1', status: 4294967295, failure: true },
+    { code: '7', status: 7, failure: true },
+  ])('records the Host exit code $code and keeps the window open on any nonzero code', ({ code, status, failure }) => {
+    const { root, bin, log } = fixture(false)
+    const entry = join(root, 'exiting-entry.mjs')
+    writeFileSync(entry, `process.exit(${code})\n`)
+
+    const result = launch(runLauncher, root, bin, log, { DSH_CLI_ENTRY: entry })
+
+    expect(result.signal, result.stderr || result.stdout).toBeNull()
+    expect(result.status, result.stdout).toBe(status)
+    const exits = readFileSync(join(root, 'dsh-home', 'diagnostics', 'host-exits.log'), 'utf8')
+    expect(exits).toContain(`run.cmd: Host exited with code ${code}`)
+    expect(exits).toContain(`exited with code ${String(status === 4294967295 ? -1 : status)}`)
+    if (failure) expect(result.stdout).toContain(`ERROR: Failed while starting DeepSeek Harness (exit code ${code})`)
+    else expect(result.stdout).not.toContain('ERROR:')
+  })
+
+  it('keeps every byte up to the Host launch line stable for a running run.cmd', () => {
+    // cmd.exe resumes a running batch file at its byte offset once the Host exits,
+    // so an update must leave everything through the launch line unchanged.
+    const source = readFileSync(runLauncher, 'utf8')
+    const launchLine = 'node --expose-internals --import "%DSH_HOST_PRELOAD%" "%DSH_BUILT_ENTRY%" web %DSH_DIAGNOSTICS_PATCH_ARG% %DSH_MEMORY_PATCH_ARGS% %DSH_PERF_PATCH_ARG%\r\n'
+    const after = source.slice(source.indexOf(launchLine) + launchLine.length)
+    expect(after.startsWith('rem Record every Host exit.')).toBe(true)
+    expect(after).toContain('if not "%DSH_EXIT_CODE%"=="0" goto :failed')
+    expect(source).not.toMatch(/(?<!\r)\n/u)
+  })
+
+  it.skipIf(process.platform !== 'win32')('records Host lifecycle evidence, ignores Ctrl+Break and shuts down on a closed console', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh host evidence-'))
+    temporaryRoots.push(root)
+    const run = (script: string) => spawnSync(process.execPath, ['--import', hostPreload, '-e', script], {
+      encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', DSH_PROTECT_HOST: 'off', DSH_DIAGNOSTICS: root },
+    })
+    const exits = () => readFileSync(join(root, 'host-exits.log'), 'utf8')
+
+    const ignored = run("process.emit('SIGBREAK', 'SIGBREAK'); console.log('alive')")
+    expect(ignored.status, ignored.stderr).toBe(0)
+    expect(ignored.stdout.trim()).toBe('alive')
+    expect(ignored.stderr).toContain('Ctrl+Break ignored')
+    expect(exits()).toContain('Ctrl+Break reached the console; ignored')
+    expect(exits()).toMatch(/started; launcher pid \d+/u)
+    expect(exits()).toContain('exited with code 0')
+
+    const graceful = run("process.on('SIGTERM', () => { console.log('shutdown'); process.exit(0) }); process.emit('SIGHUP', 'SIGHUP'); setTimeout(() => {}, 5000)")
+    expect(graceful.status, graceful.stderr).toBe(0)
+    expect(graceful.stdout.trim()).toBe('shutdown')
+    expect(exits()).toContain('console closed (SIGHUP); starting the SIGTERM shutdown')
+
+    const bare = run("process.emit('SIGHUP', 'SIGHUP'); setTimeout(() => {}, 5000)")
+    expect(bare.status).toBe(129)
+    expect(exits()).toContain('exited with code 129')
+
+    const silent = spawnSync(process.execPath, ['--import', hostPreload, '-e', ''], {
+      encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', DSH_PROTECT_HOST: 'off', DSH_DIAGNOSTICS: '' },
+    })
+    expect(silent.status, silent.stderr).toBe(0)
+  })
+
+  it.skipIf(process.platform !== 'win32')('records a launcher that disappears while the Host keeps running', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh launcher gone-'))
+    temporaryRoots.push(root)
+    const command = process.env.ComSpec as string
+    // The launcher cmd.exe starts the Host and is then killed alone; the Host ends by itself.
+    const host = join(root, 'host.mjs')
+    writeFileSync(host, 'setTimeout(() => {}, 6000)\n')
+    // Outer quotes: cmd /c strips the first and last quote of a command that holds several.
+    const launcher = spawn(command, ['/d', '/s', '/c', `""${process.execPath}" --import ${hostPreload} "${host}""`], {
+      env: { ...process.env, NODE_OPTIONS: '', DSH_PROTECT_HOST: 'off', DSH_DIAGNOSTICS: root },
+      stdio: 'ignore', windowsVerbatimArguments: true,
+    })
+    const exits = join(root, 'host-exits.log')
+    const until = async (predicate: () => boolean) => {
+      for (let waited = 0; waited < 15_000 && !predicate(); waited += 100) await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    await until(() => existsSync(exits) && readFileSync(exits, 'utf8').includes('started'))
+    spawnSync('taskkill', ['/PID', String(launcher.pid), '/F'], { stdio: 'ignore' })
+    await until(() => readFileSync(exits, 'utf8').includes('is gone'))
+    expect(readFileSync(exits, 'utf8')).toContain(`launcher pid ${String(launcher.pid)} is gone while the Host keeps running`)
+    await until(() => readFileSync(exits, 'utf8').includes('exited with code'))
+    expect(readFileSync(exits, 'utf8')).toContain('exited with code 0')
+  }, 30_000)
   it('runs both launchers on the pinned Node.js release, which satisfies the engine range', () => {
     const pinned = readFileSync(join(repositoryRoot, '.node-version'), 'utf8').trim()
     const engines = (JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as { engines: { node: string } }).engines.node
