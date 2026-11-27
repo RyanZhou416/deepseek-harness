@@ -29,8 +29,29 @@ export type SubagentCatalogInjected = {
   openChild: (address: SubagentAddress) => void
   openChildAside: (address: SubagentAddress) => void
   refreshProjection: (parentSessionId: SessionId) => void
-  /** Read this catalog and its direct children after explicit activation or retry. */
-  prepareCatalog: (parentSessionId: SessionId) => Promise<void>
+  /**
+   * Read this catalog and the direct children its shown rows name, after
+   * explicit activation, retry, or showing more rows.
+   * @param parentSessionId - Session whose catalog is read.
+   * @param shown - newest entries whose child catalogs are read; defaults to one {@link CATALOG_PAGE}.
+   */
+  prepareCatalog: (parentSessionId: SessionId, shown?: number) => Promise<void>
+}
+
+/**
+ * Rows one catalog level renders at a time, and the child catalogs one level
+ * reads, before the user asks for more. A Session can hold tens of thousands
+ * of subagents; rendering or reading them all at once blocks the page.
+ */
+export const CATALOG_PAGE = 50
+
+/**
+ * Order a catalog level newest first; the stable sort keeps catalog order between equal creation times.
+ * @param entries - one level's projected entries.
+ * @returns a new array, newest first.
+ */
+export function newestFirst<T extends { readonly createdAt: number }>(entries: readonly T[]): T[] {
+  return [...entries].sort((left, right) => right.createdAt - left.createdAt)
 }
 
 interface CatalogRowsProps {
@@ -44,6 +65,8 @@ interface CatalogRowsProps {
   openChild: (address: SubagentAddress) => void
   openChildAside: (address: SubagentAddress) => void
   refreshProjection: (parentSessionId: SessionId) => void
+  /** Read the child catalogs of the first `shown` rows of a level. */
+  prepareRows: (parentSessionId: SessionId, shown: number) => void
   toggleBranch: (childSessionId: SessionId) => void
   closeCatalog: () => void
   panelDetails: CatalogTreeProps['panelDetails']
@@ -220,9 +243,16 @@ function catalogProgress(entries: SubagentCatalogSnapshot['entries'], summaries:
 /** Render one catalog level and recurse only through explicitly expanded rows. */
 function CatalogRows({
   parentSessionId, currentSessionId, catalog, catalogs, summaries, expanded, level,
-  openChild, openChildAside, refreshProjection, toggleBranch, closeCatalog, panelDetails, t,
+  openChild, openChildAside, refreshProjection, prepareRows, toggleBranch, closeCatalog, panelDetails, t,
 }: CatalogRowsProps & { t: TranslateNS<typeof NS> }) {
   const dense = panelDetails !== undefined
+  // The current Session's row stays shown even when it is older than the first page.
+  const [limit, setLimit] = useState(() => {
+    const current = catalog.entries.findIndex(entry => entry.id === currentSessionId)
+    return Math.max(CATALOG_PAGE, current + 1)
+  })
+  const visible = catalog.entries.length > limit ? catalog.entries.slice(0, limit) : catalog.entries
+  const hidden = catalog.entries.length - visible.length
   const [now, setNow] = useState(() => Date.now())
   const running = catalog.entries.some(entry => entry.activity === 'running')
   useEffect(() => {
@@ -253,7 +283,7 @@ function CatalogRows({
           </button>
         </div>
       )}
-      {catalog.entries.map((entry, index) => {
+      {visible.map((entry, index) => {
         const external = entry.mode === 'external'
         const childCatalog = catalogs[entry.id]
         const isCurrent = entry.id === currentSessionId
@@ -436,6 +466,7 @@ function CatalogRows({
                   openChild={openChild}
                   openChildAside={openChildAside}
                   refreshProjection={refreshProjection}
+                  prepareRows={prepareRows}
                   toggleBranch={toggleBranch}
                   closeCatalog={closeCatalog}
                   panelDetails={panelDetails}
@@ -446,6 +477,20 @@ function CatalogRows({
           </div>
         )
       })}
+      {hidden > 0 && (
+        <button
+          type="button"
+          className={css.more}
+          data-subagent-more
+          onClick={() => {
+            const next = limit + CATALOG_PAGE
+            setLimit(next)
+            prepareRows(parentSessionId, next)
+          }}
+        >
+          {t('catalog.more', { count: Math.min(CATALOG_PAGE, hidden), total: hidden })}
+        </button>
+      )}
     </>
   )
 }
@@ -470,8 +515,7 @@ export function deriveCatalogs(
     return [id, {
       state,
       error: snapshot.error,
-      // Newest child first at every level; a stable sort keeps catalog order between equal creation times.
-      entries: [...(projected ?? [])].sort((left, right) => right.createdAt - left.createdAt).map(entry => ({
+      entries: newestFirst(projected ?? []).map(entry => ({
         ...entry,
         activity: (statuses.get(entry.id)?.running ?? summaries[entry.id]?.running) === true
           ? 'running' as const : 'inactive' as const,
@@ -497,9 +541,9 @@ export function progressOf(catalog: SubagentCatalogSnapshot, summaries: CatalogR
  * @param prepareCatalog - the injected catalog action.
  * @returns a callback that prepares one level.
  */
-export function levelPreparer(prepareCatalog: SubagentCatalogInjected['prepareCatalog']): (sessionId: SessionId) => void {
-  return (sessionId) => {
-    void prepareCatalog(sessionId).catch((error: unknown) => {
+export function levelPreparer(prepareCatalog: SubagentCatalogInjected['prepareCatalog']): (sessionId: SessionId, shown?: number) => void {
+  return (sessionId, shown) => {
+    void (shown === undefined ? prepareCatalog(sessionId) : prepareCatalog(sessionId, shown)).catch((error: unknown) => {
       console.error('[ui-subagent] catalog discovery failed:', error)
     })
   }
@@ -516,8 +560,11 @@ export interface CatalogTreeProps {
   summaries: CatalogRowsProps['summaries']
   openChild: (address: SubagentAddress) => void
   openChildAside: (address: SubagentAddress) => void
-  /** Read a level's catalog and its direct children; the tree calls it on branch expansion and retry. */
-  prepareLevel: (parentSessionId: SessionId) => void
+  /**
+   * Read a level's catalog and the child catalogs of its first `shown` rows;
+   * the tree calls it on branch expansion, retry, and showing more rows.
+   */
+  prepareLevel: (parentSessionId: SessionId, shown?: number) => void
   /** Called after a row opened a Session, so a surrounding popover or overlay can close. */
   onOpened: () => void
   /** Focus the first row on mount, as a keyboard-opened popover does. */
@@ -595,6 +642,7 @@ export function CatalogTree({
         openChild={openChild}
         openChildAside={openChildAside}
         refreshProjection={prepareLevel}
+        prepareRows={prepareLevel}
         toggleBranch={toggleBranch}
         closeCatalog={onOpened}
         panelDetails={panelDetails}

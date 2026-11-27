@@ -17,6 +17,7 @@ import {
 } from '../src/client/SubagentsSection.tsx'
 import { SubagentReadOnlyComposer } from '../src/client/SubagentReadOnlyComposer.tsx'
 import { createSubagentsSectionStore } from '../src/client/subagents-store.ts'
+import { CATALOG_PAGE, CatalogTree, deriveCatalogs } from '../src/client/SubagentCatalog.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import type { PanelDetailsProps, PanelFoldProps } from '@deepseek-ai/dsh-client-ui-session-panel/client'
 
@@ -1701,5 +1702,45 @@ describe('SubagentReadOnlyComposer', () => {
   it('explains that one-shot histories never accept follow-ups', () => {
     render(<SubagentReadOnlyComposer matched={{ reason: 'one-shot' }} t={t} />)
     expect(screen.getByRole('status').textContent).toContain('一次性任务不支持后续消息')
+  })
+})
+
+describe('large subagent catalogs', () => {
+  const many = (count: number): CatalogFixtureEntry[] => Array.from({ length: count }, (_, index) => ({
+    id: `many-${String(index)}` as SessionId, mode: 'one-shot' as const, label: `task ${String(index)}`, activity: 'inactive' as const,
+  }))
+
+  it('renders a level one page at a time and reads the child catalogs of each page it shows', () => {
+    const entries = many(CATALOG_PAGE * 2 + 5)
+    const input = props(catalog({ entries }))
+    render(<HeaderCatalog {...input} />)
+    fireEvent.click(screen.getByRole('button', { name: /显示其余/ }))
+    const rows = screen.getAllByRole('treeitem')
+    expect(rows).toHaveLength(CATALOG_PAGE)
+    expect(rows[0]?.getAttribute('aria-setsize')).toBe(String(entries.length))
+    const next = `再显示 ${String(CATALOG_PAGE)} 个（还有 ${String(entries.length - CATALOG_PAGE)} 个）`
+    fireEvent.click(screen.getByRole('button', { name: next }))
+    expect(screen.getAllByRole('treeitem')).toHaveLength(CATALOG_PAGE * 2)
+    expect(input.prepareCatalog).toHaveBeenLastCalledWith(PARENT, CATALOG_PAGE * 2)
+    fireEvent.click(screen.getByRole('button', { name: '再显示 5 个（还有 5 个）' }))
+    expect(screen.getAllByRole('treeitem')).toHaveLength(entries.length)
+    expect(document.querySelector('[data-subagent-more]')).toBeNull()
+  })
+
+  it('keeps the current Session row shown when it is older than the first page', () => {
+    const entries = many(CATALOG_PAGE + 30)
+    const input = props(catalog({ entries }))
+    let state!: SessionListState
+    input.useSessions((snapshot) => { state = snapshot; return null })
+    const catalogs = deriveCatalogs(state.projectionsBySession, state.byId, new Map())
+    const current = `many-${String(CATALOG_PAGE + 20)}` as SessionId
+    render(
+      <CatalogTree
+        rootSessionId={PARENT} currentSessionId={current} catalog={catalogs[PARENT]!} catalogs={catalogs} summaries={state.byId}
+        openChild={vi.fn()} openChildAside={vi.fn()} prepareLevel={vi.fn()} onOpened={vi.fn()} t={input.t}
+      />,
+    )
+    expect(screen.getAllByRole('treeitem')).toHaveLength(CATALOG_PAGE + 21)
+    expect(document.querySelector('[aria-current="true"]')?.getAttribute('aria-posinset')).toBe(String(CATALOG_PAGE + 21))
   })
 })

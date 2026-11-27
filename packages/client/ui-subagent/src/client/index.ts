@@ -4,7 +4,7 @@ import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { ComposerChainProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { SubagentHeaderLineage } from './SubagentHeaderLineage.tsx'
-import type { SubagentCatalogInjected } from './SubagentCatalog.tsx'
+import { CATALOG_PAGE, newestFirst, type SubagentCatalogInjected } from './SubagentCatalog.tsx'
 import { SubagentsProgress, SubagentsRunningIndicator, SubagentsSection } from './SubagentsSection.tsx'
 import { createSubagentsSectionStore } from './subagents-store.ts'
 import {
@@ -72,18 +72,18 @@ export function apply(ctx: ClientContext): void {
         preferNewPane: true,
       })
     },
-    async prepareCatalog(parentSessionId: SessionId) {
+    async prepareCatalog(parentSessionId: SessionId, shown = CATALOG_PAGE) {
       await ctx.sessions.refreshProjections(parentSessionId)
-      const parent = ctx.sessions.list.getSnapshot().projectionsBySession[parentSessionId]
+      const state = ctx.sessions.list.getSnapshot()
+      const parent = state.projectionsBySession[parentSessionId]
       if (parent?.state !== 'ready') return
-      for (const entry of parent.values.subagentCatalog ?? []) {
-        if (entry.mode === 'external') continue
-        const state = ctx.sessions.list.getSnapshot()
-        if (state.byId[entry.id]?.formatStatus === 'migration-required'
-          || state.projectionsBySession[entry.id]?.state === 'migration-required'
-          || state.projectionsBySession[entry.id]?.state === 'error') continue
-        await ctx.sessions.refreshProjections(entry.id)
-      }
+      // Only the rows a level shows need their child catalogs; they are read together,
+      // and a child already read in this connection generation answers without a request.
+      const children = newestFirst(parent.values.subagentCatalog ?? []).slice(0, shown).filter(entry => entry.mode !== 'external'
+        && state.byId[entry.id]?.formatStatus !== 'migration-required'
+        && state.projectionsBySession[entry.id]?.state !== 'migration-required'
+        && state.projectionsBySession[entry.id]?.state !== 'error')
+      await Promise.all(children.map(entry => ctx.sessions.refreshProjections(entry.id)))
     },
     refreshProjection(parentSessionId: SessionId) {
       void ctx.sessions.refreshProjections(parentSessionId)

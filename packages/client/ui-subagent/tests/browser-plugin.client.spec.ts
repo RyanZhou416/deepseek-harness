@@ -12,7 +12,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { ComposerChainProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { apply as applyLocale, inject as localeInject } from '@deepseek-ai/dsh-client-locale/client'
 import { SubagentHeaderLineage } from '../src/client/SubagentHeaderLineage.tsx'
-import type { SubagentCatalogInjected } from '../src/client/SubagentCatalog.tsx'
+import { CATALOG_PAGE, type SubagentCatalogInjected } from '../src/client/SubagentCatalog.tsx'
 import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
 import { en } from '../src/client/locales.ts'
 import {
@@ -126,7 +126,7 @@ describe('apply', () => {
     expect(ctx.slots.entries('conversation.session.panel.section').map(entry => entry.options.id)).toEqual(['subagents'])
   })
 
-  it('reads direct child catalogs sequentially after reading the parent', async () => {
+  it('reads the parent, then the shown children together, newest first', async () => {
     const { ctx, face } = await fullBench([...FAMILY, summary({ id: sid('legacy'), formatStatus: 'migration-required' })])
     onTestFinished(() => ctx.fiber.dispose())
     const entry = ctx.slots.entries('conversation.session.header.lineage')
@@ -136,8 +136,10 @@ describe('apply', () => {
     const held = Promise.withResolvers<undefined>()
     const refresh = vi.spyOn(face, 'refreshProjections').mockImplementation(async (id) => {
       if (id === sid('parent')) projections[id] = { state: 'ready', error: null, values: { subagentCatalog: [
-        { id: sid('external'), mode: 'external', createdAt: 1 },
-        ...['c1', 'c2', 'legacy', 'blocked', 'failed'].map(id => ({ id: sid(id), mode: 'one-shot' as const, createdAt: 1 })),
+        { id: sid('external'), mode: 'external', createdAt: 9 },
+        ...['legacy', 'blocked', 'failed'].map(id => ({ id: sid(id), mode: 'one-shot' as const, createdAt: 8 })),
+        { id: sid('c1'), mode: 'one-shot', createdAt: 2 },
+        { id: sid('c2'), mode: 'one-shot', createdAt: 3 },
       ] } }
       if (id === sid('c1')) {
         await held.promise
@@ -150,14 +152,41 @@ describe('apply', () => {
     projections[sid('blocked')] = { state: 'migration-required', error: null, values: {} }
     projections[sid('failed')] = { state: 'error', error: null, values: {} }
     const reading = actions.prepareCatalog(sid('parent'))
-    await vi.waitFor(() => { expect(refresh.mock.calls).toEqual([[sid('parent')], [sid('c1')]]) })
+    // c2 is requested while c1 is still pending: children are read together, newest first.
+    await vi.waitFor(() => { expect(refresh.mock.calls).toEqual([[sid('parent')], [sid('c2')], [sid('c1')]]) })
     held.resolve(undefined)
     await reading
-    expect(refresh.mock.calls).toEqual([[sid('parent')], [sid('c1')], [sid('c2')]])
+    expect(projections[sid('c1')]?.values.subagentCatalog).toHaveLength(1)
+    // A level that is not ready reads no children; a ready level without a catalog reads none either.
+    refresh.mockClear()
     await actions.prepareCatalog(sid('c2'))
     projections[sid('c2')] = { state: 'ready', error: null, values: {} }
     await actions.prepareCatalog(sid('c2'))
-    expect(refresh.mock.calls.slice(3)).toEqual([[sid('c2')], [sid('c2')]])
+    expect(refresh.mock.calls).toEqual([[sid('c2')], [sid('c2')]])
+  })
+
+  it('reads only the child catalogs of the shown page and the next page on request', async () => {
+    const { ctx, face } = await fullBench(FAMILY)
+    onTestFinished(() => ctx.fiber.dispose())
+    const entry = ctx.slots.entries('conversation.session.header.lineage')
+      .find(entry => entry.component === SubagentHeaderLineage)!
+    const actions = (entry.inject as (id: SessionId) => SubagentCatalogInjected)(sid('parent'))
+    const projections = face.projections
+    const children = Array.from({ length: CATALOG_PAGE + 7 }, (_, index) => ({
+      id: sid(`many-${String(index)}`), mode: 'one-shot' as const, createdAt: index,
+    }))
+    const refresh = vi.spyOn(face, 'refreshProjections').mockImplementation(async (id) => {
+      if (id === sid('parent')) projections[id] = { state: 'ready', error: null, values: { subagentCatalog: children } }
+    })
+    onTestFinished(() => { refresh.mockRestore() })
+    await actions.prepareCatalog(sid('parent'))
+    const firstPage = refresh.mock.calls.slice(1).map(([id]) => id)
+    expect(firstPage).toHaveLength(CATALOG_PAGE)
+    expect(firstPage[0]).toBe(sid(`many-${String(CATALOG_PAGE + 6)}`))
+    expect(firstPage).not.toContain(sid('many-0'))
+    refresh.mockClear()
+    await actions.prepareCatalog(sid('parent'), CATALOG_PAGE * 2)
+    expect(refresh.mock.calls.map(([id]) => id)).toContain(sid('many-0'))
   })
 
   it('registers catalog actions and selects read-only subagent composers from session facts', async () => {
