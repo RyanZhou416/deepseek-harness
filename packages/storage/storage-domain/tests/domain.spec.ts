@@ -942,3 +942,44 @@ describe('lazy record scan', () => {
     expect(domain.table('items').scan).toBeUndefined()
   })
 })
+
+describe('lazy table peek', () => {
+  const a: Item = { label: 'a', count: 1 }
+  const b: Item = { label: 'b', count: 2 }
+
+  it('reads a record asynchronously without retaining it, and serves a resident record as is', async () => {
+    const { table, pool } = await lazyHarness({ pool: residentMedium({ a, b }) })
+    expect(await table.peek!('a')).toEqual(a)
+    expect(pool.recordAsyncReads).toBe(1)
+    expect(pool.recordReads).toBe(0)
+    expect([...table.entries()]).toEqual([])
+    expect(table.get('b')).toEqual(b)
+    expect(await table.peek!('b')).toEqual(b)
+    expect(pool.recordAsyncReads).toBe(1)
+    expect(await table.peek!('missing')).toBeUndefined()
+  })
+
+  it('drops a key the medium no longer holds and salvages or rejects a failing record', async () => {
+    const pool = residentMedium({ a, bad: b, worse: b })
+    const backend = new MemoryStorageBackend(pool, { backup: true })
+    const { ctx, table } = await lazyHarness({ pool, backend, spec: residentSalvageSpec })
+    vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    pool.media.get('resident')!.tables.get('items')!.delete('a')
+    expect(await table.peek!('a')).toBeUndefined()
+    expect([...table.keys()]).not.toContain('a')
+    pool.media.get('resident')!.tables.get('items')!.set('bad', { label: 'x', count: 'NaN' })
+    expect(await table.peek!('bad')).toBeUndefined()
+    expect(pool.backups).toEqual(['memory:resident/items/bad.bak'])
+    const strict = await lazyHarness({ pool: residentMedium({ worse: b }) })
+    strict.pool.media.get('resident')!.tables.get('items')!.set('worse', { label: 'x', count: 'NaN' })
+    await expect(strict.table.peek!('worse')).rejects.toMatchObject({ code: 'invalid-record' })
+  })
+
+  it('rejects after close and is absent on an eagerly loaded table', async () => {
+    const { table, domain } = await lazyHarness({ pool: residentMedium({ a }) })
+    await domain.close()
+    await expect(table.peek!('a')).rejects.toMatchObject({ code: 'closed' })
+    const { facility } = await harness()
+    expect((await facility.open(spec)).table('items').peek).toBeUndefined()
+  })
+})

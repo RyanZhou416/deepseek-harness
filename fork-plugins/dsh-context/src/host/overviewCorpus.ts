@@ -283,18 +283,21 @@ function titleOf(value: unknown, cwd: string | undefined, id: string): string {
   return id
 }
 
-function sessionOf(
+async function sessionOf(
   entry: ScanEntry,
   cache: CachedSnapshotFace,
   projections: SnapshotProjectionsFace,
-): { session: HostSession; cacheable: boolean } {
+): Promise<{ session: HostSession; cacheable: boolean }> {
   let values: Record<string, unknown> | null = null
   let block: { values?: unknown; asOfSeq?: unknown } | undefined
   let cacheable = true
   try {
+    // A stored Session's record is read without blocking on file I/O where the host allows it.
     block = entry.live
       ? projections.snapshot(entry.session, OVERVIEW_KEYS)
-      : cache.cachedSnapshot(entry.header, OVERVIEW_KEYS)
+      : cache.cachedSnapshotAsync === undefined
+        ? cache.cachedSnapshot(entry.header, OVERVIEW_KEYS)
+        : await cache.cachedSnapshotAsync(entry.header, OVERVIEW_KEYS)
     const served = asRecord(block?.values)
     values = served ?? {}
     cacheable = served !== null
@@ -639,7 +642,7 @@ export async function buildRows(
       reusable.set(entry.id, cached)
       continue
     }
-    const built = sessionOf(entry, cache, projections)
+    const built = await sessionOf(entry, cache, projections)
     current.set(entry.id, built.session)
     if (built.cacheable) reusable.set(entry.id, built.session)
     else incomplete++

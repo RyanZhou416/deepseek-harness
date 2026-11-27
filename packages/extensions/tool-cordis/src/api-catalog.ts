@@ -3691,6 +3691,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the viewed block, or `undefined` when no usable row exists for this lifecycle at the current Session format.',
       },
       {
+        signature: 'async cachedSnapshotAsync( meta: SessionHeader, keys?: ProjectionKeySelection, excludeKeys?: ReadonlySet<string>, ): Promise<ProjectionSnapshot | undefined>',
+        description: 'The cachedSnapshot view for a corpus-wide pass: a record the resident set does not hold is read from the medium asynchronously and is not retained, so the pass neither blocks the event loop on file I/O nor evicts records request handling loaded. Validation and viewing are the same as cachedSnapshot.',
+        parameters: [{ name: 'meta', description: 'the session\'s header (identity witness; no log read).' }, { name: 'keys', description: 'optional projection keys required by the caller.' }, { name: 'excludeKeys', description: 'keys omitted before state validation or viewing.' }],
+        returns: 'the viewed block, or `undefined` when no usable row exists for this lifecycle at the current Session format.',
+      },
+      {
         signature: 'cachedPredecessorTitle(meta: SessionHeader): ProjectionSnapshot | undefined',
         description: 'Read only a predecessor checkpoint\'s title as a zero-I/O listing hint.\n\nThe authoritative Session header supplies the lifecycle identity. A cache checkpoint can lag that log but cannot lead it because writes flush the log first, so a matching predecessor title is a genuine (possibly stale) fact from this Session. The registry still requires the current title projection\'s row version and schema. No other predecessor projection is exposed: format normalization can change their current meaning, and the cachedSnapshot / hydration paths continue to reject them.',
         parameters: [{ name: 'meta', description: 'authoritative listed Session header.' }],
@@ -8442,7 +8448,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'KvTable',
-    declaration: 'export interface KvTable<K extends string, V> {\n    get(key: K): V | undefined;\n    entries(): IterableIterator<[\n        K,\n        V\n    ]>;\n    keys(): IterableIterator<K>;\n    readonly size: number;\n    put(key: K, value: V): Promise<void>;\n    delete(key: K): Promise<boolean>;\n    deleteMany(keys: readonly K[]): Promise<number>;\n    update(key: K, fn: (current: V) => V): Promise<V>;\n    scan?(): AsyncIterableIterator<readonly [\n        K,\n        V\n    ]>;\n}',
+    declaration: 'export interface KvTable<K extends string, V> {\n    get(key: K): V | undefined;\n    entries(): IterableIterator<[\n        K,\n        V\n    ]>;\n    keys(): IterableIterator<K>;\n    readonly size: number;\n    put(key: K, value: V): Promise<void>;\n    delete(key: K): Promise<boolean>;\n    deleteMany(keys: readonly K[]): Promise<number>;\n    update(key: K, fn: (current: V) => V): Promise<V>;\n    scan?(): AsyncIterableIterator<readonly [\n        K,\n        V\n    ]>;\n    peek?(key: K): Promise<V | undefined>;\n}',
   },
   {
     name: 'KvUnit',
@@ -11214,7 +11220,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'TableRecords',
-    declaration: 'export interface TableRecords {\n    get(key: string): unknown;\n    has(key: string): boolean;\n    keys(): readonly string[];\n    entries(): readonly (readonly [\n        string,\n        unknown\n    ])[];\n    readonly size: number;\n    bytesOf(value: unknown): number;\n    set(key: string, value: unknown, bytes: number): void;\n    remove(key: string): void;\n    scan?(assertReadable: () => void): AsyncIterableIterator<readonly [\n        string,\n        unknown\n    ]>;\n}',
+    declaration: 'export interface TableRecords {\n    get(key: string): unknown;\n    has(key: string): boolean;\n    keys(): readonly string[];\n    entries(): readonly (readonly [\n        string,\n        unknown\n    ])[];\n    readonly size: number;\n    bytesOf(value: unknown): number;\n    set(key: string, value: unknown, bytes: number): void;\n    remove(key: string): void;\n    scan?(assertReadable: () => void): AsyncIterableIterator<readonly [\n        string,\n        unknown\n    ]>;\n    peek?(key: string): Promise<unknown>;\n}',
   },
   {
     name: 'TableValueOf',

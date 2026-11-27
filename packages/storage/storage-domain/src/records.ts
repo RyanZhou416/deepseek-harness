@@ -101,6 +101,18 @@ export interface TableRecords {
    * @returns an async iterator over the pairs in key order.
    */
   scan?(assertReadable: () => void): AsyncIterableIterator<readonly [string, unknown]>
+
+  /**
+   * Read one record without retaining it: a resident record is returned as is,
+   * and a miss reads the medium asynchronously and validates the record at
+   * that boundary under the spec's `invalidRecords` policy, leaving the
+   * resident set unchanged. A corpus-wide pass uses it so its reads neither
+   * block the event loop on file I/O nor evict what request handling loaded.
+   * Present only on stores that read records on demand.
+   * @param key - Record key.
+   * @returns the record, or `undefined` when absent or unreadable.
+   */
+  peek?(key: string): Promise<unknown>
 }
 
 /** The fully loaded table: every record from the open-time snapshot. */
@@ -246,6 +258,26 @@ export class ResidentTableRecords implements TableRecords {
         continue
       }
       yield [key, parsed] as const
+    }
+  }
+
+  async peek(key: string): Promise<unknown> {
+    const hit = this.resident.get(key)
+    if (hit !== undefined) return hit.value
+    if (!this.known.has(key)) return undefined
+    const stored = await this.policy.reader.readAsync(this.policy.table, key)
+    if (stored === undefined) {
+      this.known.delete(key)
+      return undefined
+    }
+    try {
+      return parseRecord(this.policy.domain, this.policy.table, key, () => this.policy.schema.parse(stored))
+    } catch (error) {
+      const backup = this.policy.backupRecord
+      if (!this.policy.backupAndSkip || backup === undefined) throw error
+      this.known.delete(key)
+      await this.salvage(key, backup, error)
+      return undefined
     }
   }
 

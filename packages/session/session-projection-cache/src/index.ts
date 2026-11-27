@@ -258,6 +258,30 @@ export class SessionProjectionCache extends Service {
   }
 
   /**
+   * The {@link cachedSnapshot} view for a corpus-wide pass: a record the
+   * resident set does not hold is read from the medium asynchronously and is
+   * not retained, so the pass neither blocks the event loop on file I/O nor
+   * evicts records request handling loaded. Validation and viewing are the
+   * same as {@link cachedSnapshot}.
+   * @param meta - the session's header (identity witness; no log read).
+   * @param keys - optional projection keys required by the caller.
+   * @param excludeKeys - keys omitted before state validation or viewing.
+   * @returns the viewed block, or `undefined` when no usable row exists for
+   *   this lifecycle at the current Session format.
+   */
+  async cachedSnapshotAsync(
+    meta: SessionHeader,
+    keys?: ProjectionKeySelection,
+    excludeKeys?: ReadonlySet<string>,
+  ): Promise<ProjectionSnapshot | undefined> {
+    const expected = lifecycleIdentityOf(meta)
+    const table = this.requireTable()
+    const record = table.peek === undefined ? table.get(meta.id) : await table.peek(meta.id)
+    if (record === undefined || !currentLifecycleMatches(record.identity, expected)) return undefined
+    return this.viewRecord(record, keys, excludeKeys)
+  }
+
+  /**
    * Read only a predecessor checkpoint's title as a zero-I/O listing hint.
    *
    * The authoritative Session header supplies the lifecycle identity. A cache

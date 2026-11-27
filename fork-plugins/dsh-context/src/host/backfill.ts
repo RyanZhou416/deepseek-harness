@@ -33,6 +33,7 @@ interface SessionQueryLike {
 
 interface ProjectionCacheLike {
   cachedSnapshot(meta: SessionHeader, keys?: readonly string[]): unknown
+  cachedSnapshotAsync?(meta: SessionHeader, keys?: readonly string[]): Promise<unknown>
   coldSnapshot(header: SessionHeader, inheritedEventCount: unknown, events: readonly SessionEvent[]): unknown
 }
 
@@ -160,7 +161,10 @@ async function servesRows(
 ): Promise<boolean> {
   let block: Record<string, unknown> | null
   try {
-    block = asRecord(cache.cachedSnapshot(header, PROBE_KEYS))
+    // A whole-corpus probe reads without blocking on file I/O where the host allows it.
+    block = asRecord(cache.cachedSnapshotAsync === undefined
+      ? cache.cachedSnapshot(header, PROBE_KEYS)
+      : await cache.cachedSnapshotAsync(header, PROBE_KEYS))
   } catch {
     return false
   }

@@ -59,7 +59,7 @@ domain.table('workspaces').update(id, (r) => ({ ...r, path: newPath }))
 
 ### 按需读取记录
 
-记录较大、稀疏或可单独丢弃的领域可以要求按需读取：`ctx.storageDomain.open(spec, { lazyReads: true, maxResidentBytes })` 在打开时只读取单元的键索引，并在表读取需要某条记录时才载入它（在该边界按领域 schema 校验）。已载入记录留在有界的最近最少使用常驻集中，下一次载入会超出 `maxResidentBytes` 时释放；介质保留每个值，因此释放只让下次读取变贵。该模式要求 `per-record` 布局与暴露 `recordReader` 的后端单元；其他单元会警告并回退到全量物化。在这种表上，`keys()` 与 `size` 覆盖全部已存记录，`entries()` 只报告常驻集，`scan()` 以不驻留的方式把全部记录各流式读取一次（缓存所有者用来约束介质的维护读取）。
+记录较大、稀疏或可单独丢弃的领域可以要求按需读取：`ctx.storageDomain.open(spec, { lazyReads: true, maxResidentBytes })` 在打开时只读取单元的键索引，并在表读取需要某条记录时才载入它（在该边界按领域 schema 校验）。已载入记录留在有界的最近最少使用常驻集中，下一次载入会超出 `maxResidentBytes` 时释放；介质保留每个值，因此释放只让下次读取变贵。该模式要求 `per-record` 布局与暴露 `recordReader` 的后端单元；其他单元会警告并回退到全量物化。在这种表上，`keys()` 与 `size` 覆盖全部已存记录，`entries()` 只报告常驻集，`scan()` 以不驻留的方式把全部记录各流式读取一次（缓存所有者用来约束介质的维护读取），`peek(key)` 以不驻留的方式异步读取一条记录，使遍历整个语料的处理不在事件循环上做文件 I/O，并把常驻集留给请求处理。
 
 ### 把领域路由到后端
 

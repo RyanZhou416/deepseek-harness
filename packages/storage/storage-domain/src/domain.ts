@@ -118,6 +118,18 @@ export interface KvTable<K extends string, V> {
    * @returns an async iterator over the pairs in key order.
    */
   scan?(): AsyncIterableIterator<readonly [K, V]>
+
+  /**
+   * Read one record without retaining it, asynchronously from the medium on a
+   * resident miss and validated at that boundary (the spec's `invalidRecords`
+   * policy applies); the resident set is neither changed nor reordered. A
+   * corpus-wide read uses it so file I/O stays off the event loop and request
+   * handling keeps its loaded records. Present only on tables opened with
+   * `lazyReads`; an eager table serves `get` from memory instead.
+   * @param key - Record key.
+   * @returns the record, or `undefined` when absent.
+   */
+  peek?(key: K): Promise<V | undefined>
 }
 
 /** Global handle of a spec: typed when declared, `never` (inaccessible) when not. */
@@ -327,6 +339,8 @@ export class DomainImpl {
 class KvTableImpl<K extends string, V> implements KvTable<K, V> {
   /** Present only when the store can stream the medium without retaining it. */
   readonly scan?: () => AsyncIterableIterator<readonly [K, V]>
+  /** Present only when the store reads records on demand. */
+  readonly peek?: (key: K) => Promise<V | undefined>
 
   constructor(
     private readonly host: TableHost,
@@ -336,6 +350,13 @@ class KvTableImpl<K extends string, V> implements KvTable<K, V> {
     const scan = this.records.scan
     if (scan !== undefined) {
       this.scan = () => scan.call(this.records, () => { this.host.assertReadable() }) as AsyncIterableIterator<readonly [K, V]>
+    }
+    const peek = this.records.peek
+    if (peek !== undefined) {
+      this.peek = async (key) => {
+        this.host.assertReadable()
+        return await peek.call(this.records, key) as V | undefined
+      }
     }
   }
 

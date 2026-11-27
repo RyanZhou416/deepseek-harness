@@ -1167,6 +1167,24 @@ describe('SessionProjectionCache record budget', () => {
     expect([...table.entries()].map(([id]) => id)).toEqual(['cold'])
   })
 
+  it('serves an asynchronous view without retaining the record, matching the synchronous view', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    await seedRecord(root, 'async', rowsFor(7, 'async'))
+    const { cache, table } = await budgetHarness(root, 1024 * 1024)
+    const header = headerOf(brandString<SessionId>('async'))
+    expect((await cache.cachedSnapshotAsync(header))?.values['cache-test/marks']).toEqual({ marks: ['async'] })
+    expect([...table.entries()]).toEqual([])
+    expect(await cache.cachedSnapshotAsync({ ...header, cwd: '/elsewhere' })).toBeUndefined()
+    expect(await cache.cachedSnapshotAsync(headerOf(brandString<SessionId>('missing')))).toBeUndefined()
+    // A resident record serves the same view.
+    expect(await cache.cachedSnapshotAsync(header)).toEqual(cache.cachedSnapshot(header))
+    // An eagerly loaded table (a backend without on-demand reads) has no peek and serves from memory.
+    const requireTable: () => { get(id: SessionId): unknown } = Reflect.get(cache, 'requireTable')
+    const eager = { get: (id: SessionId) => requireTable.call(cache).get(id) }
+    Reflect.set(cache, 'requireTable', () => eager)
+    expect(await cache.cachedSnapshotAsync(header)).toEqual(cache.cachedSnapshot(header))
+  })
   it('releases records beyond the resident budget and serves them again from the medium', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
     roots.push(root)

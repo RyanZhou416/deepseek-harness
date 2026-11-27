@@ -220,6 +220,27 @@ describe('watchActivityBackfill', () => {
     assert.deepEqual(state.coldReads, [])
   })
 
+  test('a warm probe reads the cache asynchronously when the host offers it', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+    const probed: string[] = []
+    coldFaces(ctx, state, {
+      sessionProjectionCache: {
+        cachedSnapshot: () => { throw new Error('a corpus probe must use the asynchronous read') },
+        cachedSnapshotAsync: async (header: { id: string }) => {
+          probed.push(header.id)
+          return { asOfSeq: 0, values: { contextActivity: { days: {} }, contextTimeline: { ok: true } } }
+        },
+        coldSnapshot: () => ({ asOfSeq: 0, values: {} }),
+      },
+    })
+    let changes = 0
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING, { autoStart: true, onChange: () => { changes++ } })
+    await until(() => (changes > 0 ? true : undefined), 'the warm pass completed')
+    handle()
+    assert.deepEqual(probed, ['a'])
+    assert.deepEqual(state.coldReads, [], 'a warm Session is not folded')
+  })
   test('a disposed live session schedules its cold materialization', async () => {
     const ctx = new Context()
     const listed = [{ header: { id: 'a', cwd: '/repo/a' } }]

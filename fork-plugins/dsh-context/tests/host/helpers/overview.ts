@@ -104,6 +104,8 @@ export interface BootOptions {
   sessionsWithoutGet?: boolean
   sessionsGetThrows?: boolean
   cacheUndefined?: boolean
+  /** Serve the cache through `cachedSnapshotAsync` too, as current hosts do. */
+  asyncCache?: boolean
   liveNoSeq?: boolean
   persistence?: unknown
   cache?: OverviewCache
@@ -418,15 +420,16 @@ export function boot(options: BootOptions = {}): Promise<Harness> {
       return options.listSessions === undefined ? state.records : options.listSessions()
     },
   })
-  ctx.provide('sessionProjectionCache', {
-    cachedSnapshot: (header: { id?: string }) => {
-      if (cacheMode.throwCached) throw new Error('cache read failed')
-      const id = typeof header?.id === 'string' ? header.id : ''
-      calls.cached.push(id)
-      if (options.cacheUndefined === true) return undefined
-      return { asOfSeq: 5, values: cacheMode.values[id] ?? {} }
-    },
-  })
+  const cachedSnapshot = (header: { id?: string }) => {
+    if (cacheMode.throwCached) throw new Error('cache read failed')
+    const id = typeof header?.id === 'string' ? header.id : ''
+    calls.cached.push(id)
+    if (options.cacheUndefined === true) return undefined
+    return { asOfSeq: 5, values: cacheMode.values[id] ?? {} }
+  }
+  ctx.provide('sessionProjectionCache', options.asyncCache === true
+    ? { cachedSnapshot: () => { throw new Error('a corpus pass must use the asynchronous read') }, cachedSnapshotAsync: async (header: { id?: string }) => cachedSnapshot(header) }
+    : { cachedSnapshot })
   if (options.sessionsWithoutGet === true) {
     ctx.provide('sessions', {})
   } else if (options.sessionsGetThrows === true) {

@@ -22,6 +22,8 @@ export interface StateProjectionsFace {
 
 export interface CachedSnapshotFace {
   cachedSnapshot(header: unknown, keys?: ReadonlySet<string> | readonly string[]): ProjectedBlock | undefined
+  /** The same view read without blocking on file I/O or changing the cache's resident set; hosts before it omit it. */
+  cachedSnapshotAsync?(header: unknown, keys?: ReadonlySet<string> | readonly string[]): Promise<ProjectedBlock | undefined>
 }
 
 export interface SessionsFace {

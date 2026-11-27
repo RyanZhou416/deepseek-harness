@@ -655,6 +655,16 @@ describe('overview memory: disk cache, idle release, incremental updates', () =>
     assert.equal(yields, 5, 'a spent budget yields after every rebuilt session')
     harness.dispose()
   })
+  test('a rebuild reads stored Sessions through the asynchronous cache view when the host offers it', async () => {
+    const records = [recordOf('u0'), recordOf('u1')]
+    const harness = await boot({ persistence: PERSISTENCE, records, values: { u0: valuesOf(3), u1: valuesOf(4) }, asyncCache: true })
+    for (const id of ['u0', 'u1']) harness.state.captureIdentities.set(id, identityOf(id))
+    const read = await call(harness, { part: 'summary' })
+    assert.equal(summaryOf(read).sessions, 2)
+    assert.equal(summaryOf(read).tokens, 7)
+    assert.deepEqual([...harness.calls.cached].sort(), ['u0', 'u1'])
+    harness.dispose()
+  })
   test('legacy mode (no persistence face) keeps working and rebuilds after an idle release', async () => {
     const harness = await boot({ records: [recordOf('a'), recordOf('b')], values: { a: valuesOf(10), b: valuesOf(20) }, idleMs: 5 })
     const first = await call(harness, { part: 'summary' })
