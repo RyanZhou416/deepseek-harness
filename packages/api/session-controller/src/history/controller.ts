@@ -16,7 +16,11 @@ import type {
   SessionEventFrame, SessionEventsPage, SessionPageRequest,
   SessionObserveEventRequest, SessionProjectionsRequest, SessionProjectionFrame,
   SessionAddress, SessionProjectionBaseline, SessionProjectionValues, SessionProjectionsValue, SessionWaitOutput, SessionHistoryRecord,
+  SessionProjectionPageRequest, SessionProjectionPageValue,
 } from '../types.ts'
+import { SESSION_PROJECTION_PAGE_MAX } from '../types.ts'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 
 
 /** Session snapshots do not share lifetime with passive subscriptions. */
@@ -147,29 +151,62 @@ export class HistoryController {
       const live = this.ctx.sessions.get(sessionId)
       if (live !== undefined) {
         const snapshot = this.ctx.sessionProjections.snapshot(live)
-        return { kind: 'sequenced', asOfSeq: snapshot.asOfSeq, values: snapshot.values as SessionProjectionValues }
+        return { kind: 'sequenced', asOfSeq: snapshot.asOfSeq, values: this.ctx.sessionProjections.hintValues(snapshot.values) as SessionProjectionValues }
       } else {
         const stored = await this.ctx.get('sessionPersistence')?.stat(sessionId, { signal })
         signal.throwIfAborted()
         if (stored?.formatStatus === 'migration-required') {
           const cached = this.ctx.get('sessionProjectionCache')?.cachedSnapshot(stored.header)
-          return { kind: 'migration-required', values: { ...cached?.values } as SessionProjectionValues }
+          return { kind: 'migration-required', values: this.ctx.sessionProjections.hintValues({ ...cached?.values }) as SessionProjectionValues }
         }
-        return await this.usingObservation({ sessionId: request.sessionId, projection: true }, signal, observation => ({
-          kind: 'sequenced' as const,
-          ...projections(observation),
-        }))
+        return await this.usingObservation({ sessionId: request.sessionId, projection: true }, signal, (observation) => {
+          const baseline = projections(observation)
+          return { kind: 'sequenced' as const, asOfSeq: baseline.asOfSeq, values: this.ctx.sessionProjections.hintValues(baseline.values) }
+        })
       }
     } catch (error: unknown) {
-      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
-      if (code === 'SESSION_QUERY_SESSION_NOT_FOUND' || code === 'session/not-found') {
-        return null
+      return projectionReadFailure(error, signal)
+    }
+  }
+
+  /**
+   * Read one older slice of a paged projection key without activating the Session.
+   * @param request - Session, paged key, exclusive end index, and item count.
+   * @param signal - read cancellation.
+   * @returns the items `[start, end)` of the complete array and its length, or null when the Session is absent.
+   */
+  async projectionPage(request: SessionProjectionPageRequest, signal: AbortSignal): Promise<SessionProjectionPageValue> {
+    const { sessionId, key, end, limit } = request
+    if (sessionId.length === 0) throw new RemoteError('gateway/bad-request', 'sessionId must not be empty', {})
+    if (!this.ctx.sessionProjections.pagedKey(key)) {
+      throw new RemoteError('gateway/bad-request', `projection key "${key}" is not paged`, {})
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > SESSION_PROJECTION_PAGE_MAX) {
+      throw new RemoteError('gateway/bad-request', `limit must be an integer from 1 through ${String(SESSION_PROJECTION_PAGE_MAX)}`, {})
+    }
+    if (end !== undefined && (!Number.isSafeInteger(end) || end < 0)) {
+      throw new RemoteError('gateway/bad-request', 'end must be a non-negative integer', {})
+    }
+    const slice = (complete: unknown): SessionProjectionPageValue => {
+      const items = Array.isArray(complete) ? complete as JsonValue[] : []
+      const stop = Math.min(end ?? items.length, items.length)
+      const start = Math.max(0, stop - limit)
+      return { items: items.slice(start, stop), start, total: items.length }
+    }
+    const pagedKey = key as Extract<keyof SessionProjectionMap, string>
+    try {
+      signal.throwIfAborted()
+      const live = this.ctx.sessions.get(sessionId)
+      if (live !== undefined) return slice(this.ctx.sessionProjections.snapshot(live, [pagedKey]).values[pagedKey])
+      const stored = await this.ctx.get('sessionPersistence')?.stat(sessionId, { signal })
+      signal.throwIfAborted()
+      if (stored?.formatStatus === 'migration-required') {
+        return slice(this.ctx.get('sessionProjectionCache')?.cachedSnapshot(stored.header)?.values[pagedKey])
       }
-      if (signal.aborted || code === 'SESSION_QUERY_ABORTED') {
-        throw new RemoteError('gateway/cancelled', 'Session projection read was cancelled', {}, { cause: error })
-      }
-      if (remoteErrorOf(error) !== undefined) throw error
-      throw new RemoteError('gateway/internal', 'Session projection read failed', {}, { cause: error })
+      return await this.usingObservation({ sessionId, projection: true }, signal,
+        observation => slice(projections(observation).values[pagedKey]))
+    } catch (error: unknown) {
+      return projectionReadFailure(error, signal)
     }
   }
 
@@ -301,6 +338,22 @@ export function history(
     maxPageBytes,
   )
   return { cursor, records: pageRecords(page.events), hasMore: page.hasMore }
+}
+
+/**
+ * Map one projection read failure to its Remote answer.
+ * @param error - the read failure.
+ * @param signal - the read's cancellation.
+ * @returns null when the Session is absent; every other failure throws a Remote error.
+ */
+function projectionReadFailure(error: unknown, signal: AbortSignal): null {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
+  if (code === 'SESSION_QUERY_SESSION_NOT_FOUND' || code === 'session/not-found') return null
+  if (signal.aborted || code === 'SESSION_QUERY_ABORTED') {
+    throw new RemoteError('gateway/cancelled', 'Session projection read was cancelled', {}, { cause: error })
+  }
+  if (remoteErrorOf(error) !== undefined) throw error
+  throw new RemoteError('gateway/internal', 'Session projection read failed', {}, { cause: error })
 }
 
 /**

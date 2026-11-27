@@ -3570,6 +3570,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a sequenced baseline, cached hints when migration is deferred, or null when absent.',
       },
       {
+        signature: '@Remote(\'projectionPage\') projectionPage(request: SessionProjectionPageRequest, signal: AbortSignal): Promise<SessionProjectionPageValue>',
+        description: 'Read one older slice of a paged projection key, whose Client payloads carry only its newest items.',
+        parameters: [{ name: 'request', description: 'Session, paged key, exclusive end index, and item count.' }, { name: 'signal', description: 'cancellation for the Session read.' }],
+        returns: 'the items `[start, end)` of the complete array and its length, or null when the Session is absent.',
+      },
+      {
         signature: '@Remote({ mode: \'stream\' }) async *control(signal: AbortSignal): AsyncIterable<SessionControlFrame>',
         description: 'Stream a complete live-control baseline followed by replacement frames.',
         parameters: [{ name: 'signal', description: 'cancellation owned by the Remote stream carrier.' }],
@@ -3753,9 +3759,15 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'hintValue<T>( key: Extract<keyof SessionProjectionMap, string>, value: T, ): T',
-        description: 'Narrow one pushed value to its unit\'s declared hint view.\n\nA Host push (Session summary, control frame, follow opening block, follow projection frame) may carry only the bounded value a unit declares for listings; an explicit `session.projections` read and a Host snapshot keep the complete view. A key without a hint view, and a key with no live registration, passes its value through unchanged.',
-        parameters: [{ name: 'key', description: 'client-visible projection key the value belongs to.' }, { name: 'value', description: 'schema-validated view value about to enter a push.' }],
+        description: 'Bound one Client wire value to its unit\'s declared hint view.\n\nEvery Client payload (Session summary, control baseline and frame, follow opening block and frame, explicit `session.projections` read) carries the bounded value; Host snapshots keep the complete view, and pagedKey units serve older items through `session.projectionPage`. A key without a hint view, and a key with no live registration, passes its value through unchanged.',
+        parameters: [{ name: 'key', description: 'client-visible projection key the value belongs to.' }, { name: 'value', description: 'schema-validated view value about to enter a Client payload.' }],
         returns: 'the narrowed value, or the same reference when the unit declares no hint.',
+      },
+      {
+        signature: 'pagedKey(key: string): boolean',
+        description: 'Whether Clients read a key in pages: its live unit declares a hint view, so payloads carry only the newest items of an append-only array.',
+        parameters: [{ name: 'key', description: 'client-visible projection key.' }],
+        returns: 'true when the key\'s live registration declares `wire.hintView`.',
       },
       {
         signature: 'hintValues<T extends Record<string, unknown>>(values: T): T',
@@ -10355,6 +10367,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionProjectionMap',
     declaration: 'export interface SessionProjectionMap {\n}',
+  },
+  {
+    name: 'SessionProjectionPageRequest',
+    declaration: 'export interface SessionProjectionPageRequest {\n    readonly sessionId: SessionId;\n    readonly key: string;\n    readonly end?: number;\n    readonly limit: number;\n}',
+  },
+  {
+    name: 'SessionProjectionPageValue',
+    declaration: 'export type SessionProjectionPageValue = {\n    readonly items: readonly JsonValue[];\n    readonly start: number;\n    readonly total: number;\n} | null;',
   },
   {
     name: 'SessionProjectionsRequest',

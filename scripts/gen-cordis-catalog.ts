@@ -836,6 +836,8 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   SessionLogUploadExclusion: 'session.md',
   SessionProjectionsRequest: 'session.md',
   SessionProjectionsValue: 'session.md',
+  SessionProjectionPageRequest: 'session.md',
+  SessionProjectionPageValue: 'session.md',
   SubagentDescendantListEntry: 'subagent.md',
   SubagentSendMessageOptions: 'subagent.md',
   SubagentInterruptAuthority: 'subagent.md',

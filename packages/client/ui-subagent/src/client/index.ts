@@ -5,6 +5,9 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { ComposerChainProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { SubagentHeaderLineage } from './SubagentHeaderLineage.tsx'
 import { CATALOG_PAGE, newestFirst, type SubagentCatalogInjected } from './SubagentCatalog.tsx'
+
+/** Catalog entries one older-page read returns; several rendered pages fit in one read. */
+const CATALOG_READ_PAGE = 200
 import { SubagentsProgress, SubagentsRunningIndicator, SubagentsSection } from './SubagentsSection.tsx'
 import { createSubagentsSectionStore } from './subagents-store.ts'
 import {
@@ -74,12 +77,21 @@ export function apply(ctx: ClientContext): void {
     },
     async prepareCatalog(parentSessionId: SessionId, shown = CATALOG_PAGE) {
       await ctx.sessions.refreshProjections(parentSessionId)
+      // Pushes carry only the newest entries: read older pages until the shown rows are known.
+      for (;;) {
+        const snapshot = ctx.sessions.list.getSnapshot().projectionsBySession[parentSessionId]
+        if (snapshot?.state !== 'ready') return
+        const unread = snapshot.unread?.subagentCatalog
+        const known = snapshot.values.subagentCatalog?.length ?? 0
+        if (unread !== undefined && (unread === 0 || known >= shown)) break
+        await ctx.sessions.loadProjectionPage(parentSessionId, 'subagentCatalog', CATALOG_READ_PAGE)
+        if (ctx.sessions.list.getSnapshot().projectionsBySession[parentSessionId]?.unread?.subagentCatalog === unread) break
+      }
       const state = ctx.sessions.list.getSnapshot()
       const parent = state.projectionsBySession[parentSessionId]
-      if (parent?.state !== 'ready') return
       // Only the rows a level shows need their child catalogs; they are read together,
       // and a child already read in this connection generation answers without a request.
-      const children = newestFirst(parent.values.subagentCatalog ?? []).slice(0, shown).filter(entry => entry.mode !== 'external'
+      const children = newestFirst(parent?.values.subagentCatalog ?? []).slice(0, shown).filter(entry => entry.mode !== 'external'
         && state.byId[entry.id]?.formatStatus !== 'migration-required'
         && state.projectionsBySession[entry.id]?.state !== 'migration-required'
         && state.projectionsBySession[entry.id]?.state !== 'error')

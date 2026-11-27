@@ -115,16 +115,15 @@ export interface ProjectionDefinition<K extends string, S> {
      */
     view(state: NoInfer<S>): SessionProjectionViewValue<SessionProjectionMap[K]>
     /**
-     * Narrow the value a baseline push carries: a Session summary, a control
-     * baseline, or a follow opening block. Live change frames, explicit
-     * `session.projections` reads, Host snapshots, checkpoints, and every
-     * Host-internal fold stay complete, so a unit whose client value grows
-     * without bound declares this while Host consumers keep the whole state.
-     * The result keeps the wire type — a bounded suffix of a growing list, or
-     * the value itself when it is small enough — and a Client that needs the
-     * whole value reads it explicitly. The function runs for every pushed value
-     * of this key and MUST be pure and cheap.
-     * @default undefined (pushes carry the complete view)
+     * Bound the value every Client wire payload carries: Session summaries,
+     * control baselines and frames, follow opening blocks and projection
+     * frames, and explicit `session.projections` reads. Host snapshots,
+     * checkpoints, and every Host-internal fold stay complete. The view must be
+     * an append-only array whose items carry a string `id`, and this function
+     * must return its newest suffix; a Client reads older items through
+     * `session.projectionPage`, which slices the complete array by index. The
+     * function runs for every pushed value of this key and MUST be pure and cheap.
+     * @default undefined (Client payloads carry the complete view)
      */
     hintView?(value: SessionProjectionViewValue<SessionProjectionMap[K]>): SessionProjectionViewValue<SessionProjectionMap[K]>
     /**
@@ -626,15 +625,16 @@ export class SessionProjectionRegistry extends Service {
   }
 
   /**
-   * Narrow one pushed value to its unit's declared hint view.
+   * Bound one Client wire value to its unit's declared hint view.
    *
-   * A Host push (Session summary, control frame, follow opening block, follow
-   * projection frame) may carry only the bounded value a unit declares for
-   * listings; an explicit `session.projections` read and a Host snapshot keep
-   * the complete view. A key without a hint view, and a key with no live
-   * registration, passes its value through unchanged.
+   * Every Client payload (Session summary, control baseline and frame, follow
+   * opening block and frame, explicit `session.projections` read) carries the
+   * bounded value; Host snapshots keep the complete view, and
+   * {@link pagedKey} units serve older items through `session.projectionPage`.
+   * A key without a hint view, and a key with no live registration, passes its
+   * value through unchanged.
    * @param key - client-visible projection key the value belongs to.
-   * @param value - schema-validated view value about to enter a push.
+   * @param value - schema-validated view value about to enter a Client payload.
    * @returns the narrowed value, or the same reference when the unit declares no hint.
    */
   hintValue<T>(
@@ -646,6 +646,17 @@ export class SessionProjectionRegistry extends Service {
       ? undefined
       : registration.def.wire?.hint
     return (hint === undefined ? value : hint(value)) as T
+  }
+
+  /**
+   * Whether Clients read a key in pages: its live unit declares a hint view,
+   * so payloads carry only the newest items of an append-only array.
+   * @param key - client-visible projection key.
+   * @returns true when the key's live registration declares `wire.hintView`.
+   */
+  pagedKey(key: string): boolean {
+    const registration = this.registrations.get(key)
+    return registration !== undefined && registration.refs > 0 && registration.def.wire?.hint !== undefined
   }
 
   /**

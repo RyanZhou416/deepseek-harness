@@ -434,6 +434,30 @@ export type SessionProjectionsValue =
   | { readonly kind: 'migration-required'; readonly values: SessionProjectionValues }
   | null
 
+/**
+ * One older slice of a paged projection key (a key whose unit declares
+ * `wire.hintView`): Client payloads carry only its newest items.
+ */
+export interface SessionProjectionPageRequest {
+  readonly sessionId: SessionId
+  /** Paged projection key, such as `subagentCatalog`. */
+  readonly key: string
+  /** Exclusive end index in the complete array; omitted means its current length. */
+  readonly end?: number
+  /** Items to return, from 1 through {@link SESSION_PROJECTION_PAGE_MAX}. */
+  readonly limit: number
+}
+
+/** Largest `limit` one `session.projectionPage` read serves. */
+export const SESSION_PROJECTION_PAGE_MAX = 500
+
+/** The items `[start, end)` of the complete array and its current length; null when the Session is absent. */
+export type SessionProjectionPageValue = {
+  readonly items: readonly JsonValue[]
+  readonly start: number
+  readonly total: number
+} | null
+
 /** One raw Session event in the Remote journal. */
 export interface SessionEventEntry {
   readonly type: 'event'

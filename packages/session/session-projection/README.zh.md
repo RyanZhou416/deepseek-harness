@@ -107,7 +107,7 @@ Session 摘要包含每个已注册客户端视图，但排除 `SessionProjectio
 
 标记决定客户端视图类型，`wire.summary` 决定运行时键集合，省略即 `true`。map 条目带标记的 key 应声明 `wire.summary: false` 以保持一致；该字段就是普通布尔值，而不是类型层的互锁。可空条目把 `null` 放在包装之外（`SessionProjectionSummaryExcluded<TodoItem[]> | null`），以便首次写入前的值仍可表达。另外，`wire.live: false` 会把单元移出 `liveKeys()`，即 Session Controller 变更流（control stream 与 follow `projectionChanges`）发布的集合；opening、显式读取与注册表变更回调仍携带它。只有当每个消费方都能从其已 follow 的 Session event 推导实时变化时才声明。当前被标记的 key 是 `turnOutline`、`sessionStats`、`todos`、`imageLimits`、`contextPressure` 和 `contextBreakdown`：outline 随整份日志增长，列表行不渲染统计、todo 清单或上下文用量，而图片上限是每个 Session 共享的同一个宿主级启动常量。
 
-会持续增长的客户端值还可以声明有界的推送形式：`wire.hintView(value)` 返回同一 wire 类型中「推送应携带」的部分，`hintValue(key, value)` 与 `hintValues(block)` 负责应用它。Session Controller 只在 Session 列表 hints、control baseline 与 follow opening block 三处调用，因此数万行的目录不再随每一次推送发送；`snapshot`、checkpoint、`restore`、变更回调、live control 与 projection 更新帧以及显式 `session.projections` 读取仍保持完整值。该上界属于单元自身的 wire 契约，而不是部署配置：需要完整值的消费方显式读取，无法窄化的值不声明 `hintView`。
+无界增长的客户端值可以分页。它的视图必须是只追加的数组，每项带字符串 `id`，`wire.hintView(value)` 返回其最新的后缀。`hintValue(key, value)` 与 `hintValues(block)` 负责应用它，`pagedKey(key)` 判断某个在用单元是否声明了它。Session Controller 在每一种 Client 载荷上应用它：Session 列表 hints、control baseline 与帧、follow opening block 与 projection 帧，以及显式 `session.projections` 读取。`snapshot`、checkpoint、`restore`、变更回调与 Host 内部折叠保持完整值，Client 通过 `session.projectionPage` 读取更早的条目，该接口按下标切分完整数组。无法分页的值不声明 `hintView`。
 
 摘要服务于 Session 列表行，列表无需打开 Session。`@` 引用同样以列表方式枚举 Session，但只通过带 key 的 `snapshot(session, keys)` 与 `cachedSnapshot(header, keys)` 读取其 `title` 和 `subagent` 标签 key。`snapshot(session, keys)` 只计算它返回的单元；不传 key 子集时计算每个客户端可见单元、不计算 Host 专用单元，因此打开的 Session 仍会收到全部投影值，`viewCheckpoint` 不传 key 子集时同样返回每个 wire key。
 

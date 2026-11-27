@@ -38,10 +38,10 @@ export class SessionControlController {
         type: 'projection',
         sessionId: session.id,
         seq,
-        // Every projection definition validates its value before change publication.
-        // A live update keeps its whole value: a Client that already read the
-        // complete value must not have it narrowed by a bounded push.
-        changes: summary as SessionProjectionUpdate['changes'],
+        // Every projection definition validates its value before change
+        // publication; a paged unit carries its bounded window, as in every
+        // other Client payload.
+        changes: summary.map(change => ({ key: change.key, val: ctx.sessionProjections.hintValue(change.key, change.val) })) as SessionProjectionUpdate['changes'],
       })
     })
     ctx.effect(() => () => {

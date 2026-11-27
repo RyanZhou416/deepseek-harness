@@ -431,7 +431,7 @@ const FIXTURE_SESSION_READS = [
   'commands/list', 'fileReferences/list', 'goals/get', 'goals/edit',
   'goals/clear', 'goals/complete', 'goals/create', 'goals/pause', 'goals/resume', 'job/list', 'job/follow',
   'session/attachment', 'session/control', 'session/follow', 'session/list',
-  'session/page', 'session/projections', 'sessionReferenceResolver/candidates', 'skills/list',
+  'session/page', 'session/projectionPage', 'session/projections', 'sessionReferenceResolver/candidates', 'skills/list',
   'userQuestions/answer', 'userQuestions/attachWait', 'workspace/follow',
 ] as const
 

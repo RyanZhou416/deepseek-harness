@@ -140,6 +140,18 @@ export interface ISessions {
   refreshProjections(sessionId: SessionId): Promise<void>
 
   /**
+   * Read the next older page of a paged projection key (one whose payloads
+   * carry only its newest items) and merge it under the pushed window in
+   * `projectionsBySession`. Reads of one key are single-flight; a page from a
+   * superseded Host generation is discarded.
+   * @param sessionId - Session owning the key.
+   * @param key - paged projection key, such as `subagentCatalog`.
+   * @param limit - items to read, from 1 through 500.
+   * @returns completion of the current or newly started read; a failed read rejects.
+   */
+  loadProjectionPage(sessionId: SessionId, key: string, limit: number): Promise<void>
+
+  /**
    * Refresh the Host-authoritative Session list.
    * @returns completion of the current or newly started Session-list refresh.
    */

@@ -74,6 +74,7 @@ export const VIEWER_ENDPOINT_CLASSES = {
   'session/follow': 'reader-session-read', // the page follows a visible Session
   'session/page': 'reader-session-read', // the page reads a visible Session page
   'session/projections': 'reader-session-read', // the page reads visible Session projections
+  'session/projectionPage': 'reader-session-read', // the page reads an older page of a visible Session projection
   'skills/list': 'reader-session-read', // the page lists the skills of a visible Session
   'session/events': 'reader-session-read', // the page reads the event history of a visible Session
   'session/observeEvent': 'reader-session-read', // the page follows one visible Session's events

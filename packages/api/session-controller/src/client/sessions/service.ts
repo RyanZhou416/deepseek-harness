@@ -377,6 +377,10 @@ export class ClientSessions implements ISessions {
     return this.manager.refreshProjections(sessionId)
   }
 
+  loadProjectionPage(sessionId: SessionId, key: string, limit: number): Promise<void> {
+    return this.manager.loadProjectionPage(sessionId, key, limit)
+  }
+
   /**
    * Refresh the real Session baseline, reusing an in-flight pull.
    * @returns completion of the current or newly started baseline pull.

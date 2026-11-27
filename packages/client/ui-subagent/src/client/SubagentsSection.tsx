@@ -86,9 +86,9 @@ function sectionOrder(
  * most recently active ones. The list shows five rows and then a fold control
  * that shows the rest, once that holds back two rows or more; the choice is
  * kept per Session. The section renders nothing while the Session has no
- * subagents and no failed catalog read. Showing it reads the Session's
- * complete catalog once — a pushed catalog value carries only the newest
- * entries, so progress and the fold count need this read — and rows offer
+ * subagents and no failed catalog read. A pushed catalog carries only the
+ * newest entries, so showing the section reads the first older page once;
+ * progress and the fold count include the entries still unread, and rows offer
  * expansion from locally known catalogs, expanding a branch or retrying a
  * failed read prepares that level. Opening a subagent closes the panel's
  * overlay.
@@ -103,8 +103,8 @@ export function SubagentsSection({
   const catalog = catalogs[sessionId]
   const unfolded = useStore(state => state.unfolded)
   const prepareLevel = useMemo(() => levelPreparer(prepareCatalog), [prepareCatalog])
-  // The catalog a push carries is bounded to its newest entries, so a shown
-  // section reads the complete value once per Session.
+  // A pushed catalog carries only the newest entries; a shown section reads
+  // the first older page once per Session for the fold count and progress.
   const preparedSession = useRef<SessionId | undefined>(undefined)
   useEffect(() => {
     if (preparedSession.current === sessionId) return
@@ -116,13 +116,14 @@ export function SubagentsSection({
   )
   const ordered = useMemo(() => catalog === undefined ? NO_ENTRIES : sectionOrder(catalog.entries, summaries), [catalog, summaries])
   // Folding holds back two rows or more, since the fold control takes a row itself.
-  const foldable = ordered.length > FOLD_LIMIT + 1
+  const older = catalog?.older ?? 0
+  const foldable = ordered.length + older > FOLD_LIMIT + 1
   const shown = useMemo(
     () => catalog === undefined ? undefined : { ...catalog, entries: foldable && !unfolded ? ordered.slice(0, FOLD_LIMIT) : ordered },
     [catalog, ordered, foldable, unfolded],
   )
   if (shown === undefined || (shown.state !== 'error' && ordered.length === 0)) return null
-  const label = unfolded ? t('list.less') : t('list.more', { count: ordered.length - FOLD_LIMIT })
+  const label = unfolded ? t('list.less') : t('list.more', { count: ordered.length + older - FOLD_LIMIT })
   return (
     <div className={css.sectionBody} data-subagents-section="">
       {/* Moving between rows swaps their hover cards without another dwell. */}

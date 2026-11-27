@@ -6,7 +6,7 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type {
   SessionListState, SessionSnapshot, SessionSummary, SessionProjectionSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
+import type { SubagentAddress, SubagentCatalogEntry } from '@deepseek-ai/dsh-subagent/client'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { ComposerChainProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -39,6 +39,7 @@ function sessionsWith(sessions: SessionSummary[]) {
   const projections: Record<SessionId, SessionProjectionSnapshot> = {}
   const snapshot: SessionListState = { ids: sessions.map(s => s.id), byId, phase: 'ready', projectionsBySession: projections }
   const actionCalls: { method: string; args: unknown[] }[] = []
+  const older: Record<SessionId, SubagentCatalogEntry[]> = {}
   const address: SubagentAddress = {
     parentSessionId: sid('parent'),
     childSessionId: sid('c1'),
@@ -56,6 +57,23 @@ function sessionsWith(sessions: SessionSummary[]) {
       : undefined,
     refreshProjections: (parentSessionId: SessionId) => {
       actionCalls.push({ method: 'refreshProjections', args: [parentSessionId] })
+      return Promise.resolve()
+    },
+    /** Older catalog entries the Host still holds per Session, oldest first; absent means the push was complete. */
+    older,
+    loadProjectionPage: (sessionId: SessionId, key: string, limit: number) => {
+      actionCalls.push({ method: 'loadProjectionPage', args: [sessionId, key, limit] })
+      const current = projections[sessionId]
+      if (current !== undefined) {
+        const unread = older[sessionId] ?? []
+        const page = unread.slice(Math.max(0, unread.length - limit))
+        older[sessionId] = unread.slice(0, unread.length - page.length)
+        projections[sessionId] = {
+          ...current,
+          values: { ...current.values, subagentCatalog: [...page, ...current.values.subagentCatalog ?? []] },
+          unread: { subagentCatalog: unread.length - page.length },
+        }
+      }
       return Promise.resolve()
     },
   }
@@ -189,6 +207,46 @@ describe('apply', () => {
     expect(refresh.mock.calls.map(([id]) => id)).toContain(sid('many-0'))
   })
 
+  it('reads older catalog pages until the shown rows are known', async () => {
+    const { ctx, face } = await fullBench(FAMILY)
+    onTestFinished(() => ctx.fiber.dispose())
+    const entry = ctx.slots.entries('conversation.session.header.lineage')
+      .find(entry => entry.component === SubagentHeaderLineage)!
+    const actions = (entry.inject as (id: SessionId) => SubagentCatalogInjected)(sid('parent'))
+    const all = Array.from({ length: 500 }, (_, index) => ({ id: sid(`old-${String(index)}`), mode: 'one-shot' as const, createdAt: index }))
+    face.older[sid('parent')] = all.slice(0, 468)
+    const refresh = vi.spyOn(face, 'refreshProjections').mockImplementation(async (id) => {
+      if (id === sid('parent')) face.projections[id] ??= { state: 'ready', error: null, values: { subagentCatalog: all.slice(468) } }
+    })
+    onTestFinished(() => { refresh.mockRestore() })
+    await actions.prepareCatalog(sid('parent'))
+    const pageReads = () => face.actionCalls.filter(call => call.method === 'loadProjectionPage')
+    // The first activation reads one older page even when the pushed window already fills the shown rows.
+    expect(pageReads()).toEqual([{ method: 'loadProjectionPage', args: [sid('parent'), 'subagentCatalog', 200] }])
+    expect(face.projections[sid('parent')]?.unread).toEqual({ subagentCatalog: 268 })
+    await actions.prepareCatalog(sid('parent'), 400)
+    expect(pageReads()).toHaveLength(2)
+    expect(face.projections[sid('parent')]?.values.subagentCatalog).toHaveLength(432)
+    await actions.prepareCatalog(sid('parent'), 1000)
+    expect(pageReads()).toHaveLength(3)
+    expect(face.projections[sid('parent')]?.unread).toEqual({ subagentCatalog: 0 })
+    await actions.prepareCatalog(sid('parent'), 1000)
+    expect(pageReads()).toHaveLength(3)
+  })
+  it('stops reading older pages when a read leaves the unread count unchanged', async () => {
+    const { ctx, face } = await fullBench(FAMILY)
+    onTestFinished(() => ctx.fiber.dispose())
+    const entry = ctx.slots.entries('conversation.session.header.lineage')
+      .find(entry => entry.component === SubagentHeaderLineage)!
+    const actions = (entry.inject as (id: SessionId) => SubagentCatalogInjected)(sid('parent'))
+    face.projections[sid('parent')] = { state: 'ready', error: null, values: {} }
+    const load = vi.spyOn(face, 'loadProjectionPage').mockResolvedValue(undefined)
+    const refresh = vi.spyOn(face, 'refreshProjections')
+    onTestFinished(() => { load.mockRestore(); refresh.mockRestore() })
+    await actions.prepareCatalog(sid('parent'))
+    expect(load).toHaveBeenCalledOnce()
+    expect(refresh.mock.calls).toEqual([[sid('parent')]])
+  })
   it('registers catalog actions and selects read-only subagent composers from session facts', async () => {
     const { ctx, face } = await fullBench(FAMILY)
     const catalogEntry = ctx.slots.entries('conversation.session.header.lineage')

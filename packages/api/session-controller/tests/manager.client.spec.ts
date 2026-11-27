@@ -2272,3 +2272,87 @@ describe('Session summary projection replacement', () => {
     expect(entry?.title).toBe('fresh')
   })
 })
+
+describe('paged projection keys', () => {
+  const entry = (index: number) => ({ id: `c-${String(index)}` as SessionId, mode: 'one-shot' as const, createdAt: index })
+  const ids = (values: unknown) => (values as readonly { readonly id: string }[]).map(item => item.id)
+
+  it('merges older pages under the pushed window and reads each page once per Host generation', async ({ mock, remote, start }) => {
+    mock.load(sessionWorld)
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+    const window = [entry(8), entry(9)]
+    remote.session.projections.mockResolvedValueOnce(ok({ kind: 'sequenced', asOfSeq: 3, values: { subagentCatalog: window } }))
+    await manager.refreshProjections(S1)
+    const before = manager.getListSnapshot().projectionsBySession[S1]
+    expect(before?.unread).toBeUndefined()
+
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.projectionPage>>>()
+    remote.session.projectionPage.mockReturnValueOnce(pending.promise)
+    const first = manager.loadProjectionPage(S1, 'subagentCatalog', 4)
+    // One read per key at a time.
+    expect(manager.loadProjectionPage(S1, 'subagentCatalog', 4)).toBe(first)
+    pending.resolve(ok({ items: [entry(6), entry(7), entry(8), entry(9)], start: 6, total: 10 }))
+    await first
+    const merged = manager.getListSnapshot().projectionsBySession[S1]
+    expect(ids(merged?.values.subagentCatalog)).toEqual(['c-6', 'c-7', 'c-8', 'c-9'])
+    expect(merged?.unread).toEqual({ subagentCatalog: 6 })
+    // An unrelated rebuild keeps the merged identity.
+    manager.handleSessionAdded(summary(S2))
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toBe(merged)
+
+    remote.session.projectionPage.mockResolvedValueOnce(ok({ items: [0, 1, 2, 3, 4, 5].map(entry), start: 0, total: 10 }))
+    await manager.loadProjectionPage(S1, 'subagentCatalog', 6)
+    expect(remote.session.projectionPage.mock.calls.map(([request]) => request)).toEqual([
+      { sessionId: S1, key: 'subagentCatalog', limit: 4 },
+      { sessionId: S1, key: 'subagentCatalog', end: 6, limit: 6 },
+    ])
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.unread).toEqual({ subagentCatalog: 0 })
+    // Nothing older remains: no further read.
+    await manager.loadProjectionPage(S1, 'subagentCatalog', 6)
+    expect(remote.session.projectionPage).toHaveBeenCalledTimes(2)
+
+    // A new pushed window keeps the loaded run underneath, without duplicates.
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, seq: 4, changes: [{ key: 'subagentCatalog', val: [entry(9), entry(10)] }] })
+    expect(ids(manager.getListSnapshot().projectionsBySession[S1]?.values.subagentCatalog))
+      .toEqual(['c-0', 'c-1', 'c-2', 'c-3', 'c-4', 'c-5', 'c-6', 'c-7', 'c-8', 'c-9', 'c-10'])
+
+    // A page that does not join the loaded run replaces it; a removed Session forgets its pages.
+    remote.session.projectionPage.mockResolvedValueOnce(ok({ items: [entry(10)], start: 10, total: 11 }))
+    manager.handleConnected()
+    await manager.loadProjectionPage(S1, 'subagentCatalog', 1)
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.unread).toEqual({ subagentCatalog: 10 })
+    manager.handleSessionRemoved(S1)
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.unread).toBeUndefined()
+  })
+
+  it('discards a page from a superseded generation, ignores an absent Session, and rejects a failed read', async ({ mock, remote, start }) => {
+    mock.load(sessionWorld)
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+    remote.session.projections.mockResolvedValueOnce(ok({ kind: 'sequenced', asOfSeq: 1, values: { subagentCatalog: [entry(5)] } }))
+    await manager.refreshProjections(S1)
+
+    const stale = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.projectionPage>>>()
+    remote.session.projectionPage.mockReturnValueOnce(stale.promise)
+    const read = manager.loadProjectionPage(S1, 'subagentCatalog', 2)
+    manager.handleConnected()
+    stale.resolve(ok({ items: [entry(4), entry(5)], start: 4, total: 6 }))
+    await read
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.unread).toBeUndefined()
+
+    remote.session.projectionPage.mockResolvedValueOnce(ok(null))
+    await manager.loadProjectionPage(S1, 'subagentCatalog', 2)
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.unread).toBeUndefined()
+
+    const failure = new RemoteError('gateway/internal', 'page failed', {})
+    remote.session.projectionPage.mockResolvedValueOnce(err(failure))
+    await expect(manager.loadProjectionPage(S1, 'subagentCatalog', 2)).rejects.toMatchObject({ code: 'gateway/internal' })
+
+    await manager.dispose()
+    await manager.loadProjectionPage(S1, 'subagentCatalog', 2)
+    expect(remote.session.projectionPage).toHaveBeenCalledTimes(3)
+  })
+})

@@ -32,6 +32,7 @@ import { Notifier } from './notifier.ts'
 import { ProjectionValueStore } from './projection-store.ts'
 import { Session } from './session.ts'
 import type { SessionRemotes } from './remotes.ts'
+import { ProjectionPages } from './projection-pages.ts'
 import type { SessionTarget } from '../contract/sessions.ts'
 
 function sessionSeqCursor(value: number): SessionSeqCursor {
@@ -100,6 +101,12 @@ export interface SessionProjectionSnapshot {
    * projection store keeps compiling; every store-backed snapshot carries it.
    */
   readonly availability?: ProjectionAvailability
+  /**
+   * Older items not yet read, per paged key that has loaded at least one page
+   * through `loadProjectionPage`; `values` then holds the loaded items
+   * followed by the pushed newest window.
+   */
+  readonly unread?: Readonly<Record<string, number>>
 }
 
 /**
@@ -172,6 +179,12 @@ export class SessionManager {
    * wanted.
    */
   private hostGeneration = 0
+  private readonly projectionPages = new ProjectionPages()
+  private readonly pagedValueCache = new Map<SessionId, {
+    readonly source: object
+    readonly result: Readonly<Partial<SessionProjectionViewValues>>
+  }>()
+  private readonly pageInflight = new Map<string, { readonly promise: Promise<void>; readonly token: object }>()
 
 
   private listSnapshotCache: SessionListSnapshot
@@ -496,6 +509,67 @@ export class SessionManager {
     })()
     this.projectionInflight.set(sessionId, { promise: operation, controller })
     return operation
+  }
+
+  /**
+   * Read the next older page of one paged projection key; see `ClientSessions.loadProjectionPage`.
+   * @param sessionId - Session owning the key.
+   * @param key - paged projection key.
+   * @param limit - items to read.
+   * @returns completion of the current or newly started read.
+   */
+  loadProjectionPage(sessionId: SessionId, key: string, limit: number): Promise<void> {
+    if (this.disposed) return Promise.resolve()
+    const slot = `${sessionId}\u0000${key}`
+    const existing = this.pageInflight.get(slot)
+    if (existing !== undefined) return existing.promise
+    const end = this.projectionPages.unread(sessionId, key)
+    if (end === 0) return Promise.resolve()
+    const generation = this.hostGeneration
+    const token = {}
+    const operation = (async () => {
+      try {
+        const page = await this.remote.session.projectionPage({ sessionId, key, ...end === undefined ? {} : { end }, limit })
+        if (generation !== this.hostGeneration || this.disposed) return
+        if (!page.ok) throw page.error
+        if (page.value === null) return
+        this.projectionPages.add(sessionId, key, page.value)
+        this.notifier.markDirty()
+      } finally {
+        if (this.pageInflight.get(slot)?.token === token) this.pageInflight.delete(slot)
+      }
+    })()
+    this.pageInflight.set(slot, { promise: operation, token })
+    return operation
+  }
+
+  /** Store values with each paged key's loaded older items merged under its pushed window. */
+  private pagedValues(
+    sessionId: SessionId,
+    values: Readonly<Partial<SessionProjectionViewValues>>,
+  ): Readonly<Partial<SessionProjectionViewValues>> {
+    const keys = this.projectionPages.keys(sessionId)
+    if (keys.length === 0) return values
+    const cached = this.pagedValueCache.get(sessionId)
+    const merged: Record<string, unknown> = {}
+    let same = cached !== undefined && cached.source === values
+    for (const key of keys) {
+      const window = (values as Readonly<Record<string, unknown>>)[key]
+      const value = this.projectionPages.merge(sessionId, key, Array.isArray(window) ? window : [])
+      merged[key] = value
+      if (same && cached?.result[key as keyof SessionProjectionViewValues] !== value) same = false
+    }
+    if (same && cached !== undefined) return cached.result
+    const result = { ...values, ...merged } as Readonly<Partial<SessionProjectionViewValues>>
+    this.pagedValueCache.set(sessionId, { source: values, result })
+    return result
+  }
+
+  /** Unread older counts per paged key with loaded pages, or undefined when none. */
+  private unreadCounts(sessionId: SessionId): Readonly<Record<string, number>> | undefined {
+    const keys = this.projectionPages.keys(sessionId)
+    if (keys.length === 0) return undefined
+    return Object.fromEntries(keys.map(key => [key, this.projectionPages.unread(sessionId, key) ?? 0]))
   }
 
   /** Apply one successful exact projection read (or its absent and migration branches). */
@@ -909,6 +983,8 @@ export class SessionManager {
     this.pruneEngagement(sessionId, this.retainedIds(this.summaries))
     this.cancelProjectionRead(sessionId)
     this.projectionLoads.delete(sessionId)
+    this.projectionPages.drop(sessionId)
+    this.pagedValueCache.delete(sessionId)
   }
 
   /**
@@ -949,6 +1025,9 @@ export class SessionManager {
    */
   handleConnected(): void {
     this.hostGeneration += 1
+    this.projectionPages.clear()
+    this.pagedValueCache.clear()
+    this.pageInflight.clear()
     const requested = [...this.projectionLoads.keys()]
     this.captureTitlePresentationFallbacks()
     for (const store of this.projectionStores.values()) store.clear()
@@ -1024,7 +1103,8 @@ export class SessionManager {
     const sameOrder = items.length === this.itemsCache.length && items.every((e, i) => e === this.itemsCache[i])
     if (!sameOrder) this.itemsCache = items
     const projectionEntries = [...this.projectionStores].map(([sessionId, store]): [SessionId, SessionProjectionSnapshot] => {
-      const values = store.values()
+      const values = this.pagedValues(sessionId, store.values())
+      const unread = this.unreadCounts(sessionId)
       const load = this.projectionLoads.get(sessionId)
       const state = load?.state ?? 'idle'
       const error = load?.error ?? null
@@ -1033,9 +1113,9 @@ export class SessionManager {
       const availability = store.availability()
       const previous = previousProjections[sessionId]
       return [sessionId, previous !== undefined && previous.values === values && previous.state === state
-        && previous.error === error && previous.availability === availability
+        && previous.error === error && previous.availability === availability && sameUnread(previous.unread, unread)
         ? previous
-        : { values, state, error, availability }]
+        : { values, state, error, availability, ...unread === undefined ? {} : { unread } }]
     })
     const projectionsBySession = Object.fromEntries(projectionEntries)
     return {
@@ -1121,4 +1201,12 @@ function applyMutation(summaries: readonly SessionSummary[], mutation: SessionLi
 /** Temporary source-plane bridge while the Host contract and client project build independently. */
 function workspaceAttachSessionId(error: RemoteFailure): SessionId | undefined {
   return error.code === 'session/workspace-attach-failed' ? error.details.sessionId : undefined
+}
+
+/** Whether two unread-count records are equal. */
+function sameUnread(left: Readonly<Record<string, number>> | undefined, right: Readonly<Record<string, number>> | undefined): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  const keys = Object.keys(left)
+  return keys.length === Object.keys(right).length && keys.every(key => left[key] === right[key])
 }

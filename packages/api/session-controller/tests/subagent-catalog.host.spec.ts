@@ -68,7 +68,7 @@ async function bench() {
 }
 
 describe('SessionController subagent catalog', () => {
-  it('pushes the newest catalog entries while an explicit read keeps the complete value', async () => {
+  it('bounds every Client payload to the newest entries and serves older ones by page', async () => {
     const { ctx, controller } = await bench()
     const parent = ctx.sessions.create(PARENT, { meta: { createdAt: header.createdAt, cwd: '/workspace' } })
     const total = SUBAGENT_CATALOG_HINT_LIMIT + 8
@@ -114,14 +114,13 @@ describe('SessionController subagent catalog', () => {
       let frame = await stream.next()
       let catalog = frame.done || frame.value.type !== 'projection'
         ? undefined : frame.value.changes.find(change => change.key === 'subagentCatalog')?.val
-      while (!frame.done && !(Array.isArray(catalog) && catalog.length === total + 1)) {
+      while (!frame.done && !(Array.isArray(catalog) && (catalog as { readonly id: string }[]).at(-1)?.id === 'child-newest')) {
         frame = await stream.next()
         catalog = frame.done || frame.value.type !== 'projection'
           ? undefined : frame.value.changes.find(change => change.key === 'subagentCatalog')?.val
       }
-      // A live update keeps the whole value, so a Client that read the complete
-      // catalog never has it narrowed by a later change.
-      expect(Array.isArray(catalog)).toBe(true)
+      // A live update carries the same bounded window.
+      expect(catalog).toHaveLength(SUBAGENT_CATALOG_HINT_LIMIT)
       expect((catalog as { readonly id: string }[]).at(-1)?.id).toBe('child-newest')
     } finally {
       signal.abort()
@@ -151,9 +150,31 @@ describe('SessionController subagent catalog', () => {
       openingAbort.abort()
       await follow.return?.()
     }
-    const complete = await controller.projections({ sessionId: PARENT }, new AbortController().signal)
-    expect(complete).toMatchObject({ kind: 'sequenced' })
-    expect((complete as { values: { subagentCatalog?: readonly unknown[] } }).values.subagentCatalog).toHaveLength(total + 1)
+    const explicit = await controller.projections({ sessionId: PARENT }, new AbortController().signal)
+    expect(explicit).toMatchObject({ kind: 'sequenced' })
+    expect((explicit as { values: { subagentCatalog?: readonly unknown[] } }).values.subagentCatalog)
+      .toHaveLength(SUBAGENT_CATALOG_HINT_LIMIT)
+
+    // Older entries come by page, ending where the caller asks.
+    const read = (request: { end?: number; limit: number }) => controller.projectionPage(
+      { sessionId: PARENT, key: 'subagentCatalog', ...request }, new AbortController().signal)
+    const first = await read({ limit: 10 })
+    expect(first).toMatchObject({ start: total + 1 - 10, total: total + 1 })
+    expect(first?.items.map(item => (item as { id: string }).id).at(-1)).toBe('child-newest')
+    const oldest = await read({ end: 5, limit: 10 })
+    expect(oldest).toMatchObject({ start: 0, total: total + 1 })
+    expect(oldest?.items.map(item => (item as { id: string }).id)).toEqual(['child-0', 'child-1', 'child-2', 'child-3', 'child-4'])
+    const absent = brandString<SessionId>('absent')
+    expect(await controller.projectionPage({ sessionId: absent, key: 'subagentCatalog', limit: 1 }, new AbortController().signal)).toBeNull()
+    for (const bad of [
+      { sessionId: PARENT, key: 'title', limit: 1 },
+      { sessionId: PARENT, key: 'subagentCatalog', limit: 0 },
+      { sessionId: PARENT, key: 'subagentCatalog', limit: 501 },
+      { sessionId: PARENT, key: 'subagentCatalog', limit: 1, end: -1 },
+      { sessionId: brandString<SessionId>(''), key: 'subagentCatalog', limit: 1 },
+    ]) {
+      await expect(controller.projectionPage(bad, new AbortController().signal)).rejects.toMatchObject({ code: 'gateway/bad-request' })
+    }
   })
 
   it('pushes complete catalog values through the shared control stream', async () => {
@@ -201,6 +222,9 @@ describe('SessionController subagent catalog', () => {
     expect(observe).toHaveBeenCalledWith(PARENT, { signal, projectionMode: 'all' })
     expect(open).toHaveBeenCalledWith(PARENT, 'read', { signal })
     expect(resume).not.toHaveBeenCalled()
+    // A stored parent's older catalog page comes from the same non-activating read.
+    await expect(controller.projectionPage({ sessionId: PARENT, key: 'subagentCatalog', limit: 5 }, signal))
+      .resolves.toMatchObject({ start: 0, total: 1, items: [{ id: CHILD }] })
     expect(ctx.sessions.get(PARENT)).toBeUndefined()
     expect(ctx.agents.get(PARENT)).toBeUndefined()
   })
@@ -219,6 +243,9 @@ describe('SessionController subagent catalog', () => {
     expect(stored.header.version).toBe(SESSION_FORMAT_VERSION)
     await expect(controller.projections({ sessionId: PARENT }, new AbortController().signal))
       .resolves.toEqual({ kind: 'migration-required', values: {} })
+    vi.spyOn(ctx.sessionPersistence, 'stat').mockResolvedValueOnce({ ...stored, formatStatus: 'migration-required' })
+    await expect(controller.projectionPage({ sessionId: PARENT, key: 'subagentCatalog', limit: 5 }, new AbortController().signal))
+      .resolves.toEqual({ items: [], start: 0, total: 0 })
 
     expect(observe).not.toHaveBeenCalled()
     expect(open).not.toHaveBeenCalled()

@@ -54,7 +54,7 @@ const SESSION_READS = [
   'goals/clear', 'goals/complete', 'goals/create', 'goals/pause', 'goals/resume', 'job/list', 'job/follow',
   'session/attachment', 'session/control',
   'session/events', 'session/follow', 'session/list', 'session/observeEvent', 'session/observeProjections',
-  'session/observeState', 'session/page', 'session/projections', 'session/state', 'session/wait',
+  'session/observeState', 'session/page', 'session/projectionPage', 'session/projections', 'session/state', 'session/wait',
   'sessionReferenceResolver/candidates', 'userQuestions/answer', 'userQuestions/attachWait',
   'skills/list', 'toolResults/watch',
   'workspace/follow',

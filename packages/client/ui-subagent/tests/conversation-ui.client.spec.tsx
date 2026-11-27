@@ -17,7 +17,7 @@ import {
 } from '../src/client/SubagentsSection.tsx'
 import { SubagentReadOnlyComposer } from '../src/client/SubagentReadOnlyComposer.tsx'
 import { createSubagentsSectionStore } from '../src/client/subagents-store.ts'
-import { CATALOG_PAGE, CatalogTree, deriveCatalogs } from '../src/client/SubagentCatalog.tsx'
+import { CATALOG_PAGE, CatalogTree, deriveCatalogs, progressOf } from '../src/client/SubagentCatalog.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import type { PanelDetailsProps, PanelFoldProps } from '@deepseek-ai/dsh-client-ui-session-panel/client'
 
@@ -1734,6 +1734,37 @@ describe('large subagent catalogs', () => {
     expect(document.querySelector('[data-subagent-more]')).toBeNull()
   })
 
+  it('counts unread older subagents in the set size, the next-page control, progress, and the fold', () => {
+    const entries = many(CATALOG_PAGE + 2)
+    const input = props(catalog({ entries }))
+    const older = 1000
+    const useSessions = <T,>(select: (snapshot: SessionListState) => T): T => input.useSessions(snapshot => select({
+      ...snapshot,
+      projectionsBySession: {
+        ...snapshot.projectionsBySession,
+        [PARENT]: { ...snapshot.projectionsBySession[PARENT]!, unread: { subagentCatalog: older } },
+      },
+    }))
+    let state!: SessionListState
+    useSessions((snapshot) => { state = snapshot; return null })
+    const catalogs = deriveCatalogs(state.projectionsBySession, state.byId, new Map())
+    expect(catalogs[PARENT]?.older).toBe(older)
+    expect(progressOf(catalogs[PARENT]!, state.byId, input.t)).toContain(`${String(older)} 未加载`)
+    const prepareLevel = vi.fn()
+    render(
+      <CatalogTree
+        rootSessionId={PARENT} catalog={catalogs[PARENT]!} catalogs={catalogs} summaries={state.byId}
+        openChild={vi.fn()} openChildAside={vi.fn()} prepareLevel={prepareLevel} onOpened={vi.fn()} t={input.t}
+      />,
+    )
+    expect(screen.getAllByRole('treeitem')[0]?.getAttribute('aria-setsize')).toBe(String(entries.length + older))
+    const hidden = entries.length - CATALOG_PAGE + older
+    fireEvent.click(screen.getByRole('button', { name: `再显示 ${String(CATALOG_PAGE)} 个（还有 ${String(hidden)} 个）` }))
+    expect(prepareLevel).toHaveBeenLastCalledWith(PARENT, CATALOG_PAGE * 2)
+    cleanup()
+    render(<Section {...input} useSessions={useSessions} />)
+    expect(screen.getByRole('button', { name: /显示其余/ }).textContent).toBe(`显示其余 ${String(entries.length + older - 5)} 个`)
+  })
   it('keeps the current Session row shown when it is older than the first page', () => {
     const entries = many(CATALOG_PAGE + 30)
     const input = props(catalog({ entries }))

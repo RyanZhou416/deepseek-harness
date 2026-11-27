@@ -62,7 +62,7 @@ import type {
   SessionSearchValue,
   SessionSelectModelRequest,
   SessionSelectModelValue,
-  SessionProjectionsRequest,
+  SessionProjectionsRequest, SessionProjectionPageRequest, SessionProjectionPageValue,
   SessionProjectionsValue,
   SessionUpdateQueueRequest,
   SessionUpdateQueueValue,
@@ -648,6 +648,17 @@ export class SessionController extends TypertRemoteService {
   @Remote('projections')
   projections(request: SessionProjectionsRequest, signal: AbortSignal): Promise<SessionProjectionsValue> {
     return this.historyController.projections(request, signal)
+  }
+
+  /**
+   * Read one older slice of a paged projection key, whose Client payloads carry only its newest items.
+   * @param request - Session, paged key, exclusive end index, and item count.
+   * @param signal - cancellation for the Session read.
+   * @returns the items `[start, end)` of the complete array and its length, or null when the Session is absent.
+   */
+  @Remote('projectionPage')
+  projectionPage(request: SessionProjectionPageRequest, signal: AbortSignal): Promise<SessionProjectionPageValue> {
+    return this.historyController.projectionPage(request, signal)
   }
 
   /**

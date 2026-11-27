@@ -1089,6 +1089,14 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
 @Remote('projections') projections(request: SessionProjectionsRequest, signal: AbortSignal): Promise<SessionProjectionsValue>
 
 /**
+ * Read one older slice of a paged projection key, whose Client payloads carry only its newest items.
+ * @param request - Session, paged key, exclusive end index, and item count.
+ * @param signal - cancellation for the Session read.
+ * @returns the items `[start, end)` of the complete array and its length, or null when the Session is absent.
+ */
+@Remote('projectionPage') projectionPage(request: SessionProjectionPageRequest, signal: AbortSignal): Promise<SessionProjectionPageValue>
+
+/**
  * Stream a complete live-control baseline followed by replacement frames.
  * @param signal - cancellation owned by the Remote stream carrier.
  * @returns one complete baseline followed by live replacement frames.

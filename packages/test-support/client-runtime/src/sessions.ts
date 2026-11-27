@@ -318,7 +318,7 @@ export class TestSessions implements ISessions {
 
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
-    method: 'create' | 'refreshProjections' | 'refresh' | 'refreshArchived' | 'search' | 'fork' | 'editLastMessage'
+    method: 'create' | 'refreshProjections' | 'loadProjectionPage' | 'refresh' | 'refreshArchived' | 'search' | 'fork' | 'editLastMessage'
     args: unknown[]
   }[] = []
 
@@ -649,6 +649,12 @@ export class TestSessions implements ISessions {
   /** Record a projection refresh; fixture callers drive snapshots explicitly. */
   refreshProjections(sessionId: SessionId): Promise<void> {
     this.calls.push({ method: 'refreshProjections', args: [sessionId] })
+    return Promise.resolve()
+  }
+
+  /** Record an older projection page read; fixture callers drive snapshots explicitly. */
+  loadProjectionPage(sessionId: SessionId, key: string, limit: number): Promise<void> {
+    this.calls.push({ method: 'loadProjectionPage', args: [sessionId, key, limit] })
     return Promise.resolve()
   }
 

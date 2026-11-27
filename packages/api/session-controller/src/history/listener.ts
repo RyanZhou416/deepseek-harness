@@ -153,9 +153,10 @@ export class ProjectionListener implements Disposable {
         if (published.length === 0) return
         buffer.capture(() => {
           // Every projection definition validates its value before change
-          // publication. A live update keeps its whole value: a Client that
-          // already read the complete value must not have it narrowed here.
-          input.append({ type: 'projection', seq, changes: published as SessionProjectionChange['changes'] })
+          // publication; a paged unit carries its bounded window, as in every
+          // other Client payload.
+          const changes = published.map(change => ({ key: change.key, val: ctx.sessionProjections.hintValue(change.key, change.val) }))
+          input.append({ type: 'projection', seq, changes: changes as SessionProjectionChange['changes'] })
         })
       })
       this.buffer?.own(() => { this[Symbol.dispose]() })

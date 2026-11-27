@@ -16,9 +16,11 @@ import type {} from '@deepseek-ai/dsh-token-meter/client'
 import css from './SubagentCatalog.module.css'
 
 /** One Session's direct subagents with their live activity. */
-export type SubagentCatalogSnapshot = Omit<SessionProjectionSnapshot, 'values' | 'state'> & {
+export type SubagentCatalogSnapshot = Omit<SessionProjectionSnapshot, 'values' | 'state' | 'unread'> & {
   state: 'idle' | 'loading' | 'ready' | 'migration-required' | 'error'
   entries: (SessionProjectionMap['subagentCatalog'][number] & { activity: 'running' | 'inactive' })[]
+  /** Older direct subagents the Client has not read yet; `entries` holds the newest ones. */
+  older?: number
 }
 
 /** Catalogs of every Session whose projections the Client holds. */
@@ -221,7 +223,9 @@ function completedEntry(entry: SubagentCatalogSnapshot['entries'][number], summa
 }
 
 /** Count direct catalog members without treating external or other inactive entries as completed. */
-function catalogProgress(entries: SubagentCatalogSnapshot['entries'], summaries: CatalogRowsProps['summaries'], t: TranslateNS<typeof NS>): string {
+function catalogProgress(
+  entries: SubagentCatalogSnapshot['entries'], older: number, summaries: CatalogRowsProps['summaries'], t: TranslateNS<typeof NS>,
+): string {
   let completed = 0
   let active = 0
   let inactive = 0
@@ -237,6 +241,7 @@ function catalogProgress(entries: SubagentCatalogSnapshot['entries'], summaries:
     ...active > 0 ? [t('progress.active', { count: active })] : [],
     ...inactive > 0 ? [t('progress.inactive', { count: inactive })] : [],
     ...external > 0 ? [t('progress.external', { count: external })] : [],
+    ...older > 0 ? [t('progress.unloaded', { count: older })] : [],
   ].join('\u2002·\u2002')
 }
 
@@ -252,7 +257,7 @@ function CatalogRows({
     return Math.max(CATALOG_PAGE, current + 1)
   })
   const visible = catalog.entries.length > limit ? catalog.entries.slice(0, limit) : catalog.entries
-  const hidden = catalog.entries.length - visible.length
+  const hidden = catalog.entries.length - visible.length + (catalog.older ?? 0)
   const [now, setNow] = useState(() => Date.now())
   const running = catalog.entries.some(entry => entry.activity === 'running')
   useEffect(() => {
@@ -362,7 +367,7 @@ function CatalogRows({
             tabIndex={external ? -1 : 0}
             aria-disabled={external || undefined}
             aria-level={level}
-            aria-setsize={catalog.entries.length}
+            aria-setsize={catalog.entries.length + (catalog.older ?? 0)}
             aria-posinset={index + 1}
             aria-current={isCurrent || undefined}
             aria-label={[primaryLabel, secondary, metrics].filter(value => value !== '').join(' ')}
@@ -512,9 +517,11 @@ export function deriveCatalogs(
     const state = snapshot.state === 'idle'
       ? projected === undefined ? 'idle' : 'ready'
       : snapshot.state === 'migration-required' && projected !== undefined ? 'ready' : snapshot.state
+    const older = snapshot.unread?.subagentCatalog ?? 0
     return [id, {
       state,
       error: snapshot.error,
+      ...older > 0 ? { older } : {},
       entries: newestFirst(projected ?? []).map(entry => ({
         ...entry,
         activity: (statuses.get(entry.id)?.running ?? summaries[entry.id]?.running) === true
@@ -532,7 +539,7 @@ export function deriveCatalogs(
  * @returns the progress phrase, or an empty string without entries.
  */
 export function progressOf(catalog: SubagentCatalogSnapshot, summaries: CatalogRowsProps['summaries'], t: TranslateNS<typeof NS>): string {
-  return catalogProgress(catalog.entries, summaries, t)
+  return catalogProgress(catalog.entries, catalog.older ?? 0, summaries, t)
 }
 
 /**
