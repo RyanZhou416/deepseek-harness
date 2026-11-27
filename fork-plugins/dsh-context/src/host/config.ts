@@ -20,6 +20,7 @@ export type FoldBounds = typeof DEFAULT_BOUNDS & {
 export type Config = Partial<FoldBounds> & Partial<PluginSettings> & {
   backfillStartDelayMs?: number
   backfillRefreshDelayMs?: number
+  coldFoldMaxLogBytes?: number
 }
 
 export const HISTORY_LIMIT = Number.MAX_SAFE_INTEGER
@@ -29,6 +30,9 @@ export const DEFAULT_BACKFILL_START_DELAY_MS = 60_000
 
 /** Default wait between a Session disposal and its backfill pass. */
 export const DEFAULT_BACKFILL_REFRESH_DELAY_MS = 60_000
+
+/** Default cold fold cap: folding a larger stored log took tens of seconds of the Host's main thread. */
+export const DEFAULT_COLD_FOLD_MAX_LOG_BYTES = 64 * 1024 * 1024
 
 export function historyBounds(bounds: FoldBounds): FoldBounds {
   return {
@@ -80,7 +84,14 @@ export const Config = z.object({
     .description('Milliseconds between Host readiness and the first automatic activity backfill pass.'),
   backfillRefreshDelayMs: z.number().min(0).step(1).default(DEFAULT_BACKFILL_REFRESH_DELAY_MS)
     .description('Milliseconds a Session disposal waits before its backfill pass; disposals inside that wait join the same pass.'),
+  coldFoldMaxLogBytes: z.number().min(0).step(1).default(DEFAULT_COLD_FOLD_MAX_LOG_BYTES)
+    .description('Stored log bytes above which the Context facts and delta routes do not fold the whole log of an unopened Session; 0 folds every size.'),
 })
+
+/** Cold fold cap the plugin config resolves to. */
+export function resolveColdFoldMaxLogBytes(config: Config | undefined): number {
+  return (Config(config ?? {}) as Record<string, unknown>).coldFoldMaxLogBytes as number
+}
 
 /** Backfill delays the plugin config resolves to. */
 export function resolveBackfillDelays(config: Config | undefined): { startDelayMs: number; refreshDelayMs: number } {

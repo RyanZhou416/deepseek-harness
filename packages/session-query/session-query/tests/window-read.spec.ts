@@ -86,6 +86,19 @@ describe('SessionQueryEngine.readWindow delegation', () => {
     expect(Object.keys(result ?? {})).toEqual(['window'])
   })
 
+  it('omits the checkpoint baseline and keeps the selection out of the backend request when projections is false', async () => {
+    const ctx = await queryContext(['title'])
+    const readWindow = vi.fn().mockResolvedValue(storedWindow())
+    const cachedSnapshot = vi.fn()
+    ctx.provide('sessionPersistence', { readWindow } as never)
+    ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
+
+    const result = await ctx.sessionQuery.readWindow(SESSION, { maxEvents: 2, projections: false })
+
+    expect(readWindow).toHaveBeenCalledExactlyOnceWith(SESSION, { maxEvents: 2 })
+    expect(cachedSnapshot).not.toHaveBeenCalled()
+    expect(Object.keys(result ?? {})).toEqual(['window'])
+  })
   it('supplies one empty request when the caller omits the argument', async () => {
     const ctx = await queryContext()
     const readWindow = vi.fn().mockResolvedValue(storedWindow())

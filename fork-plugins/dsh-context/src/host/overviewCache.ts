@@ -268,11 +268,27 @@ export function createOverviewCache(options: OverviewCacheOptions = {}): Overvie
     return records
   }
 
+  // A shard rewrite keeps the stored entries it does not replace as they are:
+  // validating every entry on every flush cost a full-cache parse per batch.
+  // Readers still validate each entry, so a damaged one is rebuilt, not served.
+  const readShardEntries = async (shard: number): Promise<Map<string, unknown>> => {
+    const entries = new Map<string, unknown>()
+    try {
+      const data = asRecord(JSON.parse(await fs.readFile(shardPath(path, shard))))
+      if (data === null || data.format !== OVERVIEW_CACHE_FORMAT || !Array.isArray(data.sessions)) return entries
+      for (const entry of data.sessions) {
+        const id = asRecord(asRecord(asRecord(entry)?.materialization)?.facts)?.id
+        if (typeof id === 'string' && id !== '') entries.set(id, entry)
+      }
+    } catch {}
+    return entries
+  }
+
   const writeShard = async (batch: Batch, shard: number): Promise<boolean> => {
     const target = shardPath(path, shard)
     const temp = `${target}.tmp`
     try {
-      const merged = await readShard(shard)
+      const merged = await readShardEntries(shard)
       let changed = false
       if (batch.retain !== null) {
         for (const id of merged.keys()) {

@@ -56,6 +56,13 @@ export interface SessionObservationOptions {
   readonly signal?: AbortSignal
   /** Whether to compute every projection or leave projection state untouched. */
   readonly projectionMode?: 'all' | 'none'
+  /**
+   * Client-visible projection keys to compute when `projectionMode` is `'all'`;
+   * omitted computes every unit. With keys, the observation's `projections`
+   * carry only those values, and a stored Session folds only those units over
+   * its log without restoring the others from the projection cache.
+   */
+  readonly projectionKeys?: readonly Extract<keyof SessionProjectionMap, string>[]
 }
 
 /**
@@ -141,11 +148,11 @@ export class SessionObservationReader {
     sessionId: SessionId,
     options: SessionObservationOptions = {},
   ): Promise<SessionObservation> {
-    const { signal, projectionMode = 'all' } = options
+    const { signal, projectionMode = 'all', projectionKeys } = options
     for (;;) {
       throwIfObservationAborted(signal)
       const live = this.ctx.sessions.get(sessionId)
-      if (live !== undefined) return this.live(live, projectionMode)
+      if (live !== undefined) return this.live(live, projectionMode, projectionKeys)
       const persistence = this.ctx.get('sessionPersistence')
       if (persistence === undefined) throw notFound(sessionId)
 
@@ -153,14 +160,14 @@ export class SessionObservationReader {
       const cacheable = snapshot.sizeBytes === undefined || snapshot.sizeBytes <= this.cacheMaxArtifactBytes
       const attachedDuringStat = this.ctx.sessions.get(sessionId)
       if (attachedDuringStat !== undefined) {
-        return this.live(attachedDuringStat, projectionMode)
+        return this.live(attachedDuringStat, projectionMode, projectionKeys)
       }
       let entry = this.cachedEntry(persistence.identity, sessionId, snapshot.revision)
       if (entry === undefined) {
         const loaded = await this.loadSource(persistence, sessionId, signal)
         throwIfObservationAborted(signal)
         const attached = this.ctx.sessions.get(sessionId)
-        if (attached !== undefined) return this.live(attached, projectionMode)
+        if (attached !== undefined) return this.live(attached, projectionMode, projectionKeys)
         // The handle marks persisted events as adoptable; synthetic closers
         // are owned by this read, so the combined seed needs no copy.
         const seed = loaded.events
@@ -196,7 +203,7 @@ export class SessionObservationReader {
 
       let projections: ProjectionSnapshot | undefined
       try {
-        projections = projectionMode === 'none' ? undefined : this.preparedProjections(entry)
+        projections = projectionMode === 'none' ? undefined : this.preparedProjections(entry, projectionKeys)
       } catch (error: unknown) {
         throw new SessionQueryError(
           `failed to project session "${sessionId}": ${errorMessage(error)}`,
@@ -380,6 +387,7 @@ export class SessionObservationReader {
   private live(
     session: Session,
     projectionMode: NonNullable<SessionObservationOptions['projectionMode']>,
+    projectionKeys: SessionObservationOptions['projectionKeys'],
   ): SessionObservation {
     // The cut is the log length now. The log only appends, so the prefix
     // below `seq` is the same array whenever a consumer first reads `events`.
@@ -389,7 +397,9 @@ export class SessionObservationReader {
     try {
       projections = projectionMode === 'none'
         ? undefined
-        : this.ctx.get('sessionProjections')?.snapshot(session)
+        : projectionKeys === undefined
+          ? this.ctx.get('sessionProjections')?.snapshot(session)
+          : this.ctx.get('sessionProjections')?.snapshot(session, projectionKeys)
     } catch (error: unknown) {
       throw new SessionQueryError(
         `failed to project session "${session.id}": ${errorMessage(error)}`,
@@ -420,9 +430,15 @@ export class SessionObservationReader {
     return lease()
   }
 
-  private preparedProjections(entry: PreparedEntry): ProjectionSnapshot | undefined {
+  private preparedProjections(
+    entry: PreparedEntry,
+    keys: SessionObservationOptions['projectionKeys'],
+  ): ProjectionSnapshot | undefined {
     const registry = this.ctx.get('sessionProjections')
     if (registry === undefined) return undefined
+    // Selected keys fold lazily over the prepared log; only a complete cut
+    // restores every unit from the cache checkpoint.
+    if (keys !== undefined) return registry.snapshot(entry.session, keys)
     const cache = this.ctx.get('sessionProjectionCache')
     return cache === undefined
       ? registry.hydrate(entry.session, {}, entry.events, SessionLogOffset(0))

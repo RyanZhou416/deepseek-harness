@@ -24,7 +24,8 @@ import { ATTACHMENT_ROUTE, BACKFILL_ROUTE, BALANCE_ROUTE, COMMANDS_ROUTE, DETAIL
 import { serviceIdentityOf } from '../../src/host/serviceIdentity'
 import z from '@deepseek-ai/schemastery'
 import {
-  Config, DEFAULT_BACKFILL_REFRESH_DELAY_MS, DEFAULT_BACKFILL_START_DELAY_MS, DEFAULT_BOUNDS, resolveBackfillDelays, resolveBounds, volatileField,
+  Config, DEFAULT_BACKFILL_REFRESH_DELAY_MS, DEFAULT_BACKFILL_START_DELAY_MS, DEFAULT_BOUNDS, DEFAULT_COLD_FOLD_MAX_LOG_BYTES,
+  resolveBackfillDelays, resolveBounds, resolveColdFoldMaxLogBytes, volatileField,
 } from '../../src/host/config'
 
 describe('backfill-sliced', () => {
@@ -880,7 +881,10 @@ describe('Config validator (cordis Standard Schema face)', () => {
       promptSuffix: '',
       backfillStartDelayMs: DEFAULT_BACKFILL_START_DELAY_MS,
       backfillRefreshDelayMs: DEFAULT_BACKFILL_REFRESH_DELAY_MS,
+      coldFoldMaxLogBytes: DEFAULT_COLD_FOLD_MAX_LOG_BYTES,
     })
+    assert.equal(resolveColdFoldMaxLogBytes(undefined), 64 * 1024 * 1024)
+    assert.equal(resolveColdFoldMaxLogBytes({ coldFoldMaxLogBytes: 0 }), 0)
     assert.deepEqual(resolveBackfillDelays(undefined), { startDelayMs: 60_000, refreshDelayMs: 60_000 })
     assert.deepEqual(resolveBackfillDelays({ backfillStartDelayMs: 0, backfillRefreshDelayMs: 5 }), { startDelayMs: 0, refreshDelayMs: 5 })
     assert.deepEqual(resolveBounds(undefined), DEFAULT_BOUNDS)

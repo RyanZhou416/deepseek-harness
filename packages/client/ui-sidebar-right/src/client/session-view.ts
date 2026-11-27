@@ -31,7 +31,8 @@ export class SidebarSessionView {
     private readonly onTabRelease: (view: SidebarSessionView) => void,
   ) {
     this.reference = sessions.retain(sessionId, { source: 'sidebarView', facets: { conversation: true } })
-    void this.reference.ready.catch((error: unknown) => { console.error('Sidebar Session opening failed:', error) })
+    // Releasing the reference before the opening settles rejects it; that is this view's own cancellation, not a failure.
+    void this.reference.ready.catch((error: unknown) => { if (!this.disposed) console.error('Sidebar Session opening failed:', error) })
   }
 
   /** Whether an initialized retained body still needs this view. */

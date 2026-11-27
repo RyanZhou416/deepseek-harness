@@ -14,6 +14,7 @@ import {
   testSessionPersistence,
 } from './test-remote.ts'
 import { brandString } from '@deepseek-ai/dsh-brand'
+import SessionController from '../src/index.ts'
 
 const defaults = {
   defaultModelSelection: () => ({ provider: 'fixture', model: 'fixture-model' }),
@@ -239,6 +240,28 @@ describe('SessionController subagent catalog', () => {
       .resolves.toEqual({ items: entries.slice(2, 4), start: 2, total: 6 })
     expect(cachedSnapshot).toHaveBeenCalledWith(expect.objectContaining({ id: PARENT }), ['subagentCatalog'])
     expect(observe).not.toHaveBeenCalled()
+  })
+  it('folds only the paged key of a stored Session without its checkpoint row, after running openings end', async () => {
+    const { ctx, controller } = await bench()
+    const observe = vi.spyOn(ctx.sessionQuery, 'observeSession')
+    const stat = vi.spyOn(ctx.sessionPersistence, 'stat')
+    const history = Reflect.get(controller, 'historyController') as { beginOpening(): () => void }
+    const endOpening = history.beginOpening()
+    const reading = controller.projectionPage({ sessionId: PARENT, key: 'subagentCatalog', limit: 5 }, new AbortController().signal)
+    for (let index = 0; index < 5; index++) await Promise.resolve()
+    // A Session opening is in progress: the page read has not touched persistence.
+    expect(stat).not.toHaveBeenCalled()
+    endOpening()
+    await expect(reading).resolves.toMatchObject({ start: 0, total: 1 })
+    expect(observe).toHaveBeenCalledWith(PARENT, expect.objectContaining({ projectionMode: 'all', projectionKeys: ['subagentCatalog'] }))
+  })
+
+  it('resolves and validates the projection page fold concurrency', () => {
+    expect(SessionController.Config({}).projectionPageFoldConcurrency).toBe(1)
+    expect(SessionController.Config({ projectionPageFoldConcurrency: 3 }).projectionPageFoldConcurrency).toBe(3)
+    for (const projectionPageFoldConcurrency of [0, -1, 1.5]) {
+      expect(() => SessionController.Config({ projectionPageFoldConcurrency })).toThrow()
+    }
   })
   it('uses disk migration status instead of the normalized header version to defer a cold catalog read', async () => {
     const { ctx, controller } = await bench()

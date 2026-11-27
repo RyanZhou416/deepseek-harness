@@ -2174,6 +2174,21 @@ Two more costs sat between `run.cmd` and a loaded Session list on a home with ab
 **Preservation rule.** Keep one realpath cache per compilation pass (never process-wide) and the exact `fs.realpathSync` result; keep the list's cold-row reads asynchronous and bounded.
 
 **Focused verification.** `node_modules/.bin/vitest run packages/boot/app-boot/tests/realpath-cache.spec.ts` (equality with `fs.realpathSync` across plain, linked, chained, dangling, relative, and missing paths) and `packages/api/session-controller/tests/list-scheduling.host.spec.ts` ("Session-list cold rows through the asynchronous cache face").
+### Cold opening of a large Session ahead of decoration and background passes
+
+Opening the 717 MB SimCore Session cold took 3.3–4.0 s on the measured home, and the Host's main thread then stayed busy for about 30 s. Each part is now bounded:
+
+- `session-controller`: `session.projectionPage` for a stored Session starts only once no Session opening is in progress (`FoldSlots.afterOpenings`, marked by `WebController.follow` around `openWindow`), and a Session without a checkpoint row for the paged key folds only that key (`observeSession` `projectionKeys`) in at most `projectionPageFoldConcurrency` (default 1) slots. The subagent panel reads the catalog pages of 50 children at once; their checkpoints keep only list rows after the projection cache's retention pass, so each read decoded a child log and restored every projection beside the opening.
+- `session-controller` and `session-query`: a follow opening that retries its stored window with a larger bound passes `projections: false` and reuses the first read's checkpoint baseline at the same cursor, instead of viewing the 28 MB checkpoint again.
+- `fork-runtime/web/perf.patch.yml` starts the projection cache's retention pass 5 minutes after startup instead of 10 s; the pass reads and validates every stored record and took about 48 s at a fifth of the main thread.
+- `dsh-context`: overview-cache shard rewrites stop revalidating stored entries, and the facts and delta routes do not fold unopened Sessions above `coldFoldMaxLogBytes`; see the plugin's `FORK_MAINTENANCE.md`.
+- `ui-sidebar-right`: a Sidebar view released before its opening settles no longer logs `Sidebar Session opening failed: ... is released`.
+
+The cold opening now takes about 2.0–2.2 s with the main thread mostly idle afterwards.
+
+**Preservation rule.** Keep stored projection pages behind running openings and bounded, keep the selected-key fold, keep the retry baseline reuse, keep the retention delay restated with the base row's values, and keep the Sidebar's own release out of the error log.
+
+**Focused verification.** `node_modules/.bin/vitest run packages/api/session-controller/tests/fold-slots.host.spec.ts`, `packages/api/session-controller/tests/subagent-catalog.host.spec.ts` (`folds only the paged key ...`), `packages/api/session-controller/tests/session-history-paging.host.spec.ts` (`grows a follow opening ...`, `reads the baseline again when the log grows between window reads`), `packages/session-query/session-query/tests/observation.spec.ts` (`computes only the selected keys ...`), `packages/session-query/session-query/tests/window-read.spec.ts`, and `packages/client/ui-sidebar-right/tests/session-views.client.spec.ts` (`does not report its own release ...`).
 ### Optional model-facing skill catalog
 
 `@deepseek-ai/dsh-tool-skill` accepts `modelCatalog` (default `true`). `false` skips registering the `skill` loader tool; the catalog listener publishes only while that exact tool is visible, so no catalog or replacement catalog enters the context, while the user `/name` invocation listener is unchanged. A Session that already received a catalog gets one empty replacement. The user's Web profile sets it to `false` in each preset's `tool-skill` row because repeated catalog replacements (skill changes, plugin reloads, compactions) cost context in long Sessions.

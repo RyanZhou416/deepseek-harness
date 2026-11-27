@@ -16,11 +16,13 @@ import SessionStore, {
   interruptedTurnClosers,
   SESSION_FORMAT_VERSION,
   SessionId,
+  SessionSeq,
 } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { logPath } from '@deepseek-ai/dsh-session-persistence-jsonl/src/format.ts'
 import { windowIndexPath } from '@deepseek-ai/dsh-session-persistence-jsonl/src/window-index.ts'
+import type { SessionWindowRead } from '@deepseek-ai/dsh-session-query'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { SessionHistoryController } from './history-test-controller.ts'
 import type {
@@ -675,6 +677,8 @@ describe('Session history page byte budget', () => {
     const live = await openSnapshot(history, { maxMessages: 500 }, LIVE)
 
     expect(readWindow.mock.calls.map(([, read]) => read?.maxEvents)).toEqual([256, 1_024, 2_000])
+    // Only the first read computes the checkpoint baseline; retries at the same cursor reuse it.
+    expect(readWindow.mock.calls.map(([, read]) => read?.projections)).toEqual([undefined, false, false])
     expect(frame.cursor).toBe(backend.events.length - 1)
     expect(frame.records).toEqual(live.records)
     expect(frame.cursor).toBe(live.cursor)
@@ -699,6 +703,41 @@ describe('Session history page byte budget', () => {
     expect(page).toEqual(await loadPage(history, request, LIVE))
   })
 
+  it('reads the baseline again when the log grows between window reads', async () => {
+    const backend = await realBackend({ turns: 350, batchSize: 300 })
+    const history = budgetedHistory(backend, 4 * 1024 * 1024)
+    const read = backend.ctx.sessionQuery.readWindow.bind(backend.ctx.sessionQuery)
+    const baseline: NonNullable<SessionWindowRead['projections']> = { asOfSeq: SessionSeq(1), values: {} }
+    let calls = 0
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow').mockImplementation(async (id, request) => {
+      calls += 1
+      const result = await read(id, request)
+      if (result === undefined) return undefined
+      // The second read observes a cursor one past the first read's cut.
+      const window = calls === 2 ? { ...result.window, cursor: SessionSeq(result.window.cursor + 1) } : result.window
+      return request?.projections === false ? { window } : { window, projections: baseline }
+    })
+
+    const frame = await openSnapshot(history, { maxMessages: 500 })
+
+    expect(readWindow.mock.calls.map(([, request]) => [request?.maxEvents, request?.projections]))
+      .toEqual([[256, undefined], [1_024, false], [1_024, undefined], [2_000, false]])
+    expect(frame.cursor).toBe(backend.events.length - 1)
+  })
+  it('falls back to the complete observation when a retried window read is unavailable', async () => {
+    const backend = await realBackend({ turns: 350, batchSize: 300 })
+    const history = budgetedHistory(backend, 4 * 1024 * 1024)
+    const read = backend.ctx.sessionQuery.readWindow.bind(backend.ctx.sessionQuery)
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+      .mockImplementation(async (id, request) => (request?.projections === false ? undefined : await read(id, request)))
+    const observe = vi.spyOn(backend.ctx.sessionQuery, 'observeSession')
+
+    const frame = await openSnapshot(history, { maxMessages: 500 })
+
+    expect(readWindow).toHaveBeenCalledTimes(2)
+    expect(observe).toHaveBeenCalled()
+    expect(frame.cursor).toBe(backend.events.length - 1)
+  })
   it('keeps synthetic closers when the window grows to the final Turn boundary', async () => {
     // The stored log ends inside Turn 4, whose `turn/start` sits more than 256
     // events above the tail. The first-bound window already resolves the

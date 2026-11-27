@@ -15,9 +15,10 @@ import type {
 import type {
   SessionPersistenceSnapshot,
   SessionWindow,
-  SessionWindowRequest,
 } from '@deepseek-ai/dsh-session-persistence'
-import { SessionQueryError, type SessionObservation, type SessionWindowRead } from '@deepseek-ai/dsh-session-query'
+import {
+  SessionQueryError, type SessionObservation, type SessionQueryWindowRequest, type SessionWindowRead,
+} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type {
@@ -478,7 +479,7 @@ export async function isSmallStoredSource(ctx: Context, sessionId: SessionId, si
 export async function readStoredWindow(
   ctx: Context,
   sessionId: SessionId,
-  request: SessionWindowRequest,
+  request: SessionQueryWindowRequest,
 ): Promise<SessionWindowRead | undefined> {
   try {
     return await ctx.sessionQuery.readWindow(sessionId, request)

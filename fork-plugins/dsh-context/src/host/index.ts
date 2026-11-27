@@ -9,7 +9,7 @@ import { watchBalanceChannel } from './balance'
 import { watchActivityBackfill } from './backfill'
 import { makeColdReadGate } from './coldRead'
 import { watchCommandPageChannel } from './commandPages'
-import { Config, historyBounds, resolveBackfillDelays, resolveBounds } from './config'
+import { Config, historyBounds, resolveBackfillDelays, resolveBounds, resolveColdFoldMaxLogBytes } from './config'
 import { createColdTimelineStates } from './coldTimeline'
 import { watchDetailChannel, createDetailGate, type DetailChannelGate } from './detail'
 import { watchDeltaChannel } from './delta'
@@ -68,7 +68,7 @@ export function apply(ctx: Context, config: Config): void {
   watchDetailChannel(ctx, bounds, coldReads, gate, shadow, pricing)
   const deltaGate: DetailChannelGate = { ...gate, live: false }
   const ownerOf = attribution.ownerOf.bind(attribution)
-  const coldStates = createColdTimelineStates(ctx, bounds, { coldReads, resolve: ownerOf })
+  const coldStates = createColdTimelineStates(ctx, bounds, { coldReads, resolve: ownerOf, maxLogBytes: resolveColdFoldMaxLogBytes(config) })
   watchDeltaChannel(ctx, bounds, coldReads, deltaGate, shadow, ownerOf, coldStates)
   const detailStateOf = (id: string): Promise<TimelineState | null> => shadow.stateOf(id)
   watchFactsChannel(ctx, bounds, { gates: gate, coldStates, detailState: detailStateOf, cost: pricing })

@@ -427,11 +427,11 @@ observeSessionMetadata( sessionId: SessionId, options: SessionMetadataOptions = 
  * opener then serves the window without an exact block instead of falling
  * back to the complete observation, while a subagent address still requires it.
  * @param sessionId - stored session to read.
- * @param request - optional cancellation, upper bound, and backwards cursor.
+ * @param request - optional cancellation, upper bound, backwards cursor, and whether to attach the baseline.
  * @returns the window plus its complete checkpoint projection baseline, or
  *   `undefined` when the backend cannot serve a validated window.
  */
-async readWindow( sessionId: SessionId, request: SessionWindowRequest = {}, ): Promise<SessionWindowRead | undefined>
+async readWindow( sessionId: SessionId, request: SessionQueryWindowRequest = {}, ): Promise<SessionWindowRead | undefined>
 
 /**
  * Search the live-preferred logical corpus and group by session.
@@ -553,7 +553,7 @@ async traceEvent(request: SessionEventTraceRequest, signal?: AbortSignal): Promi
 async readEvent(request: SessionEventReadRequest, signal?: AbortSignal): Promise<SessionEventWindow>
 ```
 
-Types: [Session](session.md) · [SessionId](core.md) · [SessionTitleSnapshot](session-title.md) · [SessionWindowRequest](persistence.md)
+Types: [Session](session.md) · [SessionId](core.md) · [SessionTitleSnapshot](session-title.md)
 
 Source: [`packages/session-query/session-query/src/index.ts`](../../packages/session-query/session-query/src/index.ts)
 <!-- END GENERATED cordis-surface -->

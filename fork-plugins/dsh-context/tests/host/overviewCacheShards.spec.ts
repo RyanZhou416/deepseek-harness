@@ -150,6 +150,33 @@ describe('overview cache shards and capacity', () => {
     cache.dispose()
   })
 
+  test('a shard rewrite keeps unreplaced stored entries as written and drops entries without an id', async () => {
+    const cache = createOverviewCache({ path: rig.path, fs: rig.fs })
+    const first = 'session-kept'
+    const sibling = Array.from({ length: 512 }, (_, index) => `session-${index}`).find(id => shardOf(id) === shardOf(first))
+    assert.ok(sibling !== undefined)
+    await seed(cache, [first])
+    const stored = JSON.parse(await readFile(shardPath(first), 'utf8')) as { sessions: Record<string, unknown>[] }
+    // An entry readers reject still has an id: the rewrite carries it byte-for-byte.
+    const damaged = { ...stored.sessions[0], materialization: { facts: { id: first }, values: 'not a materialization' } }
+    await writeFile(shardPath(first), JSON.stringify({ ...stored, sessions: [damaged, { materialization: {} }, { materialization: { facts: { id: '' } } }, 7] }))
+    assert.equal(await cache.save([recordOf(sibling)]), true)
+    await cache.flush()
+    const rewritten = JSON.parse(await readFile(shardPath(first), 'utf8')) as { sessions: { materialization: { facts: { id: string } } }[] }
+    assert.equal(rewritten.sessions.length, 2)
+    assert.deepEqual(rewritten.sessions[0], damaged)
+    assert.equal(rewritten.sessions[1]?.materialization.facts.id, sibling)
+    // Readers still validate: the damaged entry rebuilds instead of being served.
+    const loaded = await cache.load(new Set([first, sibling]), known([first, sibling]))
+    assert.deepEqual([...loaded.sessions.keys()], [sibling])
+    // A shard of another format is replaced, not merged.
+    await writeFile(shardPath(first), JSON.stringify({ format: 2, sessions: [damaged] }))
+    assert.equal(await cache.save([recordOf(first)]), true)
+    await cache.flush()
+    const replaced = JSON.parse(await readFile(shardPath(first), 'utf8')) as { format: number; sessions: { materialization: { facts: { id: string } } }[] }
+    assert.deepEqual(replaced.sessions.map(entry => entry.materialization.facts.id), [first])
+    cache.dispose()
+  })
   test('empty prune rewrites nothing and a later empty prune is also inert', async () => {
     const cache = createOverviewCache({ path: rig.path, fs: rig.fs })
     const ids = Array.from({ length: 70 }, (_, index) => `session-${index}`)

@@ -21,6 +21,21 @@ export interface ColdTimelineStatesOptions {
   coldReads?: ColdReadGate
   idleSweepMs?: number
   resolve?: (name: string) => string | undefined
+  /** Stored log bytes above which a cold Session is not folded and reads as unavailable; 0 or omitted folds every size. */
+  maxLogBytes?: number
+}
+
+/** Stored artifact size of one cold Session, or undefined when persistence cannot tell. */
+async function storedSizeOf(ctx: Context, sessionId: string): Promise<number | undefined> {
+  const persistence = asRecord(ctx.get('sessionPersistence'))
+  if (typeof persistence?.stat !== 'function') return undefined
+  try {
+    const size = asRecord(await (persistence.stat as (id: string) => Promise<unknown>).call(persistence, sessionId))?.sizeBytes
+    return typeof size === 'number' && Number.isFinite(size) ? size : undefined
+  } catch {
+    // An unreadable size leaves the read to the fold path, which reports its own failure.
+    return undefined
+  }
 }
 
 export interface ColdTimelineStates {
@@ -75,6 +90,13 @@ export function createColdTimelineStates(ctx: Context, bounds: FoldBounds, optio
       cache.touch()
       const observe = observeOf(ctx)
       if (observe === undefined) return null
+      // Folding a cold Session decodes its whole stored log; above the cap the
+      // routes answer without host values and the client keeps its window view.
+      const maxLogBytes = options.maxLogBytes ?? 0
+      if (maxLogBytes > 0) {
+        const size = await storedSizeOf(ctx, sessionId)
+        if (size !== undefined && size > maxLogBytes) return null
+      }
       const read = async (): Promise<ColdTimelineStateEntry | null> => {
         const observation = await observe(sessionId, { projectionMode: 'none' })
         const release = leaseOf(observation)

@@ -95,6 +95,11 @@ export interface Config {
   /** Positive integral number of cold list rows whose projection-cache records are read at once. */
   readonly listCacheReadConcurrency?: number
   /**
+   * Positive integral number of stored-log folds `session.projectionPage` runs at once for Sessions
+   * whose checkpoint lacks the paged key; further reads wait their turn.
+   */
+  readonly projectionPageFoldConcurrency?: number
+  /**
    * Serialized UTF-8 bytes of records one history page may carry before it
    * stops extending backwards at a message boundary. The budget overrides the
    * caller's message and Turn minima and always keeps the newest message group;
@@ -110,6 +115,7 @@ type ResolvedConfig = Config & {
   readonly listWorkSliceMs: number
   readonly listProjectionExcludeKeys: string[]
   readonly listCacheReadConcurrency: number
+  readonly projectionPageFoldConcurrency: number
   readonly historyPageMaxBytes: number
 }
 
@@ -151,6 +157,7 @@ export class SessionController extends TypertRemoteService {
     listWorkSliceMs: z.natural().min(1).default(16),
     listProjectionExcludeKeys: z.array(z.string().min(1).pattern(/^(?!sessionListMetadata$)/u).required()).default([]),
     listCacheReadConcurrency: z.natural().min(1).default(16),
+    projectionPageFoldConcurrency: z.natural().min(1).default(1),
     historyPageMaxBytes: z.natural().default(0),
   })
 
@@ -169,6 +176,7 @@ export class SessionController extends TypertRemoteService {
   private readonly canOpenPath: () => boolean
   private readonly listWorkSliceMs: number
   private readonly listCacheReadConcurrency: number
+  private readonly projectionPageFoldConcurrency: number
   private readonly historyPageMaxBytes: number
   private readonly idleSessionRetentionMs: number
   private readonly listProjectionExcludeKeys: ReadonlySet<string>
@@ -184,6 +192,7 @@ export class SessionController extends TypertRemoteService {
     const resolved = SessionController.Config(config)
     this.listWorkSliceMs = resolved.listWorkSliceMs
     this.listCacheReadConcurrency = resolved.listCacheReadConcurrency
+    this.projectionPageFoldConcurrency = resolved.projectionPageFoldConcurrency
     this.historyPageMaxBytes = resolved.historyPageMaxBytes
     this.idleSessionRetentionMs = resolved.idleSessionRetentionMs
     this.listProjectionExcludeKeys = new Set(resolved.listProjectionExcludeKeys ?? [])
@@ -214,7 +223,7 @@ export class SessionController extends TypertRemoteService {
     }, 'session-controller.promotions')
     // Assistant-stream observation must be live before the list read yields: an Agent's
     // opening frame arriving during that await would otherwise have no listener.
-    this.historyController = new HistoryController(ctx, this.historyPageMaxBytes)
+    this.historyController = new HistoryController(ctx, this.historyPageMaxBytes, this.projectionPageFoldConcurrency)
     this.stateController = new StateController(ctx, this.historyController)
     this.webController = new WebController(
       ctx,

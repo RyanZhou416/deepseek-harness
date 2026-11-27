@@ -3850,9 +3850,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['{@link SessionQueryError} with code `SESSION_QUERY_SESSION_NOT_FOUND` when neither a live Session nor a stored source exists.'],
       },
       {
-        signature: 'async readWindow( sessionId: SessionId, request: SessionWindowRequest = {}, ): Promise<SessionWindowRead | undefined>',
+        signature: 'async readWindow( sessionId: SessionId, request: SessionQueryWindowRequest = {}, ): Promise<SessionWindowRead | undefined>',
         description: 'Read one bounded stored-history window through the persistence backend\'s optional generation index, with the stored projection checkpoint when that checkpoint is a complete baseline for the window.\n\nBackends without `readWindow` return nothing here, and callers fall back to the full observation path. A window validates its own rows, not the complete log\'s cross-event relationships; exact replay consumers keep using readSession. The baseline is attached only when it does not lead the window `cursor` and carries every registered client-visible key; a baseline missing either condition is omitted; a parent-Session follow opener then serves the window without an exact block instead of falling back to the complete observation, while a subagent address still requires it.',
-        parameters: [{ name: 'sessionId', description: 'stored session to read.' }, { name: 'request', description: 'optional cancellation, upper bound, and backwards cursor.' }],
+        parameters: [{ name: 'sessionId', description: 'stored session to read.' }, { name: 'request', description: 'optional cancellation, upper bound, backwards cursor, and whether to attach the baseline.' }],
         returns: 'the window plus its complete checkpoint projection baseline, or `undefined` when the backend cannot serve a validated window.',
       },
       {
@@ -10300,7 +10300,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionObservationOptions',
-    declaration: 'export interface SessionObservationOptions {\n    readonly signal?: AbortSignal;\n    readonly projectionMode?: \'all\' | \'none\';\n}',
+    declaration: 'export interface SessionObservationOptions {\n    readonly signal?: AbortSignal;\n    readonly projectionMode?: \'all\' | \'none\';\n    readonly projectionKeys?: readonly Extract<keyof SessionProjectionMap, string>[];\n}',
   },
   {
     name: 'SessionObserveEventRequest',
@@ -10429,6 +10429,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionPromptValue',
     declaration: 'export interface SessionPromptValue {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SessionQueryWindowRequest',
+    declaration: 'export interface SessionQueryWindowRequest extends SessionWindowRequest {\n    readonly projections?: boolean;\n}',
   },
   {
     name: 'SessionQueuedItem',

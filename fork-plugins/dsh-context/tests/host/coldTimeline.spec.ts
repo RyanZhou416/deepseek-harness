@@ -52,6 +52,30 @@ describe('cold timeline states', () => {
     spy.mockRestore()
   })
 
+  test('does not fold a stored log above the cap and folds one at or below it or of unknown size', async () => {
+    const spy = vi.spyOn(detailShadow, 'foldLog')
+    const sizes: Record<string, number | undefined> = { big: 101, small: 100, unknown: undefined }
+    const persistence = {
+      stat: async (id: string) => {
+        if (id === 'broken') throw new Error('stat failed')
+        return { sizeBytes: sizes[id] }
+      },
+    }
+    const observeSession = vi.fn(() => Promise.resolve(observationOf(EVENTS as never[], { revision: 'r1' })))
+    const fake = fakeCtx({ connection: connectionOf(), sessions: { get: () => undefined }, sessionQuery: { observeSession }, sessionPersistence: persistence })
+    const states = createColdTimelineStates(fake.ctx, BOUNDS, { coldReads: OPEN_GATE, maxLogBytes: 100 })
+    assert.equal(await states.stateOf('big'), null)
+    assert.equal(observeSession.mock.calls.length, 0, 'an oversized log is never observed')
+    for (const id of ['small', 'unknown', 'broken']) assert.notEqual(await states.stateOf(id), null)
+    assert.equal(observeSession.mock.calls.length, 3)
+    const uncapped = createColdTimelineStates(fake.ctx, BOUNDS, { coldReads: OPEN_GATE, maxLogBytes: 0 })
+    assert.notEqual(await uncapped.stateOf('big'), null)
+    const noStat = fakeCtx({ connection: connectionOf(), sessions: { get: () => undefined }, sessionQuery: { observeSession }, sessionPersistence: {} })
+    assert.notEqual(await createColdTimelineStates(noStat.ctx, BOUNDS, { coldReads: OPEN_GATE, maxLogBytes: 1 }).stateOf('small'), null)
+    fake.dispose()
+    noStat.dispose()
+    spy.mockRestore()
+  })
   test('delta serves a state folded by facts through the shared owner', async () => {
     const spy = vi.spyOn(detailShadow, 'foldLog')
     const fake = ownerCtx({ revision: 'r1', header: { id: 's1' } })

@@ -112,3 +112,28 @@ it('reports opening failure and releases Views even when committed roots are sti
   unmount()
   expect(release).toHaveBeenCalledOnce()
 })
+
+it('does not report its own release before the opening settles as a failure', async () => {
+  const r = await runtime()
+  const reference = r.sessions.retain(A, { source: 'sidebarView' })
+  const opening = Promise.withResolvers<never>()
+  vi.spyOn(r.sessions, 'retain').mockReturnValueOnce({
+    sessionId: reference.sessionId,
+    get binding() { return reference.binding },
+    ready: opening.promise,
+    release: () => {
+      reference.release()
+      opening.reject(new Error(`Session reference "${A}" is released`))
+    },
+    [Symbol.dispose]: () => { reference.release() },
+  })
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+  const views = new SidebarSessionViews(r.sessions)
+  owners.push(views)
+  views.select(A)
+  const view = views.source.getSnapshot()[0]!
+  views.dispose()
+  await expect(view.reference.ready).rejects.toThrow('is released')
+  await Promise.resolve()
+  expect(error).not.toHaveBeenCalled()
+})

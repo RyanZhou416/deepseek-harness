@@ -100,6 +100,15 @@ export { assertSessionHeadersCompatible } from './sources.ts'
  * baseline for the window. Declared on the Host entry because both fields are
  * Host persistence types the client `types` entry must not import.
  */
+/** Options for {@link SessionQuery.readWindow}: the persistence window request plus baseline selection. */
+export interface SessionQueryWindowRequest extends SessionWindowRequest {
+  /**
+   * `false` omits the checkpoint baseline, for a caller that already holds it
+   * from a read at the same window `cursor`; omitted attaches it.
+   */
+  readonly projections?: boolean
+}
+
 export interface SessionWindowRead {
   /** Validated contiguous durable window from the active persistence backend. */
   window: SessionWindow
@@ -239,16 +248,17 @@ export abstract class SessionQueryEngine extends Service {
    * opener then serves the window without an exact block instead of falling
    * back to the complete observation, while a subagent address still requires it.
    * @param sessionId - stored session to read.
-   * @param request - optional cancellation, upper bound, and backwards cursor.
+   * @param request - optional cancellation, upper bound, backwards cursor, and whether to attach the baseline.
    * @returns the window plus its complete checkpoint projection baseline, or
    *   `undefined` when the backend cannot serve a validated window.
    */
   async readWindow(
     sessionId: SessionId,
-    request: SessionWindowRequest = {},
+    request: SessionQueryWindowRequest = {},
   ): Promise<SessionWindowRead | undefined> {
+    const { projections: withBaseline = true, ...windowRequest } = request
     const persistence = this.ctx.get('sessionPersistence')
-    const window = await persistence?.readWindow?.(sessionId, request)
+    const window = await persistence?.readWindow?.(sessionId, windowRequest)
     request.signal?.throwIfAborted()
     if (window === undefined) return undefined
     if (window.header.id !== sessionId) {
@@ -257,6 +267,7 @@ export abstract class SessionQueryEngine extends Service {
         'SESSION_QUERY_SOURCE_CONFLICT',
       )
     }
+    if (!withBaseline) return { window }
     const checkpoint = this.ctx.get('sessionProjectionCache')?.cachedSnapshot(window.header)
     const projections = checkpoint !== undefined && this._baselineComplete(checkpoint, window.cursor)
       ? checkpoint

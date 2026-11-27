@@ -837,6 +837,36 @@ describe('SessionObservationReader cold projections', () => {
     await ctx.fiber.dispose()
   })
 
+  it('computes only the selected keys of a stored Session without restoring the others from the cache', async () => {
+    const ctx = await readerContext()
+    await ctx.plugin(SessionProjectionRegistry)
+    const meta = header('cold-selected')
+    const store = new Map([[meta.id, { header: meta, events: [messageEvent(0, 'selected')], revision: 'r1' }]])
+    ctx.provide('sessionPersistence', stubPersistence(store, { stat: 0, open: 0, read: 0 }))
+    const hydratePrepared = vi.fn()
+    ctx.provide('sessionProjectionCache', { hydratePrepared } as never)
+    const snapshot = vi.spyOn(ctx.sessionProjections, 'snapshot')
+
+    using observed = await new SessionObservationReader(ctx).read(meta.id, { projectionKeys: ['title'] })
+
+    expect(hydratePrepared).not.toHaveBeenCalled()
+    expect(snapshot).toHaveBeenCalledWith(expect.objectContaining({ id: meta.id }), ['title'])
+    expect(observed.projections).toBe(snapshot.mock.results[0]?.value)
+    await ctx.fiber.dispose()
+  })
+
+  it('computes only the selected keys of a live Session', async () => {
+    const ctx = await readerContext()
+    await ctx.plugin(SessionProjectionRegistry)
+    const session = ctx.sessions.create(brandString<SessionId>('live-selected'))
+    const snapshot = vi.spyOn(ctx.sessionProjections, 'snapshot')
+
+    using observed = await new SessionObservationReader(ctx).read(session.id, { projectionKeys: ['title'] })
+
+    expect(snapshot).toHaveBeenCalledWith(session, ['title'])
+    expect(observed.projections).toBe(snapshot.mock.results[0]?.value)
+    await ctx.fiber.dispose()
+  })
   it('wraps a prepared projection failure as a corrupt-session failure', async () => {
     const ctx = await readerContext()
     await ctx.plugin(SessionProjectionRegistry)

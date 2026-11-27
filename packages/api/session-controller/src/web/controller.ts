@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionLogOffset, SessionSeq, interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
-import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
+import type { SessionObservation, SessionWindowRead } from '@deepseek-ai/dsh-session-query'
 import type { HistoryController } from '../history/controller.ts'
 import {
   addressId, isSmallStoredSource, paginateSlice, pageRecords, projectionBlock, readStoredWindow, rejectNotFound,
@@ -66,7 +66,13 @@ export class WebController {
       ? new ProjectionListener(this.ctx, sessionId, signal, queue)
       : undefined
     let observation: SessionObservation | undefined
-    let opening = await this.openWindow(request, spec, signal)
+    const endOpening = this.historyController.beginOpening()
+    let opening: Extract<SessionFollowFrame, { readonly type: 'snapshot' }> | undefined
+    try {
+      opening = await this.openWindow(request, spec, signal)
+    } finally {
+      endOpening()
+    }
     if (opening === undefined) {
       observation = await this.historyController.usingObservation({ sessionId, projection: true }, signal)
         .catch((error: unknown) => {
@@ -141,10 +147,14 @@ export class WebController {
     const sessionId = windowSessionId(this.ctx, request.address)
     if (sessionId === undefined || await isSmallStoredSource(this.ctx, sessionId, signal)) return undefined
     const bounds = windowReadBounds(spec, this.maxPageBytes)
+    // The checkpoint baseline does not depend on the window size, so a retry
+    // with a larger bound reuses the first read's baseline at the same cursor.
+    let baseline: { readonly cursor: number; readonly read: SessionWindowRead } | undefined
     for (const [index, maxEvents] of bounds.entries()) {
       signal.throwIfAborted()
-      const read = await readStoredWindow(this.ctx, sessionId, { signal, maxEvents })
+      const read = await this.readWindowAt(sessionId, maxEvents, baseline, signal)
       if (read === undefined) return undefined
+      if (baseline?.cursor !== read.window.cursor) baseline = { cursor: read.window.cursor, read }
       validateWindow(request.address, read.window, read.projections)
       const windowEvents = read.window.events
       const windowBase = SessionLogOffset(windowEvents[0]?.seq ?? read.window.cursor + 1)
@@ -177,6 +187,29 @@ export class WebController {
       }
     }
     return undefined
+  }
+
+  /**
+   * Read one stored window, reusing a baseline read at the same cursor.
+   * @param sessionId - stored Session to read.
+   * @param maxEvents - window bound.
+   * @param baseline - an earlier read of this opening, if any.
+   * @param signal - stream cancellation.
+   * @returns the window with its baseline, or undefined to fall back.
+   */
+  private async readWindowAt(
+    sessionId: SessionId,
+    maxEvents: number,
+    baseline: { readonly cursor: number; readonly read: SessionWindowRead } | undefined,
+    signal: AbortSignal,
+  ): Promise<SessionWindowRead | undefined> {
+    if (baseline === undefined) return await readStoredWindow(this.ctx, sessionId, { signal, maxEvents })
+    const read = await readStoredWindow(this.ctx, sessionId, { signal, maxEvents, projections: false })
+    if (read === undefined) return undefined
+    // A log that grew between the reads needs the baseline at its new cursor.
+    if (read.window.cursor !== baseline.cursor) return await readStoredWindow(this.ctx, sessionId, { signal, maxEvents })
+    const projections = baseline.read.projections
+    return projections === undefined ? read : { ...read, projections }
   }
 
   /**

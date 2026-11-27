@@ -348,6 +348,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   SessionWindow: 'persistence.md',
   SessionWindowRequest: 'persistence.md',
   SessionWindowRead: 'session-query.md',
+  SessionQueryWindowRequest: 'session-query.md',
   OTelEventRecord: 'otel.md',
   OTelEventScalar: 'otel.md',
   ProductTelemetryRecord: 'product-telemetry.md',

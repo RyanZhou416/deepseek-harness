@@ -19,11 +19,21 @@ import type {
   SessionProjectionPageRequest, SessionProjectionPageValue,
 } from '../types.ts'
 import { SESSION_PROJECTION_PAGE_MAX } from '../types.ts'
+import { FoldSlots } from './fold-slots.ts'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 
 
 /** Session snapshots do not share lifetime with passive subscriptions. */
+/** Session identity and projection work for one controller read. */
+interface ObservationRequest {
+  readonly sessionId: SessionId
+  /** Whether the read computes projections. */
+  readonly projection: boolean
+  /** Keys to compute when `projection` is true; omitted computes every unit. */
+  readonly projectionKeys?: readonly Extract<keyof SessionProjectionMap, string>[]
+}
+
 export class HistoryController {
 
   /** Reconnect state for this controller's assistant subscriptions. */
@@ -33,7 +43,23 @@ export class HistoryController {
    * @param ctx - Host context carrying Session reads and projections.
    * @param maxPageBytes - serialized UTF-8 byte budget for one page's records; `0` disables the cap and keeps the message limits alone.
    */
-  constructor(private readonly ctx: Context, private readonly maxPageBytes = 0) {
+  private readonly foldSlots: FoldSlots
+
+  /**
+   * Mark one Session opening in progress, so stored paged projection reads wait for it.
+   * @returns idempotent end of this opening.
+   */
+  beginOpening(): () => void {
+    return this.foldSlots.beginOpening()
+  }
+
+  /**
+   * @param ctx - Host context carrying Session, query, persistence, and projection services.
+   * @param maxPageBytes - history page byte budget; `0` disables it.
+   * @param projectionPageFoldConcurrency - log folds paged projection reads may run at once.
+   */
+  constructor(private readonly ctx: Context, private readonly maxPageBytes = 0, projectionPageFoldConcurrency = 1) {
+    this.foldSlots = new FoldSlots(projectionPageFoldConcurrency)
     this.streamsListener = new SessionAssistantStreamsListener(this.ctx)
   }
 
@@ -200,6 +226,8 @@ export class HistoryController {
       signal.throwIfAborted()
       const live = this.ctx.sessions.get(sessionId)
       if (live !== undefined) return slice(this.ctx.sessionProjections.snapshot(live, [pagedKey]).values[pagedKey])
+      // A page is decoration beside an opening: stored reads start once no opening is in progress.
+      await this.foldSlots.afterOpenings(signal)
       const stored = await this.ctx.get('sessionPersistence')?.stat(sessionId, { signal })
       signal.throwIfAborted()
       // A stored Session's page comes from its newest durable checkpoint when one
@@ -208,8 +236,12 @@ export class HistoryController {
       // without such a checkpoint folds its log.
       const cached = stored === undefined ? undefined : this.ctx.get('sessionProjectionCache')?.cachedSnapshot(stored.header, [pagedKey])?.values[pagedKey]
       if (cached !== undefined || stored?.formatStatus === 'migration-required') return slice(cached)
-      return await this.usingObservation({ sessionId, projection: true }, signal,
-        observation => slice(projections(observation).values[pagedKey]))
+      // Such folds run in bounded slots, so a level that reads many child pages
+      // leaves the main thread to the opening beside it.
+      return await this.foldSlots.run(signal, async () => await this.usingObservation(
+        { sessionId, projection: true, projectionKeys: [pagedKey] }, signal,
+        observation => slice(projections(observation).values[pagedKey]),
+      ))
     } catch (error: unknown) {
       return projectionReadFailure(error, signal)
     }
@@ -263,7 +295,7 @@ export class HistoryController {
    * @returns a lease the caller must dispose.
    */
   usingObservation(
-    request: { readonly sessionId: SessionId; readonly projection: boolean }, signal: AbortSignal, callback?: undefined,
+    request: ObservationRequest, signal: AbortSignal, callback?: undefined,
   ): Promise<SessionObservation>
   /**
    * Keep the borrowed lease alive until the callback settles, then dispose it.
@@ -273,16 +305,20 @@ export class HistoryController {
    * @returns the callback result; read and callback failures propagate.
    */
   usingObservation<T>(
-    request: { readonly sessionId: SessionId; readonly projection: boolean }, signal: AbortSignal,
+    request: ObservationRequest, signal: AbortSignal,
     callback: (observation: SessionObservation) => T,
   ): Promise<Awaited<T>>
   async usingObservation<T>(
-    { sessionId, projection }: { readonly sessionId: SessionId; readonly projection: boolean }, signal: AbortSignal,
+    { sessionId, projection, projectionKeys }: ObservationRequest, signal: AbortSignal,
     callback?: (observation: SessionObservation) => T,
   ): Promise<SessionObservation | Awaited<T>> {
     let observation: SessionObservation
     try {
-      observation = await this.ctx.sessionQuery.observeSession(sessionId, { signal, projectionMode: projection ? 'all' : 'none' })
+      observation = await this.ctx.sessionQuery.observeSession(sessionId, {
+        signal,
+        projectionMode: projection ? 'all' : 'none',
+        ...projectionKeys === undefined ? {} : { projectionKeys },
+      })
     } catch (error: unknown) {
       const code = (error as { readonly code?: unknown } | null | undefined)?.code
       if (code === 'SESSION_QUERY_SESSION_NOT_FOUND') {

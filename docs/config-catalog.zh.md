@@ -310,6 +310,11 @@ export interface Config {
   /** Positive integral number of cold list rows whose projection-cache records are read at once. */
   readonly listCacheReadConcurrency?: number
   /**
+   * Positive integral number of stored-log folds `session.projectionPage` runs at once for Sessions
+   * whose checkpoint lacks the paged key; further reads wait their turn.
+   */
+  readonly projectionPageFoldConcurrency?: number
+  /**
    * Serialized UTF-8 bytes of records one history page may carry before it
    * stops extending backwards at a message boundary. The budget overrides the
    * caller's message and Turn minima and always keeps the newest message group;
