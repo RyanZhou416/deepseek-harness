@@ -15,7 +15,7 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 import { haltTeamWork, registerAgentTeamsTools } from '../lib/tools.js'
 import { buildActivationDirective, invokedAgentTeamsGoal, invokedAgentTeamsInvocation, installAgentTeamsGestureBoundary, profileCommandName, registerAgentTeamsCommand } from '../lib/command.js'
 import { readArchivedTeam, readMailbox, readTeam, readUnreadMailbox } from '../lib/state.js'
-import { collectArchivedTeamsActivity } from '../lib/snapshot.js'
+import { assembleTeamSnapshot, collectArchivedTeamsActivity } from '../lib/snapshot.js'
 
 const deliveryHarness = process.argv.includes('--delivery-harness')
 const modernHarness = deliveryHarness || process.argv.includes('--modern-harness')
@@ -688,6 +688,14 @@ try {
     let rejected = false; try { await call('agent_teams_edit_plan', { operations: [operation] }) } catch { rejected = true }
     check('running edits reject active attempts, cycles and roster changes: ' + JSON.stringify(operation), rejected)
   }
+  let runningRosterError = ''
+  try {
+    await call('agent_teams_edit_plan', { operations: [{ action: 'remove_member', member_name: 'implementer' }] })
+  } catch (error) { runningRosterError = String(error) }
+  check('running edit_plan directs the captain to the live tools (#348)',
+    /agent_teams_edit_plan.*running/.test(runningRosterError)
+      && ['create_task', 'add_member', 'remove_member', 'reassign_task', 'update_task']
+        .every(tool => runningRosterError.includes('agent_teams_' + tool)))
   const abandoned = await call('agent_teams_create_task', { subject: 'Cancelled planning mistake', assignee: 'implementer', dependencies: [dynamicFirst.task_id] })
   const cancelledPending = await call('agent_teams_update_task', { task_id: abandoned.task_id, status: 'cancelled', output: 'No execution began; captain corrected the plan.' })
   check('captain can cancel dependency-blocked member work before its first attempt', cancelledPending.status === 'cancelled' && cancelledPending.attempt === 0)
@@ -776,6 +784,17 @@ try {
   const builder = [...liveAgents.values()].find(agent => qualityTeam?.members.some(member => member.id === agent.id && member.name === 'builder'))
   let criticMember
   const implClaim = await call('agent_teams_claim_task', { task_id: impl.task_id }, builder)
+  const claimedSnapshot = await assembleTeamSnapshot(ctx, stateRoot, workspace, await readTeam(stateRoot, 'quality-loop'))
+  const claimedCard = claimedSnapshot.tasks.find(item => item.id === impl.task_id)
+  check('#262 dispatched working member retains a distinct claimed card before in_progress',
+    builder.status === 'running' && implClaim.status === 'claimed'
+      && claimedCard.status === 'claimed' && claimedCard.state === 'claimed',
+    JSON.stringify({ member: builder.status, status: implClaim.status, visual: claimedCard.state }))
+  let directClaimedCompletion = ''
+  try {
+    await call('agent_teams_update_task', { task_id: impl.task_id, status: 'completed', attempt_id: implClaim.attempt_id }, builder)
+  } catch (error) { directClaimedCompletion = String(error.message) }
+  check('#262 claimed still cannot skip in_progress', directClaimedCompletion.includes('cannot move from "claimed" to "completed"'))
   for (const attempt_id of [undefined, '']) {
     let missingAttemptError = ''
     try { await call('agent_teams_update_task', { task_id: impl.task_id, status: 'in_progress', ...(attempt_id === undefined ? {} : { attempt_id }) }, builder) }
@@ -785,6 +804,10 @@ try {
         && (await readTeam(stateRoot, 'quality-loop')).tasks.find(t => t.id === impl.task_id).attemptId === implClaim.attempt_id)
   }
   await call('agent_teams_update_task', { task_id: impl.task_id, status: 'in_progress', attempt_id: implClaim.attempt_id }, builder)
+  const runningSnapshot = await assembleTeamSnapshot(ctx, stateRoot, workspace, await readTeam(stateRoot, 'quality-loop'))
+  check('#262 explicit in_progress changes the same attempt to running',
+    runningSnapshot.tasks.find(item => item.id === impl.task_id).state === 'running'
+      && (await readTeam(stateRoot, 'quality-loop')).tasks.find(item => item.id === impl.task_id).attemptId === implClaim.attempt_id)
   let illegalCompleteRejected = false
   try {
     await call('agent_teams_update_task', {
@@ -966,11 +989,28 @@ try {
       && deliveries.length === deliveriesBeforeDisposedParkedKicks)
   liveAgents.set(alpha.id, alpha)
 
-  // Unobserved recovery whose followup fails must not strand the durable
-  // generation: the dispatcher retires the dead activation and starts one
-  // fresh activation that continues the recovered attempt. The failed
-  // replacement path (restore and park) is covered by
-  // dispatch-recovery.test.mjs.
+  // A guidance turn resumes this same attempt. Harness becomes idle before
+  // the plugin's asynchronous idle listener has necessarily finished (#103).
+  await call('agent_teams_send_message', { to: 'alpha', content: 'Continue the current attempt.' })
+  publishStatus(alpha, 'running')
+  const deadline = Date.now() + 5_000
+  while ((await state()).members.find(member => member.id === alpha.id)?.status !== 'working') {
+    if (Date.now() >= deadline) throw new Error('alpha did not enter the guidance turn')
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  const alphaDeliveries = () => deliveries.filter(delivery => delivery.childId === alpha.id).length
+  const beforeGuidancePoll = alphaDeliveries()
+  alpha.status = 'idle'
+  await call('agent_teams_status', {})
+  const afterGuidance = await task(t1.task_id)
+  check('poll before guidance idle is recorded keeps the open attempt without redelivery (#103)',
+    afterGuidance?.status === 'in_progress' && afterGuidance.attempt === alphaClaim.attempt
+      && afterGuidance.attemptId === alphaClaim.attempt_id && alphaDeliveries() === beforeGuidancePoll)
+  publishStatus(alpha, 'idle')
+
+  // Unobserved recovery whose followup fails must restore the original open
+  // capability and consume that generation's budget. Later status kicks must
+  // not recast it into pending or a new attempt.
   const tRecoverFail = await call('agent_teams_create_task', {
     subject: 'unobserved recovery delivery failure', assignee: 'gamma',
   })

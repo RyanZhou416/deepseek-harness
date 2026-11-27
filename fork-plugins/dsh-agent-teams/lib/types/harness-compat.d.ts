@@ -11,7 +11,7 @@
  * public sendMessage instead steers a running Agent and must never carry team jobs.
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { type Agent, type AgentOptions, type ModelSelection } from '@deepseek-ai/dsh-agent';
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent';
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm';
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session';
 import { type MemberToolFilter } from './tool-policies.ts';
@@ -60,8 +60,33 @@ export type AgentTeamsSource = {
     readonly goal?: string;
     readonly profile?: string;
 };
-/** Stored session format generation of the running host; 0 when it exposes none. */
-export declare function hostSessionFormatVersion(): number;
+/** Anything that exposes the stored format generation on its live session header. */
+export interface SessionFormatBearer {
+    readonly session?: {
+        readonly header?: {
+            readonly version?: unknown;
+        };
+    } | undefined;
+}
+/**
+ * Stored format generation observed on a live session, when the host exposes it.
+ *
+ * The module constant is only a fallback: a plugin can resolve a *nested*
+ * `@deepseek-ai/dsh-session` copy that belongs to a different host generation
+ * than the process loading it (a profile whose lockfile pins the DSH package
+ * line, a Desktop shell with an embedded core, a duplicated store). That copy
+ * then reports the wrong generation — 0 on a v4 host — which selects the
+ * retired `plugin` wrapper and makes every durable AgentTeams message fail the
+ * host's own admission check (#236). The live session header belongs to the
+ * host that persists the message, so it outranks the resolved module.
+ */
+export declare function observedSessionFormatVersion(subject?: SessionFormatBearer): number | undefined;
+/**
+ * Stored session format generation of the running host; 0 when neither the live
+ * session nor the resolved module exposes one.
+ * @param observed - a live session observation; preferred over the module constant.
+ */
+export declare function hostSessionFormatVersion(observed?: number): number;
 /**
  * Source for one AgentTeams-authored message on the running host.
  *
@@ -74,79 +99,35 @@ export declare function hostSessionFormatVersion(): number;
  * the released plugin wrapper is used instead; the goal and profile already
  * travel in the message text.
  * @param modern - the producer-owned source to use where the host admits it.
+ * @param observed - the live session's stored format generation, when callers
+ * have the owning agent at hand. Never trust the resolved module alone: on a
+ * host whose profile pins another DSH line it reports a retired generation and
+ * the v4 writer rejects the wrapper (#236).
  * @returns a source accepted by the running host and by its migration chain.
  */
-export declare function agentTeamsSource(modern: AgentTeamsSource): MessageSource;
+export declare function agentTeamsSource(modern: AgentTeamsSource, observed?: number): MessageSource;
 /**
  * 0.1.6 moved startup admission to serial agent/created. Older created events
  * have no source and precede session-start; ignore those until the old hook.
  * Keep the removed event's type confined to this audited compatibility seam.
  */
 export declare function onAgentReady(ctx: Context, listener: (agent: Agent, vetoable: boolean) => void): () => void;
-/** Read child-owned history, excluding any descriptor inherited from a parent. */
-export declare function sessionOwnEvents(session: Session): readonly SessionEvent[];
+/**
+ * Search child-owned history in bounded reads on hosts with ranged snapshots.
+ * Stop at the first match in the requested direction without copying the full log.
+ */
+export declare function findOwnSessionEvent(session: Session, matches: (event: SessionEvent) => boolean, options?: {
+    order?: 'oldest' | 'newest';
+    fromSeq?: number;
+}): SessionEvent | undefined;
+/** Legacy hosts log each chunk separately; current hosts embed the committed stream. */
+export declare function outputLimitTurn(event: SessionEvent): number | undefined;
+/** rc.2 summaries use tree names; the new structured reason owns the outcome. */
+export declare function successfulSubagentSettlement(source: MessageSource | undefined): source is Extract<MessageSource, {
+    kind: 'subagent-settled';
+}>;
 /** Install before the first request, including cold resume, with HMR cleanup. */
 export declare function installContinuableMemberSetup(ctx: Context, setup: Setup): void;
-/**
- * Mutable route the pre-0.2.2 host loop reads inside its request hook. Hosts
- * that own selection on the Agent keep this object inert.
- */
-export interface MemberModelSelectionRef {
-    /** Route the next step should use; the fallback switch rewrites it. */
-    current: ModelSelection | undefined;
-    /** Route the current step captured during prompt assembly. */
-    assembled: ModelSelection | undefined;
-}
-/**
- * Whether this Agent owns its model selection. 0.2.2 moved selection from the
- * request hook's mutable ref to `Agent.model`: the loop captures the route
- * before prompt assembly and rejects a request-time replacement, so a route
- * change is recorded for the next step instead of rewriting the current one.
- * @param agent - the member Agent to inspect.
- * @returns whether the running host owns model selection on each Agent.
- */
-export declare function hostOwnsModelSelection(agent: Agent): boolean;
-/**
- * Install the member's route contributions on the running host.
- *
- * A host that owns selection only needs the switch notice: the route travels in
- * the child's creation options and in recorded selections. Older hosts consume
- * the mutable ref, so the plugin must supply every request route itself.
- * @param ctx - the member Agent's scoped context.
- * @param agent - the member Agent receiving route and notice contributions.
- * @param selection - mutable route consumed by hosts without Agent-owned selection.
- * @returns Disposer for the installed selection contributions.
- */
-export declare function installMemberModelSelection(ctx: Context, agent: Agent, selection: MemberModelSelectionRef): () => void;
-/**
- * Record a member route the running host would not otherwise start from.
- *
- * A cold resume restores the descriptor's creation route, while a member that
- * already failed over keeps running on its saved backup route. Recording the
- * saved choice is the only supported way to start a step there on hosts that
- * own selection; an equal choice is skipped so no redundant `model/selection`
- * event enters the session log.
- * @param agent - the member Agent to route.
- * @param selection - the member's saved route.
- */
-export declare function recordMemberModelSelection(agent: Agent, selection: ModelSelection): void;
-/**
- * Apply one accepted fallback route to a member whose request already failed.
- *
- * Hosts without Agent-owned selection rewrite the captured request route, so
- * the recovery action retries the failed step on the backup route. From 0.2.2
- * the loop fixes the step's route before assembly and refuses a replacement:
- * this recovery records the backup route for the next step and declines the
- * retry, so the failed attempt keeps its own outcome instead of repeating on
- * the primary route.
- * @param agent - the member Agent whose request failed.
- * @param selection - mutable legacy route ref.
- * @param next - the backup route to run.
- * @returns the recovery action for hosts without Agent-owned selection.
- */
-export declare function applyFallbackRoute(agent: Agent, selection: MemberModelSelectionRef, next: ModelSelection): {
-    kind: 'retry';
-} | undefined;
 /** Queue a distinct host-authored turn; never substitute model-message steer. */
 export declare function queueMemberPrompt(runtime: Context['subagents'], parent: Agent, childId: SessionId, content: ContentBlock[], signal: AbortSignal): Promise<MessageId>;
 /** Coordination joins the nearest step, including waking an idle/cold child. */
@@ -206,17 +187,15 @@ export declare function startMemberWithLenientFilter<T>(start: (filter: MemberTo
 /**
  * Stop the selected member activations.
  *
- * 0.2.2 and earlier expose a targeted drain that closes admission for exactly
- * those children and awaits their descendants. 0.2.3-alpha.2 replaced it with a
- * tree-wide drain whose admission cutoff lasts until the parent leaves the
- * registry, so draining the captain would also stop unrelated delegation and
- * block every later spawn of that session. On that generation each selected
- * child is cancelled and interrupted instead: the cancel clears the member's
- * queued work, the interrupt releases the host execution, and the host disposes
- * the activation once the child reaches idle. The plugin's own per-step
+ * The 0.2.2 tree manager exposes a tree-wide drain whose admission cutoff lasts
+ * until the parent leaves the registry, so draining the captain would also stop
+ * unrelated delegation and block every later spawn of that session. On that
+ * generation only work in the selected creation branches is joined, and only
+ * their resident activations are disposed. 0.2.2 and earlier keep the targeted
+ * drain. A host with neither a targeted drain nor the audited tree manager
+ * cancels and interrupts exactly the selected children; the plugin's per-step
  * admission check and retired-id delivery guard already reject every later turn
- * of a stopped member, and the durable task attempt is invalidated before this
- * call.
+ * of a stopped member.
  * @param ctx - the plugin context (injects `subagents` and `agents`).
  * @param parent - the exact live parent agent of the members.
  * @param ids - child session ids to stop.

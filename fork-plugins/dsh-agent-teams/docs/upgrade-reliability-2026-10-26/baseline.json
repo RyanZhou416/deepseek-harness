@@ -1,0 +1,18 @@
+{
+  "baselineCommit": "43a3f160e20a1f316ca32340b3676aae7d7d4b82",
+  "fixtureOnly": true,
+  "newHost": "0.2.1-rc.999",
+  "missingInstallAccepted": [
+    "Verified one package against 0.2.1-rc.3, 0.2.1-rc.2, 0.2.1-rc.1, 0.2.0-rc.2, 0.1.7-rc.2, 0.1.5-rc.3, 0.1.5-rc.2, 0.1.5-rc.1, 0.1.2-rc.1, 0.1.2-alpha.5, 0.1.2-alpha.2, 0.2.1-rc.999"
+  ],
+  "missingLifecycleRejected": true,
+  "controlError": "Host 0.2.1-rc.999 did not exercise lifecycle",
+  "broadEngineAcceptedBefore": 11,
+  "officialGateAblation": {
+    "hostRuntime": "0.2.1-rc.3",
+    "hypotheticalCandidate": "0.2.1-rc.999",
+    "exactDeclarationMismatchCount": 21,
+    "broadEngineBypasses": true,
+    "runtimeCompatibilityNotTested": true
+  }
+}

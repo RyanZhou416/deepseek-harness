@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { acknowledgeMailbox, CAPTAIN_KEY, discardMailboxMessages, drainSkippedUnreadableTeams, findTeamByCaptain, readMailbox, readUnreadMailbox, readTeam, sanitizeKey, withTeamLock } from "./state.js";
-import { sessionOwnEvents } from "./harness-compat.js";
+import { findOwnSessionEvent, successfulSubagentSettlement } from "./harness-compat.js";
 import { leadIdentityOfAsync, sessionLeadsTeamAsync } from "./lineage.js";
 const PREFIX = 'AgentTeams inbox receipt: ';
 export function isCurrentMail(team, message) {
@@ -25,15 +25,25 @@ function mailboxBody(recipient, messages) {
         ? `AgentTeams message from member ${message.from}:\n\n${mailboxContent(message)}`
         : `AgentTeams message from ${message.from}${message.attemptId === undefined ? '' : ` for task ${message.taskId}, attempt_id ${message.attemptId}`}:\n\n${mailboxContent(message)}`).join('\n\n');
 }
+/** Read current mail while the caller holds the lock and has verified the team. */
+export async function readCurrentMailboxLocked(root, team, recipient, onMalformed) {
+    const messages = await readUnreadMailbox(root, team.id, recipient, onMalformed);
+    const current = [];
+    const staleIds = [];
+    for (const message of messages) {
+        if (isCurrentMail(team, message))
+            current.push(message);
+        else
+            staleIds.push(message.id);
+    }
+    await discardMailboxMessages(root, team.id, recipient, staleIds);
+    return current;
+}
 /** Fallback reads must enforce the same current-generation rule as live admission. */
 export async function readCurrentMailbox(root, teamId, recipient, onMalformed) {
     return withTeamLock(`team:${root}:${teamId}`, async () => {
         const team = await readTeam(root, teamId);
-        if (team === undefined)
-            return [];
-        const messages = await readUnreadMailbox(root, teamId, recipient, onMalformed);
-        await discardMailboxMessages(root, teamId, recipient, messages.filter(message => !isCurrentMail(team, message)).map(message => message.id));
-        return messages.filter(message => isCurrentMail(team, message));
+        return team === undefined ? [] : readCurrentMailboxLocked(root, team, recipient, onMalformed);
     });
 }
 export function mailboxPrompt(teamId, recipient, messages) {
@@ -70,8 +80,7 @@ export function installMailboxAdmission(ctx, stateDir) {
         // result. Keep abnormal endings and missing reports as fallback signals.
         const successfulSettlements = new Set(decision.messages.flatMap(input => {
             const source = input.source;
-            return source?.kind === 'subagent-settled'
-                && source.summary === `Background subagent ${source.senderSessionId} finished and will do no further work unless you send it more.`
+            return successfulSubagentSettlement(source)
                 ? [source.senderSessionId] : [];
         }));
         const redundantSettlements = new Set();
@@ -165,8 +174,7 @@ export function installMailboxAdmission(ctx, stateDir) {
         }
         const admitted = [];
         for (const { input, receipt, batch } of inputs) {
-            if (input.source?.kind === 'subagent-settled' && redundantSettlements.has(input.source.senderSessionId)
-                && input.source.summary === `Background subagent ${input.source.senderSessionId} finished and will do no further work unless you send it more.`)
+            if (successfulSubagentSettlement(input.source) && redundantSettlements.has(input.source.senderSessionId))
                 continue;
             if (receipt === undefined || batch === undefined || batch.failed === true) {
                 admitted.push(input);
@@ -187,18 +195,8 @@ export function installMailboxAdmission(ctx, stateDir) {
         // existing turn, a status tool may have consumed this same mail already;
         // dropping its duplicate must not block the pending tool-result response.
         if (decision.messages.length > 0 && admitted.length === 0) {
-            const events = sessionOwnEvents(payload.agent.session);
-            let continuing = false;
-            for (let i = events.length - 1; i >= 0; i--) {
-                const event = events[i];
-                if (event.type === 'step/start' && event.data.turn === payload.turn) {
-                    continuing = true;
-                    break;
-                }
-                if (event.type === 'turn/start')
-                    break;
-            }
-            if (!continuing)
+            const boundary = findOwnSessionEvent(payload.agent.session, event => event.type === 'turn/start' || (event.type === 'step/start' && event.data.turn === payload.turn), { order: 'newest' });
+            if (boundary?.type !== 'step/start')
                 return { kind: 'reject' };
         }
         return { ...decision, messages: admitted };

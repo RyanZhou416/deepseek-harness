@@ -30,7 +30,7 @@
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
 | Published fork | `main` after local integration | `dsh-v0.2.3-alpha.2` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
 | Current official target | `dsh-v0.2.3-alpha.2`（`4b399c39a6`）on 2026-11-26 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
-| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.24`（main，含 0.2.1 适配）+ 本 fork `0.1.24-dsh022rc1.1` 私有发布通道（0.2.2-rc.1 适配）与有界未读邮箱缓存 |
+| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.31` + 本 fork `0.1.31-dsh023a2.1` 私有发布通道（0.2.3-alpha.2 适配）与有界未读邮箱缓存 |
 | Context subtree | `fork-plugins/dsh-context` | 上游 `v0.87.2` + 本 fork `0.87.2-dsh023a2.1` 的宿主侧参照价、head 视图与有界冷 detail；详见 [Local Context package](#local-context-package) |
 | Subscriptions subtree | `fork-plugins/dsh-plugin-subscriptions` | 上游 `v0.9.4` + 本 fork RC.1/V4 私有适配与 pinned Claude Code 2.1.288 wire；凭据与 Session 格式不变 |
 | Relay plugin | `fork-plugins/dsh-relay` | 本 fork 自有的 DshRelay 远程访问客户端：设置页 + 凭据服务 + DSH Cookie 铸造 + frpc 隧道托管；不含部署值 |
@@ -616,7 +616,7 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 **DeepSeek 账户包迁移。** 上游删除 `packages/credentials/deepseek-account` 与 `packages/credentials/deepseek-account-platform`，合并为 `packages/account/deepseek-account`；fork 的凭据停放行为迁到该包 `src/index.ts`，规则见 [DeepSeek account credential parking](#deepseek-account-credential-parking)。
 
-**Subagent 激活参数扁平化。** `SubagentActivationSpec` 现为扁平结构（`provider`/`parent`/`prompt`/`agentOptions`/`maxDepth`/`outputSchema`/`delivery` 都在顶层），fork 的强制子代理模型重做在 `packages/subagent/subagent/src/index.ts` 的 `launchActivation(spec, applyOverride)`；`start`/`startContinuable` 已移除。上游删除了 `src/internal.ts`，fork 重建它以保留 AgentTeams 依赖的宿主适配器（`deliverSubagentPrompt`、`HostPromptDeliverer`、`queueHostSubagentPrompt`、`steerHostSubagentPrompt`、`startAgentTeamsMember`、`startHostAgentTeamsMember`）；AgentTeams 插件（`0.1.24-dsh023a2.1`）发送扁平 spec，并优先走 `startAgentTeamsMember` 入口，使全局子代理模型覆盖不改写成员路由；官方 npm 版 0.2.3-alpha.2 宿主没有这两个适配器，插件在其上挂载即明确失败。
+**Subagent 激活参数扁平化。** `SubagentActivationSpec` 现为扁平结构（`provider`/`parent`/`prompt`/`agentOptions`/`maxDepth`/`outputSchema`/`delivery` 都在顶层），fork 的强制子代理模型重做在 `packages/subagent/subagent/src/index.ts` 的 `launchActivation(spec, applyOverride)`；`start`/`startContinuable` 已移除。上游删除了 `src/internal.ts`，fork 重建它以保留 AgentTeams 依赖的宿主适配器（`deliverSubagentPrompt`、`HostPromptDeliverer`、`queueHostSubagentPrompt`、`steerHostSubagentPrompt`、`startAgentTeamsMember`、`startHostAgentTeamsMember`）；AgentTeams 插件（`0.1.31-dsh023a2.1`）在宿主的树管理器上提交扁平 spec，并优先走 `startAgentTeamsMember` 入口，使全局子代理模型覆盖不改写成员路由；官方 npm 版 0.2.3-alpha.2 宿主没有这两个适配器，插件在其上挂载即明确失败。
 
 **SessionPersistence 列表排除。** 新的 SQLite Segment 后端 `packages/session/session-persistence-sqlite/src/sqlite.ts` 必须实现 `SessionPersistenceListOptions.excludeSessionIds`（在解码存储 header 前排除）与 `excludeSubagentSessions`，并把被排除的 id 仍算作 stored；这是每个 `SessionPersistence` 提供方的通用义务，由 `packages/session/session-persistence/tests/contract.ts` 的 `listHeaders` 用例守护。
 
@@ -632,7 +632,7 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 **官方 Team 包与文档派生物。** 上游删除 `packages/experimental/agent-team*`，Team 工具面移到 `packages/team/agent-team` 与 `packages/team/tool-agent-team`（四个 `team_task_*` 工具，无 `spawn_teammate`）；`docs/capability-seams*` 由 `scripts/gen-doc-graphs.ts` 混合生成，`scripts/verify-no-unknown-casts.ts` 现在基于上游的 `scripts/baseline-inventory.ts`。
 
-**Fork 插件 cohort 已重定到 0.2.3-alpha.2。** subscriptions `0.9.4-dsh023a2.1`、AetherShell `0.1.0-dsh023a2.1`、AgentTeams `0.1.24-dsh023a2.1`、dsh-context `0.87.2-dsh023a2.1`、dsh-relay 与 SimFlow relay `0.1.0-dsh023a2.1`：`@deepseek-ai/dsh-*` peer 与 `engines.dsh` 为 `0.2.3-alpha.2`，Cordis/schemastery devDependencies 对齐 vendor 的 `4.2.0-alpha.1`/`3.20.0-alpha.1`（两套版本会产生两套 Context）。各插件的适配细节归其分节所有。`scripts/fork-plugins-build.ts` 以真实数据副本完成整组 staging，副本启动后全部插件激活。
+**Fork 插件 cohort 已重定到 0.2.3-alpha.2。** subscriptions `0.9.4-dsh023a2.1`、AetherShell `0.1.0-dsh023a2.1`、AgentTeams `0.1.31-dsh023a2.1`、dsh-context `0.87.2-dsh023a2.1`、dsh-relay 与 SimFlow relay `0.1.0-dsh023a2.1`：`@deepseek-ai/dsh-*` peer 与 `engines.dsh` 为 `0.2.3-alpha.2`，Cordis/schemastery devDependencies 对齐 vendor 的 `4.2.0-alpha.1`/`3.20.0-alpha.1`（两套版本会产生两套 Context）。各插件的适配细节归其分节所有。`scripts/fork-plugins-build.ts` 以真实数据副本完成整组 staging，副本启动后全部插件激活。
 
 **Focused verification.** 合并后的 phase 2 记录覆盖 `packages/session*`、`packages/session-query*`、`packages/workspace/workspace`、`packages/llm*`、`packages/subagent*`、`packages/account/deepseek-account` 与 `packages/api/session-controller` 的 focused 套件，`tsc -p tsconfig.host.json` 与 `tsc -p tsconfig.client.json` 均为 0 错误；行文中的分节各自保留更窄的入口。只改本文时运行 `node_modules/.bin/tsx scripts/verify-md-links.ts` 与 `node_modules/.bin/tsx scripts/verify-concrete-terms.ts`。
 
@@ -664,15 +664,15 @@ Focused verification: `packages/subagent/tool-subagent/tests/tool-subagent.spec.
 
 `subagent.modelOverride` 默认为 `false`；设置页 **插件 → Subagent → 强制模型覆盖** 可选择 provider、model、reasoning effort，和深度/容量一起按同一 namespace revision 保存。`SubagentActivationSpec` 在 0.2.3-alpha.2 已扁平化（`provider`/`parent`/`prompt`/`agentOptions`/`maxDepth`/`outputSchema`/`delivery` 都在顶层），Host 的 `SubagentRuntime.startActivation(spec)` 在派发前经 `launchActivation(spec, applyOverride)` 覆盖调用者模型参数并验证最终路由；`start`/`startContinuable` 已不存在。省略 effort 时清除父级继承，采用模型默认值。开启时不支持 `agentOptions` 的普通后端明确拒绝，工作流、Ralph、普通工具与嵌套委派统一受约束，已有子代理/冷恢复保留持久化的模型。该设置不构成对 shell、任意 Host 代码或配置编辑的安全隔离。
 
-AgentTeams 成员是用户指定的例外；核心 `startAgentTeamsMember` symbol（`Symbol.for('dsh.subagent.startAgentTeamsMember')`）与 `startHostAgentTeamsMember` 适配器位于 fork 重建的 `packages/subagent/subagent/src/internal.ts`，插件侧 `harness-compat.startMember` 仍按旧的嵌套 `request` 对象调用 `startActivation`，尚未适配扁平 spec，因此成员模型豁免目前不会生效，必须同步修插件。不得改成按标签前缀豁免、model-visible 跳过参数或仅前端默认值。保留 `startActivation` 调用路径上的插件生命周期/委派限制。合并上游时验证 `subagent/tests/{service,child-agent,continuation}.spec.ts`、`tool-subagent/tests/model-selection.spec.ts`、设置页 controller/component tests 与 `apps/web/tests/plugin-config.e2e.ts` 的 override 保存快照；同时保留 AgentTeams 内部适配器与对应私有包。
+AgentTeams 成员是用户指定的例外；核心 `startAgentTeamsMember` symbol（`Symbol.for('dsh.subagent.startAgentTeamsMember')`）与 `startHostAgentTeamsMember` 适配器位于 fork 重建的 `packages/subagent/subagent/src/internal.ts`，插件侧 `harness-compat.startMember` 优先调用该入口（0.2.3-alpha.2 的扁平 spec），成员因此不套用用户的全局子代理模型覆盖；没有该入口的宿主（0.2.2 及更早）继续走 `startActivation`。不得改成按标签前缀豁免、model-visible 跳过参数或仅前端默认值。保留 `startActivation` 调用路径上的插件生命周期/委派限制。合并上游时验证 `subagent/tests/{service,child-agent,continuation}.spec.ts`、`tool-subagent/tests/model-selection.spec.ts`、设置页 controller/component tests 与 `apps/web/tests/plugin-config.e2e.ts` 的 override 保存快照；同时保留 AgentTeams 内部适配器与对应私有包。
 
 ### AgentTeams 在 0.2.1 上的成员创建
 
-官方 0.2.1 删除了 delegation 请求中的 `persona` 与 `toolFilter`（`tool-subagent` 会对这两个配置直接报错）。上游 v0.1.24 的 `harness-compat.startMember` 因此按主机分层：存在 `startActivation` 时改传 `delivery: 'parent'` 并在请求中丢弃这两个字段，同时吞掉 `activation.result` 的失败以保留结算兜底；只支持 `startContinuable` 的旧主机仍走原路径。fork 不在核心层回补这两个字段。0.2.3-alpha.2 起宿主 `startActivation` 接受扁平 `SubagentActivationSpec`，插件仍把 `parent`/`prompt`/`agentOptions` 放在嵌套 `request` 里，合并后必须把这三个字段提升到顶层，否则成员创建会拿到空请求。
+官方 0.2.1 删除了 delegation 请求中的 `persona` 与 `toolFilter`（`tool-subagent` 会对这两个配置直接报错）。上游 v0.1.24 的 `harness-compat.startMember` 因此按主机分层：存在 `startActivation` 时改传 `delivery: 'parent'` 并在请求中丢弃这两个字段，同时吞掉 `activation.result` 的失败以保留结算兜底；只支持 `startContinuable` 的旧主机仍走原路径。fork 不在核心层回补这两个字段。0.2.3-alpha.2 起宿主 `startActivation` 接受扁平 `SubagentActivationSpec`；上游 v0.1.31 已按 `treeBoundary(runtime)` 判断代际：树管理器存在（0.2.2-rc.2+，含 0.2.3-alpha.2）时提交顶层 `provider`/`label`/`parent`/`prompt`/`agentOptions`/`signal`/`delivery`，否则保留嵌套 `request` 给 0.2.2 及更早。fork 只在树管理器之上补 `startAgentTeamsMember` 入口，不再自行合成两代 spec。
 
-**Preservation rule.** 成员级 persona 与工具限制只在旧主机上生效；0.2.1 起成员工具集由所选 Agent Preset 的插件组合决定，不再有按成员的 deny 列表。不要为此在 `packages/subagent` 里加 fork 分支，也不要在预设之外重建动态 persona。
+**Preservation rule.** 成员级 persona 与工具限制只在旧主机上生效；0.2.1 起成员工具集由所选 Agent Preset 的插件组合决定，不再有按成员的 deny 列表。不要为此在 `packages/subagent` 里加 fork 分支，也不要在预设之外重建动态 persona。树管理器的定向 teardown（只 join/dispose 所选创建分支）由上游拥有；不得改回宿主的树级 `drainDescendants`。
 
-活动面板的取数契约也留在 fork：`/plugins/dsh-agent-teams/state` 无参数时保持全量且带完整详情与收件箱预览（面板行为不变）；`captainSessionId` 或成对的 `teamCaptainSessionId`+`teamId` 只返回所选团队；`detail=1` 再附带团队描述、成员执行提示词、任务描述等重字段，`archived=1` 走归档集合。非法分域参数返回 400，不回退成全量扫描。
+活动面板的取数契约也留在 fork：`/plugins/dsh-agent-teams/state` 无参数时保持全量且带完整详情与收件箱预览（面板行为不变）；`captainSessionId` 或成对的 `teamCaptainSessionId`+`teamId` 只返回所选团队；`detail=1` 再附带团队描述、成员执行提示词、任务描述等重字段，`archived=1` 走归档集合。非法分域参数返回 400，不回退成全量扫描。上游 v0.1.31 的客户端改用 `session=<captain>&summary=1`，因此路由同时接受这两个开关，并以 `writeJsonWithEtag` 对未变化轮询返回 `304`；`collectTeamsActivity`/`collectArchivedTeamsActivity` 统一收一个 options，`includeDetails` 保留为 `summary` 的 fork 别名。
 
 **Focused verification.** 在 `fork-plugins/dsh-agent-teams` 运行 `pnpm typecheck`、`pnpm build` 与 `pnpm verify`（覆盖 fallback/member-failure TDD、issue regressions、quality gates、lifecycle、stress、compatibility、doctor、skill、harness contract、capabilities、release metadata）。`release-metadata.test.mjs` 需覆盖 `dsh022rc1` 私有通道与 `0.2.2-rc.1` 推荐宿主（同时保留 `0.2.1-rc.2` 旧目标），`doctor` 需报告依赖闭包内每个包只有一个身份。
 ### Subagent and AgentTeams responsiveness
@@ -683,7 +683,7 @@ AgentTeams 成员是用户指定的例外；核心 `startAgentTeamsMember` symbo
 
 #### External AgentTeams mailbox delivery
 
-外置 AgentTeams v0.1.24 拥有 live member 的 next-step delivery、inactive member 的 Queue、稳定 message id、accept/ack、target-local serialization、crash recovery、cold replay 与退休成员拒绝。RC.1 的 Host 协调消息使用专属 `agent-teams-host` source；Fork 不修改官方 Team 包（0.2.3-alpha.2 起为 `packages/team/agent-team` 与 `packages/team/tool-agent-team`，四个 `team_task_*` 工具，无 `spawn_teammate`）。
+外置 AgentTeams v0.1.31 拥有 live member 的 next-step delivery、inactive member 的 Queue、稳定 message id、accept/ack、target-local serialization、crash recovery、cold replay 与退休成员拒绝；0.2.2-rc.2+ 的投递走宿主的 tree manager（`manager.deliverToMember`，保留 `authorize` 复核），旧主机继续走 `followup`/Host queue/steer 适配器。RC.1 的 Host 协调消息使用专属 `agent-teams-host` source；Fork 不修改官方 Team 包（0.2.3-alpha.2 起为 `packages/team/agent-team` 与 `packages/team/tool-agent-team`，四个 `team_task_*` 工具，无 `spawn_teammate`）。
 
 Fork 仍让 inactive Captain 通过 Session Controller cold resume，并在 awaited `agent/created` 阶段按 durable mailbox 顺序重投；成功逐条 ack，失败释放当前记录和未处理后缀。未读 projection 使用 256-entry / 8 MiB LRU，磁盘 JSONL 格式不变。
 
@@ -823,7 +823,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
 | `dshmarket` | — | Removed | 官方 Plugin Manager 接管安装、配置与运行时启停；profile 不恢复旧 package 或 bundle |
-| `@nanmicoder/dsh-agent-teams` | `0.1.24-dsh022rc1.1` | Installed, enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/agent-teams`；该目录由隔离工作副本从源码构建，源码改动重启 Host 或重新运行 `build.cmd` 后生效，禁止被 npm latest/next 覆盖 |
+| `@nanmicoder/dsh-agent-teams` | `0.1.31-dsh023a2.1` | Installed, enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/agent-teams`；该目录由隔离工作副本从源码构建，源码改动重启 Host 或重新运行 `build.cmd` 后生效，禁止被 npm latest/next 覆盖 |
 | `dsh-plugin-subscriptions` | `0.9.4-dsh022rc1.1` | Installed; Windows Web enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/subscriptions`（源码在 `fork-plugins/dsh-plugin-subscriptions`）；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-18 前的 rc1.32/rc1.33 为上一代制品，仅归档 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
 | `dsh-context` | `0.78.2-dsh022rc1.1` | Installed, enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/context`，并保留 `300/60/100/400/100/100` bounds；该目录由隔离工作副本从源码构建，源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
@@ -840,7 +840,7 @@ Mac 主 checkout 已快进至同一 fork `main`；当前 Mac 部署路径为 `bu
 
 ### Local AgentTeams package
 
-维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。当前安装为 `0.1.24-dsh023a2.1` 的 `link:` 依赖，指向 `build.cmd` 从隔离工作副本生成的 `.build/fork-plugins/agent-teams`；`fork-plugins\releases\archive\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`（SHA256 `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`）只作历史归档。该 package 标记为 private，禁止用上游 npm scope 发布；更新须在 Host 停止后重新运行 `build.cmd`。
+维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。当前安装为 `0.1.31-dsh023a2.1` 的 `link:` 依赖，指向 `build.cmd` 从隔离工作副本生成的 `.build/fork-plugins/agent-teams`；`fork-plugins\releases\archive\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`（SHA256 `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`）只作历史归档。该 package 标记为 private，禁止用上游 npm scope 发布；更新须在 Host 停止后重新运行 `build.cmd`。
 
 Windows 的 `build.cmd` 现在通过 `scripts/fork-plugins-build.ts` 把四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）与 workspace 的 `@deepseek-ai/dsh-llm-cc-pool` provider bundle 全部以本地 `link:` 安装到 `profiles\web`：Subscriptions 和 AetherShell 由 staging 直接编译，AgentTeams 与 Context 复制到 `.build/fork-plugins/work/<id>/` 隔离副本后运行各自的 `build`（Context 构建时从 plugin-local install 解析 `zod` 等开发依赖，staged manifest 保留运行时 `zod`），`llm-cc-pool` 从根构建产物复制。全新 clone 无需手工 tgz，也不读取提交的插件 `lib/`；Host 在 3080 监听时脚本会在修改 profile 前拒绝执行。
 
@@ -855,7 +855,7 @@ fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plug
 5. 普通 captain 不驻留时，成员报告和 team 操作必须先通过 Session Controller 的 `resolveAgent`（兼容旧 Host 时用 `ctx.agents.resume`）恢复**原 `captainSessionId`**；恢复后校验返回 Agent id，不一致即失败。禁止用 `sessionController.create`、caller cwd 或硬编码 `agentPreset: 'standard'` 伪造驻留：`create` 对已开始 turn 的 Session 会 mint 新 id，导致原 captain 永久找不到。Captain Session start 会重投 durable mailbox，成功逐条 ack，失败记录及后缀释放 delivery lease。Lineage 解析遇到不可读的中间 header 时保留已解析前缀但不得缓存为完整 ancestry；否则多级 fork 会在进程生命周期内失去 lead 身份。
 6. Windows directory rename 使用独立的 5 次重试预算；构建清理目标用跨平台 `basename()` 校验。
 7. `readUnreadMailbox()` 使用只保留 pending 消息的 256-entry / 8 MiB 有界 LRU，并以 `dev/ino/size/mtimeNs/ctimeNs` 检测文件替换；lease 每次按当前时间重算，append/claim/release/ack/archive/remove 成功后精确失效。完整历史读取和磁盘 JSONL 字节格式不变。
-8. 活动轮询把当前 captain 和所有已挂载卡片的 active captain/team 对传给 Host，包括右侧并排会话，在 activity/mailbox 装配前过滤；摘要保留全部任务结构，主会话 staged 计划的长说明与 execution prompt 通过详情读取并按 revision 复用。旧无范围请求保留完整字段和 captainInbox，新 Client 兼容旧 Host；畸形 scope/detail 查询在扫描前返回 400。详情 cache 由各 poller 持有，stop 释放；mutation 代际、同 revision 失效、失败期间 presentation identity 和每次请求自己的 AbortSignal 均须保留，避免旧响应覆盖表单。hidden 暂停，visible 立即刷新，隐藏中止的首次恢复不能提前完成 firstTick。归档旁侧卡数据保留到最后一个卡引用卸载，inactive target 不维持热轮询；归档只读，旁侧卡不获取编辑器长详情。
+8. Host 活动取数同时接受两种客户端：fork 无参数请求保留完整字段和 captainInbox，`captainSessionId`/成对 `teamCaptainSessionId`+`teamId`/`detail=1` 在 activity/mailbox 装配前过滤，畸形 scope/detail 查询在扫描前返回 400；上游 v0.1.31 客户端改发 `session=<captain>&summary=1`，Host 同样识别，并以 `writeJsonWithEtag` 复核未变化轮询。摘要保留全部任务结构，staged 计划的长说明与 execution prompt 在 summary 下仍保留；归档只读。Client 侧的 per-scope 行替换、validator/tag 失效、archive 保留、hidden 暂停与 visible 立即刷新由上游控件拥有；后续合并不得在 Host 侧删掉 fork 的 scope/detail 参数或 `400` 语义。
 
 9. 只有明确 captain/team 对且不含 Captain 发现请求时，在原有 live/archive 目录枚举后先按 team id 过滤，再读取 `team.json` 并重新校验记录 id 与 captain。保留目录顺序、目录错误传播、目录类型过滤和旧 id；Captain 发现仍读取全部团队。Host 与面板复用按 assignee 精确值分组的任务索引，保留任务顺序、首个运行任务、完成数、removed roster、模型选择和详情；缺失 assignee 与显式空值不同。索引只跟随当前输入，不引入跨请求状态缓存。
 
@@ -863,9 +863,9 @@ fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plug
 
 11. 成员已完成一轮且 activation 已释放时，任务派发失败必须退役旧 member session（retired index）并 fresh spawn 同一成员继续当前 attempt，不得把任务回滚成 `pending attempt N`；所有 dispatch 失败持久化 `spawnError`。scheduler 采用 task-first：有 ready task 时先派任务，未读 mailbox 不得饿死任务；未到达成员的派发失败不膨胀 attempt。保留 mailbox durable 重试、retired 拒绝与旧 attempt 证据恢复。
 
-12. 0.2.3-alpha.2 的成员创建与停止：`harness-compat.startMember` 提交同时服务两代的激活 spec（扁平任务字段给 0.2.3，嵌套 `request` 给 0.2.2 及更早），并优先走宿主 `Symbol.for('dsh.subagent.startAgentTeamsMember')`——它是唯一不套用用户全局子代理模型覆盖的创建入口，成员路由因此保持用户声明的例外。`drainMemberChildren` 在宿主提供定向 drain 时不变，否则只对所选成员 `cancel`（清空排队工作）+ `interrupt`（释放宿主执行），不得改用 `drainDescendants`：它的准入关闭会停掉队长下无关的委派并让该会话此后无法再 spawn。`BrowserRequestGate` 改用 `admit()`（每个已声明宿主都有），插件仍自行回写 401/403/503 JSON 与 `no-store`；血缘只读 Session header，不使用已移除的 `isOwnedBy`/`roots()`。0.2.3-alpha.2 目标要求宿主为 fork 重建版本（恢复 `packages/subagent/subagent/src/internal.ts` 的 `dsh.subagent.deliverPrompt` 与 AgentTeams 成员入口）；未经 fork 重建的上游 0.2.3-alpha.2 宿主会在挂载时显式失败，不降级成员投递。该宿主的 PTC 默认程序格式同时变为 scoped REPL（禁止顶层 `return`，模型只看到 `inspect()` 输出）；插件产品代码不解析程序文本，测试与 fixture 按 `ctx.ptcRuntime.programFormat` 生成程序。
+12. 0.2.3-alpha.2 的成员创建与停止：上游 v0.1.31 已按 `treeBoundary(runtime)` 判断代际——树管理器存在（0.2.2-rc.2+，含 0.2.3-alpha.2）时提交扁平激活 spec 并走 `manager.deliverToMember`，否则保留嵌套 `request` 与旧 delivery 适配器；定向停止只 join/dispose 所选创建分支，不得改用会关闭整棵树准入的 `drainDescendants`。fork 在其上优先走宿主 `Symbol.for('dsh.subagent.startAgentTeamsMember')`——它是唯一不套用用户全局子代理模型覆盖的创建入口，成员路由因此保持用户声明的例外。`BrowserRequestGate` 改用 `auth: 'required'` 交给 0.2.3 宿主自身的路由鉴权（插件 fiber 不得调用 `Connection.admit()`；0.2.2 及更早仍由插件回写 401/403/503 JSON 与 `no-store`）；血缘只读 Session header，不使用已移除的 `isOwnedBy`/`roots()`。0.2.3-alpha.2 目标要求宿主为 fork 重建版本（恢复 `packages/subagent/subagent/src/internal.ts` 的 `dsh.subagent.deliverPrompt` 与 AgentTeams 成员入口）；未经 fork 重建的上游 0.2.3-alpha.2 宿主会在挂载时显式失败，不降级成员投递。该宿主的 PTC 默认程序格式同时变为 scoped REPL（禁止顶层 `return`，模型只看到 `inspect()` 输出）；插件产品代码不解析程序文本，测试与 fixture 按 `ctx.ptcRuntime.programFormat` 生成程序。
 
-**Preservation rule.** 保留 cold-member fallback spawn、task-first 调度与 `spawnError` 可见性；不要恢复“投递失败静默回滚 pending”或 mailbox 优先饿死 ready task 的行为，也不要把成员创建改回普通 `startActivation`（那会让全局子代理模型覆盖改写成员路由）或把成员停止改成树级 drain。
+**Preservation rule.** 保留 cold-member fallback spawn、task-first 调度与 `spawnError` 可见性；不要恢复“投递失败静默回滚 pending”或 mailbox 优先饿死 ready task 的行为；成员创建必须优先走 `startAgentTeamsMember`（无该入口的旧宿主才退回普通 `startActivation`），成员停止不得改成树级 drain。
 
 **Focused verification.** `fork-plugins/dsh-agent-teams` 的 `pnpm verify`（含 `scripts/harness-compat-tdd.mjs` 的两代激活与成员停止回归、`scripts/web-routes-verify.mjs`、release/README 元数据、`scripts/lifecycle-verify.mjs` 的 modern/delivery 变体与 `scripts/stress-verify.mjs`）、`pnpm typecheck` 与 `pnpm build`。
 
@@ -873,7 +873,7 @@ AgentTeams 的 `scripts/activity-state.perf.mjs` 使用 27/58 个合成团队、
 
 `.local-plugins-src\...dsh012.2/.3/.4` 只是历史解包产物，不能再当维护源。以后用 `git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git <tag> --squash` 获取精确官方发布，再在 fork 内重放和验证上述行为；不得用 npm install 覆盖 subtree。
 
-本 fork 以 `v0.1.24` 生成 `0.1.24-dsh023a2.1`。上游拥有 scheduling、next-step delivery、retired-member cleanup、repair scope 与 task correction；fork 保留 RC.1 source/导航适配、冷 Captain mailbox 恢复、有界 unread mailbox projection、0.2.3-alpha.2 的扁平激活与成员模型豁免，以及上述活动状态读取策略。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终以 `link:` 安装源码构建的 staging 副本，而不是打包产物。
+本 fork 以 `v0.1.31` 生成 `0.1.31-dsh023a2.1`。上游拥有 scheduling、tree-manager delivery、next-step delivery、retired-member cleanup、repair scope、task correction 与成员模型选择/fallback；fork 保留 RC.1 source/导航适配、冷 Captain mailbox 恢复、有界 unread mailbox projection、成员创建豁免（`startAgentTeamsMember`）、路由鉴权分层、可解析的既有 scope 取数，以及上述活动状态读取策略。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终以 `link:` 安装源码构建的 staging 副本，而不是打包产物。
 
 ### Local Context package
 
@@ -994,14 +994,14 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Tool-search block round trip | Preserve | Keep the library's block whitelist and the plugin's capture/replay in step, and keep envelope entries optional and index-based |
 | Separate disclosed-wait ceiling | Preserve | Keep `providerWaitMaxMs` optional and default-equal to `maxDelayMs`; a policy that omits it must resolve, retry, and serialize its policy key exactly as upstream |
 | Stable prompt boundary | Preserve | Keep `renderPromptSections` → `GenerateOptions.systemSections` and the subscription plugin's section grouping; upstream `system-prompt` admission owns registration, replacement and retirement — do not restore the fork's `SystemPromptProjection` |
-| Forced ordinary Subagent models | Preserve | Apply `config.modelOverride` on the flat `SubagentActivationSpec` in `launchActivation`; keep the host-only `startAgentTeamsMember` bypass in the rebuilt `src/internal.ts`, and adapt the AgentTeams plugin's nested request before relying on the member exemption |
+| Forced ordinary Subagent models | Preserve | Apply `config.modelOverride` on the flat `SubagentActivationSpec` in `launchActivation`; keep the host-only `startAgentTeamsMember` bypass in the rebuilt `src/internal.ts`, and keep the AgentTeams plugin preferring that entry (the nested `startActivation` request remains only for hosts without it) |
 | Optional catalog hint exclusions | Preserve | Default to all keys, start from `summaryKeys()` and subtract the configured exclusions, use `snapshot(session, keys)` for live and `cachedSnapshot(header, keys, excluded)` for cold rows, read `sessionListMetadata` through `sessionQuery.getListMetadata`, skip predecessor-title fallback when `title` is excluded, retain explicit reads and unknown plugins |
 | Connection recovery under load | Preserve | Keep loopback independent of external offline hints, one progress-aware bounded Ping, fresh control readers after terminal failures, display-only title retention and close diagnostics; keep upstream `websocketCompression` at its `'deflate'` default with the 1,024-character threshold and the fork carrier write-progress rule (`PING_CONTROL_FRAME_BYTES = 2`). Upstream owns WebSocket upgrade admission (`registerUpgrade` plus the admitted peer) and the `streamOutboxBytes` write queue; do not restore the fork's `admitConnection`/`releases` bookkeeping |
 | Status and catalog derivation | Preserve | Session status lives in `packages/client/ui-session-status` (`UiSessionStatus`, root `useSessionStatus`); publish one list-cut status result, skip unchanged state work, reuse lineage and row inputs, preserve synchronous Remote status and exact retention/label invalidation. Re-author the dropped batch-publish and projection-only cases against `reconcileStatus` |
 | AgentTeams target reads and task ownership | Preserve | Filter explicit targets before JSON reads, retain directory enumeration and errors, captain discovery, workspace/captain checks and exact ordered assignee groups |
 | Stable public projection views | Preserve | Keep full private fold state and watermarks; weak scalar-view entries must not retain Session or Agent owners |
 | Pending control recovery | Preserve | Reuse a recovery opening before its baseline; restart after an accepted baseline or terminal failure |
-| Scoped AgentTeams activity | Preserve | Keep paired targets, legacy full compatibility, complete task structure, staged detail revision/abort ownership and visibility recovery |
+| Scoped AgentTeams activity | Preserve | Keep paired targets, legacy full compatibility, complete task structure, staged detail revision/abort ownership and visibility recovery; the route also accepts the upstream `session=`/`summary=1` client and revalidates unchanged polls with an ETag |
 | Jobs one-hour TTL / 100 terminal target | Ported onto RC.1 | Official ring caps do not bound terminal-record count or lifetime; preserve unread protection and lightweight heap indexes |
 | Jobs shared timer initiator isolation | Preserve | Create initial, renewed and deferred-prune timers without an Agent initiator; preserve owner cleanup, expiry behavior and scheduling during teardown |
 | Skill watcher initiator isolation | Preserve | Open chokidar root watchers and `watchFile` ancestor polls, including rewatches, without an Agent initiator; keep the `dsh-agent` peer |
@@ -1019,7 +1019,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Global disconnect overlay | Preserve | Official replacement must remain visible with collapsed sidebar |
 | Windows/macOS launch/build scripts | Preserve | Official launcher must cover local heap/report/path needs before removal |
 | Source CLI module identity and scheduler failure pairing | Preserve | Source profiles use link resolution; every scheduler failure drains work and records result pairs before Turn error |
-| Fork-vendored AgentTeams behavior | Preserve and verified for RC.1 | Pull upstream through subtree, retain the private version/artifact, and never install npm latest over the live profile |
+| Fork-vendored AgentTeams behavior | Preserve and verified for 0.2.3-alpha.2 | Pull upstream through subtree (current base v0.1.31), retain the private version/artifact, and never install npm latest over the live profile |
 | AgentTeams unread mailbox projection LRU | Preserve | Require unchanged JSONL format, dynamic lease expiry, exact mutation invalidation, caller isolation and bounded retention |
 | AgentTeams crash-durable state | Preserve | Sync state files before rename or direct overwrite; workspace scans skip content-damaged teams with one warning while direct team reads and I/O errors still throw |
 | Independent Session creation and unrestricted Session-id Agent messages | Preserve | Keep same-call create-and-start, configured permission inheritance before delivery (never custom or current-session-only Auto), server-derived sender attribution, wake-enabled next-step delivery and prompt-only loop guidance; do not fold it into human `session.prompt` or widen subagent adjacency |
@@ -1155,7 +1155,7 @@ corepack pnpm@10.30.2 verify
 - AgentTeams 的 append/claim/ack 仍会整份重写单个 mailbox JSONL；未读投影缓存已消除不变文件的每秒重读/解析，但超长高频写邮箱仍存在 O(N) 写放大。下一步只能在保持旧 JSONL 可读和归档历史完整的前提下优化。
 - AgentTeams 的进程内 team lock Map 与 scheduler parked-attempt Map 仍有小量键保留；当前有界数据量不构成 P1，但后续应随 team archive/remove 回收。
 - `AccountView.status` 新增 `needs-reauth` 与 `credentialIssue` 后，Host/Desktop 账户代码会校验两者，但客户端只按 `credential-stored`/`signed-out` 分支，还没有“重新登录”的产品文案或入口；补 UI 前不要假设用户能看到停放状态。
-- `fork-plugins/{dsh-agent-teams,dsh-plugin-subscriptions,dsh-plugin-aether-shell}` 仍钉 Cordis `4.1.0`/schemastery `3.19.0`，subscriptions 与 AetherShell 的 harness peer 仍是 `0.2.2-rc.1`；在插件 manifest 重定到 `0.2.3-alpha.2` 与 vendor `4.2.0-alpha.1`/`3.20.0-alpha.1` 之前，`build.cmd` 会在 staging 阶段失败。
+- 本条款原记录的「插件仍钉 Cordis `4.1.0`/schemastery `3.19.0`、harness peer `0.2.2-rc.1`」已随 0.2.3-alpha.2 插件 cohort 重定而失效：AgentTeams `0.1.31-dsh023a2.1`、subscriptions、AetherShell 与 Context 现均对齐 Cordis `4.2.0-alpha.1`/schemastery `3.20.0-alpha.1` 与宿主 `0.2.3-alpha.2`，`build.cmd` 的 staging 不再因此失败。
 - Diagnostics 目前没有自动轮转，长期运行后需按具体文件人工归档。
 - Subscriptions 的当前源码测试套件为 1944 项，全部通过（0 失败、0 跳过）：`pnpm --dir fork-plugins/dsh-plugin-subscriptions test`。插件源码与集成分支的 base 逐字节相同，因此该结果是集成分支的有效证据；整包升级仍按维护说明逐条挑入，不做替换。
 - `verify-client-domain-graph` is red on this tree **and on a pristine `dsh-v0.2.1-rc.2` tree**: `pnpm exec tsx scripts/verify-client-domain-graph.ts` reports the same 87 violations from the same file→specifier pairs (23 CSS/SVG/WebP asset imports plus 64 TS imports across `ui-sidebar-documentpreview`, `ui-sidebar-browser`, `ui-settings-account`, `ui-plugin-manager`, `ui-workspace`, `ui-conversation`, and `ui-chat`; the `session-actions -> rows` CSS edges are part of that upstream set). This is inherited upstream client-ownership debt, not a fork delta: do not baseline, weaken, or suppress the gate. Clearing it needs the upstream `contract/` refactor; until that lands, report it as a retained red. Reproduce the baseline side with `git archive dsh-v0.2.1-rc.2 packages/client scripts/verify-client-domain-graph.ts | tar -x -C <dir>` and `pnpm exec tsx <dir>/scripts/verify-client-domain-graph.ts`; both trees print the identical 87.

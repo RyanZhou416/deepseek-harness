@@ -13,7 +13,7 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { memberActivity } from './members.ts'
 import { canDeclareDelivery, describeQualityLoop, verdictAuditNotes } from './quality-gates.ts'
-import { auditTeamWorkspace } from './workspace-audit.ts'
+import { workspaceAuditor } from './workspace-audit-service.ts'
 import {
   CAPTAIN_KEY, listArchivedTeamIds, readArchivedTeam, readUnreadMailbox, readTeam,
   taskDepthsById, taskVisualState,
@@ -21,7 +21,7 @@ import {
 import type { MemberStatus, TeamState, TeamTask } from './types.ts'
 
 /** Visual task state for the activity panel. */
-export type VisualTaskState = 'blocked' | 'open' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type VisualTaskState = 'blocked' | 'open' | 'claimed' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 /** One member row of the activity snapshot. */
 export interface TeamActivityMember {
@@ -31,7 +31,7 @@ export interface TeamActivityMember {
   readonly provider: string
   readonly model: string
   readonly reasoningEffort: string
-  readonly executionPrompt: string
+  readonly executionPrompt?: string
   readonly status: MemberStatus
   readonly activity: 'working' | 'idle' | 'unknown'
   readonly progress: number
@@ -45,7 +45,7 @@ export interface TeamActivityMember {
 export interface TeamActivityTask {
   readonly id: string
   readonly subject: string
-  readonly description: string
+  readonly description?: string
   readonly status: string
   readonly state: VisualTaskState
   readonly assignee: string
@@ -94,6 +94,8 @@ export interface TeamActivitySnapshot {
 
 /** Snapshot projection switches for live and archived teams. */
 export interface TeamSnapshotOptions {
+  /** Running panels omit the long text used only by the staging editor. */
+  readonly summary?: boolean
   /** Historic review must retain members that were marked removed at shutdown. */
   readonly includeRemoved?: boolean
   /** Archived teams have no meaningful live activity after their sessions stop. */
@@ -122,7 +124,9 @@ export interface TeamActivityCollectionOptions {
   readonly captainSessionId?: string
   /** Explicit durable teams retained by visible conversation cards. */
   readonly targets?: readonly TeamActivityTarget[]
-  /** Include staged-plan authoring fields. */
+  /** Omit editor-only text from running teams. */
+  readonly summary?: boolean
+  /** Fork alias for {@link summary}: an explicit `false` omits editor-only text. */
   readonly includeDetails?: boolean
   /** Include legacy captain-inbox preview bodies. */
   readonly includeCaptainInbox?: boolean
@@ -141,6 +145,11 @@ function selectedTeam(state: TeamState, options: TeamActivityCollectionOptions):
   return (captain !== '' && state.captainSessionId === captain) || targets.some(target => (
     target.captainSessionId === state.captainSessionId && target.teamId === state.id
   ))
+}
+
+/** Whether the caller asked for the trimmed running-team payload. */
+function wantsSummary(options: TeamActivityCollectionOptions): boolean {
+  return options.summary === true || options.includeDetails === false
 }
 
 /** The current task of a member: its first unfinished owned task. */
@@ -176,7 +185,8 @@ export async function assembleTeamSnapshot(
   options: TeamSnapshotOptions = {},
 ): Promise<TeamActivitySnapshot> {
   // Omitted switches keep the panel's original payload; only an explicit summary trims.
-  const detail: 'summary' | 'full' = options.includeDetails === false ? 'summary' : 'full'
+  const includePlanText = options.summary !== true || state.phase === 'staged' || options.historic === true
+  const detail: 'summary' | 'full' = includePlanText ? 'full' : 'summary'
   const tasks = state.tasks
   const depths = taskDepthsById(tasks)
   const roster = options.includeRemoved === true
@@ -204,7 +214,7 @@ export async function assembleTeamSnapshot(
       provider: member.provider?.trim() ?? '',
       model: member.model?.trim() ?? '',
       reasoningEffort: member.reasoningEffort?.trim() ?? '',
-      executionPrompt: detail === 'full' ? member.executionPrompt ?? '' : '',
+      ...includePlanText ? { executionPrompt: member.executionPrompt ?? '' } : {},
       status: member.status,
       activity: options.historic === true
         ? 'idle'
@@ -225,7 +235,7 @@ export async function assembleTeamSnapshot(
   const captainInbox = await readUnreadMailbox(stateRoot, state.id, CAPTAIN_KEY)
   // The panel must reach the same delivery conclusion as the status tool, so
   // it reads the same current bytes instead of trusting task records alone.
-  const audit = options.workspacePath === undefined ? undefined : auditTeamWorkspace(options.workspacePath, state)
+  const audit = options.workspacePath === undefined ? undefined : await workspaceAuditor(ctx).audit(options.workspacePath, state, stateRoot)
   const deliveryCheck = audit === undefined ? canDeclareDelivery(state) : canDeclareDelivery(state, audit)
   const loop = audit === undefined ? describeQualityLoop(state) : describeQualityLoop(state, audit)
   const staleById = new Map<string, string[]>()
@@ -238,7 +248,7 @@ export async function assembleTeamSnapshot(
     workspace,
     teamId: state.id,
     name: state.name,
-    ...state.description === undefined || detail !== 'full' ? {} : { description: state.description },
+    ...state.description === undefined || !includePlanText ? {} : { description: state.description },
     captainSessionId: state.captainSessionId,
     phase: state.phase ?? 'running',
     ...state.phase === 'staged'
@@ -254,7 +264,7 @@ export async function assembleTeamSnapshot(
     tasks: tasks.map((task) => ({
       id: task.id,
       subject: task.subject,
-      description: detail === 'full' ? task.description ?? '' : '',
+      ...includePlanText ? { description: task.description ?? '' } : {},
       status: task.status,
       state: taskVisualState(task.status, task.dependencies, tasks),
       assignee: task.assignee ?? '',
@@ -280,9 +290,10 @@ export async function assembleTeamSnapshot(
 }
 
 /**
- * Collect every team under the given workspace state roots.
+ * Collect live teams under the given workspace state roots.
  * @param ctx - the plugin context.
  * @param roots - `{ workspace, stateRoot }` pairs (resolved absolute roots).
+ * @param options - captain/target scope, payload trimming and inbox switches.
  * @returns the snapshots in stable order (workspace, then team id).
  */
 export async function collectTeamsActivity(
@@ -307,8 +318,8 @@ export async function collectTeamsActivity(
         const state = await readTeam(root.stateRoot, entry.name)
         if (state === undefined || !selectedTeam(state, options)) continue
         snapshots.push(await assembleTeamSnapshot(ctx, root.stateRoot, root.workspace, state, {
+          summary: wantsSummary(options),
           ...root.workspacePath === undefined ? {} : { workspacePath: root.workspacePath },
-          ...options.includeDetails === undefined ? {} : { includeDetails: options.includeDetails },
           ...options.includeCaptainInbox === undefined ? {} : { includeCaptainInbox: options.includeCaptainInbox },
         }))
       } catch {
@@ -320,11 +331,12 @@ export async function collectTeamsActivity(
 }
 
 /**
- * Collect every archived team under the given workspace state roots (the
+ * Collect archived teams under the given workspace state roots (the
  * `archive/` subdirectory of each state root). Used by the historic panel
  * path to restore full team detail after deletion.
  * @param ctx - the plugin context.
  * @param roots - `{ workspace, stateRoot }` pairs.
+ * @param options - captain/target scope and inbox switches.
  * @returns the archived snapshots in stable order.
  */
 export async function collectArchivedTeamsActivity(
@@ -346,7 +358,7 @@ export async function collectArchivedTeamsActivity(
           {
             includeRemoved: true,
             historic: true,
-            ...options.includeDetails === undefined ? {} : { includeDetails: options.includeDetails },
+            summary: wantsSummary(options),
             ...options.includeCaptainInbox === undefined ? {} : { includeCaptainInbox: options.includeCaptainInbox },
           },
         ))

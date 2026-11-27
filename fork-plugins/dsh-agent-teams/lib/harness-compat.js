@@ -1,4 +1,3 @@
-import { installModelSelection } from '@deepseek-ai/dsh-agent';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import * as dshSession from '@deepseek-ai/dsh-session';
 import { SubagentError } from '@deepseek-ai/dsh-subagent';
@@ -14,6 +13,51 @@ const hostPromptQueue = Symbol.for('dsh.subagent.queuePrompt');
 // 0.1.5 keeps queueHostSubagentPrompt but replaces its symbol with this
 // delivery-mode-aware implementation (packages/subagent/subagent/src/internal.ts).
 const hostPromptDeliver = Symbol.for('dsh.subagent.deliverPrompt');
+const treeWork = new WeakMap();
+/**
+ * The audited 0.2.2-rc.2+ tree manager, when this runtime exposes a complete
+ * one. The manager binds only after the Agent registry service exists, so a
+ * bare composition falls back to the audited legacy delivery path instead of
+ * failing the plugin mount.
+ */
+function treeBoundary(runtime) {
+    const tree = runtime;
+    if (typeof tree.rootOf !== 'function' || typeof tree.prompt !== 'function')
+        return undefined;
+    if (typeof tree.manager?.deliverToMember !== 'function' || typeof tree.manager.dispose !== 'function'
+        || !(tree.manager.resident instanceof Map))
+        return undefined;
+    return tree;
+}
+/** Track exact branch work before its first await so a targeted stop can join it. */
+function trackTreeWork(manager, root, branch, signal, operation) {
+    const pending = treeWork.get(manager) ?? new Set();
+    treeWork.set(manager, pending);
+    const controller = new AbortController();
+    let finish;
+    const settled = new Promise(resolve => { finish = resolve; });
+    const work = { root, branch, controller, settled };
+    pending.add(work);
+    try {
+        return operation(AbortSignal.any([signal, controller.signal])).finally(() => { pending.delete(work); finish(); });
+    }
+    catch (error) {
+        pending.delete(work);
+        finish();
+        throw error;
+    }
+}
+function deliverTreePrompt(runtime, tree, parent, childId, content, source, signal, delivery) {
+    const root = tree.rootOf.call(runtime, parent);
+    return tree.manager.deliverToMember.call(tree.manager, root, childId, content, {
+        source, signal, delivery,
+        // Recheck the exact live caller immediately before native inbox acceptance.
+        authorize: () => {
+            if (tree.rootOf.call(runtime, parent) !== root)
+                throw new SubagentError('AgentTeams caller left its subagent tree', 'UNAUTHORIZED');
+        },
+    });
+}
 /**
  * AgentTeams-specific member creation entry the 0.2.3-alpha.2 host exposes from
  * its unbundled internal module. Member routes are a user-declared exception to
@@ -42,7 +86,9 @@ export async function startMember(runtime, spec) {
     if (createMember !== undefined) {
         // The AgentTeams entry is the only creation path that neither applies the
         // user's subagent model override nor needs the nested request.
-        const activation = await createMember({ ...request, provider: spec.provider, label: spec.label, delivery: 'parent', signal: spec.signal });
+        const activation = await createMember({
+            provider: spec.provider, label: spec.label, ...request, delivery: 'parent', signal: spec.signal,
+        });
         // Preserve native settlement as the missing-report/error fallback on both
         // fresh and resumed activations. mailbox.ts deduplicates successful reports.
         void activation.result.catch(() => undefined);
@@ -50,12 +96,9 @@ export async function startMember(runtime, spec) {
     }
     const host = runtime;
     if (typeof host.startActivation === 'function') {
-        // A host without that entry is either the 0.2.2 generation, which reads the
-        // nested `request`, or 0.2.3-alpha.2 without the entry (an upstream build),
-        // which reads the flattened top-level task fields. Both ignore the fields
-        // they do not use, so one spec serves either generation: persona and
-        // toolFilter stay behind at the 0.2.1-and-earlier creation seam.
-        const activation = await host.startActivation.call(runtime, { ...spec, ...request, request, delivery: 'parent' });
+        const activation = await Reflect.apply(host.startActivation, runtime, [treeBoundary(runtime) === undefined
+                ? { ...spec, request, delivery: 'parent' }
+                : { provider: spec.provider, label: spec.label, ...request, signal: spec.signal, delivery: 'parent' }]);
         void activation.result.catch(() => undefined);
         return activation;
     }
@@ -66,6 +109,7 @@ export async function startMember(runtime, spec) {
 /** Wrap every available creation API, restoring only this plugin's own methods. */
 export function guardSubagentCreation(ctx, check) {
     const runtime = ctx.subagents;
+    const tree = treeBoundary(ctx.subagents);
     ctx.effect(() => {
         const disposers = [];
         for (const key of ['start', 'startContinuable', 'startActivation']) {
@@ -74,12 +118,16 @@ export function guardSubagentCreation(ctx, check) {
                 continue;
             const descriptor = Object.getOwnPropertyDescriptor(runtime, key);
             const guarded = async (...args) => {
-                // `start` takes the request second; both activation generations carry the
-                // task fields at the top level once 0.2.3-alpha.2 flattens the spec.
-                const spec = (key === 'start' ? args[1] : args[0]);
-                const parent = spec?.request?.parent ?? spec?.parent;
-                if (parent !== undefined)
-                    check(parent);
+                const request = key === 'start' ? args[1] : key === 'startActivation' && tree !== undefined
+                    ? args[0] : args[0].request;
+                const parent = request.parent;
+                check(parent);
+                if (key === 'startActivation' && tree !== undefined) {
+                    const spec = args[0];
+                    const root = tree.rootOf.call(ctx.subagents, parent);
+                    const branch = [parent.id, ...tree.manager.resident.get(parent.id)?.ancestors ?? []];
+                    return trackTreeWork(tree.manager, root, branch, spec.signal, signal => Reflect.apply(original, ctx.subagents, [{ ...spec, signal }]));
+                }
                 return Reflect.apply(original, ctx.subagents, args);
             };
             Object.defineProperty(runtime, key, { value: guarded, writable: true, configurable: true });
@@ -112,8 +160,30 @@ export const AGENT_TEAMS_PLUGIN_NAME = '@nanmicoder/dsh-agent-teams';
  * newer host opens it (#160).
  */
 export const RELEASED_SOURCE_VOCABULARY_VERSION = 3;
-/** Stored session format generation of the running host; 0 when it exposes none. */
-export function hostSessionFormatVersion() {
+/**
+ * Stored format generation observed on a live session, when the host exposes it.
+ *
+ * The module constant is only a fallback: a plugin can resolve a *nested*
+ * `@deepseek-ai/dsh-session` copy that belongs to a different host generation
+ * than the process loading it (a profile whose lockfile pins the DSH package
+ * line, a Desktop shell with an embedded core, a duplicated store). That copy
+ * then reports the wrong generation — 0 on a v4 host — which selects the
+ * retired `plugin` wrapper and makes every durable AgentTeams message fail the
+ * host's own admission check (#236). The live session header belongs to the
+ * host that persists the message, so it outranks the resolved module.
+ */
+export function observedSessionFormatVersion(subject) {
+    const version = subject?.session?.header?.version;
+    return typeof version === 'number' && Number.isSafeInteger(version) && version >= 0 ? version : undefined;
+}
+/**
+ * Stored session format generation of the running host; 0 when neither the live
+ * session nor the resolved module exposes one.
+ * @param observed - a live session observation; preferred over the module constant.
+ */
+export function hostSessionFormatVersion(observed) {
+    if (typeof observed === 'number' && Number.isSafeInteger(observed) && observed >= 0)
+        return observed;
     const version = dshSession.SESSION_FORMAT_VERSION;
     return typeof version === 'number' && Number.isSafeInteger(version) && version >= 0 ? version : 0;
 }
@@ -129,10 +199,14 @@ export function hostSessionFormatVersion() {
  * the released plugin wrapper is used instead; the goal and profile already
  * travel in the message text.
  * @param modern - the producer-owned source to use where the host admits it.
+ * @param observed - the live session's stored format generation, when callers
+ * have the owning agent at hand. Never trust the resolved module alone: on a
+ * host whose profile pins another DSH line it reports a retired generation and
+ * the v4 writer rejects the wrapper (#236).
  * @returns a source accepted by the running host and by its migration chain.
  */
-export function agentTeamsSource(modern) {
-    if (hostSessionFormatVersion() >= RELEASED_SOURCE_VOCABULARY_VERSION)
+export function agentTeamsSource(modern, observed) {
+    if (hostSessionFormatVersion(observed) >= RELEASED_SOURCE_VOCABULARY_VERSION)
         return modern;
     // Released-format hosts persist plugin-authored messages as this wrapper; the
     // current vocabulary retired it, so the cast stays confined to this branch
@@ -154,8 +228,7 @@ export function onAgentReady(ctx, listener) {
     const stopLegacy = legacy.on('agent/session-start', ({ agent }) => listener(agent, false));
     return () => { stopCreated(); stopLegacy(); };
 }
-/** Read child-owned history, excluding any descriptor inherited from a parent. */
-export function sessionOwnEvents(session) {
+function legacyOwnSessionEvents(session) {
     const current = session;
     if (typeof current.ownEvents === 'function')
         return current.ownEvents.call(session);
@@ -163,6 +236,57 @@ export function sessionOwnEvents(session) {
     if (!Array.isArray(legacy.events))
         return unsupported('missing ownEvents/legacy session log');
     return legacy.events.slice(legacy.header.seedLength ?? 0);
+}
+/**
+ * Search child-owned history in bounded reads on hosts with ranged snapshots.
+ * Stop at the first match in the requested direction without copying the full log.
+ */
+export function findOwnSessionEvent(session, matches, options = {}) {
+    const { order = 'oldest', fromSeq = 0 } = options;
+    const start = Math.max(session.inheritedEventCount, fromSeq);
+    const end = session.seq;
+    const search = (events) => {
+        if (order === 'oldest')
+            return events.find(matches);
+        for (let i = events.length - 1; i >= 0; i--) {
+            const event = events[i];
+            if (matches(event))
+                return event;
+        }
+    };
+    if (typeof session.snapshotEvents !== 'function' || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)) {
+        return search(legacyOwnSessionEvents(session));
+    }
+    const batchSize = 256;
+    let cursor = order === 'oldest' ? start : end;
+    while (order === 'oldest' ? cursor < end : cursor > start) {
+        const from = order === 'oldest' ? cursor : Math.max(start, cursor - batchSize);
+        const to = order === 'oldest' ? Math.min(end, cursor + batchSize) : cursor;
+        const event = search(session.snapshotEvents(from, to));
+        if (event !== undefined)
+            return event;
+        cursor = order === 'oldest' ? to : from;
+    }
+}
+/** Legacy hosts log each chunk separately; current hosts embed the committed stream. */
+export function outputLimitTurn(event) {
+    const record = event;
+    if (record.type === 'assistant/chunk') {
+        const { chunk, turn } = record.data;
+        return chunk.type === 'finish' && chunk.reason.kind === 'max-tokens' ? turn : undefined;
+    }
+    if (record.type === 'assistant/message' && record.data.stream?.some(item => item.type === 'chunk' && item.chunk.type === 'finish' && item.chunk.reason.kind === 'max-tokens')) {
+        return record.data.turn;
+    }
+}
+/** rc.2 summaries use tree names; the new structured reason owns the outcome. */
+export function successfulSubagentSettlement(source) {
+    if (source?.kind !== 'subagent-settled')
+        return false;
+    const current = source;
+    return current.stopReason === undefined
+        ? source.summary === `Background subagent ${source.senderSessionId} finished and will do no further work unless you send it more.`
+        : current.stopReason === 'completed';
 }
 /** Install before the first request, including cold resume, with HMR cleanup. */
 export function installContinuableMemberSetup(ctx, setup) {
@@ -178,7 +302,7 @@ export function installContinuableMemberSetup(ctx, setup) {
         });
         return;
     }
-    if ((typeof runtime[hostPromptQueue] !== 'function' && typeof runtime[hostPromptDeliver] !== 'function') || typeof runtime.sendMessage !== 'function') {
+    if (treeBoundary(ctx.subagents) === undefined && ((typeof runtime[hostPromptQueue] !== 'function' && typeof runtime[hostPromptDeliver] !== 'function') || typeof runtime.sendMessage !== 'function')) {
         return unsupported('missing continuable setup and modern host queue');
     }
     const installed = new WeakSet();
@@ -242,80 +366,13 @@ export function installContinuableMemberSetup(ctx, setup) {
         return cleanup;
     }, 'agent-teams: member lifecycle compatibility');
 }
-/**
- * Whether this Agent owns its model selection. 0.2.2 moved selection from the
- * request hook's mutable ref to `Agent.model`: the loop captures the route
- * before prompt assembly and rejects a request-time replacement, so a route
- * change is recorded for the next step instead of rewriting the current one.
- * @param agent - the member Agent to inspect.
- * @returns whether the running host owns model selection on each Agent.
- */
-export function hostOwnsModelSelection(agent) {
-    return typeof agent.model?.select === 'function';
-}
-/**
- * Install the member's route contributions on the running host.
- *
- * A host that owns selection only needs the switch notice: the route travels in
- * the child's creation options and in recorded selections. Older hosts consume
- * the mutable ref, so the plugin must supply every request route itself.
- * @param ctx - the member Agent's scoped context.
- * @param agent - the member Agent receiving route and notice contributions.
- * @param selection - mutable route consumed by hosts without Agent-owned selection.
- * @returns Disposer for the installed selection contributions.
- */
-export function installMemberModelSelection(ctx, agent, selection) {
-    const install = installModelSelection;
-    return hostOwnsModelSelection(agent) ? install(ctx) : install(ctx, selection);
-}
-/**
- * Record a member route the running host would not otherwise start from.
- *
- * A cold resume restores the descriptor's creation route, while a member that
- * already failed over keeps running on its saved backup route. Recording the
- * saved choice is the only supported way to start a step there on hosts that
- * own selection; an equal choice is skipped so no redundant `model/selection`
- * event enters the session log.
- * @param agent - the member Agent to route.
- * @param selection - the member's saved route.
- */
-export function recordMemberModelSelection(agent, selection) {
-    const model = agent.model;
-    if (typeof model?.select !== 'function')
-        return;
-    const current = model.current?.();
-    if (current !== undefined && current.provider === selection.provider && current.model === selection.model
-        && current.reasoningEffort === selection.reasoningEffort)
-        return;
-    model.select(selection);
-}
-/**
- * Apply one accepted fallback route to a member whose request already failed.
- *
- * Hosts without Agent-owned selection rewrite the captured request route, so
- * the recovery action retries the failed step on the backup route. From 0.2.2
- * the loop fixes the step's route before assembly and refuses a replacement:
- * this recovery records the backup route for the next step and declines the
- * retry, so the failed attempt keeps its own outcome instead of repeating on
- * the primary route.
- * @param agent - the member Agent whose request failed.
- * @param selection - mutable legacy route ref.
- * @param next - the backup route to run.
- * @returns the recovery action for hosts without Agent-owned selection.
- */
-export function applyFallbackRoute(agent, selection, next) {
-    selection.current = next;
-    if (hostOwnsModelSelection(agent)) {
-        recordMemberModelSelection(agent, next);
-        return undefined;
-    }
-    selection.assembled = next;
-    return { kind: 'retry' };
-}
 /** Queue a distinct host-authored turn; never substitute model-message steer. */
 export async function queueMemberPrompt(runtime, parent, childId, content, signal) {
     const host = boundary(runtime);
-    const source = agentTeamsSource({ kind: 'agent-teams' });
+    const source = agentTeamsSource({ kind: 'agent-teams' }, observedSessionFormatVersion(parent));
+    const tree = treeBoundary(runtime);
+    if (tree !== undefined)
+        return deliverTreePrompt(runtime, tree, parent, childId, content, source, signal, 'queue');
     if (typeof host.followup === 'function') {
         return host.followup.call(runtime, parent, childId, content, { source, signal });
     }
@@ -330,7 +387,10 @@ export async function queueMemberPrompt(runtime, parent, childId, content, signa
 /** Coordination joins the nearest step, including waking an idle/cold child. */
 export async function steerMemberPrompt(runtime, parent, childId, content, signal, live) {
     const host = boundary(runtime);
-    const source = agentTeamsSource({ kind: 'agent-teams' });
+    const source = agentTeamsSource({ kind: 'agent-teams' }, observedSessionFormatVersion(live ?? parent));
+    const tree = treeBoundary(runtime);
+    if (tree !== undefined)
+        return deliverTreePrompt(runtime, tree, parent, childId, content, source, signal, 'steer');
     const deliver = host[hostPromptDeliver];
     if (typeof deliver === 'function')
         return deliver.call(runtime, parent, childId, content, source, signal, 'steer');
@@ -351,6 +411,39 @@ export async function steerMemberPrompt(runtime, parent, childId, content, signa
 /** Guard all resumable delivery paths, preserving the native service receiver. */
 export function guardSubagentDelivery(ctx, isRetired) {
     const runtime = ctx.subagents;
+    const tree = treeBoundary(runtime);
+    if (tree !== undefined) {
+        const manager = tree.manager;
+        ctx.effect(() => {
+            const original = manager.deliverToMember;
+            const descriptor = Object.getOwnPropertyDescriptor(manager, 'deliverToMember');
+            let active = true;
+            const guarded = async (root, childId, content, options) => {
+                if (!active)
+                    return original.call(manager, root, childId, content, options);
+                const branch = [childId, ...manager.resident.get(childId)?.ancestors ?? []];
+                return trackTreeWork(manager, root, branch, options.signal, async (signal) => {
+                    signal.throwIfAborted();
+                    if (await isRetired(root, childId)) {
+                        throw new SubagentError(`AgentTeams member "${childId}" was retired and cannot be resumed`, 'NOT_RESUMABLE');
+                    }
+                    signal.throwIfAborted();
+                    return original.call(manager, root, childId, content, { ...options, signal });
+                });
+            };
+            manager.deliverToMember = guarded;
+            return () => {
+                active = false;
+                if (Object.getOwnPropertyDescriptor(manager, 'deliverToMember')?.value !== guarded)
+                    return;
+                if (descriptor === undefined)
+                    Reflect.deleteProperty(manager, 'deliverToMember');
+                else
+                    Object.defineProperty(manager, 'deliverToMember', descriptor);
+            };
+        }, 'agent-teams: tree retired member guard');
+        return;
+    }
     const host = boundary(runtime);
     const legacy = host.followup;
     const queue = host[hostPromptQueue];
@@ -517,23 +610,39 @@ export async function startMemberWithLenientFilter(start, filter, relaxableDeny 
 /**
  * Stop the selected member activations.
  *
- * 0.2.2 and earlier expose a targeted drain that closes admission for exactly
- * those children and awaits their descendants. 0.2.3-alpha.2 replaced it with a
- * tree-wide drain whose admission cutoff lasts until the parent leaves the
- * registry, so draining the captain would also stop unrelated delegation and
- * block every later spawn of that session. On that generation each selected
- * child is cancelled and interrupted instead: the cancel clears the member's
- * queued work, the interrupt releases the host execution, and the host disposes
- * the activation once the child reaches idle. The plugin's own per-step
+ * The 0.2.2 tree manager exposes a tree-wide drain whose admission cutoff lasts
+ * until the parent leaves the registry, so draining the captain would also stop
+ * unrelated delegation and block every later spawn of that session. On that
+ * generation only work in the selected creation branches is joined, and only
+ * their resident activations are disposed. 0.2.2 and earlier keep the targeted
+ * drain. A host with neither a targeted drain nor the audited tree manager
+ * cancels and interrupts exactly the selected children; the plugin's per-step
  * admission check and retired-id delivery guard already reject every later turn
- * of a stopped member, and the durable task attempt is invalidated before this
- * call.
+ * of a stopped member.
  * @param ctx - the plugin context (injects `subagents` and `agents`).
  * @param parent - the exact live parent agent of the members.
  * @param ids - child session ids to stop.
  */
 export async function drainMemberChildren(ctx, parent, ids) {
     const runtime = ctx.subagents;
+    const tree = treeBoundary(runtime);
+    if (tree !== undefined) {
+        const root = tree.rootOf.call(runtime, parent);
+        const selected = new Set(ids);
+        // The native tree-wide drain also stops unrelated siblings and permanently
+        // closes the captain. Join only work in the selected creation branches.
+        const pending = [...treeWork.get(tree.manager) ?? []].filter(work => work.root === root && work.branch.some(id => selected.has(id)));
+        for (const work of pending)
+            work.controller.abort();
+        await Promise.all(pending.map(work => work.settled));
+        const targets = [...tree.manager.resident.values()].filter(item => item.root === root
+            && item.ancestors.includes(parent.id) && (selected.has(item.childId) || item.ancestors.some(id => selected.has(id))));
+        const results = await Promise.allSettled(targets.map(item => tree.manager.dispose.call(tree.manager, item)));
+        const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+        if (failures.length)
+            throw new AggregateError(failures, 'AgentTeams member teardown failed');
+        return;
+    }
     const host = runtime;
     const drain = host.drainChildren ?? host.drainContinuableChildren;
     if (typeof drain === 'function') {

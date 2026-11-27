@@ -10,8 +10,14 @@ export interface ActivityQuery {
 }
 /**
  * Parse one activity-state URL without allowing malformed scope to become unscoped work.
+ *
+ * Two client generations poll this route. The current panel sends
+ * `session=<captain>&summary=1`; a scoped card/legacy caller may send
+ * `captainSessionId`, paired `teamCaptainSessionId`+`teamId` targets, and
+ * `detail=1`. A request with neither scope nor switches keeps the original
+ * full payload, including captain-inbox previews.
  * @param url - request URL resolved by the Host route.
  * @returns archive selection and collection options.
- * @throws {ActivityQueryError} when scoped/detail parameters are incomplete or empty.
+ * @throws {ActivityQueryError} when scoped/detail parameters are incomplete, empty or contradictory.
  */
 export declare function parseActivityQuery(url: URL): ActivityQuery;

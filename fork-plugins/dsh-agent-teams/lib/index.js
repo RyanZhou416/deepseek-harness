@@ -32,8 +32,9 @@ import { leadIdentityOfAsync } from "./lineage.js";
 import { formatProfilesForPrompt } from "./profiles.js";
 import { parseToolPolicies } from "./tool-policies.js";
 import { installTeamCapabilities } from "./capabilities.js";
+import { agentTeamsSource, observedSessionFormatVersion } from "./harness-compat.js";
 import { TEAM_TOOL_NAMES } from "./tool-names.js";
-import { authenticatedWebRoutes, readJsonRequest, RequestBodyError } from "./web-routes.js";
+import { authenticatedWebRoutes, readJsonRequest, RequestBodyError, writeJsonWithEtag } from "./web-routes.js";
 /** Web-server service key candidates, newest first. */
 const WEB_SERVER_KEYS = ['webServer', 'httpServer'];
 /** Workspace registry service key candidates, newest first. */
@@ -184,6 +185,7 @@ export function apply(ctx, config) {
             path: '/plugins/dsh-agent-teams/state',
             handler: async (req, res) => {
                 const url = new URL(req.url ?? '/', 'http://x');
+                const captainSessionId = url.searchParams.get('session')?.trim() || undefined;
                 const roots = workspaceRegistry.list().map((workspace) => ({
                     workspace: workspace.title,
                     // The panel audits the same current bytes as agent_teams_status, so it
@@ -208,12 +210,8 @@ export function apply(ctx, config) {
                 const snapshots = query.archived
                     ? await collectArchivedTeamsActivity(ctx, roots, query.options)
                     : await collectTeamsActivity(ctx, roots, query.options);
-                const body = JSON.stringify({ teams: snapshots });
-                res.writeHead(200, {
-                    'content-type': 'application/json; charset=utf-8',
-                    'cache-control': 'no-store',
-                });
-                res.end(body);
+                // ETag revalidation keeps unchanged polls at 304 across both clients.
+                writeJsonWithEtag(req, res, JSON.stringify({ teams: snapshots }));
             },
         }), 'agent-teams: activity route');
         ctx.effect(() => webServer.register({
@@ -323,7 +321,7 @@ export function apply(ctx, config) {
                         try {
                             captain.steer(createUserMessage({
                                 content: [{ type: 'text', text: stagedPlanApprovedContext(team.name) }],
-                                source: { kind: 'agent-teams' },
+                                source: agentTeamsSource({ kind: 'agent-teams' }, observedSessionFormatVersion(captain)),
                             }));
                         }
                         catch (error) {

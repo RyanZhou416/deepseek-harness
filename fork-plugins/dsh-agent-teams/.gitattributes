@@ -1,0 +1,14 @@
+# Keep the tree LF everywhere: packaged shebang scripts are executed directly on
+# Unix hosts, and a CRLF checkout (core.autocrlf=true on Windows) breaks them with
+# `/usr/bin/env: 'node\r': No such file or directory` before `pnpm pack` can run.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.tgz binary
+*.woff binary
+*.woff2 binary

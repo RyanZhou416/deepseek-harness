@@ -27,6 +27,7 @@ jobs:
     timeout-minutes: 20
     outputs:
       hosts: ${{ steps.policy.outputs.hosts }}
+      targets: ${{ steps.policy.outputs.targets }}
       artifact_name: agent-teams-candidate
       artifact_sha256: ${{ steps.artifact.outputs.sha256 }}
     steps:
@@ -43,7 +44,9 @@ jobs:
           pnpm install --frozen-lockfile
       - name: Validate the single compatibility policy
         id: policy
-        run: node scripts/compatibility.mjs --github-output >> "$GITHUB_OUTPUT"
+        run: |
+          node scripts/compatibility.mjs --github-output >> "$GITHUB_OUTPUT"
+          node scripts/harness-validation.mjs --github-output >> "$GITHUB_OUTPUT"
       - name: Verify committed Git installation artifacts before rebuilding
         run: node scripts/git-artifacts.mjs
       - name: Typecheck, build, and verify
@@ -51,6 +54,7 @@ jobs:
           pnpm typecheck
           pnpm build
           pnpm verify
+          node --test scripts/harness-runtime-platform.test.mjs
           node --test scripts/fixtures/harness-model-case.test.mjs scripts/fixtures/harness-complex-case.test.mjs scripts/fixtures/harness-benchmark-scope.test.mjs
       - name: Pack the actual candidate once
         id: artifact
@@ -74,13 +78,15 @@ jobs:
           retention-days: 14
 
   windows:
-    name: Static checks (Windows)
+    name: Static checks and package (Windows)
     runs-on: windows-latest
     timeout-minutes: 20
     defaults:
       run:
         shell: bash
     steps:
+      - name: Exercise default Git for Windows line endings
+        run: git config --global core.autocrlf true
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -97,17 +103,26 @@ jobs:
           pnpm typecheck
           pnpm build
           pnpm verify
+          node --test scripts/harness-runtime-platform.test.mjs
           node --test scripts/fixtures/harness-model-case.test.mjs scripts/fixtures/harness-complex-case.test.mjs scripts/fixtures/harness-benchmark-scope.test.mjs
 
+      - name: Pack with strict shebang validation
+        run: |
+          npx --yes pnpm@12.15.0 pack --out "$RUNNER_TEMP/windows-candidate.tgz"
+          tar --list --file "$(cygpath -u "$RUNNER_TEMP/windows-candidate.tgz")"
+
   harness:
-    name: Real Harness (${{ matrix.host }})
+    name: Real Harness (${{ matrix.os }}, ${{ matrix.host }})
     needs: [build, windows]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        host: ${{ fromJSON(needs.build.outputs.hosts) }}
+        include: ${{ fromJSON(needs.build.outputs.targets) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -147,7 +162,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: harness-${{ matrix.host }}
+          name: harness-${{ matrix.os }}-${{ matrix.host }}
           if-no-files-found: warn
           retention-days: 14
           path: |
@@ -160,10 +175,36 @@ jobs:
             ${{ runner.temp }}/harness-${{ matrix.host }}/*/cold-trace.jsonl
             ${{ runner.temp }}/harness-${{ matrix.host }}/*/team-evidence.json
 
+  desktop-install-policy:
+    name: Desktop package selection (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install the observed desktop package manager separately from the build toolchain
+        run: npm install --prefix "$RUNNER_TEMP/desktop-pnpm" --ignore-scripts pnpm@11.28.5
+      - name: Reproduce fresh-release fallback and verify readiness detection
+        run: |
+          export DESKTOP_PNPM_CLI="$RUNNER_TEMP/desktop-pnpm/node_modules/pnpm/bin/pnpm.mjs"
+          node --test scripts/check-install-channel.test.mjs
+
   verified:
     name: Complete compatibility gate
     if: always()
-    needs: [build, windows, harness]
+    needs: [build, windows, harness, desktop-install-policy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -172,10 +213,12 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
           HARNESS_RESULT: ${{ needs.harness.result }}
+          DESKTOP_POLICY_RESULT: ${{ needs.desktop-install-policy.result }}
         run: |
           test "$BUILD_RESULT" = success
           test "$WINDOWS_RESULT" = success
           test "$HARNESS_RESULT" = success
+          test "$DESKTOP_POLICY_RESULT" = success
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -193,24 +236,6 @@ jobs:
           EXPECTED_HOSTS: ${{ needs.build.outputs.hosts }}
           EXPECTED_SHA256: ${{ needs.build.outputs.artifact_sha256 }}
         run: |
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict'
-          import { readFileSync } from 'node:fs'
-          import { join } from 'node:path'
-          import { validatePackageCompatibility } from './scripts/compatibility.mjs'
-          const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
-          const hosts = validatePackageCompatibility(pkg)
-          assert.deepEqual(hosts, JSON.parse(process.env.EXPECTED_HOSTS))
-          for (const version of hosts) {
-            const report = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'host-reports', `harness-${version}`, 'result.json'), 'utf8'))
-            assert.equal(report.passed, true, `Host ${version} did not pass`)
-            assert.equal(report.version, version)
-            assert.equal(report.pluginVersion, pkg.version)
-            assert.equal(report.artifactSha256, process.env.EXPECTED_SHA256)
-            assert.ok(report.runs.length > 0 && report.runs.every(run => run.passed), `Host ${version} lacks successful functional evidence`)
-            for (const scenario of ['lifecycle', 'lifecycle-cold-restore', 'fallback', 'fallback-cold-restore', 'failure', 'captain-idle-wakeup', 'progressive-entry', 'web-approval', 'protocol-compatibility', 'stability']) {
-              assert.ok(report.runs.some(run => run.scenario === scenario && run.passed), `Host ${version} did not exercise ${scenario}`)
-            }
-          }
-          console.log(`Verified one package against ${hosts.join(', ')}`)
-          JS
+          node scripts/harness-validation.mjs \
+            --reports "$RUNNER_TEMP/host-reports" \
+            --sha256 "$EXPECTED_SHA256"

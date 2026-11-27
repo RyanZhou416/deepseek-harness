@@ -11,11 +11,13 @@
  * which the captain reads through `agent_teams_status`.
  * @module dsh-agent-teams/members
  */
+import { installModelSelection } from '@deepseek-ai/dsh-agent';
 // Declaration merge only: makes ctx.subagents visible.
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent';
 import { createUserMessage, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { applyFallbackRoute, guardSubagentCreation, installMemberModelSelection, recordMemberModelSelection, startMember, usesManagedActivations, guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, startMemberWithLenientFilter, steerMemberPrompt, sessionOwnEvents } from "./harness-compat.js";
+import { agentTeamsSource, observedSessionFormatVersion, outputLimitTurn, guardSubagentCreation, startMember, usesManagedActivations, guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, startMemberWithLenientFilter, steerMemberPrompt, findOwnSessionEvent } from "./harness-compat.js";
 import { markMailboxDelivered, appendMailbox, CAPTAIN_KEY, createMessage, readRetiredMemberIds, readTeamSync, readTeam, releaseMailboxDelivery, withTeamLock, writeTeam } from "./state.js";
 import { mailboxPrompt } from "./mailbox.js";
 import { nearestLiveLead } from "./lineage.js";
@@ -96,7 +98,11 @@ export async function validateMemberLlmSelections(ctx, selections, signal) {
     }
 }
 const MEMBER_LABEL_PREFIX = 'agent-teams:';
-const FALLBACK_FAILURE_CODES = new Set(['QUOTA', 'RATE_LIMIT', 'AUTH', 'MISSING_CREDENTIAL', 'NO_ADAPTER']);
+const FALLBACK_FAILURE_CODES = new Set([
+    'QUOTA', 'RATE_LIMIT', 'AUTH', 'MISSING_CREDENTIAL', 'NO_ADAPTER',
+    // The account-backed DeepSeek adapter remaps equivalent provider failures.
+    'ACCOUNT_QUOTA', 'ACCOUNT_TOKEN_INVALID', 'ACCOUNT_SIGN_IN_REQUIRED',
+]);
 export function isFallbackFailureCode(code) {
     return FALLBACK_FAILURE_CODES.has(code);
 }
@@ -112,7 +118,7 @@ export function steerCaptainReport(captain, from, content, receipt) {
     try {
         captain.steer(createUserMessage({
             content: [{ type: 'text', text: receipt ?? `AgentTeams message from member ${from}:\n\n${content}` }],
-            source: { kind: 'agent-teams' },
+            source: agentTeamsSource({ kind: 'agent-teams' }, observedSessionFormatVersion(captain)),
         }));
         return true;
     }
@@ -145,6 +151,8 @@ export function classifyMemberFailure(observed, current) {
         return 'ignored';
     const task = current.task;
     if (task === undefined) {
+        if (observed.openAttemptOnly === true)
+            return 'ignored';
         // No open attempt is owned by this generation any more, so nothing here may
         // be mutated — but the failure itself must still be recorded. `working` is
         // NOT evidence of newer work: `syncMemberStatus` writes it as soon as the
@@ -225,6 +233,10 @@ export async function failMemberOpenAttempt(ctx, stateRoot, teamId, memberName, 
         if (disposition === 'ignored')
             return;
         if (disposition === 'failed_attempt' && task !== undefined) {
+            // Historical records may lack a capability id. Bind this failure report
+            // to the terminal attempt so a later retry invalidates unread mail.
+            if (observed.openAttemptOnly === true)
+                task.attemptId ??= randomUUID();
             task.status = 'failed';
             task.output = summary;
             task.updatedAt = Date.now();
@@ -240,6 +252,9 @@ export async function failMemberOpenAttempt(ctx, stateRoot, teamId, memberName, 
             : undefined;
         const message = {
             ...createMessage(memberName, CAPTAIN_KEY, memberFailureMessage(memberName, summary, disposition, task, settledRecord)),
+            ...observed.openAttemptOnly === true && task?.attemptId !== undefined
+                ? { sourceTaskId: task.id, sourceAttemptId: task.attemptId, sourceTaskStatus: 'failed' }
+                : {},
             deliveryClaimedAt: Date.now(),
         };
         if (disposition === 'failed_attempt')
@@ -271,20 +286,34 @@ export async function failMemberOpenAttempt(ctx, stateRoot, teamId, memberName, 
         : releaseMailboxDelivery(stateRoot, teamId, CAPTAIN_KEY, [prepared.message.id]));
     return true;
 }
-async function updateFallbackState(stateRoot, teamId, memberName, fallback, ctx) {
-    await withTeamLock(`team:${stateRoot}:${teamId}`, async () => {
+async function commitFallbackRoute(stateRoot, teamId, memberName, child, fallback, signal, ctx, activate) {
+    return withTeamLock(`team:${stateRoot}:${teamId}`, async () => {
         const team = await readTeam(stateRoot, teamId);
-        if (team === undefined)
-            return;
-        const member = team.members.find(candidate => candidate.name === memberName);
-        if (member === undefined)
-            return;
+        if (signal.aborted || team === undefined || team.captainSessionId !== child.session.header.parentSession || team.halted === true)
+            return false;
+        const member = team.members.find(candidate => candidate.name === memberName && candidate.id === child.id);
+        if (member === undefined || member.status === 'removed' || member.stopping === true)
+            return false;
         member.activeProvider = fallback.provider;
         member.activeModel = fallback.model;
         member.fallbackActive = true;
-        await writeTeam(stateRoot, team);
+        let committed = false;
+        const onCommit = () => {
+            committed = true;
+            activate();
+        };
+        try {
+            await writeTeam(stateRoot, team, { signal, onCommit });
+        }
+        catch (error) {
+            if (committed)
+                throw error;
+            ctx.logger.warn(`agent-teams: failed to persist fallback route: ${String(error)}`);
+            if (!signal.aborted)
+                onCommit();
+        }
+        return committed;
     });
-    void ctx;
 }
 function pendingSelectionKey(parentSessionId, label) {
     return `${parentSessionId}\u0000${label}`;
@@ -479,13 +508,13 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
     const pending = new Map();
     const pendingSetup = new Map();
     installContinuableMemberSetup(ctx, (childCtx, child) => {
-        const descriptor = foldSubagentDescriptor(sessionOwnEvents(child.session));
-        if (descriptor?.mode !== 'continuable' || !descriptor.label.startsWith(MEMBER_LABEL_PREFIX)) {
-            return () => undefined;
-        }
         const parentSessionId = child.session.header.parentSession;
         if (parentSessionId === undefined)
             return () => undefined;
+        const descriptor = ownSubagentDescriptor(child);
+        if (descriptor?.mode !== 'continuable' || !descriptor.label.startsWith(MEMBER_LABEL_PREFIX)) {
+            return () => undefined;
+        }
         const identity = descriptor.label.slice(MEMBER_LABEL_PREFIX.length);
         const separator = identity.indexOf(':');
         if (separator < 1 || separator === identity.length - 1)
@@ -557,17 +586,10 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
                 throw new Error(`agent-teams: saved model route for member "${memberName}" does not match its subagent descriptor`);
             }
         }
-        let lastFailedTurn;
-        // Harness emits agent/error only after request recovery is exhausted. In
-        // particular, llm-retry's "always" policy calls downstream request-error
-        // listeners before it retries; that waterfall cannot declare a turn dead.
-        const disposeFailure = childCtx.on('agent/error', async (payload) => {
-            if (payload.agent.id !== child.id || payload.turn === lastFailedTurn)
-                return;
-            lastFailedTurn = payload.turn;
+        const observeFailedAttempt = () => {
             try {
-                // Capture the attempt synchronously at the event, before any lock wait
-                // can let a captain reassign it or replace the member/team generation.
+                // Capture the capability synchronously, before a handoff or lock wait
+                // can move the member to another task attempt.
                 const snapshot = readTeamSync(stateRoot, teamId);
                 if (snapshot?.captainSessionId !== parentSessionId)
                     return;
@@ -576,16 +598,22 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
                     return;
                 const task = snapshot.tasks.find(item => item.assignee === memberName
                     && (item.status === 'claimed' || item.status === 'in_progress'));
-                const failure = payload.error instanceof LlmError ? payload.error.failure : {
-                    code: 'UNKNOWN',
-                    message: payload.error instanceof Error ? payload.error.message : String(payload.error),
-                };
-                const recorded = await failMemberOpenAttempt(ctx, stateRoot, teamId, memberName, failure, child.session, {
-                    captainSessionId: parentSessionId, memberId: child.id, task,
-                });
+                return { captainSessionId: parentSessionId, memberId: child.id, task };
+            }
+            catch (error) {
+                ctx.logger.warn(`agent-teams: failed to observe member turn failure: ${String(error)}`);
+            }
+        };
+        let lastFailedTurn;
+        const recordFailure = async (turn, failure, observed) => {
+            if (turn === lastFailedTurn)
+                return;
+            lastFailedTurn = turn;
+            try {
+                const recorded = await failMemberOpenAttempt(ctx, stateRoot, teamId, memberName, failure, child.session, observed);
                 if (!recorded)
                     return;
-                // The final-error event precedes driver quiescence. Observe the real
+                // The failure event precedes driver quiescence. Observe the real
                 // lifecycle and kick explicitly even if its idle event was missed.
                 // Never force an active Agent's status to idle or retry the failed task.
                 await child.whenIdle();
@@ -604,51 +632,134 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
             catch (error) {
                 ctx.logger.warn(`agent-teams: failed to record member turn failure: ${String(error)}`);
             }
+        };
+        // Harness emits agent/error only after request recovery is exhausted. In
+        // particular, llm-retry's "always" policy calls downstream request-error
+        // listeners before it retries; that waterfall cannot declare a turn dead.
+        const disposeFailure = childCtx.on('agent/error', (payload) => {
+            if (payload.agent.id !== child.id || payload.turn === lastFailedTurn)
+                return;
+            const observed = observeFailedAttempt();
+            if (observed === undefined)
+                return;
+            const failure = payload.error instanceof LlmError ? payload.error.failure : {
+                code: 'UNKNOWN',
+                message: payload.error instanceof Error ? payload.error.message : String(payload.error),
+            };
+            return recordFailure(payload.turn, failure, observed);
         });
+        let cappedAttempt;
+        const disposeOutputLimit = childCtx.on('session/event', (session, event) => {
+            if (session !== child.session)
+                return;
+            // The host's turn reason stays max-tokens even if fresh steering runs
+            // another step. Only the last executed step can leave an attempt stuck.
+            if (event.type === 'step/start')
+                cappedAttempt = undefined;
+            const turn = outputLimitTurn(event);
+            if (turn !== undefined) {
+                const observed = observeFailedAttempt();
+                if (observed?.task !== undefined)
+                    cappedAttempt = { turn, observed };
+            }
+            if (event.type !== 'turn/end')
+                return;
+            const capped = cappedAttempt;
+            cappedAttempt = undefined;
+            if (capped?.turn !== event.data.turn || event.data.reason?.kind !== 'max-tokens')
+                return;
+            return recordFailure(capped.turn, {
+                code: 'MAX_TOKENS',
+                message: 'Model output-token limit reached before the member closed this task',
+            }, { ...capped.observed, openAttemptOnly: true });
+        });
+        const cleanupFailure = () => { disposeOutputLimit(); disposeFailure(); cleanupAdmission(); };
         // Legacy teams still need failure reporting even without a saved route.
         if (selection === undefined)
-            return () => { disposeFailure(); cleanupAdmission(); };
-        // A member that already failed over resumes on its saved backup route while
-        // its descriptor still names the original one. A host that owns selection
-        // starts the step from the recorded choice, so restore the saved route here.
-        const memberSelection = modelSelection(selection);
-        recordMemberModelSelection(child, memberSelection);
-        const selectionRef = { current: memberSelection, assembled: undefined };
-        const disposeSelection = installMemberModelSelection(childCtx, child, selectionRef);
+            return cleanupFailure;
+        const selectionRef = { current: modelSelection(selection), assembled: undefined };
+        // Newer Harness owns the next-step selection in the Agent's durable model
+        // API. Its installModelSelection hook now only contributes switch notices.
+        const model = child.model;
+        const nativeModel = typeof model?.select === 'function' ? model : undefined;
+        // Creation options already carry a fresh member's route. Record only the
+        // saved backup route a cold resume would otherwise start without, so no
+        // redundant model/selection event enters the session log.
+        const saved = selectionRef.current;
+        const current = nativeModel?.current?.();
+        if (nativeModel !== undefined && (current === undefined
+            || current.provider !== saved.provider || current.model !== saved.model
+            || current.reasoningEffort !== saved.reasoningEffort))
+            nativeModel.select(saved);
+        // 0.2.2 and later accept only the scoped context; hosts that still read the
+        // mutable request route take the ref as the second argument.
+        const installSelection = installModelSelection;
+        const disposeSelection = nativeModel === undefined ? installSelection(childCtx, selectionRef) : installSelection(childCtx);
         const fallback = selection.fallback;
         let switched = false;
+        const recoveryLifetime = new AbortController();
         const disposeFallback = childCtx.on('agent/request-error', async (payload, next) => {
-            if (payload.agent.id !== child.id || payload.signal.aborted)
+            if (payload.agent.id !== child.id)
                 return next();
-            const transition = selectFallbackRoute(selectionRef.current ?? { provider: selection.provider, model: selection.model }, fallback, payload.failure.code, switched);
-            // selectFallbackRoute only retries when a fallback route exists; the
-            // explicit guard narrows that fact for the compiler.
-            if (fallback !== undefined && transition.retry) {
+            const transition = selectFallbackRoute(selectionRef.current, fallback, payload.failure.code, switched);
+            if (fallback === undefined || !transition.retry)
+                return next();
+            // The turn can survive plugin unload. Stop any queued recovery when
+            // this child setup is disposed while waiting for the team lock.
+            const signal = AbortSignal.any([payload.signal, recoveryLifetime.signal]);
+            if (signal.aborted)
+                return next();
+            const committed = await commitFallbackRoute(stateRoot, teamId, memberName, child, fallback, signal, ctx, () => {
                 switched = transition.switched;
-                // A host that fixes the step's route cannot retry it on another model;
-                // the recorded choice applies from the next step, so the failed attempt
-                // keeps its own outcome.
-                const retry = applyFallbackRoute(child, selectionRef, transition.selection);
-                await updateFallbackState(stateRoot, teamId, memberName, fallback, ctx).catch((error) => {
-                    ctx.logger.warn(`agent-teams: failed to persist fallback route: ${String(error)}`);
-                });
+                selectionRef.current = transition.selection;
                 ctx.logger.warn(`agent-teams: member ${child.id} switching to fallback ${fallback.provider}/${fallback.model} after ${payload.failure.code}`);
-                return retry;
-            }
-            return next();
+                if (nativeModel === undefined) {
+                    // Legacy recovery rebuilds the request without rerunning assembly.
+                    selectionRef.assembled = transition.selection;
+                    return;
+                }
+                // Modern recovery fixes the route for all retries of a prepared step.
+                // Close that step without failing its task, then wake the same member in
+                // a new turn. The assignment and any completed calls are already in its
+                // session history, so there is no task retry or replay of input.
+                nativeModel.select(transition.selection);
+                const continuation = createUserMessage({
+                    content: [{ type: 'text', text: 'AgentTeams switched to the configured fallback model. Continue the current work from the conversation history and recorded task state.' }],
+                    source: agentTeamsSource({ kind: 'agent-teams' }, observedSessionFormatVersion(child)),
+                });
+                if (signal.aborted)
+                    return;
+                child.cancel({ kind: 'hook', reason: 'agent-teams/model-fallback' }, { keepInbox: true });
+                try {
+                    child.followup(continuation);
+                }
+                catch (error) {
+                    // Cancellation suppresses the host's agent/error event, so a rejected
+                    // continuation still needs to settle the observed attempt.
+                    const observed = observeFailedAttempt();
+                    if (observed !== undefined)
+                        void recordFailure(payload.turn, payload.failure, observed);
+                    throw error;
+                }
+            });
+            if (!committed)
+                return next();
+            return nativeModel === undefined ? { kind: 'retry' } : undefined;
         });
         return () => {
+            recoveryLifetime.abort();
             disposeFallback();
             disposeSelection();
-            disposeFailure();
-            cleanupAdmission();
+            cleanupFailure();
         };
     });
     return {
         isPendingMember(agent) {
             const parent = agent.session.header.parentSession;
-            const descriptor = foldSubagentDescriptor(sessionOwnEvents(agent.session));
-            return parent !== undefined && descriptor?.mode === 'continuable'
+            if (parent === undefined || pending.size === 0)
+                return false;
+            const descriptor = ownSubagentDescriptor(agent);
+            return descriptor?.mode === 'continuable'
                 && pending.has(pendingSelectionKey(parent, descriptor.label));
         },
         async withPending(parentSessionId, label, selection, operation, setup) {
@@ -899,6 +1010,18 @@ export function installRetiredMemberGuard(ctx, stateDir) {
         return retired.has(childId);
     });
 }
+const subagentDescriptorScan = new WeakMap();
+/** Harness treats the first descriptor in the child's own log as authoritative. */
+function ownSubagentDescriptor(agent) {
+    const { session } = agent;
+    const prior = subagentDescriptorScan.get(session);
+    const event = prior?.event ?? findOwnSessionEvent(session, entry => entry.type === 'subagent/descriptor', { fromSeq: prior?.through });
+    // Session history is append-only. After exhausting an own prefix, resume the
+    // scan at newly appended events, and retain the first descriptor once seen.
+    if (typeof session.seq === 'number')
+        subagentDescriptorScan.set(session, { through: session.seq, event });
+    return event === undefined ? undefined : foldSubagentDescriptor([event]);
+}
 /** Bound all descendant creation, including renamed tools and code-runtime calls. */
 export function installMemberDelegationGuard(ctx, stateDir, maxDepth) {
     let active = true;
@@ -908,7 +1031,7 @@ export function installMemberDelegationGuard(ctx, stateDir, maxDepth) {
         let ancestor = parent;
         let depth = 1;
         while (ancestor !== undefined) {
-            const descriptor = foldSubagentDescriptor(sessionOwnEvents(ancestor.session));
+            const descriptor = ownSubagentDescriptor(ancestor);
             if (descriptor?.label?.startsWith(MEMBER_LABEL_PREFIX)) {
                 const identity = descriptor.label.slice(MEMBER_LABEL_PREFIX.length);
                 const separator = identity.indexOf(':');

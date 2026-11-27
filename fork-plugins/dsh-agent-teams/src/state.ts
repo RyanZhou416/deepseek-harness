@@ -14,8 +14,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs'
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import type { MemberToolFilter } from './tool-policies.ts'
 import { FINDING_SEVERITIES, REVIEW_VERDICTS, TASK_KINDS, TERMINAL_TASK_STATUSES, type ReviewFinding, type TaskStatus, type TeamMember, type TeamMessage, type TeamProfileSnapshot, type TeamState, type TeamTask } from './types.ts'
@@ -415,6 +415,12 @@ export function readTeamSync(stateRoot: string, teamId: string): TeamState | und
   }
 }
 
+/** Pair a cancellation-sensitive team replacement with its live effect. */
+interface TeamWriteCommit {
+  signal: AbortSignal
+  onCommit: () => void
+}
+
 /**
  * Whether a team read failed on the contents of `team.json` (truncated,
  * crash zero-filled, or schema-invalid) rather than on I/O.
@@ -478,9 +484,10 @@ async function readTeamForScan(stateRoot: string, teamId: string): Promise<TeamS
  * Persist one team record (inside the caller's lock).
  * @param stateRoot - resolved absolute state root directory.
  * @param state - the record to persist.
+ * @param commit - gate and synchronous effect for a cancellation-sensitive replacement.
  */
-export async function writeTeam(stateRoot: string, state: TeamState): Promise<void> {
-  await atomicWriteText(join(stateRoot, state.id, 'team.json'), JSON.stringify(state, null, 2))
+export async function writeTeam(stateRoot: string, state: TeamState, commit?: TeamWriteCommit): Promise<void> {
+  await atomicWriteText(join(stateRoot, state.id, 'team.json'), JSON.stringify(state, null, 2), commit)
 }
 
 /** Read the durable set of member session ids retired by remove/delete. */
@@ -924,23 +931,79 @@ export async function replaceFileAtomicOrDirect(
 }
 
 /**
+ * Write one UTF-8 state file and fsync it before returning, so a crash cannot
+ * leave a length-correct file with never-written (zero-filled) contents.
+ *
+ * The temp file is written with `wx` so two writers never share bytes; sync
+ * happens before the atomic rename or the Windows direct-overwrite fallback.
+ * @param file - target path.
+ * @param content - full UTF-8 payload.
+ * @param flag - `wx` for a fresh temp file, `w` for a direct overwrite.
+ */
+async function writeDurableText(file: string, content: string, flag: 'w' | 'wx'): Promise<void> {
+  await writeFile(file, content, { encoding: 'utf8', flag })
+  // Flush the written bytes before the caller renames or keeps the file, so a
+  // crash cannot leave a length-correct file with unwritten contents.
+  const handle = await open(file, 'r+')
+  try {
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
+/**
+ * Synchronous durable write for the committed path, which must install the
+ * file and its live effect in the same JS turn.
+ * @param file - target path.
+ * @param content - full UTF-8 payload.
+ */
+function writeDurableTextSync(file: string, content: string): void {
+  const fd = openSync(file, 'w')
+  try {
+    writeSync(fd, content)
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/**
  * Atomically replace one UTF-8 state file from a same-directory temp file,
  * degrading to a direct overwrite when the atomic rename cannot proceed
  * (see {@link replaceFileAtomicOrDirect} for the Windows EPERM rationale).
  */
-async function atomicWriteText(file: string, content: string): Promise<void> {
+async function atomicWriteText(file: string, content: string, commit?: TeamWriteCommit): Promise<void> {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   try {
-    await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' })
+    await writeDurableText(temporary, content, 'wx')
   } catch (error: unknown) {
     await rm(temporary, { force: true }).catch(() => undefined)
     throw error
   }
+  // Stage bytes asynchronously. Guarded callers install the file and apply
+  // its live effect in the same JS turn, so abort can never leave a canceled
+  // route visible to a synchronous cold read while the rename is pending.
+  const remove = (path: string) => rm(path, { force: true })
+  let effectFailure: { error: unknown } | undefined
+  const commitIfActive = (replace: () => void): boolean => {
+    if (commit?.signal.aborted) return false
+    replace()
+    // An effect failure is not a filesystem failure. Do not let the Windows
+    // retry/direct overwrite run the effect again.
+    try { commit?.onCommit() } catch (error) { effectFailure = { error } }
+    return true
+  }
   await replaceFileAtomicOrDirect(temporary, file, content, {
-    rename: (from, to) => rename(from, to),
-    writeFile: (target, payload) => writeFile(target, payload, 'utf8'),
-    remove: (path) => rm(path, { force: true }),
+    rename: commit === undefined ? (from, to) => rename(from, to) : async (from, to) => {
+      if (!commitIfActive(() => renameSync(from, to))) await remove(from).catch(() => undefined)
+    },
+    writeFile: commit === undefined ? (target, payload) => writeDurableText(target, payload, 'w') : async (target, payload) => {
+      commitIfActive(() => writeDurableTextSync(target, payload))
+    },
+    remove,
   })
+  if (effectFailure !== undefined) throw effectFailure.error
 }
 
 /** Whether a parsed JSON value is a plain record. */
@@ -1463,10 +1526,11 @@ export async function listArchivedTeamIds(stateRoot: string): Promise<string[]> 
 // ── activity snapshot (server-side, like the Claude Code desktop watcher) ──
 
 /** Visual task state for the activity panel. */
-export type VisualTaskState = 'blocked' | 'open' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type VisualTaskState = 'blocked' | 'open' | 'claimed' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 /**
- * The visual state of one task: `running` while in_progress, `completed`
+ * The visual state of one task: `claimed` after assignment, `running` only
+ * after the explicit in_progress update, `completed`
  * when done, `failed`/`cancelled` when terminal without success, `blocked`
  * while any dependency is unfinished, else `open`.
  */
@@ -1479,6 +1543,7 @@ export function taskVisualState(
   if (status === 'failed') return 'failed'
   if (status === 'cancelled') return 'cancelled'
   if (status === 'in_progress') return 'running'
+  if (status === 'claimed') return 'claimed'
   const byId = new Map(tasks.map((task) => [task.id, task]))
   const openDependency = dependencies.some((dependencyId) => {
     const dependency = byId.get(dependencyId)

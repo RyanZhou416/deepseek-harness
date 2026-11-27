@@ -32,7 +32,7 @@ In the DSH fork, members keep their AgentTeams provider/model/effort even when o
 
 Ask in natural language. The plugin provides the team protocol, 14 coordination tools, persistent state, an automatic shared-task scheduler, and a live Web UI—without requiring a separate workflow engine.
 
-> This fork tracks upstream `v0.1.24` as `0.1.24-dsh023a2.1` for DSH `0.2.3-alpha.2`. The real Web profile links the staged copy at `.build/fork-plugins/agent-teams` instead of installing a tarball, as [`../README.md`](../README.md) records; the public npm instructions below describe the upstream release channel.
+> This fork tracks upstream `v0.1.31` as `0.1.31-dsh023a2.1` for DSH `0.2.3-alpha.2`. The real Web profile links the staged copy at `.build/fork-plugins/agent-teams` instead of installing a tarball, as [`../README.md`](../README.md) records; the public npm instructions below describe the upstream release channel.
 
 <p align="center">
   <img src="./assets/readme/workspace.png" width="100%" alt="AgentTeams native workspace with members, task dependencies, and progress">
@@ -40,7 +40,7 @@ Ask in natural language. The plugin provides the team protocol, 14 coordination 
 
 ## Releases
 
-[v0.1.24-dsh023a2.1](./release-notes/v0.1.24-dsh023a2.1.md) moves the fork channel to Harness `0.2.3-alpha.2`: members are created against the flattened activation spec through the host's AgentTeams member entry, so a user's global subagent model override never rewrites a member route, and a stopped member no longer needs the host's tree-wide drain. Release channel: npm `dsh023a2` (prerelease). Check [npm versions](https://www.npmjs.com/package/@nanmicoder/dsh-agent-teams?activeTab=versions) for publication status before installing. See the exact [support matrix](./compatibility.json) and [migration evidence](./docs/harness-0.2.3-alpha.2/README.md).
+[Fork release v0.1.31-dsh023a2.1](./release-notes/v0.1.31-dsh023a2.1.md) rebases the fork on upstream `v0.1.31`: member delivery now uses the host tree-delivery manager, a park notice and a parked attempt survive guidance turns, and member stops keep their selected branches. Harness `0.2.2-rc.1` stays the recommended host; `0.2.3-alpha.2` is a preview target that needs the fork-rebuilt host described below. See the [tested matrix](./compatibility.json).
 
 ## Why AgentTeams?
 
@@ -59,56 +59,72 @@ The conversation card and activity panel use Harness's official locale service. 
 
 ## Install and choose versions
 
-**Recommended pair: DeepSeek Harness `0.2.2-rc.1` + AgentTeams `0.1.24-dsh023a2.1`. The host remains an RC.**
-
-`0.2.3-alpha.2` is a preview target: it needs the Harness build that restores the host prompt protocol and the AgentTeams member entry, and a vanilla upstream `0.2.3-alpha.2` host has neither.
+**Recommended pair: DeepSeek Harness `0.2.2-rc.1` + AgentTeams `0.1.31-dsh023a2.1`.**
 
 | Use case | DeepSeek Harness | AgentTeams plugin |
 | --- | --- | --- |
-| **Recommended** | **`0.2.2-rc.1`** | **`0.1.24-dsh023a2.1`** |
-| Preview (fork host build) | `0.2.3-alpha.2` | `0.1.24-dsh023a2.1` |
-| Previous recommended RC | `0.2.1-rc.2`, `0.2.0-rc.2`, `0.1.7-rc.2` | `0.1.24-dsh023a2.1` |
-| Legacy RC | `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.5-rc.3` | `0.1.24-dsh023a2.1` |
-| Retaining an older RC | `0.1.2-rc.1` | `0.1.24-dsh023a2.1` |
-| Developer Alpha testing | `0.1.2-alpha.5` | `0.1.24-dsh023a2.1` |
-| Retaining an older Alpha | `0.1.2-alpha.2` | `0.1.24-dsh023a2.1` |
+| **Recommended** | **`0.2.2-rc.1`** | **`0.1.31-dsh023a2.1`** |
+| Preview (fork-rebuilt host) | `0.2.3-alpha.2` | `0.1.31-dsh023a2.1` |
+| Tested legacy RCs | `0.2.1-rc.2`, `0.2.0-rc.2`, `0.1.7-rc.2` | `0.1.31-dsh023a2.1` |
+| Legacy RC | `0.1.5-rc.3`, `0.1.5-rc.2`, `0.1.5-rc.1` | `0.1.31-dsh023a2.1` |
+| Retaining an older RC | `0.1.2-rc.1` | `0.1.31-dsh023a2.1` |
+| Developer Alpha testing | `0.1.2-alpha.5` | `0.1.31-dsh023a2.1` |
+| Retaining an older Alpha | `0.1.2-alpha.2` | `0.1.31-dsh023a2.1` |
+
+CI verifies the exact hosts listed above. The published peer ranges enumerate only these exact hosts, so an unlisted host fails at install time instead of mounting without the audited adapters. `0.2.3-alpha.2` additionally needs the fork-rebuilt Harness that restores the host prompt protocol and the AgentTeams member entry; a vanilla upstream `0.2.3-alpha.2` host has neither.
 
 ### Desktop app
 
-In the app sidebar, open **Plugins → Add plugin** and enter the npm package spec:
+In the app sidebar, open **Plugins → Add plugin**. You can install directly from GitHub by pasting this repository URL into the plugin input, without a version, tag, or commit suffix:
 
 ```text
-@nanmicoder/dsh-agent-teams@0.1.24-dsh023a2.1
+https://github.com/NanmiCoder/dsh-agent-teams
 ```
 
-Install it, then choose **Enable now**. If the host asks for a restart, restart the desktop app. Use the package spec above for the published build; an npm or GitHub webpage URL is not the same install source. For Git installation, use a commit containing the verified build outputs described below.
+This installs from the default branch and is available immediately after release. The equivalent shorthand is also supported:
 
-The desktop app supplies its own Harness core and package manager. Upgrading the global CLI does not upgrade that core, and an ordinary standalone CLI cannot manage its desktop profile. The CLI carrier installed by the desktop app can manage that profile in `0.2.2-rc.1`. Check the embedded core against the compatibility list. Harness `0.2.2-rc.1` is now the exact published target; its RC status is unchanged. The earlier source-only `0.2.0` prediction is no longer a support declaration. See the [release migration evidence](./docs/harness-0.2.2-rc.1/README.md).
+```text
+github:NanmiCoder/dsh-agent-teams
+```
+
+For npm installation, enter the versioned spec `@nanmicoder/dsh-agent-teams@0.1.31-dsh023a2.1`. Desktop's pnpm 11 defaults to a 24-hour minimum release age: for 24 hours after a release, a bare package name or `@latest` installs the previous version even when the preview shows the newest one, and the installation fails if that version is incompatible with your host. An exact version installs immediately. Changing registry mirrors does not remove this policy. GitHub access is required for the Git route; it may contain newer code than npm.
+
+For an existing npm installation, open **Plugins**, check for updates, then select **0.1.31-dsh023a2.1** and confirm **Update**. The desktop updater requests the selected exact plugin version.
+
+Install it, then choose **Enable now**. If the host asks for a restart, restart the desktop app. Do not disable compatibility checks or the global release-age policy to install the plugin.
+
+Use the desktop app's built-in updater when it offers `0.2.2-rc.1`. AgentTeams `0.1.31-dsh023a2.1` supports that host through the ordinary plugin channel. Desktop manages its bundled Harness independently of the global CLI. Use the CLI shipped with Desktop when managing its profile from a terminal.
 
 ### CLI / Web: 1. Install DeepSeek Harness
 
 ```sh
-npm install --global @deepseek-ai/dsh@0.2.2-rc.1
+npm install --global @deepseek-ai/dsh
 dsh --version
 ```
 
-Skip this if you already run this version. Alpha is opt-in: select an exact Alpha version from the table and lock all host dependencies as described in the [maintenance guide](./docs/maintenance-workflow.md).
+The command selects the host's npm `latest`. To install the recommended host explicitly, run `npm install --global @deepseek-ai/dsh@0.2.2-rc.1`. Check `dsh --version` against the support matrix after upgrading. For Alpha testing, select an exact version and lock the host dependencies using the [maintenance guide](./docs/maintenance-workflow.md).
 
 ### CLI / Web: 2. Install the AgentTeams plugin
 
-After this version is published, install or upgrade from npm using the exact prerelease version:
+Install or upgrade from npm with an exact version (currently `0.1.31-dsh023a2.1`):
 
 ```sh
-dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.24-dsh023a2.1
+dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.31-dsh023a2.1
 ```
 
 For a CLI-managed installation, replace `web` with your active CLI profile. **Stop and restart that profile's Harness process, then refresh the browser.** Installing the plugin does not upgrade Harness; the host and plugin have independent `latest` channels.
 
-For Git installation, use a Git package spec pinned to a commit containing the verified server, client, and type build outputs in `lib/`, rather than an npm webpage URL. The repository distributes these outputs so installation does not need a `prepare` hook or build-script approval. Source maintainers must run `pnpm build` and update the committed outputs whenever the source changes. Existing npm releases remain immutable.
+Alternatively, install or update from the latest GitHub default branch without a tag or commit suffix:
+
+```sh
+dsh plugin --profile web add github:NanmiCoder/dsh-agent-teams
+```
+
+To update, run the command again with the new version, then restart the profile; a bare package name can retain an already installed exact version. For 24 hours after a release, a bare package name or `@latest` installs the previous version. If a registry mirror has not synced the release, append `--registry=https://registry.npmjs.org` to the npm command. GitHub default-branch code may be newer than npm `latest`. The default branch includes the verified server, client, and type build outputs in `lib/`. The repository distributes these outputs so installation does not need a `prepare` hook or build-script approval. Source maintainers must run `pnpm build` and update the committed outputs whenever the source changes. Existing npm releases remain immutable.
 
 For a manually cloned checkout, run `pnpm install --frozen-lockfile` and `pnpm build` after pulling, then restart the corresponding Harness process. Updating Git alone does not update local build output. See the [maintenance guide](./docs/maintenance-workflow.md).
 
-> For older `0.1.0-*` / `0.1.1-*` or unlisted hosts, keep a working pair and follow the [older-version and diagnostic guide](./docs/maintenance-workflow.md).
+> For `0.1.0-*` / `0.1.1-*` hosts older than `0.1.2-alpha.2`, keep a working pair and follow the [older-version and diagnostic guide](./docs/maintenance-workflow.md).
 
 See the full [compatibility matrix](./compatibility.json), [source installation and Alpha testing guide](./docs/maintenance-workflow.md), and [verification coverage and platform limits](./docs/maintenance-2026-09-06/release/README.md).
 

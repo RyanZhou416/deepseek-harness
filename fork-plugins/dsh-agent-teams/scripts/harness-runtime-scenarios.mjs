@@ -1,11 +1,38 @@
 /** Shared built-product scenarios for registry releases and explicitly identified source checkouts. */
-import { mkdirSync, writeFileSync, readFileSync, existsSync, copyFileSync, symlinkSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, copyFileSync, symlinkSync, unlinkSync, lstatSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hostVerification } from './harness-validation.mjs';
 
 const json = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n');
 
+/**
+ * Windows refuses `symlinkSync(..., 'dir')` without Developer Mode or an elevated
+ * token. A directory junction links the same paths with no privilege, so the
+ * fixture profile can point at the prepared runtime on every supported host.
+ * A leftover link is removed first, so repeated runs over the same report
+ * directory do not fail with EEXIST.
+ */
+export const linkDirectory = (target, path) => {
+    try {
+        if (!lstatSync(path).isSymbolicLink()) throw Error('Refusing to replace non-link fixture path: ' + path);
+        unlinkSync(path);
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
+};
+
 export const runtimeScenarios = ['lifecycle', 'fallback', 'failure', 'captain-idle-wakeup', 'progressive-entry', 'web-approval', 'protocol-compatibility', 'stability'];
+
+/** The direct fixture link cannot prove that a user's plugin install is accepted. */
+export async function runPluginInstallation({ version, pluginVersion, artifact, runtime, report, command, environment }) {
+    if (!hostVerification(version).pluginManagerInstall) return [];
+    const home = join(report, 'plugin-install-home');
+    const install = await command([process.execPath, join(runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), 'plugin', '--profile', 'web', 'add', '--save-exact', resolve(artifact)], runtime, environment({ DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }), 'plugin-manager-install', 120000);
+    const installedPath = join(home, 'profiles/web/node_modules/@nanmicoder/dsh-agent-teams/package.json');
+    const installed = existsSync(installedPath) ? JSON.parse(readFileSync(installedPath, 'utf8')) : undefined;
+    const assertions = { exit0: install.code === 0 && !install.timedOut, exactPluginVersion: installed?.version === pluginVersion };
+    return [{ scenario: 'plugin-manager-install', passed: Object.values(assertions).every(Boolean), assertions }];
+}
 
 /** Run the same fixture and persisted-state assertions against an already prepared runtime. */
 export async function runRuntimeScenarios({ report, runtime, command, environment, selectedScenarios = runtimeScenarios, linkWorkspacePackages = false }) {
@@ -15,8 +42,8 @@ for (const scenario of selectedScenarios) {
     mkdirSync(profile, { recursive: true });
     mkdirSync(workspace, { recursive: true });
     mkdirSync(join(profile, 'node_modules/@nanmicoder'), { recursive: true });
-    if (linkWorkspacePackages) symlinkSync(join(runtime, 'node_modules/@deepseek-ai'), join(profile, 'node_modules/@deepseek-ai'), 'dir');
-    symlinkSync(join(runtime, 'node_modules/@nanmicoder/dsh-agent-teams'), join(profile, 'node_modules/@nanmicoder/dsh-agent-teams'), 'dir');
+    if (linkWorkspacePackages) linkDirectory(join(runtime, 'node_modules/@deepseek-ai'), join(profile, 'node_modules/@deepseek-ai'));
+    linkDirectory(join(runtime, 'node_modules/@nanmicoder/dsh-agent-teams'), join(profile, 'node_modules/@nanmicoder/dsh-agent-teams'));
     json(join(profile, 'package.json'), { name: 'runtime-test-profile', version: '0.0.0', private: true, type: 'module', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless', '@nanmicoder/dsh-agent-teams'], patchReload: 'startup' } } });
     copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/harness-runtime-llm.mjs'), join(profile, 'fixture-llm.mjs'));
     writeFileSync(join(profile, 'cordis.patch.yml'), `- id: llm-deepseek\n  disabled: true\n- id: llm-pi-ai\n  disabled: true\n- id: agent-default-model\n  config:\n    provider: runtime-lab\n    model: fixture-model\n- insert:\n    - id: runtime-lab-fixture\n      name: './fixture-llm.mjs'\n`);
@@ -30,15 +57,17 @@ for (const scenario of selectedScenarios) {
         writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + '- id: tool-subagent\n  name: \'@deepseek-ai/dsh-tool-subagent\'\n  config:\n    provider: spawn\n    toolName: subagent_legacy\n    backgroundMode: continuable\n');
     if (scenario === 'fallback')
         writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + '- id: agent-teams\n  config:\n    stateDir: .agent-teams\n    memberProvider: spawn\n    fallback:\n      provider: runtime-lab\n      model: fixture-fallback\n');
+    // Custom drivers replace the task runner, while startup still provides
+    // the host's filesystem and sandbox setup on newer Harness versions.
     if (scenario === 'captain-idle-wakeup') {
         copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/harness-runtime-idle.mjs'), join(profile, 'fixture-idle.mjs'));
-        writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + '- id: headless-startup\n  disabled: true\n- id: headless-runner\n  disabled: true\n- insert:\n    - id: runtime-lab-idle-captain\n      name: ./fixture-idle.mjs\n');
+        writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + '- id: headless-runner\n  disabled: true\n- insert:\n    - id: runtime-lab-idle-captain\n      name: ./fixture-idle.mjs\n');
     }
+    if (scenario === 'progressive-entry' || scenario === 'stability')
+        copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/harness-runtime-tools.mjs'), join(profile, 'fixture-tools.mjs'));
     if (scenario === 'progressive-entry') {
         copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/harness-runtime-entry.mjs'), join(profile, 'fixture-entry.mjs'));
-        writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + `- id: headless-startup
-  disabled: true
-- id: headless-runner
+        writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + `- id: headless-runner
   disabled: true
 - id: agent-teams
   config:
@@ -59,8 +88,6 @@ for (const scenario of selectedScenarios) {
     if (scenario === 'web-approval') {
         copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/harness-runtime-web-approval.mjs'), join(profile, 'fixture-web-approval.mjs'));
         writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + `- id: runtime-lab-fixture
-  disabled: true
-- id: headless-startup
   disabled: true
 - id: headless-runner
   disabled: true
@@ -83,8 +110,6 @@ for (const scenario of selectedScenarios) {
     if (scenario === 'protocol-compatibility') {
         copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/harness-runtime-protocol.mjs'), join(profile, 'fixture-protocol.mjs'));
         writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + `- id: runtime-lab-fixture
-  disabled: true
-- id: headless-startup
   disabled: true
 - id: headless-runner
   disabled: true
@@ -115,8 +140,6 @@ for (const scenario of selectedScenarios) {
     if (scenario === 'stability') {
         copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/harness-runtime-stability.mjs'), join(profile, 'fixture-stability.mjs'));
         writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + `- id: runtime-lab-fixture
-  disabled: true
-- id: headless-startup
   disabled: true
 - id: headless-runner
   disabled: true
@@ -161,7 +184,10 @@ for (const scenario of selectedScenarios) {
         const evidence = trace.find(x => x.event === 'web-approval-passed');
         const invalid = trace.find(x => x.event === 'web-http-invalid-team-rejected'), repeated = trace.find(x => x.event === 'web-http-repeat-rejected');
         const stable = trace.find(x => x.event === 'web-headers-stable');
-        const assertions = { exit0: result.code === 0 && !result.timedOut, productMarker: result.stdout.includes('WEB_APPROVAL_OK'), driverCompleted: Boolean(evidence), stagedBeforeApproval: Boolean(staged?.status === 'idle' && approved?.status === 200 && staged.order < approved.order), independentApprovalWake: Boolean(approvalWake && yielded?.status === 'idle' && released && approvalWake.order < yielded.order && yielded.order < released.order), reportWakeAfterYield: Boolean(released && reportWake && released.order < reportWake.order && reportWake.sessionId === staged?.sessionId), noPollingOrDuplicateApproval: !trace.some(x => x.event === 'web-model-tool-call' && ['agent_teams_approve', 'agent_teams_status'].includes(x.name)), oneUserMessageAndHttpApproval: trace.filter(x => x.event === 'web-driver-user-message').length === 1 && trace.filter(x => x.event === 'web-http-approval-start').length === 1, invalidTeamRejected: Boolean(invalid?.status === 404 && approved && invalid.order < approved.order), repeatApprovalRejected: Boolean(repeated?.status === 409 && yielded && released && yielded.order < repeated.order && repeated.order < released.order), stableCaptainHeaders: Boolean(stable?.systemSha256 && stable?.toolsSha256), memberFourTools: stable?.memberTeamToolCount === 4 && stable.memberRequests > 0, taskCompleted: evidence?.taskStatus === 'completed' };
+        const byteAudit = trace.find(x => x.event === 'web-workspace-audit');
+        const assertions = { claimedProjection: trace.some(x => x.event === 'web-claimed-projection' && x.taskStatus === 'claimed' && x.visualState === 'claimed' && x.memberActivity === 'working'), exit0: result.code === 0 && !result.timedOut, productMarker: result.stdout.includes('WEB_APPROVAL_OK'), driverCompleted: Boolean(evidence), stagedBeforeApproval: Boolean(staged?.status === 'idle' && approved?.status === 200 && staged.order < approved.order), independentApprovalWake: Boolean(approvalWake && yielded?.status === 'idle' && released && approvalWake.order < yielded.order && yielded.order < released.order), reportWakeAfterYield: Boolean(released && reportWake && released.order < reportWake.order && reportWake.sessionId === staged?.sessionId), noPollingOrDuplicateApproval: !trace.some(x => x.event === 'web-model-tool-call' && ['agent_teams_approve', 'agent_teams_status'].includes(x.name)), oneUserMessageAndHttpApproval: trace.filter(x => x.event === 'web-driver-user-message').length === 1 && trace.filter(x => x.event === 'web-http-approval-start').length === 1, invalidTeamRejected: Boolean(invalid?.status === 404 && approved && invalid.order < approved.order), repeatApprovalRejected: Boolean(repeated?.status === 409 && yielded && released && yielded.order < repeated.order && repeated.order < released.order), stableCaptainHeaders: Boolean(stable?.systemSha256 && stable?.toolsSha256), memberFourTools: stable?.memberTeamToolCount === 4 && stable.memberRequests > 0, taskCompleted: evidence?.taskStatus === 'completed' };
+        assertions.byteAuditSnapshot = byteAudit?.before?.ok === true && byteAudit.before.deliverable === true
+            && byteAudit?.after?.ok === false && byteAudit.after.deliverable === false && byteAudit.after.stale === true && byteAudit.hostBytesRead === 0;
         runs.push({ scenario, passed: Object.values(assertions).every(Boolean), assertions, evidence, exit: { code: result.code, signal: result.signal, timedOut: result.timedOut } });
         continue;
     }
@@ -188,6 +214,14 @@ for (const scenario of selectedScenarios) {
     if (scenario === 'fallback') {
         assertions.fallbackActivated = memberRequests.some(x => x.model === 'fixture-fallback') && state?.members?.some(m => m.fallbackActive && m.activeModel === 'fixture-fallback');
         assertions.fallbackReasoningReset = memberRequests.some(x => x.model === 'fixture-fallback') && memberRequests.filter(x => x.model === 'fixture-fallback').every(x => x.reasoningEffort === 'low');
+        const primaryFailures = trace.filter(x => x.event === 'fallback-primary-auth');
+        const firstFallback = memberRequests.find(x => x.model === 'fixture-fallback');
+        const task = state?.tasks?.find(task => task.id === 't1');
+        assertions.fallbackPreservedAttempt = primaryFailures.length === 1 && firstFallback !== undefined
+            && firstFallback.sessionId === primaryFailures[0].sessionId
+            && task?.attemptId === primaryFailures[0].attemptId && task.attempt === 1
+            && firstFallback.called.filter(name => name === 'agent_teams_claim_task').length === 1
+            && firstFallback.called.filter(name => name === 'agent_teams_update_task').length === 1;
     }
     const passed = Object.values(assertions).every(Boolean);
     runs.push({ scenario, passed, exit: { code: result.code, signal: result.signal, timedOut: result.timedOut }, assertions, requests: requests.length, memberRequests: memberRequests.length });
@@ -195,9 +229,10 @@ for (const scenario of selectedScenarios) {
         json(join(report, scenario, 'team-evidence.json'), state);
     if (passed && !isFailure && scenario !== 'captain-idle-wakeup') {
         copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/harness-runtime-resume.mjs'), join(profile, 'fixture-resume.mjs'));
-        writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + '- id: headless-startup\n  disabled: true\n- id: headless-runner\n  disabled: true\n- insert:\n    - id: runtime-lab-cold-resume\n      name: ./fixture-resume.mjs\n');
+        writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + '- id: headless-runner\n  disabled: true\n- insert:\n    - id: runtime-lab-cold-resume\n      name: ./fixture-resume.mjs\n');
         const coldTrace = join(report, scenario, 'cold-trace.jsonl');
-        const cold = await command([process.execPath, join(runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'headless'], workspace, environment({ DSH_HOME: home, DSH_PERMISSION_MODE: 'danger-full-access', DSH_TELEMETRY_DISABLED: '1', LAB_TRACE: coldTrace, LAB_TEAMS: '1', LAB_COLD: '1', LAB_SCENARIO: scenario, LAB_PARENT_SESSION: state.captainSessionId }), scenario + '-cold', 90000);
+        // Older startup parsers require a task even when the runner is disabled.
+        const cold = await command([process.execPath, join(runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'headless', 'Run the deterministic cold restore fixture.'], workspace, environment({ DSH_HOME: home, DSH_PERMISSION_MODE: 'danger-full-access', DSH_TELEMETRY_DISABLED: '1', LAB_TRACE: coldTrace, LAB_TEAMS: '1', LAB_COLD: '1', LAB_SCENARIO: scenario, LAB_PARENT_SESSION: state.captainSessionId }), scenario + '-cold', 90000);
         const coldEvents = existsSync(coldTrace) ? readFileSync(coldTrace, 'utf8').trim().split('\n').filter(Boolean).map(s => JSON.parse(s)) : [];
         const coldMember = coldEvents.find(x => x.event === 'cold-member-completed');
         const coldAssertions = { memberToolsRestricted: memberToolsRestricted(coldEvents.filter(x => x.event === 'request' && x.isMember && x.purpose === undefined)), exit0: cold.code === 0 && !cold.timedOut, driverCompleted: cold.stdout.includes('COLD_RESTORE_DRIVER_DONE'), sameMemberRestored: coldMember?.sessionId === state.members.find(m => m.name === 'worker')?.id, routeRestored: coldMember?.model === (scenario === 'fallback' ? 'fixture-fallback' : 'fixture-model'), reasoningRestored: coldMember?.reasoningEffort === (scenario === 'fallback' ? 'low' : 'high') };

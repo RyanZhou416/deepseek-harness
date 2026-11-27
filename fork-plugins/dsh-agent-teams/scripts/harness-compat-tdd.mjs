@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
-import { guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, sessionOwnEvents } from '../lib/harness-compat.js'
+import { drainMemberChildren, guardSubagentCreation, guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, findOwnSessionEvent, startMember, steerMemberPrompt } from '../lib/harness-compat.js'
 import { installMemberSelectionRuntime, spawnMember } from '../lib/members.js'
 import { createTeamDir } from '../lib/state.js'
 import { CAPTAIN_TOOL_NAMES } from '../lib/tool-names.js'
@@ -43,6 +43,92 @@ function modernRuntime() {
   return { [deliverKey]() {}, sendMessage() {} }
 }
 
+function treeRuntime() {
+  const accepted = []
+  const root = { id: 'captain', session: { header: {} } }
+  const manager = {
+    resident: new Map(),
+    async deliverToMember(owner, id, body, options) {
+      assert.equal(this, manager)
+      options.signal.throwIfAborted()
+      options.authorize?.()
+      accepted.push({ owner, id, body, ...options })
+      return 'accepted'
+    },
+    async dispose(activation) { assert.equal(this, manager); manager.resident.delete(activation.childId) },
+  }
+  const runtime = {
+    manager,
+    rootOf(agent) { assert.equal(this, runtime); if (agent !== root) throw Error('unavailable caller'); return root },
+    async startActivation(spec) { assert.equal(this, runtime); assert.equal(spec.parent, root); assert.ok(!('request' in spec)); return { childId: 'child', result: Promise.resolve({}) } },
+    sendMessage(sender, id, body, options) { return manager.deliverToMember(runtime.rootOf(sender), id, body, { ...options, delivery: 'steer', source: { kind: 'agent', sessionId: sender.id } }) },
+    prompt(request, signal) { return manager.deliverToMember(root, request.childSessionId, request.content, { signal, delivery: request.delivery, source: { kind: 'user', rpcId: request.requestId } }) },
+  }
+  return { runtime, root, manager, accepted }
+}
+
+await test('0.2.2-rc.2 tree ABI activates setup, flattens creation and preserves host FIFO provenance', async () => {
+  const { runtime, root, accepted } = treeRuntime()
+  const ctx = scope({ subagents: runtime })
+  installContinuableMemberSetup(ctx, () => () => {})
+  guardSubagentCreation(ctx, parent => assert.equal(parent, root))
+  const spec = { provider: 'spawn', label: 'worker', signal, request: { parent: root, prompt: content, persona: 'role', toolFilter: { deny: [] }, agentOptions: { model: 'chosen' } } }
+  assert.equal((await startMember(runtime, spec)).childId, 'child')
+  await queueMemberPrompt(runtime, root, 'child', content, signal)
+  await steerMemberPrompt(runtime, root, 'child', content, signal)
+  assert.deepEqual(accepted.map(item => [item.delivery, item.source]), [['queue', source], ['steer', source]])
+  ctx.dispose()
+})
+
+await test('0.2.2-rc.2 retirement guard covers host, model and browser delivery, survives HMR and preserves attribution', async () => {
+  const { runtime, root, manager, accepted } = treeRuntime()
+  const before = Object.getOwnPropertyDescriptor(manager, 'deliverToMember')
+  const first = scope({ subagents: runtime }), second = scope({ subagents: runtime })
+  guardSubagentDelivery(first, async (owner, id) => { assert.equal(owner, root); return id === 'retired-first' })
+  guardSubagentDelivery(second, async (_owner, id) => id === 'retired-second')
+  for (const id of ['retired-first', 'retired-second']) {
+    await assert.rejects(queueMemberPrompt(runtime, root, id, content, signal), { code: 'NOT_RESUMABLE' })
+    await assert.rejects(steerMemberPrompt(runtime, root, id, content, signal), { code: 'NOT_RESUMABLE' })
+    await assert.rejects(runtime.sendMessage(root, id, content, { signal }), { code: 'NOT_RESUMABLE' })
+    await assert.rejects(runtime.prompt({ childSessionId: id, content, delivery: 'queue', requestId: 'browser-id' }, signal), { code: 'NOT_RESUMABLE' })
+  }
+  assert.equal(accepted.length, 0)
+  await runtime.prompt({ childSessionId: 'unrelated', content, delivery: 'queue', requestId: 'browser-id' }, signal)
+  assert.deepEqual(accepted[0].source, { kind: 'user', rpcId: 'browser-id' })
+  first.dispose()
+  await queueMemberPrompt(runtime, root, 'retired-first', content, signal)
+  await assert.rejects(queueMemberPrompt(runtime, root, 'retired-second', content, signal), { code: 'NOT_RESUMABLE' })
+  second.dispose()
+  await queueMemberPrompt(runtime, root, 'retired-second', content, signal)
+  assert.notEqual(manager.deliverToMember, undefined)
+  // Out-of-order HMR may retain an inactive outer wrapper; it must be inert.
+  assert.equal(accepted.length, 3)
+  assert.ok(before.value)
+})
+
+await test('0.2.2-rc.2 targeted drain stops only the selected member branch and awaits in-flight creation', async () => {
+  const { runtime, root, manager } = treeRuntime()
+  const other = { id: 'other-root' }
+  for (const [id, owner, ancestors] of [['worker', root, ['captain']], ['grandchild', root, ['captain', 'worker']], ['sibling', root, ['captain']], ['outsider', other, ['other-root']]]) {
+    manager.resident.set(id, { childId: id, root: owner, ancestors })
+  }
+  let childSignal
+  const parent = { id: 'worker' }
+  runtime.rootOf = () => root
+  runtime.startActivation = async spec => {
+    childSignal = spec.signal
+    await new Promise((resolve, reject) => spec.signal.addEventListener('abort', () => reject(spec.signal.reason), { once: true }))
+  }
+  const ctx = scope({ subagents: runtime })
+  guardSubagentCreation(ctx, () => {})
+  const pending = runtime.startActivation({ parent, provider: 'spawn', label: 'pending', prompt: content, signal, delivery: 'parent' })
+  const rejected = assert.rejects(pending, error => error.name === 'AbortError')
+  await drainMemberChildren(ctx, root, ['worker'])
+  await rejected
+  assert.equal(childSignal.aborted, true)
+  assert.deepEqual([...manager.resident.keys()], ['sibling', 'outsider'])
+  ctx.dispose()
+})
 /**
  * Install the host's `dsh.subagent.deliverPrompt` adapter on a runtime whose
  * package no longer ships it. The fork host restores that adapter in
@@ -90,6 +176,12 @@ function child({ workspace = process.cwd(), effort, inherited = false, route = {
     },
     select(selection) { recorded.push({ ...selection }) },
   }
+  // Modern fallback recovery closes the failed step and wakes the member with
+  // a continuation instead of retrying the prepared request.
+  agent.cancelled = []
+  agent.continuations = []
+  agent.cancel = (cause, options) => { agent.cancelled.push({ cause, options }) }
+  agent.followup = message => { agent.continuations.push(message) }
   agent.ctx = scope() // Harness 0.1.5 no longer exposes Context.agent.
   return agent
 }
@@ -206,15 +298,73 @@ await test('unsupported queue-only or send-only contract fails explicitly', asyn
   assert.throws(() => installContinuableMemberSetup(scope({ subagents: runtime }), () => () => {}), /unsupported Harness/)
   assert.throws(() => guardSubagentDelivery(scope({ subagents: runtime }), async () => false), /unsupported Harness/)
   await assert.rejects(queueMemberPrompt(runtime, {}, 'child', content, signal), /missing host FIFO/)
-  assert.throws(() => sessionOwnEvents({ header: {} }), /missing ownEvents/)
+  assert.throws(() => findOwnSessionEvent({ header: {} }, () => true), /missing ownEvents/)
 })
 
 await test('legacy session history excludes its inherited prefix; modern uses ownEvents receiver', () => {
   const inherited = { type: 'subagent/descriptor', data: { label: 'foreign' } }
   const own = { type: 'subagent/descriptor', data: { label: 'member' } }
-  assert.deepEqual(sessionOwnEvents({ header: { seedLength: 1 }, events: [inherited, own] }), [own])
+  assert.equal(findOwnSessionEvent({ header: { seedLength: 1 }, events: [inherited, own] }, () => true), own)
   const session = { header: {}, ownEvents() { assert.equal(this, session); return [own] } }
-  assert.deepEqual(sessionOwnEvents(session), [own])
+  assert.equal(findOwnSessionEvent(session, () => true), own)
+})
+
+await test('member detection reads a bounded prefix of its own long session (#356)', async () => {
+  const ctx = scope({ subagents: modernRuntime() })
+  const bridge = installMemberSelectionRuntime(ctx, '.agent-teams')
+  const agent = child()
+  const [descriptor] = agent.session.ownEvents()
+  const inheritedEventCount = 12_000
+  const seq = 46_000
+  const ranges = []
+  Object.assign(agent.session, {
+    inheritedEventCount,
+    seq,
+    ownEvents() { assert.fail('member detection must not materialize the whole session') },
+    snapshotEvents(from, to) {
+      assert.equal(this, agent.session)
+      ranges.push([from, to])
+      return Array.from({ length: to - from }, (_, index) =>
+        from + index === inheritedEventCount + 2 ? descriptor : { type: 'turn/start' })
+    },
+  })
+  await bridge.withPending('captain', 'agent-teams:team:worker', {
+    provider: 'primary', model: 'model',
+  }, async () => {
+    assert.equal(bridge.isPendingMember(agent), true)
+    assert.equal(bridge.isPendingMember(agent), true)
+    assert.equal(ranges.length, 1)
+    assert.equal(ranges[0][0], inheritedEventCount)
+    assert.ok(ranges[0][1] - ranges[0][0] <= 256)
+  })
+  ctx.dispose()
+})
+
+await test('reverse history search reaches an older batch and stops at the nearest owned turn boundary (#356)', () => {
+  const inheritedEventCount = 20_000
+  const seq = 46_000
+  const turnStart = { type: 'turn/start' }
+  const stepStart = { type: 'step/start', data: { turn: 42 } }
+  const ranges = []
+  const session = {
+    inheritedEventCount,
+    seq,
+    ownEvents() { assert.fail('mail admission must not copy the whole log') },
+    snapshotEvents(from, to) {
+      assert.ok(from >= inheritedEventCount && to - from <= 256)
+      ranges.push([from, to])
+      return Array.from({ length: to - from }, (_, index) => {
+        const position = from + index
+        if (position === seq - 300) return stepStart
+        if (position === seq - 310) return turnStart
+        return { type: 'assistant/message' }
+      })
+    },
+  }
+  assert.equal(findOwnSessionEvent(session, event =>
+    event.type === 'turn/start' || (event.type === 'step/start' && event.data.turn === 42),
+  { order: 'newest' }), stepStart)
+  assert.deepEqual(ranges, [[seq - 256, seq], [seq - 512, seq - 256]])
 })
 
 await test('synchronous modern setup routes the first step once, deduplicates events, and disposes for HMR', async () => {
@@ -492,33 +642,32 @@ await test('managed start strips retired options and guards native activation cr
   await nested.startActivation({ ...spec, request: { ...spec.request, parent: { id: 'member' } } })
 })
 
-await test('0.2.3-alpha.2 flat activation keeps the top-level request and its member route', async () => {
+await test('0.2.2 nested activation keeps the request and strips retired options', async () => {
   const { startMember, guardSubagentCreation, usesManagedActivations } = await import('../lib/harness-compat.js')
   let received
-  const flat = {
+  const nested = {
     async startActivation(spec) {
-      assert.equal(this, flat); received = spec
+      assert.equal(this, nested); received = spec
       return { childId: 'child', name: 'worker', result: Promise.resolve({ stopReason: 'completed' }) }
     },
   }
-  const activation = await startMember(flat, {
+  const activation = await startMember(nested, {
     provider: 'spawn', label: 'worker', signal,
     request: { parent: { id: 'captain' }, prompt: content, persona: 'role', toolFilter: { deny: [] } },
   })
   assert.equal(activation.childId, 'child')
-  // 0.2.3-alpha.2 reads the flattened task fields; the nested request stays for
-  // the 0.2.2 generation and carries no retired option.
+  // The 0.2.2 generation reads the nested request; persona and toolFilter stay
+  // behind at the 0.2.1-and-earlier creation seam.
   assert.equal(received.provider, 'spawn')
   assert.equal(received.label, 'worker')
   assert.equal(received.delivery, 'parent')
-  assert.equal(received.parent.id, 'captain')
-  assert.deepEqual(received.prompt, content)
-  assert.ok(!('persona' in received)); assert.ok(!('toolFilter' in received))
+  assert.equal(received.request.parent.id, 'captain')
+  assert.deepEqual(received.request.prompt, content)
   assert.ok(!('persona' in received.request)); assert.ok(!('toolFilter' in received.request))
-  assert.equal(usesManagedActivations(flat), true)
-  const ctx = scope({ subagents: flat })
+  assert.equal(usesManagedActivations(nested), true)
+  const ctx = scope({ subagents: nested })
   guardSubagentCreation(ctx, parent => { if (parent.id === 'member') throw Error('depth exceeded') })
-  await assert.rejects(flat.startActivation({ provider: 'spawn', label: 'nested', delivery: 'parent', signal, parent: { id: 'member' }, prompt: content }), /depth exceeded/)
+  await assert.rejects(nested.startActivation({ provider: 'spawn', label: 'nested', delivery: 'parent', signal, request: { parent: { id: 'member' }, prompt: content } }), /depth exceeded/)
   ctx.dispose()
 })
 

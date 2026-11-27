@@ -26,6 +26,29 @@ export const serverRuntimePeers = [
   '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-tools',
 ]
 
+function isDshPackage(name) {
+  return name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')
+}
+
+/** semver precedence for the x.y.z[-alpha|beta|rc.N] versions DSH publishes; undefined for anything else. */
+export function compareHostVersions(left, right) {
+  const parse = version => {
+    const match = typeof version === 'string' && /^(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)\.(\d+))?$/.exec(version)
+    return match && { core: match.slice(1, 4).map(Number), tag: match[4], number: Number(match[5]) }
+  }
+  const a = parse(left), b = parse(right)
+  if (!a || !b) return undefined
+  for (let index = 0; index < 3; index++) if (a.core[index] !== b.core[index]) return Math.sign(a.core[index] - b.core[index])
+  if (a.tag === b.tag) return a.tag ? Math.sign(a.number - b.number) : 0
+  if (!a.tag || !b.tag) return a.tag ? -1 : 1
+  return a.tag < b.tag ? -1 : 1
+}
+
+/** Oldest declared host, source candidates included. Informational: peers still enumerate supported hosts. */
+export function minimumHost(input = policy) {
+  return declaredHostVersions(input).sort(compareHostVersions)[0]
+}
+
 export function validatePolicy(input) {
   if (input.schemaVersion !== 1 || input.previewTag !== 'next') throw new Error('Unsupported compatibility policy')
   const hosts = input.supportedHosts
@@ -38,6 +61,16 @@ export function validatePolicy(input) {
       throw new Error('Host targets must be unique exact versions with an explicit track')
     }
     versions.add(host.version)
+    if (host.platforms !== undefined && (!Array.isArray(host.platforms)
+        || !host.platforms.includes('ubuntu-latest')
+        || new Set(host.platforms).size !== host.platforms.length
+        || host.platforms.some(platform => !['ubuntu-latest', 'windows-latest'].includes(platform)))) {
+      throw new Error('Host platforms must include Ubuntu and only unique supported CI platforms')
+    }
+    if (host.legacyDirectInstallReason !== undefined && (typeof host.legacyDirectInstallReason !== 'string'
+        || !host.legacyDirectInstallReason.trim())) {
+      throw new Error('Legacy direct-install coverage requires an explicit reason')
+    }
   }
   const recommended = hosts.filter(host => host.track === 'recommended')
   if (recommended.length !== 1 || recommended[0].version !== input.recommendedHost) throw new Error('Exactly one recommended host is required')
@@ -80,7 +113,7 @@ export function validatePackageCompatibility(pkg, input = policy, workspace = wo
   }
   if (pkg.pnpm?.overrides) throw new Error('Move pnpm.overrides to pnpm-workspace.yaml for pnpm 11')
   const overrides = workspace.overrides ?? {}
-  const dshNames = Object.keys(pkg.devDependencies ?? {}).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+  const dshNames = Object.keys(pkg.devDependencies ?? {}).filter(name => isDshPackage(name))
   for (const name of dshNames) {
     if (overrides[name] !== baseline) throw new Error(`${name} requires an exact pnpm override to ${baseline}`)
   }
@@ -92,8 +125,10 @@ export function validatePackageCompatibility(pkg, input = policy, workspace = wo
       if (version !== baseline) throw new Error(`${name} override must match the development host ${baseline}`)
     }
   }
+  // The fork keeps an enumerated host declaration so an unknown host fails at
+  // install time instead of mounting without the audited adapters.
   for (const [name, range] of Object.entries(pkg.peerDependencies ?? {})) {
-    if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) {
+    if (isDshPackage(name)) {
       const declared = range.split('||').map(value => value.trim())
       if (declared.length !== declaredVersions.length || declaredVersions.some(version => !declared.includes(version))) {
         throw new Error(`${name} peer range must enumerate the supported host targets and source candidates`)

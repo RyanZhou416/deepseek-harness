@@ -73,7 +73,11 @@ export function inspectInstallation(hostRoot, profileRoot, support = policy) {
   if (plugin && plugin.version !== policyPackage.version) {
     problems.push(`Installed plugin ${plugin.version} differs from this policy's plugin ${policyPackage.version}; verify its own host compatibility`)
   }
-  if (!allowed.includes(host.version) && !sourceCandidate) problems.push(`Unsupported host ${host.version}; recommended target is ${support.recommendedHost}`)
+  const tested = allowed.includes(host.version)
+  // The fork enumerates every supported host in the peer range, so an untested
+  // host fails at install time and is unsupported here as well.
+  const installable = tested || sourceCandidate !== undefined
+  if (!installable) problems.push(`Unsupported host ${host.version}; requires one of ${allowed.join(', ')}, recommended target is ${support.recommendedHost}`)
   if (mixed.length) problems.push(`${mixed.length} resolved DSH packages differ from host ${host.version}`)
   if (missing.length) problems.push(`Missing packages: ${[...new Set(missing)].join(', ')}`)
   const identities = new Map()
@@ -89,11 +93,13 @@ export function inspectInstallation(hostRoot, profileRoot, support = policy) {
     host: { version: host.version, path: dirname(hostPath) },
     ...(plugin ? { plugin } : {}),
     checkedPackages: packages.length, supportedHosts: allowed,
-    validation: sourceCandidate ? { kind: 'source-preview', ...sourceCandidate, sourceCommitVerified: false } : { kind: allowed.includes(host.version) ? 'published-matrix' : 'unsupported' },
+    validation: sourceCandidate ? { kind: 'source-preview', ...sourceCandidate, sourceCommitVerified: false }
+      : { kind: tested ? 'published-matrix' : installable ? 'untested' : 'unsupported' },
     problems, packages,
     limits: [
       'Checks files resolved from the supplied roots; does not identify the running process or prove plugin behavior.',
       ...(sourceCandidate ? [`Host ${host.version} is pre-adapted against source ${sourceCandidate.commit}; this inspection does not verify that the installed release matches that source.`] : []),
+      ...(!tested && !sourceCandidate && installable ? [`Host ${host.version} is allowed but not in this release's tested matrix; report failures at https://github.com/NanmiCoder/dsh-agent-teams/issues.`] : []),
     ],
   }
 }

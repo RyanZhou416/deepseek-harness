@@ -1,0 +1,19 @@
+{
+  "checkedAt": "2026-10-26T02:41:17.779Z",
+  "needsAttention": true,
+  "hostChannels": {
+    "latest": "0.2.1-rc.2",
+    "next": "0.2.1-rc.3"
+  },
+  "pluginChannel": "latest",
+  "pluginVersion": "0.1.26",
+  "unverifiedChannels": [],
+  "unpublishedSupport": [
+    "0.2.1-rc.3"
+  ],
+  "unrecognizedDeclarations": [],
+  "limits": [
+    "Compares declarations only; does not prove runtime compatibility or publish anything.",
+    "Checks host latest/next and plugin latest; other tags and untagged releases require an explicit audit."
+  ]
+}

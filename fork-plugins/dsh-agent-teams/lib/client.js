@@ -382,6 +382,11 @@ window.__ModuleLoader__.load({
 			teams: [],
 			archivedTeams: []
 		};
+		const MAX_RETAINED_SCOPES = 8;
+		const scopedSnapshots = {
+			teams: /* @__PURE__ */ new Map(),
+			archivedTeams: /* @__PURE__ */ new Map()
+		};
 		function targetKey(sessionId, teamId) {
 			return `${sessionId}\u0000${teamId}`;
 		}
@@ -467,11 +472,32 @@ window.__ModuleLoader__.load({
 		function getActivitySnapshotsSnapshot() {
 			return activitySnapshots;
 		}
-		/** Publish one or both successful state-route responses. */
-		function updateActivitySnapshots(update) {
+		/** Read the rows owned by one route and optional scope for ETag comparison. */
+		function getPublishedActivityRows(field, scope) {
+			return scope === void 0 ? activitySnapshots[field] : scopedSnapshots[field].get(scope);
+		}
+		function replaceActivityRows(field, rows, scope) {
+			const current = activitySnapshots[field];
+			if (rows === void 0) return current;
+			const recent = scopedSnapshots[field];
+			if (scope === void 0) {
+				recent.clear();
+				return rows;
+			}
+			const previous = recent.get(scope);
+			recent.delete(scope);
+			recent.set(scope, rows);
+			const oldest = recent.size > MAX_RETAINED_SCOPES ? recent.keys().next().value : void 0;
+			if (oldest !== void 0) recent.delete(oldest);
+			if (previous === rows) return current;
+			const otherRows = current.filter((team) => team.captainSessionId !== scope && team.captainSessionId !== oldest);
+			return otherRows.length === current.length && rows.length === 0 ? current : [...otherRows, ...rows];
+		}
+		/** Publish full state-route responses or replace the rows for just one captain. */
+		function updateActivitySnapshots(update, scope) {
 			const next = {
-				teams: update.teams ?? activitySnapshots.teams,
-				archivedTeams: update.archivedTeams ?? activitySnapshots.archivedTeams
+				teams: replaceActivityRows("teams", update.teams, scope),
+				archivedTeams: replaceActivityRows("archivedTeams", update.archivedTeams, scope)
 			};
 			if (next.teams === activitySnapshots.teams && next.archivedTeams === activitySnapshots.archivedTeams) return;
 			activitySnapshots = next;
@@ -489,6 +515,13 @@ window.__ModuleLoader__.load({
 		/** Host route serving live and archived team snapshots. */
 		const ACTIVITY_STATE_URL = "/plugins/dsh-agent-teams/state";
 		const ACTIVITY_HALT_URL = "/plugins/dsh-agent-teams/halt";
+		async function readActivityTeams(response, scope) {
+			if (!response.ok) throw new Error("Activity unavailable");
+			const body = await response.json();
+			if (!Array.isArray(body?.teams) || body.teams.some((team) => typeof team?.teamId !== "string" || typeof team?.captainSessionId !== "string")) throw new Error("Invalid activity response");
+			const teams = body.teams;
+			return scope === void 0 ? teams : teams.filter((team) => team.captainSessionId === scope);
+		}
 		/**
 		* Start the single polling loop for the current session's requested targets.
 		*
@@ -517,12 +550,24 @@ window.__ModuleLoader__.load({
 				clearInterval(timer);
 			});
 			const publishSnapshots = runtime.publishSnapshots ?? updateActivitySnapshots;
+			const getPublishedRows = runtime.getPublishedRows ?? (runtime.publishSnapshots === void 0 ? getPublishedActivityRows : void 0);
 			const settleTargets = runtime.settleTargets ?? settleActivityMonitorTargets;
+			const owners = new Set(monitorTargets.map((target) => target.sessionId));
+			if (discoverySessionId) owners.add(discoverySessionId);
+			const scope = owners.size === 1 ? owners.values().next().value : void 0;
+			const sessionQuery = scope ? new URLSearchParams({ session: scope }).toString() : "";
+			const liveUrl = sessionQuery === "" ? ACTIVITY_STATE_URL : `${ACTIVITY_STATE_URL}?${sessionQuery}&summary=1`;
+			const archiveUrl = `${ACTIVITY_STATE_URL}?archived=1${sessionQuery === "" ? "" : `&${sessionQuery}`}`;
+			const conditionalHeaders = (tag) => tag === void 0 ? {} : { headers: { "if-none-match": tag } };
+			const stillPublished = (field, snapshot) => getPublishedRows === void 0 || getPublishedRows(field, scope) === snapshot?.teams;
 			let cancelled = false;
 			let inFlight = false;
 			let hot = monitorTargets.length > 0;
-			let discoveryComplete = false;
 			let discoveredLiveKeys = /* @__PURE__ */ new Set();
+			let archiveRefreshPending = Boolean(discoverySessionId);
+			let missingTargets = /* @__PURE__ */ new Set();
+			let publishedLive;
+			let publishedArchive;
 			let controller;
 			let timer;
 			const intervalMs = () => hot ? ACTIVITY_POLL_MS : ACTIVITY_PROBE_MS;
@@ -537,38 +582,55 @@ window.__ModuleLoader__.load({
 				inFlight = true;
 				controller = new AbortController();
 				try {
-					const liveResponse = await fetchState(ACTIVITY_STATE_URL, {
+					const liveTag = stillPublished("teams", publishedLive) ? publishedLive?.tag : void 0;
+					const liveResponse = await fetchState(liveUrl, {
 						cache: "no-store",
-						signal: controller.signal
+						signal: controller.signal,
+						...conditionalHeaders(liveTag)
 					});
-					if (!liveResponse.ok) throw new Error("Activity unavailable");
-					const body = await liveResponse.json();
 					if (cancelled) return;
-					if (!Array.isArray(body.teams)) throw new Error("Invalid activity response");
+					if (liveResponse.status !== 304 || liveTag === void 0) {
+						const liveTeams = await readActivityTeams(liveResponse, scope);
+						if (cancelled) return;
+						publishSnapshots({ teams: liveTeams }, scope);
+						if (cancelled) return;
+						publishedLive = {
+							teams: liveTeams,
+							tag: liveResponse.headers?.get("etag") ?? void 0
+						};
+						const previousDiscoveredKeys = discoveredLiveKeys;
+						discoveredLiveKeys = new Set(discoverySessionId ? liveTeams.filter((team) => team.captainSessionId === discoverySessionId).map((team) => team.teamId) : []);
+						archiveRefreshPending ||= [...previousDiscoveredKeys].some((teamId) => !discoveredLiveKeys.has(teamId));
+						missingTargets = new Set(monitorTargets.filter((target) => !liveTeams.some((team) => team.captainSessionId === target.sessionId && team.teamId === target.teamId)).map((target) => target.key));
+						if (!hot && discoveredLiveKeys.size > 0) {
+							hot = true;
+							reschedule();
+						}
+					} else if (!stillPublished("teams", publishedLive)) return;
 					runtime.onStatus?.("ready");
-					const liveTeams = body.teams;
-					publishSnapshots({ teams: liveTeams });
-					const previousDiscoveredKeys = discoveredLiveKeys;
-					discoveredLiveKeys = new Set(discoverySessionId === void 0 || discoverySessionId === "" ? [] : liveTeams.filter((team) => team.captainSessionId === discoverySessionId).map((team) => team.teamId));
-					if (!hot && discoveredLiveKeys.size > 0) {
-						hot = true;
-						reschedule();
-					}
-					const discoveredTeamArchived = [...previousDiscoveredKeys].some((teamId) => !discoveredLiveKeys.has(teamId));
-					const missing = monitorTargets.filter((target) => !liveTeams.some((team) => team.captainSessionId === target.sessionId && team.teamId === target.teamId));
-					const needsDiscoveryArchive = discoverySessionId !== void 0 && discoverySessionId !== "" && !discoveryComplete;
-					if (missing.length === 0 && !needsDiscoveryArchive && !discoveredTeamArchived) return;
-					const archivedResponse = await fetchState(`${ACTIVITY_STATE_URL}?archived=1`, {
+					const archiveReplaced = publishedArchive !== void 0 && !stillPublished("archivedTeams", publishedArchive);
+					if (cancelled || missingTargets.size === 0 && !archiveRefreshPending && !archiveReplaced) return;
+					const archiveTag = archiveReplaced ? void 0 : publishedArchive?.tag;
+					const archivedResponse = await fetchState(archiveUrl, {
 						cache: "no-store",
-						signal: controller.signal
+						signal: controller.signal,
+						...conditionalHeaders(archiveTag)
 					});
-					if (!archivedResponse.ok) throw new Error("Archive unavailable");
-					const archivedBody = await archivedResponse.json();
 					if (cancelled) return;
-					if (!Array.isArray(archivedBody.teams)) throw new Error("Invalid archive response");
-					publishSnapshots({ archivedTeams: archivedBody.teams });
-					discoveryComplete = true;
-					settleTargets(new Set(missing.map((target) => target.key)));
+					if (archivedResponse.status !== 304 || archiveTag === void 0) {
+						const archivedTeams = await readActivityTeams(archivedResponse, scope);
+						if (cancelled) return;
+						publishSnapshots({ archivedTeams }, scope);
+						if (cancelled) return;
+						publishedArchive = {
+							teams: archivedTeams,
+							tag: archivedResponse.headers?.get("etag") ?? void 0
+						};
+					} else if (!stillPublished("archivedTeams", publishedArchive)) return;
+					archiveRefreshPending = false;
+					const settled = missingTargets;
+					missingTargets = /* @__PURE__ */ new Set();
+					settleTargets(settled);
 				} catch (error) {
 					if (error?.name === "AbortError") return;
 					if (!cancelled) runtime.onStatus?.("error");
@@ -631,8 +693,8 @@ window.__ModuleLoader__.load({
 			return null;
 		}
 		//#endregion
-		//#region \0dsh-css:C:\Project\dsh-upgrade\worktree\fork-plugins\dsh-agent-teams\src\client\AgentTeamsCard.module.css.mjs
-		const css$2 = ".HcVmTG_root{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);border-radius:10px;flex-direction:column;gap:8px;width:100%;min-width:0;padding:10px 12px;display:flex}.HcVmTG_head{align-items:center;gap:8px;min-width:0;display:flex}.HcVmTG_leadAvatar{object-fit:contain;filter:drop-shadow(0 1px 1px #122d4833);background:0 0;border:0;border-radius:0;flex:none;width:30px;height:30px}.HcVmTG_teamName{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;flex:0 auto;font-size:13px;font-weight:600;line-height:20px;overflow:hidden}.HcVmTG_memberCount{color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none;margin-left:auto;font-size:11px;line-height:16px}.HcVmTG_panelButton{border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;border-radius:999px;flex:none;padding:2px 8px;font-size:10.5px;font-weight:600;line-height:16px;transition:border-color .12s,color .12s}.HcVmTG_panelButton:hover{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}.HcVmTG_panelButton:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}.HcVmTG_members{flex-wrap:wrap;gap:6px;min-width:0;display:flex}.HcVmTG_member{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);max-width:160px;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;border-radius:999px;align-items:center;gap:5px;padding:3px 8px 3px 3px;font-size:11px;font-weight:500;line-height:16px;transition:border-color .12s,background-color .12s;display:inline-flex}.HcVmTG_member:hover{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-button-ghost-active-fill)}.HcVmTG_member:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}.HcVmTG_memberArt{object-fit:contain;filter:drop-shadow(0 1px 1px #122d482e);background:0 0;border:0;border-radius:0;width:24px;height:24px}.HcVmTG_memberInitial{background:var(--dsw-alias-state-business-primary);width:20px;height:20px;color:var(--dsw-alias-label-primary-inverted);border-radius:50%;justify-content:center;align-items:center;font-size:10px;font-weight:600;line-height:20px;display:inline-flex}.HcVmTG_memberName{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.HcVmTG_chatEntry{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font:inherit;white-space:nowrap;cursor:pointer;background:0 0;border-radius:7px;align-items:center;gap:5px;padding:3px 8px;font-size:12px;display:inline-flex}.HcVmTG_chatEntry img{object-fit:contain;width:22px;height:22px}.HcVmTG_chatEntry:hover{background:var(--dsw-alias-bg-module-platform)}.HcVmTG_chatEntry:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.HcVmTG_turnCards{gap:8px;margin-block:10px;display:grid}@media (width<=600px){.HcVmTG_head{flex-wrap:wrap}}";
+		//#region \0dsh-css:C:\Project\dsh-agt\worktree\fork-plugins\dsh-agent-teams\src\client\AgentTeamsCard.module.css.mjs
+		const css$2 = ".Rkd7ya_root{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);border-radius:10px;flex-direction:column;gap:8px;width:100%;min-width:0;padding:10px 12px;display:flex}.Rkd7ya_head{align-items:center;gap:8px;min-width:0;display:flex}.Rkd7ya_leadAvatar{object-fit:contain;filter:drop-shadow(0 1px 1px #122d4833);background:0 0;border:0;border-radius:0;flex:none;width:30px;height:30px}.Rkd7ya_teamName{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;flex:0 auto;font-size:13px;font-weight:600;line-height:20px;overflow:hidden}.Rkd7ya_memberCount{color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none;margin-left:auto;font-size:11px;line-height:16px}.Rkd7ya_panelButton{border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;border-radius:999px;flex:none;padding:2px 8px;font-size:10.5px;font-weight:600;line-height:16px;transition:border-color .12s,color .12s}.Rkd7ya_panelButton:hover{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}.Rkd7ya_panelButton:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}.Rkd7ya_members{flex-wrap:wrap;gap:6px;min-width:0;display:flex}.Rkd7ya_member{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);max-width:160px;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;border-radius:999px;align-items:center;gap:5px;padding:3px 8px 3px 3px;font-size:11px;font-weight:500;line-height:16px;transition:border-color .12s,background-color .12s;display:inline-flex}.Rkd7ya_member:hover{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-button-ghost-active-fill)}.Rkd7ya_member:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}.Rkd7ya_memberArt{object-fit:contain;filter:drop-shadow(0 1px 1px #122d482e);background:0 0;border:0;border-radius:0;width:24px;height:24px}.Rkd7ya_memberInitial{background:var(--dsw-alias-state-business-primary);width:20px;height:20px;color:var(--dsw-alias-label-primary-inverted);border-radius:50%;justify-content:center;align-items:center;font-size:10px;font-weight:600;line-height:20px;display:inline-flex}.Rkd7ya_memberName{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.Rkd7ya_chatEntry{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font:inherit;white-space:nowrap;cursor:pointer;background:0 0;border-radius:7px;align-items:center;gap:5px;padding:3px 8px;font-size:12px;display:inline-flex}.Rkd7ya_chatEntry img{object-fit:contain;width:22px;height:22px}.Rkd7ya_chatEntry:hover{background:var(--dsw-alias-bg-module-platform)}.Rkd7ya_chatEntry:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.Rkd7ya_turnCards{gap:8px;margin-block:10px;display:grid}@media (width<=600px){.Rkd7ya_head{flex-wrap:wrap}}";
 		const tagId$2 = "@nanmicoder/dsh-agent-teams/AgentTeamsCard.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$2) + "]") === null) {
 			const tag = document.createElement("style");
@@ -642,19 +704,19 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var AgentTeamsCard_module_css_default = {
-			"chatEntry": "HcVmTG_chatEntry",
-			"head": "HcVmTG_head",
-			"leadAvatar": "HcVmTG_leadAvatar",
-			"member": "HcVmTG_member",
-			"memberArt": "HcVmTG_memberArt",
-			"memberCount": "HcVmTG_memberCount",
-			"memberInitial": "HcVmTG_memberInitial",
-			"memberName": "HcVmTG_memberName",
-			"members": "HcVmTG_members",
-			"panelButton": "HcVmTG_panelButton",
-			"root": "HcVmTG_root",
-			"teamName": "HcVmTG_teamName",
-			"turnCards": "HcVmTG_turnCards"
+			"chatEntry": "Rkd7ya_chatEntry",
+			"head": "Rkd7ya_head",
+			"leadAvatar": "Rkd7ya_leadAvatar",
+			"member": "Rkd7ya_member",
+			"memberArt": "Rkd7ya_memberArt",
+			"memberCount": "Rkd7ya_memberCount",
+			"memberInitial": "Rkd7ya_memberInitial",
+			"memberName": "Rkd7ya_memberName",
+			"members": "Rkd7ya_members",
+			"panelButton": "Rkd7ya_panelButton",
+			"root": "Rkd7ya_root",
+			"teamName": "Rkd7ya_teamName",
+			"turnCards": "Rkd7ya_turnCards"
 		};
 		//#endregion
 		//#region lib/client/AgentTeamsCard.js
@@ -776,8 +838,8 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region \0dsh-css:C:\Project\dsh-upgrade\worktree\fork-plugins\dsh-agent-teams\src\client\ActivityPanel.module.css.mjs
-		const css$1 = "html{--agent-teams-panel-shift:420px}html[data-agent-teams-panel-open] [data-phase=active]{box-sizing:border-box;padding-right:var(--agent-teams-panel-shift)}.FqzhMq_badge{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:color-mix(in srgb, var(--dsw-alias-bg-module-platform) 92%, transparent);backdrop-filter:blur(16px);height:34px;box-shadow:0 8px 28px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 29%, transparent);color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;border-radius:999px;align-items:center;gap:7px;padding:0 12px;font-size:12px;font-weight:600;line-height:20px;transition:border-color .15s,transform .12s;display:inline-flex;position:absolute;top:64px;right:18px}.FqzhMq_badge:hover{border-color:var(--dsw-alias-border-l3);transform:translateY(-1px)}.FqzhMq_badge:active{transform:translateY(0)scale(.98)}.FqzhMq_badge:focus-visible,.FqzhMq_iconButton:focus-visible,.FqzhMq_memberRow:focus-visible,.FqzhMq_membersToggle:focus-visible,.FqzhMq_sectionToggleTitle:focus-visible,.FqzhMq_dagNode:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.FqzhMq_badgeDot,.FqzhMq_panelDot{background:var(--dsw-alias-label-tertiary);border-radius:50%;width:7px;height:7px}.FqzhMq_badgeDot[data-busy=true],.FqzhMq_panelDot[data-busy=true]{background:var(--dsw-alias-state-business-primary);animation:1.25s ease-in-out infinite FqzhMq_agentTeamsPulse}.FqzhMq_badgeCount,.FqzhMq_memberCount,.FqzhMq_teamStats,.FqzhMq_stageLabel,.FqzhMq_taskId{font-variant-numeric:tabular-nums}.FqzhMq_panel{box-sizing:border-box;border:1px solid color-mix(in srgb, var(--dsw-alias-border-l3) 58%, transparent);background:color-mix(in srgb, var(--dsw-alias-bg-layer-1) 95%, transparent);backdrop-filter:blur(20px)saturate(1.08);box-shadow:0 12px 32px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 25%, transparent), 0 32px 72px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 33%, transparent);will-change:transform;border-radius:16px;flex-direction:column;animation:.16s ease-out FqzhMq_agentTeamsPanelIn;display:flex;position:absolute;top:0;left:0;overflow:hidden}.FqzhMq_panel[data-dragging],.FqzhMq_panel[data-resizing]{user-select:none;box-shadow:0 16px 38px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 29%, transparent), 0 36px 78px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 38%, transparent)}@keyframes FqzhMq_agentTeamsPanelIn{0%{opacity:0}to{opacity:1}}@keyframes FqzhMq_agentTeamsPulse{0%,to{opacity:.42}50%{opacity:1}}.FqzhMq_panelHead{border-bottom:1px solid var(--dsw-alias-border-l2);cursor:grab;touch-action:none;flex:none;justify-content:space-between;align-items:center;min-height:44px;padding:0 14px 0 16px;display:flex}.FqzhMq_panelHead:active,.FqzhMq_panel[data-dragging] .FqzhMq_panelHead{cursor:grabbing}.FqzhMq_panel[data-compact] .FqzhMq_panelHead{cursor:default;touch-action:auto}.FqzhMq_panelTitle{color:var(--dsw-alias-label-primary);align-items:center;gap:8px;font-size:14px;font-weight:600;line-height:20px;display:inline-flex}.FqzhMq_panelControls{flex:none;align-items:center;gap:2px;display:inline-flex}.FqzhMq_iconButton{width:28px;height:28px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:7px;justify-content:center;align-items:center;padding:0;transition:background-color .12s,color .12s,transform .12s;display:inline-flex}.FqzhMq_iconButton:hover{background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-primary)}.FqzhMq_iconButton:active{transform:scale(.94)}.FqzhMq_iconButton[data-control=dock][data-mode=docked] svg{transform:scaleX(-1)}.FqzhMq_resizeHandle{z-index:5;touch-action:none;pointer-events:auto;position:absolute}.FqzhMq_resizeHandle[data-resize-edge=left]{cursor:ew-resize;width:14px;top:44px;bottom:14px;left:0}.FqzhMq_resizeHandle[data-resize-edge=left]:after{background:color-mix(in srgb, var(--dsw-alias-label-tertiary) 42%, transparent);content:\"\";opacity:.45;border-radius:999px;width:3px;height:48px;transition:background-color .12s,opacity .12s;position:absolute;top:50%;left:4px;transform:translateY(-50%)}.FqzhMq_resizeHandle[data-resize-edge=bottom]{cursor:ns-resize;height:14px;bottom:0;left:20px;right:20px}.FqzhMq_resizeHandle[data-resize-edge=bottom]:after{background:color-mix(in srgb, var(--dsw-alias-label-tertiary) 42%, transparent);content:\"\";opacity:.45;border-radius:999px;width:48px;height:3px;transition:background-color .12s,opacity .12s;position:absolute;bottom:4px;left:50%;transform:translate(-50%)}.FqzhMq_resizeHandle[data-resize-edge=corner]{cursor:nwse-resize;width:28px;height:28px;bottom:0;right:0}.FqzhMq_resizeHandle[data-resize-edge=corner]:after{border-right:2px solid var(--dsw-alias-label-tertiary);border-bottom:2px solid var(--dsw-alias-label-tertiary);content:\"\";opacity:.58;width:10px;height:10px;transition:border-color .12s,opacity .12s;position:absolute;bottom:6px;right:6px}.FqzhMq_resizeHandle:hover:after,.FqzhMq_panel[data-resizing] .FqzhMq_resizeHandle:after{background-color:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);opacity:.95}.FqzhMq_teams{overscroll-behavior:contain;scrollbar-color:color-mix(in srgb, var(--dsw-alias-label-tertiary) 28%, transparent) transparent;scrollbar-width:thin;flex-direction:column;min-height:0;display:flex;overflow-y:auto}.FqzhMq_teams::-webkit-scrollbar{width:6px}.FqzhMq_teams::-webkit-scrollbar-track{background:0 0}.FqzhMq_teams::-webkit-scrollbar-thumb{background:color-mix(in srgb, var(--dsw-alias-label-tertiary) 28%, transparent);background-clip:padding-box;border:2px solid #0000;border-radius:999px}.FqzhMq_teams:hover::-webkit-scrollbar-thumb{background:color-mix(in srgb, var(--dsw-alias-label-tertiary) 44%, transparent);background-clip:padding-box}.FqzhMq_team{border-bottom:1px solid var(--dsw-alias-border-l2);flex-direction:column;gap:12px;padding:12px 14px 16px;display:flex;container:FqzhMq_agent-team/inline-size}.FqzhMq_team:last-child{border-bottom:0}.FqzhMq_teamHead{align-items:center;gap:10px;min-width:0;display:flex}.FqzhMq_teamName{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:13px;font-weight:600;line-height:18px;overflow:hidden}.FqzhMq_teamStats{color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none;gap:8px;font-size:10.5px;line-height:16px;display:inline-flex}.FqzhMq_teamStopButton{border:1px solid var(--dsw-alias-border-l2);width:26px;height:26px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border-radius:7px;flex:none;place-items:center;padding:0;transition:border-color .15s,background .15s,color .15s;display:grid}.FqzhMq_teamStopButton:hover{border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 42%, var(--dsw-alias-border-l2));background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, transparent);color:var(--dsw-alias-state-error-primary)}.FqzhMq_teamStopButton:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.FqzhMq_stopModalActions{justify-content:flex-end;gap:8px;display:flex}.FqzhMq_stopModalActions button{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-ghost-active-fill);min-height:34px;color:var(--dsw-alias-label-primary);cursor:pointer;font:inherit;border-radius:8px;justify-content:center;align-items:center;gap:6px;padding:6px 13px;font-size:12px;font-weight:600;display:inline-flex}.FqzhMq_stopModalActions button[data-danger]{border-color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-inverted)}.FqzhMq_stopModalActions button:disabled{cursor:wait;opacity:.58}.FqzhMq_stopModalError{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);color:var(--dsw-alias-state-error-primary);border-radius:8px;align-items:flex-start;gap:7px;margin:0;padding:9px 10px;font-size:12px;line-height:18px;display:flex}.FqzhMq_stopModalError svg{flex:none;margin-top:1px}.FqzhMq_sectionHead{justify-content:space-between;align-items:center;gap:8px;min-width:0;display:flex}.FqzhMq_sectionTitle{color:var(--dsw-alias-label-secondary);align-items:center;gap:6px;font-size:11px;font-weight:600;line-height:16px;display:inline-flex}.FqzhMq_sectionHint{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:14px;overflow:hidden}.FqzhMq_delegationSection{min-width:0}.FqzhMq_captainNode{box-sizing:border-box;border:1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 32%, var(--dsw-alias-border-l2));background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-layer-1));border-radius:10px;grid-template-columns:48px minmax(0,1fr) auto;align-items:center;gap:9px;min-height:56px;padding:6px 10px;display:grid}.FqzhMq_captainAvatar,.FqzhMq_memberAvatar{flex:none;justify-content:center;align-items:center;display:inline-flex;position:relative}.FqzhMq_captainAvatar{width:46px;height:46px}.FqzhMq_leadAvatar,.FqzhMq_memberArt{object-fit:contain;filter:drop-shadow(0 1px 1px #122d4833);background:0 0;border:0;border-radius:0}.FqzhMq_leadAvatar{width:44px;height:44px}.FqzhMq_memberArt{width:40px;height:40px}.FqzhMq_captainInfo,.FqzhMq_memberInfo{flex-direction:column;min-width:0;display:flex}.FqzhMq_captainInfo{gap:2px}.FqzhMq_captainLine,.FqzhMq_memberLine{align-items:center;gap:6px;min-width:0;display:flex}.FqzhMq_captainName,.FqzhMq_memberName{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:600;line-height:18px;overflow:hidden}.FqzhMq_captainRole,.FqzhMq_memberRole{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:14px;overflow:hidden}.FqzhMq_captainSummary,.FqzhMq_memberStatusLine{color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;line-height:15px;overflow:hidden}.FqzhMq_taskDetailModel{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px;line-height:14px;overflow:hidden}.FqzhMq_memberModel{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-ghost-active-fill);min-width:0;max-width:132px;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;border-radius:999px;flex:0 auto;align-items:center;padding:0 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;font-weight:600;line-height:15px;display:inline-flex;overflow:hidden}.FqzhMq_captainState,.FqzhMq_memberState{color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none;align-items:center;gap:5px;font-size:10px;font-weight:500;line-height:15px;display:inline-flex}.FqzhMq_captainState[data-busy=true],.FqzhMq_memberState[data-activity=working]{color:var(--dsw-alias-state-business-primary)}.FqzhMq_workGlyph rect{opacity:.5}.FqzhMq_workGlyph[data-active=true] rect{animation:1.1s ease-in-out infinite FqzhMq_agentTeamsDot}@keyframes FqzhMq_agentTeamsDot{0%,to{opacity:.25}50%{opacity:1}}.FqzhMq_progressOverview{flex-direction:column;gap:7px;display:flex}.FqzhMq_progressTitle{color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:600;line-height:16px}.FqzhMq_progressSegments{gap:3px;display:flex}.FqzhMq_progressSegments>span,.FqzhMq_progressEmpty{background:var(--dsw-alias-border-l3);border-radius:2px;flex:1;height:5px}.FqzhMq_progressEmpty{width:100%;display:block}.FqzhMq_progressSegments>span[data-state=running]{background:var(--dsw-alias-state-business-primary)}.FqzhMq_progressSegments>span[data-state=blocked]{background:var(--dsw-alias-state-warn-primary)}.FqzhMq_progressSegments>span[data-state=completed]{background:var(--dsw-alias-state-success-primary)}.FqzhMq_progressSegments>span[data-state=failed]{background:var(--dsw-alias-state-error-primary)}.FqzhMq_progressSegments>span[data-state=cancelled]{opacity:.55}.FqzhMq_progressLegend{color:var(--dsw-alias-label-tertiary);gap:10px;font-size:9.5px;line-height:14px;display:flex}.FqzhMq_progressLegend>span[data-state=running]{color:var(--dsw-alias-state-business-primary)}.FqzhMq_progressLegend>span[data-state=blocked]{color:var(--dsw-alias-state-warn-primary)}.FqzhMq_progressLegend>span[data-state=completed]{color:var(--dsw-alias-state-success-primary)}.FqzhMq_progressSummary{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-layer-1));min-width:0;color:var(--dsw-alias-label-secondary);border-radius:8px;align-items:center;gap:6px;padding:5px 8px;font-size:10px;font-weight:600;line-height:15px;display:flex}.FqzhMq_progressSummary[data-state=warning]{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 8%, var(--dsw-alias-bg-layer-1))}.FqzhMq_progressSummary[data-state=completed]{background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 8%, var(--dsw-alias-bg-layer-1))}.FqzhMq_progressSummary[data-state=discarded]{background:var(--dsw-alias-button-ghost-active-fill)}.FqzhMq_progressSummary>span:last-child{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.FqzhMq_progressSummaryDot{background:var(--dsw-alias-state-business-primary);border-radius:50%;flex:none;width:5px;height:5px}.FqzhMq_progressSummary[data-state=warning] .FqzhMq_progressSummaryDot{background:var(--dsw-alias-state-warn-primary)}.FqzhMq_progressSummary[data-state=completed] .FqzhMq_progressSummaryDot{background:var(--dsw-alias-state-success-primary)}.FqzhMq_progressSummary[data-state=discarded] .FqzhMq_progressSummaryDot{background:var(--dsw-alias-label-tertiary)}.FqzhMq_membersToggle{background:var(--dsw-alias-bg-module-platform);width:100%;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;border:0;border-radius:8px;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;font-size:10.5px;font-weight:600;line-height:15px;display:flex}.FqzhMq_membersToggle:hover{background:var(--dsw-alias-button-ghost-active-fill)}.FqzhMq_membersToggle>span{align-items:center;gap:5px;display:inline-flex}.FqzhMq_membersToggle>span:last-child{color:var(--dsw-alias-state-business-primary)}.FqzhMq_chevron{flex:none;transition:transform .14s}.FqzhMq_chevron[data-open=true]{transform:rotate(90deg)}.FqzhMq_delegationTree{flex-direction:column;gap:2px;margin-left:18px;padding:9px 0 0 20px;display:flex;position:relative}.FqzhMq_delegationTree:before{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 48%, var(--dsw-alias-border-l2));content:\"\";width:1px;position:absolute;top:0;bottom:22px;left:0}.FqzhMq_memberBlock{flex-direction:column;min-width:0;padding:3px 0 7px;display:flex;position:relative}.FqzhMq_memberBranch{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 48%, var(--dsw-alias-border-l2));width:20px;height:1px;display:block;position:absolute;top:27px;right:100%}.FqzhMq_memberBranch:before{background:var(--dsw-alias-state-business-primary);content:\"\";border-radius:50%;width:5px;height:5px;position:absolute;top:-2px;right:-1px}.FqzhMq_memberRow{box-sizing:border-box;width:100%;min-width:0;min-height:48px;color:inherit;font:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:8px;grid-template-columns:46px minmax(0,1fr) auto;align-items:center;gap:8px;padding:4px 6px;transition:background-color .12s,transform .12s;display:grid}.FqzhMq_memberRow:hover,.FqzhMq_memberRow[data-activity=working]{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-layer-1))}.FqzhMq_memberRow:active{transform:scale(.995)}.FqzhMq_memberAvatar{width:42px;height:42px}.FqzhMq_memberAvatar[data-unread=true]:after{box-sizing:border-box;border:1px solid var(--dsw-alias-bg-layer-1);background:var(--dsw-alias-state-business-primary);content:\"\";border-radius:50%;width:6px;height:6px;animation:1.8s ease-in-out infinite FqzhMq_agentTeamsUnreadPulse;position:absolute;top:0;right:-1px}@keyframes FqzhMq_agentTeamsUnreadPulse{0%,to{opacity:.78;transform:scale(.92)}50%{opacity:1;transform:scale(1.16)}}.FqzhMq_memberInitial{background:var(--dsw-alias-state-business-primary);width:34px;height:34px;color:var(--dsw-alias-label-primary-inverted);border-radius:50%;justify-content:center;align-items:center;font-size:14px;font-weight:600;line-height:20px;display:inline-flex}.FqzhMq_stateArt{box-sizing:border-box;object-fit:contain;width:22px;height:22px;filter:drop-shadow(0 0 1px var(--dsw-alias-bg-layer-1)) drop-shadow(0 1px 1px #122d483d);background:0 0;border:0;border-radius:0;position:absolute;bottom:-3px;right:-5px}.FqzhMq_stateArt[data-activity=working]{animation:2.4s ease-in-out infinite FqzhMq_agentTeamsFloat}.FqzhMq_stateArt[data-activity=idle]{animation:4.2s ease-in-out infinite FqzhMq_agentTeamsBreathe}.FqzhMq_stateArt[data-activity=unknown]{animation:2.8s ease-in-out infinite FqzhMq_agentTeamsThink}@keyframes FqzhMq_agentTeamsFloat{0%,to{transform:translateY(0)rotate(-4deg)}50%{transform:translateY(-2px)rotate(4deg)}}@keyframes FqzhMq_agentTeamsBreathe{0%,to{opacity:.82;transform:scale(1)}50%{opacity:1;transform:scale(1.06)}}@keyframes FqzhMq_agentTeamsThink{0%,to{transform:rotate(-7deg)}50%{transform:rotate(7deg)}}.FqzhMq_memberState{margin-left:auto}.FqzhMq_memberCount{color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:16px}.FqzhMq_assignmentLine{align-items:center;gap:7px;min-width:0;padding:0 6px 0 60px;display:flex}.FqzhMq_assignmentLabel{color:var(--dsw-alias-label-tertiary);flex:none;font-size:9.5px;line-height:14px}.FqzhMq_assignmentTasks{flex-wrap:wrap;flex:1;gap:4px;min-width:0;display:flex}.FqzhMq_assignmentChip{background:var(--dsw-alias-button-ghost-active-fill);max-width:100%;min-height:16px;color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;border-radius:4px;align-items:center;padding:0 5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;font-weight:600;line-height:14px;display:inline-flex;overflow:hidden}.FqzhMq_assignmentChip[data-state=running]{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted)}.FqzhMq_assignmentChip[data-state=completed]{background:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-label-primary-inverted)}.FqzhMq_assignmentChip[data-state=blocked]{background:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-label-primary-inverted)}.FqzhMq_assignmentChip[data-state=failed]{background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-inverted)}.FqzhMq_assignmentChip[data-state=cancelled]{color:var(--dsw-alias-label-tertiary);text-decoration:line-through}.FqzhMq_unreadPill{color:var(--dsw-alias-state-business-primary);white-space:nowrap;flex:none;font-size:9.5px;font-weight:600;line-height:14px}.FqzhMq_taskEmpty{color:var(--dsw-alias-label-tertiary);font-size:9.5px;line-height:14px}.FqzhMq_dependencySection{border-top:1px solid var(--dsw-alias-border-l2);flex-direction:column;gap:7px;min-width:0;padding-top:10px;display:flex}.FqzhMq_sectionToggleTitle{color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;background:0 0;border:0;align-items:center;gap:6px;padding:0;font-size:11px;font-weight:600;line-height:16px;display:inline-flex}.FqzhMq_dagViewport{scrollbar-width:thin;min-width:0;padding:2px 0 4px;overflow-x:auto}.FqzhMq_dagCanvas{min-width:100%;position:relative}.FqzhMq_dagCanvas[data-layout=parallel]{flex-wrap:wrap;gap:8px;display:flex}.FqzhMq_dagCanvas[data-layout=parallel] .FqzhMq_dagNode{flex:92px;min-width:92px;position:relative}.FqzhMq_dagEdges{pointer-events:none;position:absolute;inset:0;overflow:visible}.FqzhMq_dagEdges path{fill:none;stroke:var(--dsw-alias-border-l3);stroke-width:1px;transition:opacity .14s,stroke .14s,stroke-width .14s}.FqzhMq_dagEdges path[data-active=true]{stroke:var(--dsw-alias-state-business-primary);stroke-width:1.6px}.FqzhMq_dagEdges path[data-dimmed=true]{opacity:.24}.FqzhMq_dagNode{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer;border-radius:6px;flex-direction:column;justify-content:center;gap:1px;padding:0 6px;transition:border-color .14s,background-color .14s,opacity .14s;display:flex;position:absolute}.FqzhMq_dagNode:hover,.FqzhMq_dagNode[data-focused=true]{border-color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-layer-1))}.FqzhMq_dagNode[data-dimmed=true]{opacity:.3}.FqzhMq_dagNode[data-state=running][data-dimmed=true]{opacity:.58}.FqzhMq_dagNode[data-state=completed]{border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 48%, var(--dsw-alias-border-l2))}.FqzhMq_dagNode[data-state=blocked]{border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 52%, var(--dsw-alias-border-l2))}.FqzhMq_dagNode[data-state=failed]{border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 56%, var(--dsw-alias-border-l2))}.FqzhMq_dagNode[data-verdict-stale=true]{border-style:dashed;border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 62%, var(--dsw-alias-border-l2))}.FqzhMq_dagNode[data-verdict-stale=true] .FqzhMq_dagNodeHead{color:var(--dsw-alias-state-warn-primary)}.FqzhMq_dagNodeHead{color:var(--dsw-alias-label-primary);align-items:center;gap:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px;font-weight:700;display:flex}.FqzhMq_dagNodeDot{background:var(--dsw-alias-border-l3);border-radius:1.5px;flex:none;width:5px;height:5px}.FqzhMq_dagNode[data-state=running] .FqzhMq_dagNodeDot{background:var(--dsw-alias-state-business-primary)}.FqzhMq_dagNode[data-state=running] .FqzhMq_dagNodeHead{padding-right:12px}.FqzhMq_dagRunningState{width:9px;height:9px;color:var(--dsw-alias-state-business-primary);pointer-events:none;justify-content:center;align-items:center;display:inline-flex;position:absolute;top:4px;right:5px}.FqzhMq_dagRunningState .FqzhMq_workGlyph{width:9px;height:9px}.FqzhMq_dagNode[data-state=blocked] .FqzhMq_dagNodeDot{background:var(--dsw-alias-state-warn-primary)}.FqzhMq_dagNode[data-state=completed] .FqzhMq_dagNodeDot{background:var(--dsw-alias-state-success-primary)}.FqzhMq_dagNode[data-state=failed] .FqzhMq_dagNodeDot{background:var(--dsw-alias-state-error-primary)}.FqzhMq_dagNodeLabel{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:8.5px;line-height:11px;overflow:hidden}.FqzhMq_taskDetail{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);border-radius:9px;flex-direction:column;gap:3px;min-width:0;padding:7px 9px;display:flex}.FqzhMq_taskDetailHead{align-items:center;gap:6px;min-width:0;display:flex}.FqzhMq_taskDetailId{color:var(--dsw-alias-state-business-primary);flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:700}.FqzhMq_taskDetailSubject{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;line-height:16px;overflow:hidden}.FqzhMq_taskDetailBadge{background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-secondary);border-radius:4px;flex:none;padding:0 5px;font-size:8.5px;font-weight:600;line-height:14px}.FqzhMq_taskDetailBadge[data-state=running]{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted)}.FqzhMq_taskDetailBadge[data-state=blocked]{background:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-label-primary-inverted)}.FqzhMq_taskDetailBadge[data-state=completed]{background:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-label-primary-inverted)}.FqzhMq_taskDetailBadge[data-state=failed]{background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-inverted)}.FqzhMq_taskDetailLine,.FqzhMq_taskDetailMeta{color:var(--dsw-alias-label-secondary);font-size:9.5px;line-height:14px}.FqzhMq_taskDetailMeta{color:var(--dsw-alias-label-tertiary)}.FqzhMq_emptyHint{color:var(--dsw-alias-label-tertiary);padding:10px 12px;font-size:11px;line-height:16px}.FqzhMq_planEditor{border:1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 30%, var(--dsw-alias-border-l2));background:color-mix(in srgb, var(--dsw-alias-bg-module-platform) 94%, var(--dsw-alias-state-business-primary));box-shadow:inset 0 1px 0 color-mix(in srgb, var(--dsw-alias-label-primary) 5%, transparent);border-radius:10px;flex-direction:column;gap:12px;margin:0 10px 12px;padding:12px;display:flex}.FqzhMq_planHeader>span{justify-content:space-between;align-items:center;gap:8px;display:flex}.FqzhMq_planHeader>span>span{flex-direction:column;gap:2px;min-width:0;display:flex}.FqzhMq_planHeader strong{color:var(--dsw-alias-label-primary);font-size:12px}.FqzhMq_planHeader small{color:var(--dsw-alias-label-secondary);font-size:9px;font-weight:500;line-height:13px}.FqzhMq_planHeader em{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted);border-radius:999px;flex:none;padding:1px 7px;font-size:9px;font-style:normal;line-height:16px}.FqzhMq_planHeader p{color:var(--dsw-alias-label-secondary);margin:5px 0 0;font-size:10px;line-height:15px}.FqzhMq_planFlow{grid-template-columns:repeat(3,minmax(0,1fr));margin:0;padding:0;list-style:none;display:grid}.FqzhMq_planFlow li{min-width:0;color:var(--dsw-alias-label-tertiary);align-items:center;gap:5px;font-size:9px;font-weight:600;line-height:14px;display:flex;position:relative}.FqzhMq_planFlow li:not(:last-child):after{background:var(--dsw-alias-border-l2);content:\"\";flex:1;min-width:8px;height:1px;margin-right:5px}.FqzhMq_planFlow li>span{border:1px solid var(--dsw-alias-border-l2);border-radius:50%;flex:none;place-items:center;width:18px;height:18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;display:grid}.FqzhMq_planFlow li[data-active]{color:var(--dsw-alias-state-business-primary)}.FqzhMq_planFlow li[data-active]>span{border-color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent)}.FqzhMq_planSection{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);border-radius:8px;overflow:hidden}.FqzhMq_planSectionToggle,.FqzhMq_planCardHeader{box-sizing:border-box;width:100%;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;background:0 0;border:0}.FqzhMq_planSectionToggle{justify-content:space-between;align-items:center;gap:8px;min-height:42px;padding:7px 9px;display:flex}.FqzhMq_planSectionToggle:hover,.FqzhMq_planCardHeader:hover{background:color-mix(in srgb, var(--dsw-alias-button-ghost-active-fill) 46%, transparent)}.FqzhMq_planSectionToggle>span{align-items:baseline;gap:7px;min-width:0;display:flex}.FqzhMq_planSectionToggle strong{font-size:10.5px}.FqzhMq_planSectionToggle small{color:var(--dsw-alias-label-tertiary);font-size:9px}.FqzhMq_planList{border-top:1px solid var(--dsw-alias-border-l2);flex-direction:column;gap:0;display:flex}.FqzhMq_planEmpty{color:var(--dsw-alias-label-tertiary);text-align:center;margin:0;padding:12px;font-size:10px}.FqzhMq_planCard{background:0 0;border:0;border-radius:0;min-width:0;margin:0;padding:0;display:block;position:relative}.FqzhMq_planCard+.FqzhMq_planCard{border-top:1px solid var(--dsw-alias-border-l2)}.FqzhMq_planCard[data-open=true]{background:color-mix(in srgb, var(--dsw-alias-bg-base) 62%, transparent)}.FqzhMq_planCardHeader{grid-template-columns:minmax(80px,.9fr) minmax(72px,1.15fr) auto 12px;align-items:center;gap:7px;min-height:40px;padding:6px 9px;display:grid}.FqzhMq_planCardIdentity{flex-direction:column;gap:1px;min-width:0;display:flex}.FqzhMq_planCardIdentity strong,.FqzhMq_planTaskSummary{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:650;line-height:14px;overflow:hidden}.FqzhMq_planCardIdentity>span,.FqzhMq_planCardMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:8.5px;line-height:12px;overflow:hidden}.FqzhMq_planTaskId{background:var(--dsw-alias-button-ghost-active-fill);width:max-content;color:var(--dsw-alias-label-secondary);border-radius:4px;padding:1px 5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:8.5px;font-weight:700;line-height:14px}.FqzhMq_planDirty{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 13%, transparent);color:var(--dsw-alias-state-warn-primary);border-radius:999px;justify-self:end;padding:1px 5px;font-size:8px;font-style:normal;font-weight:650;line-height:14px}.FqzhMq_planChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .18s cubic-bezier(.2,.7,.2,1)}.FqzhMq_planChevron[data-open=true]{transform:rotate(90deg)}.FqzhMq_planCardBody{flex-direction:column;gap:8px;padding:0 9px 9px;display:flex}.FqzhMq_planCardBody fieldset{border:0;flex-direction:column;gap:7px;min-width:0;margin:0;padding:0;display:flex}.FqzhMq_planCardBody label,.FqzhMq_planNewTask label{min-width:0;color:var(--dsw-alias-label-tertiary);flex-direction:column;flex:1;gap:4px;font-size:9px;display:flex}.FqzhMq_planCardBody label small{color:var(--dsw-alias-label-tertiary);font-size:8px;line-height:11px}.FqzhMq_planCard input,.FqzhMq_planCard textarea,.FqzhMq_planCard select,.FqzhMq_planNewTask input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);width:100%;min-width:0;color:var(--dsw-alias-label-primary);font:inherit;border-radius:6px;outline:none;font-size:10.5px;line-height:16px;transition:border-color .16s,box-shadow .16s}.FqzhMq_planCard input,.FqzhMq_planCard select,.FqzhMq_planNewTask input{min-height:32px;padding:6px 8px}.FqzhMq_planCard textarea{resize:vertical;min-height:58px;padding:7px 8px}.FqzhMq_planCard input:focus-visible,.FqzhMq_planCard textarea:focus-visible,.FqzhMq_planCard select:focus-visible,.FqzhMq_planNewTask input:focus-visible{border-color:var(--dsw-alias-state-business-primary);box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent)}.FqzhMq_planGrid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;display:grid}.FqzhMq_planModelPicker{grid-template-columns:minmax(0,1fr);gap:5px;display:grid}.FqzhMq_planModelMenu{width:100%;display:flex}.FqzhMq_planModelTrigger{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);width:100%;min-height:38px;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;border-radius:7px;justify-content:space-between;align-items:center;gap:8px;padding:7px 9px;transition:border-color .16s,background-color .16s,transform .12s;display:flex}.FqzhMq_planModelTrigger:hover:not(:disabled){border-color:var(--dsw-alias-border-l3);background:var(--dsw-alias-interactive-bg-hover)}.FqzhMq_planModelTrigger:active:not(:disabled){transform:translateY(1px)}.FqzhMq_planModelTrigger:focus-visible{border-color:var(--dsw-alias-state-business-primary);outline:2px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);outline-offset:1px}.FqzhMq_planModelTrigger:disabled{cursor:wait;opacity:.64}.FqzhMq_planModelTriggerCopy{align-items:baseline;gap:6px;min-width:0;display:flex}.FqzhMq_planModelTriggerCopy strong,.FqzhMq_planModelTriggerCopy span{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.FqzhMq_planModelTriggerCopy strong{color:var(--dsw-alias-label-primary);font-size:10px;font-weight:650;line-height:15px}.FqzhMq_planModelTriggerCopy span{color:var(--dsw-alias-label-tertiary);font-size:9px;line-height:14px}.FqzhMq_planModelMenuRow{grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;width:100%;min-width:0;display:grid}.FqzhMq_planModelMenuRow>span:first-child{color:var(--dsw-alias-label-primary)}.FqzhMq_planModelMenuRow strong{color:var(--dsw-alias-label-tertiary);text-align:right;text-overflow:ellipsis;white-space:nowrap;font-weight:450;overflow:hidden}.FqzhMq_planModelMenuBack{align-items:center;gap:7px;display:inline-flex}.FqzhMq_planModelMenuBack svg{transform:rotate(180deg)}.FqzhMq_planModelEffortRow{flex-direction:column;align-items:flex-start;min-width:0;display:flex}.FqzhMq_planModelEffortRow small{width:100%;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:14px;overflow:hidden}.FqzhMq_planModelHint{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:8.5px;line-height:12px;overflow:hidden}.FqzhMq_planModelNotice{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 9%, transparent);color:var(--dsw-alias-label-secondary);border-radius:6px;grid-column:1/-1;justify-content:space-between;align-items:center;gap:8px;padding:6px 7px;font-size:8.5px;line-height:12px;display:flex}.FqzhMq_planModelNotice button{color:var(--dsw-alias-state-business-primary);cursor:pointer;font:inherit;background:0 0;border:0;flex:none;padding:2px 6px;font-weight:650}.FqzhMq_planActions,.FqzhMq_planApproveRow,.FqzhMq_planNewTask,.FqzhMq_planConfirm,.FqzhMq_planApproveActions,.FqzhMq_planSecondaryActions{align-items:center;gap:7px;display:flex}.FqzhMq_planReviewActions{grid-template-columns:minmax(0,1fr);gap:6px;width:100%;display:grid}.FqzhMq_planSecondaryActions{grid-template-columns:minmax(0,1fr) auto;display:grid}.FqzhMq_planActions{justify-content:flex-end}.FqzhMq_planActions button,.FqzhMq_planNewTask button,.FqzhMq_planApproveRow button,.FqzhMq_planConfirm button{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-ghost-active-fill);min-height:30px;color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:6px;flex:none;padding:5px 10px;font-size:9.5px;font-weight:600;transition:background .16s,border-color .16s,transform .16s}.FqzhMq_planActions button:hover:not(:disabled),.FqzhMq_planNewTask button:hover:not(:disabled),.FqzhMq_planApproveRow button:hover:not(:disabled),.FqzhMq_planConfirm button:hover:not(:disabled){border-color:var(--dsw-alias-label-tertiary)}.FqzhMq_planActions button:active:not(:disabled),.FqzhMq_planNewTask button:active:not(:disabled),.FqzhMq_planApproveRow button:active:not(:disabled),.FqzhMq_planConfirm button:active:not(:disabled){transform:scale(.98)}.FqzhMq_planActions button[data-danger],.FqzhMq_planConfirm button[data-danger]{color:var(--dsw-alias-state-error-primary)}.FqzhMq_planFeedback{min-width:0;color:var(--dsw-alias-label-secondary);flex:1;align-items:center;gap:5px;font-size:9px;line-height:13px;animation:.18s ease-out FqzhMq_plan-feedback-in;display:inline-flex}.FqzhMq_planFeedback[data-tone=success]{color:var(--dsw-alias-state-success-primary)}.FqzhMq_planFeedback[data-tone=error]{color:var(--dsw-alias-state-error-primary)}.FqzhMq_planFeedback>span{border:1px solid;border-radius:50%;flex:none;place-items:center;width:15px;height:15px;display:grid}.FqzhMq_planFeedback svg{width:11px;height:11px}@keyframes FqzhMq_plan-feedback-in{0%{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:translateY(0)}}.FqzhMq_planConfirm{border:1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, var(--dsw-alias-border-l2));background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, transparent);border-radius:7px;flex-wrap:wrap;justify-content:flex-end;padding:7px}.FqzhMq_planConfirm>span{min-width:140px;color:var(--dsw-alias-label-secondary);flex:1;font-size:9px;line-height:13px}.FqzhMq_planNewTask{align-items:flex-end}.FqzhMq_planNewTask label{gap:4px}.FqzhMq_planNewTask label>span{line-height:13px}.FqzhMq_planApproveRow{z-index:1;border:1px solid var(--dsw-alias-border-l2);background:color-mix(in srgb, var(--dsw-alias-bg-module-platform) 94%, transparent);min-height:50px;box-shadow:0 -5px 16px color-mix(in srgb, var(--dsw-alias-bg-base) 35%, transparent);backdrop-filter:blur(8px);border-radius:8px;flex-direction:column;justify-content:flex-end;align-items:stretch;margin:0 -4px -4px;padding:8px;position:sticky;bottom:0}.FqzhMq_planApproveRow[data-armed=true]{border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, var(--dsw-alias-border-l2))}.FqzhMq_planApproveRow[data-discard=true]{border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, var(--dsw-alias-border-l2))}.FqzhMq_planApproveCopy{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}.FqzhMq_planApproveCopy strong{color:var(--dsw-alias-label-primary);font-size:9.5px;line-height:13px}.FqzhMq_planApproveCopy small{color:var(--dsw-alias-label-tertiary);font-size:8.5px;line-height:12px}.FqzhMq_planApproveRow button{background:var(--dsw-alias-state-business-primary);min-height:32px;color:var(--dsw-alias-label-primary-inverted);padding-inline:13px}.FqzhMq_planReviewActions>button[data-plan-approve]{width:100%}.FqzhMq_planApproveActions>button:first-child{background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-primary)}.FqzhMq_planSecondaryActions>button,.FqzhMq_planApproveActions>button[data-danger]{border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-primary)}.FqzhMq_planSecondaryActions>button[data-danger],.FqzhMq_planApproveActions>button[data-danger]{color:var(--dsw-alias-state-error-primary)}.FqzhMq_planSectionToggle:focus-visible,.FqzhMq_planCardHeader:focus-visible,.FqzhMq_planActions button:focus-visible,.FqzhMq_planNewTask button:focus-visible,.FqzhMq_planApproveRow button:focus-visible,.FqzhMq_planConfirm button:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}.FqzhMq_planActions button:disabled,.FqzhMq_planNewTask button:disabled,.FqzhMq_planApproveRow button:disabled{cursor:default;opacity:.55}.FqzhMq_historicPill{background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-tertiary);border-radius:4px;flex:none;margin-left:auto;padding:1px 7px;font-size:9.5px;font-weight:600;line-height:15px}.FqzhMq_members{flex-direction:column;gap:3px;display:flex}.FqzhMq_archiveLabel{color:var(--dsw-alias-label-tertiary);padding:5px 14px 0;font-size:9.5px;font-weight:600;line-height:14px;display:block}@media (prefers-reduced-motion:reduce){.FqzhMq_panel,.FqzhMq_badge,.FqzhMq_badgeDot,.FqzhMq_panelDot,.FqzhMq_workGlyph rect,.FqzhMq_stateArt,.FqzhMq_memberAvatar[data-unread=true]:after,.FqzhMq_planChevron,.FqzhMq_planFeedback,.FqzhMq_planActions button,.FqzhMq_planNewTask button,.FqzhMq_planApproveRow button,.FqzhMq_planConfirm button,.FqzhMq_planCard input,.FqzhMq_planCard textarea,.FqzhMq_planCard select,.FqzhMq_planNewTask input{transition:none;animation:none}}@media (width<=960px){html[data-agent-teams-panel-open] [data-phase=active]{padding-right:0}}@media (width<=640px){.FqzhMq_badge{top:56px;right:10px}.FqzhMq_teamStats span[data-stat=messages]{display:none}.FqzhMq_captainNode{grid-template-columns:48px minmax(0,1fr)}.FqzhMq_captainState{display:none}.FqzhMq_delegationTree{margin-left:12px;padding-left:15px}.FqzhMq_memberBranch{width:15px}.FqzhMq_assignmentLine{padding-left:53px}.FqzhMq_planFlow li{gap:4px;font-size:8px}.FqzhMq_planFlow li:not(:last-child):after{margin-right:3px}.FqzhMq_planCardHeader{grid-template-columns:auto minmax(0,1fr) auto}.FqzhMq_planCardHeader .FqzhMq_planCardMeta{display:none}.FqzhMq_planGrid,.FqzhMq_planModelPicker{grid-template-columns:minmax(0,1fr)}.FqzhMq_planNewTask,.FqzhMq_planApproveRow{flex-direction:column;align-items:stretch}.FqzhMq_planNewTask button,.FqzhMq_planApproveRow>button,.FqzhMq_planApproveActions,.FqzhMq_planReviewActions{width:100%}.FqzhMq_planApproveActions button,.FqzhMq_planReviewActions button,.FqzhMq_planSecondaryActions button{flex:1}}@container FqzhMq_agent-team (width<=360px){.FqzhMq_planEditor{margin-inline:0;padding-inline:10px}.FqzhMq_planHeader>span{align-items:flex-start}.FqzhMq_planFlow li{gap:3px;font-size:7.5px}.FqzhMq_planFlow li:not(:last-child):after{min-width:4px;margin-right:2px}.FqzhMq_planSecondaryActions,.FqzhMq_planApproveActions{grid-template-columns:minmax(0,1fr);width:100%;display:grid}.FqzhMq_planSecondaryActions button,.FqzhMq_planApproveActions button{width:100%}}.FqzhMq_dagOwner{text-overflow:ellipsis;max-width:64px;margin-left:auto;font-size:9px;font-weight:400;overflow:hidden}.FqzhMq_team[data-workspace-team]{background:0 0;border:0;padding:0;container:none}.FqzhMq_team[data-workspace-team] .FqzhMq_teamHead{flex-wrap:wrap;gap:8px;padding-bottom:18px}.FqzhMq_team[data-workspace-team] .FqzhMq_teamName{font-size:15px}.FqzhMq_team[data-workspace-team] .FqzhMq_teamStats{flex-wrap:wrap}.FqzhMq_team[data-workspace-team] .FqzhMq_delegationSection,.FqzhMq_team[data-workspace-team] .FqzhMq_dependencySection{min-width:0}.FqzhMq_team[data-workspace-team] .FqzhMq_dagNodeLabel{white-space:normal;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.4;display:-webkit-box;overflow:hidden}.FqzhMq_team[data-workspace-team] .FqzhMq_sectionHead{flex-wrap:wrap;gap:6px}.FqzhMq_team[data-workspace-team] .FqzhMq_sectionHint{white-space:normal}.FqzhMq_team[data-workspace-team] .FqzhMq_memberLine{flex-wrap:wrap}.FqzhMq_team[data-workspace-team] .FqzhMq_memberStatusLine,.FqzhMq_team[data-workspace-team] .FqzhMq_taskDetailSubject{white-space:normal}.FqzhMq_team[data-workspace-team] .FqzhMq_dagViewport{padding-bottom:12px}@container (width>=1000px){.FqzhMq_team[data-workspace-team]{grid-template-columns:minmax(260px,.85fr) minmax(0,1.35fr);align-items:start;column-gap:32px;display:grid}.FqzhMq_team[data-workspace-team]>.FqzhMq_teamHead,.FqzhMq_team[data-workspace-team]>:not(.FqzhMq_teamHead):not(.FqzhMq_delegationSection):not(.FqzhMq_dependencySection){grid-column:1/-1}.FqzhMq_team[data-workspace-team] .FqzhMq_dependencySection{border-top:0;border-left:1px solid var(--dsw-alias-border-l2);margin:0;padding:0 0 0 28px}.FqzhMq_team[data-workspace-team] .FqzhMq_captainNode{padding-top:0}.FqzhMq_team[data-workspace-team] .FqzhMq_dagCanvas[data-layout=parallel]{grid-template-columns:repeat(2,minmax(0,1fr))}}.FqzhMq_team[data-workspace-team] .FqzhMq_dagNode{border-radius:9px;padding:10px 11px}.FqzhMq_team[data-workspace-team] .FqzhMq_dagNodeHead{margin-bottom:7px;font-size:10px}.FqzhMq_team[data-workspace-team] .FqzhMq_dagNodeLabel{letter-spacing:0;font-size:12px}.FqzhMq_team[data-workspace-team] .FqzhMq_dagOwner{font-size:10px}.FqzhMq_team[data-workspace-team] .FqzhMq_taskDetail{margin-top:14px;padding:14px}.FqzhMq_team[data-workspace-team] .FqzhMq_captainName{font-size:14px}.FqzhMq_team[data-workspace-team] .FqzhMq_captainRole{font-size:11px}.FqzhMq_team[data-workspace-team] .FqzhMq_captainSummary{font-size:12px;line-height:1.6}.FqzhMq_team[data-workspace-team] .FqzhMq_captainState{font-size:11px}.FqzhMq_team[data-workspace-team] .FqzhMq_memberName{font-size:13px}.FqzhMq_team[data-workspace-team] .FqzhMq_memberRole,.FqzhMq_team[data-workspace-team] .FqzhMq_memberState,.FqzhMq_team[data-workspace-team] .FqzhMq_memberCount{font-size:11px}.FqzhMq_team[data-workspace-team] .FqzhMq_memberStatusLine{font-size:12px;line-height:1.6}.FqzhMq_team[data-workspace-team] .FqzhMq_taskDetailSubject{font-size:13px;line-height:1.6}.FqzhMq_team[data-workspace-team] .FqzhMq_taskDetailLine,.FqzhMq_team[data-workspace-team] .FqzhMq_taskDetailMeta{font-size:12px;line-height:1.6}.FqzhMq_team[data-workspace-team] .FqzhMq_captainNode{background:var(--dsw-alias-bg-module-platform);border-color:var(--dsw-alias-border-l2)}.FqzhMq_team[data-workspace-team] .FqzhMq_planEditor{border-color:var(--dsw-alias-border-l2);background:0 0;margin:0 0 24px;padding:16px}@container (width>=1000px){.FqzhMq_team[data-workspace-team]:has(>[data-staging-editor]){grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.FqzhMq_team[data-workspace-team]>[data-staging-editor]{grid-row:2/4;grid-column:1!important}.FqzhMq_team[data-workspace-team]:has(>[data-staging-editor])>.FqzhMq_delegationSection{grid-area:2/2}.FqzhMq_team[data-workspace-team]:has(>[data-staging-editor])>.FqzhMq_dependencySection{border-left:0;grid-area:3/2;padding:24px 0 0}}.FqzhMq_team[data-workspace-team] .FqzhMq_memberBlock[data-selected-member] .FqzhMq_memberRow{outline:1px solid var(--dsw-alias-state-business-primary);outline-offset:3px}.FqzhMq_team[data-workspace-team] .FqzhMq_dagOwner{white-space:nowrap;max-width:105px}.FqzhMq_team[data-workspace-team] .FqzhMq_planApproveRow{position:static}";
+		//#region \0dsh-css:C:\Project\dsh-agt\worktree\fork-plugins\dsh-agent-teams\src\client\ActivityPanel.module.css.mjs
+		const css$1 = "html{--agent-teams-panel-shift:420px}html[data-agent-teams-panel-open] [data-phase=active]{box-sizing:border-box;padding-right:var(--agent-teams-panel-shift)}.bUAAdG_badge{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:color-mix(in srgb, var(--dsw-alias-bg-module-platform) 92%, transparent);backdrop-filter:blur(16px);height:34px;box-shadow:0 8px 28px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 29%, transparent);color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;border-radius:999px;align-items:center;gap:7px;padding:0 12px;font-size:12px;font-weight:600;line-height:20px;transition:border-color .15s,transform .12s;display:inline-flex;position:absolute;top:64px;right:18px}.bUAAdG_badge:hover{border-color:var(--dsw-alias-border-l3);transform:translateY(-1px)}.bUAAdG_badge:active{transform:translateY(0)scale(.98)}.bUAAdG_badge:focus-visible,.bUAAdG_iconButton:focus-visible,.bUAAdG_memberRow:focus-visible,.bUAAdG_membersToggle:focus-visible,.bUAAdG_sectionToggleTitle:focus-visible,.bUAAdG_dagNode:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.bUAAdG_badgeDot,.bUAAdG_panelDot{background:var(--dsw-alias-label-tertiary);border-radius:50%;width:7px;height:7px}.bUAAdG_badgeDot[data-busy=true],.bUAAdG_panelDot[data-busy=true]{background:var(--dsw-alias-state-business-primary);animation:1.25s ease-in-out infinite bUAAdG_agentTeamsPulse}.bUAAdG_badgeCount,.bUAAdG_memberCount,.bUAAdG_teamStats,.bUAAdG_stageLabel,.bUAAdG_taskId{font-variant-numeric:tabular-nums}.bUAAdG_panel{box-sizing:border-box;border:1px solid color-mix(in srgb, var(--dsw-alias-border-l3) 58%, transparent);background:color-mix(in srgb, var(--dsw-alias-bg-layer-1) 95%, transparent);backdrop-filter:blur(20px)saturate(1.08);box-shadow:0 12px 32px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 25%, transparent), 0 32px 72px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 33%, transparent);will-change:transform;border-radius:16px;flex-direction:column;animation:.16s ease-out bUAAdG_agentTeamsPanelIn;display:flex;position:absolute;top:0;left:0;overflow:hidden}.bUAAdG_panel[data-dragging],.bUAAdG_panel[data-resizing]{user-select:none;box-shadow:0 16px 38px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 29%, transparent), 0 36px 78px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 38%, transparent)}@keyframes bUAAdG_agentTeamsPanelIn{0%{opacity:0}to{opacity:1}}@keyframes bUAAdG_agentTeamsPulse{0%,to{opacity:.42}50%{opacity:1}}.bUAAdG_panelHead{border-bottom:1px solid var(--dsw-alias-border-l2);cursor:grab;touch-action:none;flex:none;justify-content:space-between;align-items:center;min-height:44px;padding:0 14px 0 16px;display:flex}.bUAAdG_panelHead:active,.bUAAdG_panel[data-dragging] .bUAAdG_panelHead{cursor:grabbing}.bUAAdG_panel[data-compact] .bUAAdG_panelHead{cursor:default;touch-action:auto}.bUAAdG_panelTitle{color:var(--dsw-alias-label-primary);align-items:center;gap:8px;font-size:14px;font-weight:600;line-height:20px;display:inline-flex}.bUAAdG_panelControls{flex:none;align-items:center;gap:2px;display:inline-flex}.bUAAdG_iconButton{width:28px;height:28px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:7px;justify-content:center;align-items:center;padding:0;transition:background-color .12s,color .12s,transform .12s;display:inline-flex}.bUAAdG_iconButton:hover{background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-primary)}.bUAAdG_iconButton:active{transform:scale(.94)}.bUAAdG_iconButton[data-control=dock][data-mode=docked] svg{transform:scaleX(-1)}.bUAAdG_resizeHandle{z-index:5;touch-action:none;pointer-events:auto;position:absolute}.bUAAdG_resizeHandle[data-resize-edge=left]{cursor:ew-resize;width:14px;top:44px;bottom:14px;left:0}.bUAAdG_resizeHandle[data-resize-edge=left]:after{background:color-mix(in srgb, var(--dsw-alias-label-tertiary) 42%, transparent);content:\"\";opacity:.45;border-radius:999px;width:3px;height:48px;transition:background-color .12s,opacity .12s;position:absolute;top:50%;left:4px;transform:translateY(-50%)}.bUAAdG_resizeHandle[data-resize-edge=bottom]{cursor:ns-resize;height:14px;bottom:0;left:20px;right:20px}.bUAAdG_resizeHandle[data-resize-edge=bottom]:after{background:color-mix(in srgb, var(--dsw-alias-label-tertiary) 42%, transparent);content:\"\";opacity:.45;border-radius:999px;width:48px;height:3px;transition:background-color .12s,opacity .12s;position:absolute;bottom:4px;left:50%;transform:translate(-50%)}.bUAAdG_resizeHandle[data-resize-edge=corner]{cursor:nwse-resize;width:28px;height:28px;bottom:0;right:0}.bUAAdG_resizeHandle[data-resize-edge=corner]:after{border-right:2px solid var(--dsw-alias-label-tertiary);border-bottom:2px solid var(--dsw-alias-label-tertiary);content:\"\";opacity:.58;width:10px;height:10px;transition:border-color .12s,opacity .12s;position:absolute;bottom:6px;right:6px}.bUAAdG_resizeHandle:hover:after,.bUAAdG_panel[data-resizing] .bUAAdG_resizeHandle:after{background-color:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);opacity:.95}.bUAAdG_teams{overscroll-behavior:contain;scrollbar-color:color-mix(in srgb, var(--dsw-alias-label-tertiary) 28%, transparent) transparent;scrollbar-width:thin;flex-direction:column;min-height:0;display:flex;overflow-y:auto}.bUAAdG_teams::-webkit-scrollbar{width:6px}.bUAAdG_teams::-webkit-scrollbar-track{background:0 0}.bUAAdG_teams::-webkit-scrollbar-thumb{background:color-mix(in srgb, var(--dsw-alias-label-tertiary) 28%, transparent);background-clip:padding-box;border:2px solid #0000;border-radius:999px}.bUAAdG_teams:hover::-webkit-scrollbar-thumb{background:color-mix(in srgb, var(--dsw-alias-label-tertiary) 44%, transparent);background-clip:padding-box}.bUAAdG_team{border-bottom:1px solid var(--dsw-alias-border-l2);flex-direction:column;gap:12px;padding:12px 14px 16px;display:flex;container:bUAAdG_agent-team/inline-size}.bUAAdG_team:last-child{border-bottom:0}.bUAAdG_teamHead{align-items:center;gap:10px;min-width:0;display:flex}.bUAAdG_teamName{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:13px;font-weight:600;line-height:18px;overflow:hidden}.bUAAdG_teamStats{color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none;gap:8px;font-size:10.5px;line-height:16px;display:inline-flex}.bUAAdG_teamStopButton{border:1px solid var(--dsw-alias-border-l2);width:26px;height:26px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border-radius:7px;flex:none;place-items:center;padding:0;transition:border-color .15s,background .15s,color .15s;display:grid}.bUAAdG_teamStopButton:hover{border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 42%, var(--dsw-alias-border-l2));background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, transparent);color:var(--dsw-alias-state-error-primary)}.bUAAdG_teamStopButton:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}.bUAAdG_stopModalActions{justify-content:flex-end;gap:8px;display:flex}.bUAAdG_stopModalActions button{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-ghost-active-fill);min-height:34px;color:var(--dsw-alias-label-primary);cursor:pointer;font:inherit;border-radius:8px;justify-content:center;align-items:center;gap:6px;padding:6px 13px;font-size:12px;font-weight:600;display:inline-flex}.bUAAdG_stopModalActions button[data-danger]{border-color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_stopModalActions button:disabled{cursor:wait;opacity:.58}.bUAAdG_stopModalError{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);color:var(--dsw-alias-state-error-primary);border-radius:8px;align-items:flex-start;gap:7px;margin:0;padding:9px 10px;font-size:12px;line-height:18px;display:flex}.bUAAdG_stopModalError svg{flex:none;margin-top:1px}.bUAAdG_sectionHead{justify-content:space-between;align-items:center;gap:8px;min-width:0;display:flex}.bUAAdG_sectionTitle{color:var(--dsw-alias-label-secondary);align-items:center;gap:6px;font-size:11px;font-weight:600;line-height:16px;display:inline-flex}.bUAAdG_sectionHint{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:14px;overflow:hidden}.bUAAdG_delegationSection{min-width:0}.bUAAdG_captainNode{box-sizing:border-box;border:1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 32%, var(--dsw-alias-border-l2));background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-layer-1));border-radius:10px;grid-template-columns:48px minmax(0,1fr) auto;align-items:center;gap:9px;min-height:56px;padding:6px 10px;display:grid}.bUAAdG_captainAvatar,.bUAAdG_memberAvatar{flex:none;justify-content:center;align-items:center;display:inline-flex;position:relative}.bUAAdG_captainAvatar{width:46px;height:46px}.bUAAdG_leadAvatar,.bUAAdG_memberArt{object-fit:contain;filter:drop-shadow(0 1px 1px #122d4833);background:0 0;border:0;border-radius:0}.bUAAdG_leadAvatar{width:44px;height:44px}.bUAAdG_memberArt{width:40px;height:40px}.bUAAdG_captainInfo,.bUAAdG_memberInfo{flex-direction:column;min-width:0;display:flex}.bUAAdG_captainInfo{gap:2px}.bUAAdG_captainLine,.bUAAdG_memberLine{align-items:center;gap:6px;min-width:0;display:flex}.bUAAdG_captainName,.bUAAdG_memberName{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:600;line-height:18px;overflow:hidden}.bUAAdG_captainRole,.bUAAdG_memberRole{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:14px;overflow:hidden}.bUAAdG_captainSummary,.bUAAdG_memberStatusLine{color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;line-height:15px;overflow:hidden}.bUAAdG_taskDetailModel{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px;line-height:14px;overflow:hidden}.bUAAdG_memberModel{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-ghost-active-fill);min-width:0;max-width:132px;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;border-radius:999px;flex:0 auto;align-items:center;padding:0 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;font-weight:600;line-height:15px;display:inline-flex;overflow:hidden}.bUAAdG_captainState,.bUAAdG_memberState{color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none;align-items:center;gap:5px;font-size:10px;font-weight:500;line-height:15px;display:inline-flex}.bUAAdG_captainState[data-busy=true],.bUAAdG_memberState[data-activity=working]{color:var(--dsw-alias-state-business-primary)}.bUAAdG_workGlyph rect{opacity:.5}.bUAAdG_workGlyph[data-active=true] rect{animation:1.1s ease-in-out infinite bUAAdG_agentTeamsDot}@keyframes bUAAdG_agentTeamsDot{0%,to{opacity:.25}50%{opacity:1}}.bUAAdG_progressOverview{flex-direction:column;gap:7px;display:flex}.bUAAdG_progressTitle{color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:600;line-height:16px}.bUAAdG_progressSegments{gap:3px;display:flex}.bUAAdG_progressSegments>span,.bUAAdG_progressEmpty{background:var(--dsw-alias-border-l3);border-radius:2px;flex:1;height:5px}.bUAAdG_progressEmpty{width:100%;display:block}.bUAAdG_progressSegments>span[data-state=running]{background:var(--dsw-alias-state-business-primary)}.bUAAdG_progressSegments>span[data-state=blocked]{background:var(--dsw-alias-state-warn-primary)}.bUAAdG_progressSegments>span[data-state=completed]{background:var(--dsw-alias-state-success-primary)}.bUAAdG_progressSegments>span[data-state=failed]{background:var(--dsw-alias-state-error-primary)}.bUAAdG_progressSegments>span[data-state=cancelled]{opacity:.55}.bUAAdG_progressLegend{color:var(--dsw-alias-label-tertiary);flex-wrap:wrap;gap:10px;font-size:9.5px;line-height:14px;display:flex}.bUAAdG_progressLegend>span[data-state=running]{color:var(--dsw-alias-state-business-primary)}.bUAAdG_progressLegend>span[data-state=blocked]{color:var(--dsw-alias-state-warn-primary)}.bUAAdG_progressLegend>span[data-state=completed]{color:var(--dsw-alias-state-success-primary)}.bUAAdG_progressSummary{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-layer-1));min-width:0;color:var(--dsw-alias-label-secondary);border-radius:8px;align-items:center;gap:6px;padding:5px 8px;font-size:10px;font-weight:600;line-height:15px;display:flex}.bUAAdG_progressSummary[data-state=warning]{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 8%, var(--dsw-alias-bg-layer-1))}.bUAAdG_progressSummary[data-state=completed]{background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 8%, var(--dsw-alias-bg-layer-1))}.bUAAdG_progressSummary[data-state=discarded]{background:var(--dsw-alias-button-ghost-active-fill)}.bUAAdG_progressSummary>span:last-child{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.bUAAdG_progressSummaryDot{background:var(--dsw-alias-state-business-primary);border-radius:50%;flex:none;width:5px;height:5px}.bUAAdG_progressSummary[data-state=warning] .bUAAdG_progressSummaryDot{background:var(--dsw-alias-state-warn-primary)}.bUAAdG_progressSummary[data-state=completed] .bUAAdG_progressSummaryDot{background:var(--dsw-alias-state-success-primary)}.bUAAdG_progressSummary[data-state=discarded] .bUAAdG_progressSummaryDot{background:var(--dsw-alias-label-tertiary)}.bUAAdG_membersToggle{background:var(--dsw-alias-bg-module-platform);width:100%;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;border:0;border-radius:8px;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;font-size:10.5px;font-weight:600;line-height:15px;display:flex}.bUAAdG_membersToggle:hover{background:var(--dsw-alias-button-ghost-active-fill)}.bUAAdG_membersToggle>span{align-items:center;gap:5px;display:inline-flex}.bUAAdG_membersToggle>span:last-child{color:var(--dsw-alias-state-business-primary)}.bUAAdG_chevron{flex:none;transition:transform .14s}.bUAAdG_chevron[data-open=true]{transform:rotate(90deg)}.bUAAdG_delegationTree{flex-direction:column;gap:2px;margin-left:18px;padding:9px 0 0 20px;display:flex;position:relative}.bUAAdG_delegationTree:before{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 48%, var(--dsw-alias-border-l2));content:\"\";width:1px;position:absolute;top:0;bottom:22px;left:0}.bUAAdG_memberBlock{flex-direction:column;min-width:0;padding:3px 0 7px;display:flex;position:relative}.bUAAdG_memberBranch{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 48%, var(--dsw-alias-border-l2));width:20px;height:1px;display:block;position:absolute;top:27px;right:100%}.bUAAdG_memberBranch:before{background:var(--dsw-alias-state-business-primary);content:\"\";border-radius:50%;width:5px;height:5px;position:absolute;top:-2px;right:-1px}.bUAAdG_memberRow{box-sizing:border-box;width:100%;min-width:0;min-height:48px;color:inherit;font:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:8px;grid-template-columns:46px minmax(0,1fr) auto;align-items:center;gap:8px;padding:4px 6px;transition:background-color .12s,transform .12s;display:grid}.bUAAdG_memberRow:hover,.bUAAdG_memberRow[data-activity=working]{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-layer-1))}.bUAAdG_memberRow:active{transform:scale(.995)}.bUAAdG_memberAvatar{width:42px;height:42px}.bUAAdG_memberAvatar[data-unread=true]:after{box-sizing:border-box;border:1px solid var(--dsw-alias-bg-layer-1);background:var(--dsw-alias-state-business-primary);content:\"\";border-radius:50%;width:6px;height:6px;animation:1.8s ease-in-out infinite bUAAdG_agentTeamsUnreadPulse;position:absolute;top:0;right:-1px}@keyframes bUAAdG_agentTeamsUnreadPulse{0%,to{opacity:.78;transform:scale(.92)}50%{opacity:1;transform:scale(1.16)}}.bUAAdG_memberInitial{background:var(--dsw-alias-state-business-primary);width:34px;height:34px;color:var(--dsw-alias-label-primary-inverted);border-radius:50%;justify-content:center;align-items:center;font-size:14px;font-weight:600;line-height:20px;display:inline-flex}.bUAAdG_stateArt{box-sizing:border-box;object-fit:contain;width:22px;height:22px;filter:drop-shadow(0 0 1px var(--dsw-alias-bg-layer-1)) drop-shadow(0 1px 1px #122d483d);background:0 0;border:0;border-radius:0;position:absolute;bottom:-3px;right:-5px}.bUAAdG_stateArt[data-activity=working]{animation:2.4s ease-in-out infinite bUAAdG_agentTeamsFloat}.bUAAdG_stateArt[data-activity=idle]{animation:4.2s ease-in-out infinite bUAAdG_agentTeamsBreathe}.bUAAdG_stateArt[data-activity=unknown]{animation:2.8s ease-in-out infinite bUAAdG_agentTeamsThink}@keyframes bUAAdG_agentTeamsFloat{0%,to{transform:translateY(0)rotate(-4deg)}50%{transform:translateY(-2px)rotate(4deg)}}@keyframes bUAAdG_agentTeamsBreathe{0%,to{opacity:.82;transform:scale(1)}50%{opacity:1;transform:scale(1.06)}}@keyframes bUAAdG_agentTeamsThink{0%,to{transform:rotate(-7deg)}50%{transform:rotate(7deg)}}.bUAAdG_memberState{margin-left:auto}.bUAAdG_memberCount{color:var(--dsw-alias-label-tertiary);font-size:10.5px;line-height:16px}.bUAAdG_assignmentLine{align-items:center;gap:7px;min-width:0;padding:0 6px 0 60px;display:flex}.bUAAdG_assignmentLabel{color:var(--dsw-alias-label-tertiary);flex:none;font-size:9.5px;line-height:14px}.bUAAdG_assignmentTasks{flex-wrap:wrap;flex:1;gap:4px;min-width:0;display:flex}.bUAAdG_assignmentChip{background:var(--dsw-alias-button-ghost-active-fill);max-width:100%;min-height:16px;color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;border-radius:4px;align-items:center;padding:0 5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;font-weight:600;line-height:14px;display:inline-flex;overflow:hidden}.bUAAdG_assignmentChip[data-state=running]{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_assignmentChip[data-state=completed]{background:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_assignmentChip[data-state=blocked]{background:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_assignmentChip[data-state=failed]{background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_assignmentChip[data-state=cancelled]{color:var(--dsw-alias-label-tertiary);text-decoration:line-through}.bUAAdG_unreadPill{color:var(--dsw-alias-state-business-primary);white-space:nowrap;flex:none;font-size:9.5px;font-weight:600;line-height:14px}.bUAAdG_taskEmpty{color:var(--dsw-alias-label-tertiary);font-size:9.5px;line-height:14px}.bUAAdG_dependencySection{border-top:1px solid var(--dsw-alias-border-l2);flex-direction:column;gap:7px;min-width:0;padding-top:10px;display:flex}.bUAAdG_sectionToggleTitle{color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer;background:0 0;border:0;align-items:center;gap:6px;padding:0;font-size:11px;font-weight:600;line-height:16px;display:inline-flex}.bUAAdG_dagViewport{scrollbar-width:thin;min-width:0;padding:2px 0 4px;overflow-x:auto}.bUAAdG_dagCanvas{min-width:100%;position:relative}.bUAAdG_dagCanvas[data-layout=parallel]{flex-wrap:wrap;gap:8px;display:flex}.bUAAdG_dagCanvas[data-layout=parallel] .bUAAdG_dagNode{flex:92px;min-width:92px;position:relative}.bUAAdG_dagEdges{pointer-events:none;position:absolute;inset:0;overflow:visible}.bUAAdG_dagEdges path{fill:none;stroke:var(--dsw-alias-border-l3);stroke-width:1px;transition:opacity .14s,stroke .14s,stroke-width .14s}.bUAAdG_dagEdges path[data-active=true]{stroke:var(--dsw-alias-state-business-primary);stroke-width:1.6px}.bUAAdG_dagEdges path[data-dimmed=true]{opacity:.24}.bUAAdG_dagNode{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer;border-radius:6px;flex-direction:column;justify-content:center;gap:1px;padding:0 6px;transition:border-color .14s,background-color .14s,opacity .14s;display:flex;position:absolute}.bUAAdG_dagNode:hover,.bUAAdG_dagNode[data-focused=true]{border-color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-layer-1))}.bUAAdG_dagNode[data-dimmed=true]{opacity:.3}.bUAAdG_dagNode[data-state=running][data-dimmed=true]{opacity:.58}.bUAAdG_dagNode[data-state=completed]{border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 48%, var(--dsw-alias-border-l2))}.bUAAdG_dagNode[data-state=blocked]{border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 52%, var(--dsw-alias-border-l2))}.bUAAdG_dagNode[data-state=failed]{border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 56%, var(--dsw-alias-border-l2))}.bUAAdG_dagNode[data-verdict-stale=true]{border-style:dashed;border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 62%, var(--dsw-alias-border-l2))}.bUAAdG_dagNode[data-verdict-stale=true] .bUAAdG_dagNodeHead{color:var(--dsw-alias-state-warn-primary)}.bUAAdG_dagNodeHead{color:var(--dsw-alias-label-primary);align-items:center;gap:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px;font-weight:700;display:flex}.bUAAdG_dagNodeDot{background:var(--dsw-alias-border-l3);border-radius:1.5px;flex:none;width:5px;height:5px}.bUAAdG_dagNode[data-state=running] .bUAAdG_dagNodeDot{background:var(--dsw-alias-state-business-primary)}.bUAAdG_dagNode[data-state=running] .bUAAdG_dagNodeHead{padding-right:12px}.bUAAdG_dagRunningState{width:9px;height:9px;color:var(--dsw-alias-state-business-primary);pointer-events:none;justify-content:center;align-items:center;display:inline-flex;position:absolute;top:4px;right:5px}.bUAAdG_dagRunningState .bUAAdG_workGlyph{width:9px;height:9px}.bUAAdG_dagNode[data-state=blocked] .bUAAdG_dagNodeDot{background:var(--dsw-alias-state-warn-primary)}.bUAAdG_dagNode[data-state=completed] .bUAAdG_dagNodeDot{background:var(--dsw-alias-state-success-primary)}.bUAAdG_dagNode[data-state=failed] .bUAAdG_dagNodeDot{background:var(--dsw-alias-state-error-primary)}.bUAAdG_dagNodeLabel{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:8.5px;line-height:11px;overflow:hidden}.bUAAdG_taskDetail{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);border-radius:9px;flex-direction:column;gap:3px;min-width:0;padding:7px 9px;display:flex}.bUAAdG_taskDetailHead{align-items:center;gap:6px;min-width:0;display:flex}.bUAAdG_taskDetailId{color:var(--dsw-alias-state-business-primary);flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:700}.bUAAdG_taskDetailSubject{min-width:0;color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;line-height:16px;overflow:hidden}.bUAAdG_taskDetailBadge{background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-secondary);border-radius:4px;flex:none;padding:0 5px;font-size:8.5px;font-weight:600;line-height:14px}.bUAAdG_taskDetailBadge[data-state=running]{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_taskDetailBadge[data-state=blocked]{background:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_taskDetailBadge[data-state=completed]{background:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_taskDetailBadge[data-state=failed]{background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_taskDetailLine,.bUAAdG_taskDetailMeta{color:var(--dsw-alias-label-secondary);font-size:9.5px;line-height:14px}.bUAAdG_taskDetailMeta{color:var(--dsw-alias-label-tertiary)}.bUAAdG_emptyHint{color:var(--dsw-alias-label-tertiary);padding:10px 12px;font-size:11px;line-height:16px}.bUAAdG_planEditor{border:1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 30%, var(--dsw-alias-border-l2));background:color-mix(in srgb, var(--dsw-alias-bg-module-platform) 94%, var(--dsw-alias-state-business-primary));box-shadow:inset 0 1px 0 color-mix(in srgb, var(--dsw-alias-label-primary) 5%, transparent);border-radius:10px;flex-direction:column;gap:12px;margin:0 10px 12px;padding:12px;display:flex}.bUAAdG_planHeader>span{justify-content:space-between;align-items:center;gap:8px;display:flex}.bUAAdG_planHeader>span>span{flex-direction:column;gap:2px;min-width:0;display:flex}.bUAAdG_planHeader strong{color:var(--dsw-alias-label-primary);font-size:12px}.bUAAdG_planHeader small{color:var(--dsw-alias-label-secondary);font-size:9px;font-weight:500;line-height:13px}.bUAAdG_planHeader em{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted);border-radius:999px;flex:none;padding:1px 7px;font-size:9px;font-style:normal;line-height:16px}.bUAAdG_planHeader p{color:var(--dsw-alias-label-secondary);margin:5px 0 0;font-size:10px;line-height:15px}.bUAAdG_planFlow{grid-template-columns:repeat(3,minmax(0,1fr));margin:0;padding:0;list-style:none;display:grid}.bUAAdG_planFlow li{min-width:0;color:var(--dsw-alias-label-tertiary);align-items:center;gap:5px;font-size:9px;font-weight:600;line-height:14px;display:flex;position:relative}.bUAAdG_planFlow li:not(:last-child):after{background:var(--dsw-alias-border-l2);content:\"\";flex:1;min-width:8px;height:1px;margin-right:5px}.bUAAdG_planFlow li>span{border:1px solid var(--dsw-alias-border-l2);border-radius:50%;flex:none;place-items:center;width:18px;height:18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;display:grid}.bUAAdG_planFlow li[data-active]{color:var(--dsw-alias-state-business-primary)}.bUAAdG_planFlow li[data-active]>span{border-color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent)}.bUAAdG_planSection{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-module-platform);border-radius:8px;overflow:hidden}.bUAAdG_planSectionToggle,.bUAAdG_planCardHeader{box-sizing:border-box;width:100%;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;background:0 0;border:0}.bUAAdG_planSectionToggle{justify-content:space-between;align-items:center;gap:8px;min-height:42px;padding:7px 9px;display:flex}.bUAAdG_planSectionToggle:hover,.bUAAdG_planCardHeader:hover{background:color-mix(in srgb, var(--dsw-alias-button-ghost-active-fill) 46%, transparent)}.bUAAdG_planSectionToggle>span{align-items:baseline;gap:7px;min-width:0;display:flex}.bUAAdG_planSectionToggle strong{font-size:10.5px}.bUAAdG_planSectionToggle small{color:var(--dsw-alias-label-tertiary);font-size:9px}.bUAAdG_planList{border-top:1px solid var(--dsw-alias-border-l2);flex-direction:column;gap:0;display:flex}.bUAAdG_planEmpty{color:var(--dsw-alias-label-tertiary);text-align:center;margin:0;padding:12px;font-size:10px}.bUAAdG_planCard{background:0 0;border:0;border-radius:0;min-width:0;margin:0;padding:0;display:block;position:relative}.bUAAdG_planCard+.bUAAdG_planCard{border-top:1px solid var(--dsw-alias-border-l2)}.bUAAdG_planCard[data-open=true]{background:color-mix(in srgb, var(--dsw-alias-bg-base) 62%, transparent)}.bUAAdG_planCardHeader{grid-template-columns:minmax(80px,.9fr) minmax(72px,1.15fr) auto 12px;align-items:center;gap:7px;min-height:40px;padding:6px 9px;display:grid}.bUAAdG_planCardIdentity{flex-direction:column;gap:1px;min-width:0;display:flex}.bUAAdG_planCardIdentity strong,.bUAAdG_planTaskSummary{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:650;line-height:14px;overflow:hidden}.bUAAdG_planCardIdentity>span,.bUAAdG_planCardMeta{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:8.5px;line-height:12px;overflow:hidden}.bUAAdG_planTaskId{background:var(--dsw-alias-button-ghost-active-fill);width:max-content;color:var(--dsw-alias-label-secondary);border-radius:4px;padding:1px 5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:8.5px;font-weight:700;line-height:14px}.bUAAdG_planDirty{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 13%, transparent);color:var(--dsw-alias-state-warn-primary);border-radius:999px;justify-self:end;padding:1px 5px;font-size:8px;font-style:normal;font-weight:650;line-height:14px}.bUAAdG_planChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .18s cubic-bezier(.2,.7,.2,1)}.bUAAdG_planChevron[data-open=true]{transform:rotate(90deg)}.bUAAdG_planCardBody{flex-direction:column;gap:8px;padding:0 9px 9px;display:flex}.bUAAdG_planCardBody fieldset{border:0;flex-direction:column;gap:7px;min-width:0;margin:0;padding:0;display:flex}.bUAAdG_planCardBody label,.bUAAdG_planNewTask label{min-width:0;color:var(--dsw-alias-label-tertiary);flex-direction:column;flex:1;gap:4px;font-size:9px;display:flex}.bUAAdG_planCardBody label small{color:var(--dsw-alias-label-tertiary);font-size:8px;line-height:11px}.bUAAdG_planCard input,.bUAAdG_planCard textarea,.bUAAdG_planCard select,.bUAAdG_planNewTask input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);width:100%;min-width:0;color:var(--dsw-alias-label-primary);font:inherit;border-radius:6px;outline:none;font-size:10.5px;line-height:16px;transition:border-color .16s,box-shadow .16s}.bUAAdG_planCard input,.bUAAdG_planCard select,.bUAAdG_planNewTask input{min-height:32px;padding:6px 8px}.bUAAdG_planCard textarea{resize:vertical;min-height:58px;padding:7px 8px}.bUAAdG_planCard input:focus-visible,.bUAAdG_planCard textarea:focus-visible,.bUAAdG_planCard select:focus-visible,.bUAAdG_planNewTask input:focus-visible{border-color:var(--dsw-alias-state-business-primary);box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent)}.bUAAdG_planGrid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;display:grid}.bUAAdG_planModelPicker{grid-template-columns:minmax(0,1fr);gap:5px;display:grid}.bUAAdG_planModelMenu{width:100%;display:flex}.bUAAdG_planModelTrigger{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);width:100%;min-height:38px;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;border-radius:7px;justify-content:space-between;align-items:center;gap:8px;padding:7px 9px;transition:border-color .16s,background-color .16s,transform .12s;display:flex}.bUAAdG_planModelTrigger:hover:not(:disabled){border-color:var(--dsw-alias-border-l3);background:var(--dsw-alias-interactive-bg-hover)}.bUAAdG_planModelTrigger:active:not(:disabled){transform:translateY(1px)}.bUAAdG_planModelTrigger:focus-visible{border-color:var(--dsw-alias-state-business-primary);outline:2px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);outline-offset:1px}.bUAAdG_planModelTrigger:disabled{cursor:wait;opacity:.64}.bUAAdG_planModelTriggerCopy{align-items:baseline;gap:6px;min-width:0;display:flex}.bUAAdG_planModelTriggerCopy strong,.bUAAdG_planModelTriggerCopy span{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.bUAAdG_planModelTriggerCopy strong{color:var(--dsw-alias-label-primary);font-size:10px;font-weight:650;line-height:15px}.bUAAdG_planModelTriggerCopy span{color:var(--dsw-alias-label-tertiary);font-size:9px;line-height:14px}.bUAAdG_planModelMenuRow{grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;width:100%;min-width:0;display:grid}.bUAAdG_planModelMenuRow>span:first-child{color:var(--dsw-alias-label-primary)}.bUAAdG_planModelMenuRow strong{color:var(--dsw-alias-label-tertiary);text-align:right;text-overflow:ellipsis;white-space:nowrap;font-weight:450;overflow:hidden}.bUAAdG_planModelMenuBack{align-items:center;gap:7px;display:inline-flex}.bUAAdG_planModelMenuBack svg{transform:rotate(180deg)}.bUAAdG_planModelEffortRow{flex-direction:column;align-items:flex-start;min-width:0;display:flex}.bUAAdG_planModelEffortRow small{width:100%;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:14px;overflow:hidden}.bUAAdG_planModelHint{color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;font-size:8.5px;line-height:12px;overflow:hidden}.bUAAdG_planModelNotice{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 9%, transparent);color:var(--dsw-alias-label-secondary);border-radius:6px;grid-column:1/-1;justify-content:space-between;align-items:center;gap:8px;padding:6px 7px;font-size:8.5px;line-height:12px;display:flex}.bUAAdG_planModelNotice button{color:var(--dsw-alias-state-business-primary);cursor:pointer;font:inherit;background:0 0;border:0;flex:none;padding:2px 6px;font-weight:650}.bUAAdG_planActions,.bUAAdG_planApproveRow,.bUAAdG_planNewTask,.bUAAdG_planConfirm,.bUAAdG_planApproveActions,.bUAAdG_planSecondaryActions{align-items:center;gap:7px;display:flex}.bUAAdG_planReviewActions{grid-template-columns:minmax(0,1fr);gap:6px;width:100%;display:grid}.bUAAdG_planSecondaryActions{grid-template-columns:minmax(0,1fr) auto;display:grid}.bUAAdG_planActions{justify-content:flex-end}.bUAAdG_planActions button,.bUAAdG_planNewTask button,.bUAAdG_planApproveRow button,.bUAAdG_planConfirm button{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-ghost-active-fill);min-height:30px;color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:6px;flex:none;padding:5px 10px;font-size:9.5px;font-weight:600;transition:background .16s,border-color .16s,transform .16s}.bUAAdG_planActions button:hover:not(:disabled),.bUAAdG_planNewTask button:hover:not(:disabled),.bUAAdG_planApproveRow button:hover:not(:disabled),.bUAAdG_planConfirm button:hover:not(:disabled){border-color:var(--dsw-alias-label-tertiary)}.bUAAdG_planActions button:active:not(:disabled),.bUAAdG_planNewTask button:active:not(:disabled),.bUAAdG_planApproveRow button:active:not(:disabled),.bUAAdG_planConfirm button:active:not(:disabled){transform:scale(.98)}.bUAAdG_planActions button[data-danger],.bUAAdG_planConfirm button[data-danger]{color:var(--dsw-alias-state-error-primary)}.bUAAdG_planFeedback{min-width:0;color:var(--dsw-alias-label-secondary);flex:1;align-items:center;gap:5px;font-size:9px;line-height:13px;animation:.18s ease-out bUAAdG_plan-feedback-in;display:inline-flex}.bUAAdG_planFeedback[data-tone=success]{color:var(--dsw-alias-state-success-primary)}.bUAAdG_planFeedback[data-tone=error]{color:var(--dsw-alias-state-error-primary)}.bUAAdG_planFeedback>span{border:1px solid;border-radius:50%;flex:none;place-items:center;width:15px;height:15px;display:grid}.bUAAdG_planFeedback svg{width:11px;height:11px}@keyframes bUAAdG_plan-feedback-in{0%{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:translateY(0)}}.bUAAdG_planConfirm{border:1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, var(--dsw-alias-border-l2));background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 7%, transparent);border-radius:7px;flex-wrap:wrap;justify-content:flex-end;padding:7px}.bUAAdG_planConfirm>span{min-width:140px;color:var(--dsw-alias-label-secondary);flex:1;font-size:9px;line-height:13px}.bUAAdG_planNewTask{align-items:flex-end}.bUAAdG_planNewTask label{gap:4px}.bUAAdG_planNewTask label>span{line-height:13px}.bUAAdG_planApproveRow{z-index:1;border:1px solid var(--dsw-alias-border-l2);background:color-mix(in srgb, var(--dsw-alias-bg-module-platform) 94%, transparent);min-height:50px;box-shadow:0 -5px 16px color-mix(in srgb, var(--dsw-alias-bg-base) 35%, transparent);backdrop-filter:blur(8px);border-radius:8px;flex-direction:column;justify-content:flex-end;align-items:stretch;margin:0 -4px -4px;padding:8px;position:sticky;bottom:0}.bUAAdG_planApproveRow[data-armed=true]{border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, var(--dsw-alias-border-l2))}.bUAAdG_planApproveRow[data-discard=true]{border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, var(--dsw-alias-border-l2))}.bUAAdG_planApproveCopy{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}.bUAAdG_planApproveCopy strong{color:var(--dsw-alias-label-primary);font-size:9.5px;line-height:13px}.bUAAdG_planApproveCopy small{color:var(--dsw-alias-label-tertiary);font-size:8.5px;line-height:12px}.bUAAdG_planApproveRow button{background:var(--dsw-alias-state-business-primary);min-height:32px;color:var(--dsw-alias-label-primary-inverted);padding-inline:13px}.bUAAdG_planReviewActions>button[data-plan-approve]{width:100%}.bUAAdG_planApproveActions>button:first-child{background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-primary)}.bUAAdG_planSecondaryActions>button,.bUAAdG_planApproveActions>button[data-danger]{border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-primary)}.bUAAdG_planSecondaryActions>button[data-danger],.bUAAdG_planApproveActions>button[data-danger]{color:var(--dsw-alias-state-error-primary)}.bUAAdG_planSectionToggle:focus-visible,.bUAAdG_planCardHeader:focus-visible,.bUAAdG_planActions button:focus-visible,.bUAAdG_planNewTask button:focus-visible,.bUAAdG_planApproveRow button:focus-visible,.bUAAdG_planConfirm button:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}.bUAAdG_planActions button:disabled,.bUAAdG_planNewTask button:disabled,.bUAAdG_planApproveRow button:disabled{cursor:default;opacity:.55}.bUAAdG_historicPill{background:var(--dsw-alias-button-ghost-active-fill);color:var(--dsw-alias-label-tertiary);border-radius:4px;flex:none;margin-left:auto;padding:1px 7px;font-size:9.5px;font-weight:600;line-height:15px}.bUAAdG_members{flex-direction:column;gap:3px;display:flex}.bUAAdG_archiveLabel{color:var(--dsw-alias-label-tertiary);padding:5px 14px 0;font-size:9.5px;font-weight:600;line-height:14px;display:block}@media (prefers-reduced-motion:reduce){.bUAAdG_panel,.bUAAdG_badge,.bUAAdG_badgeDot,.bUAAdG_panelDot,.bUAAdG_workGlyph rect,.bUAAdG_stateArt,.bUAAdG_memberAvatar[data-unread=true]:after,.bUAAdG_planChevron,.bUAAdG_planFeedback,.bUAAdG_planActions button,.bUAAdG_planNewTask button,.bUAAdG_planApproveRow button,.bUAAdG_planConfirm button,.bUAAdG_planCard input,.bUAAdG_planCard textarea,.bUAAdG_planCard select,.bUAAdG_planNewTask input{transition:none;animation:none}}@media (width<=960px){html[data-agent-teams-panel-open] [data-phase=active]{padding-right:0}}@media (width<=640px){.bUAAdG_badge{top:56px;right:10px}.bUAAdG_teamStats span[data-stat=messages]{display:none}.bUAAdG_captainNode{grid-template-columns:48px minmax(0,1fr)}.bUAAdG_captainState{display:none}.bUAAdG_delegationTree{margin-left:12px;padding-left:15px}.bUAAdG_memberBranch{width:15px}.bUAAdG_assignmentLine{padding-left:53px}.bUAAdG_planFlow li{gap:4px;font-size:8px}.bUAAdG_planFlow li:not(:last-child):after{margin-right:3px}.bUAAdG_planCardHeader{grid-template-columns:auto minmax(0,1fr) auto}.bUAAdG_planCardHeader .bUAAdG_planCardMeta{display:none}.bUAAdG_planGrid,.bUAAdG_planModelPicker{grid-template-columns:minmax(0,1fr)}.bUAAdG_planNewTask,.bUAAdG_planApproveRow{flex-direction:column;align-items:stretch}.bUAAdG_planNewTask button,.bUAAdG_planApproveRow>button,.bUAAdG_planApproveActions,.bUAAdG_planReviewActions{width:100%}.bUAAdG_planApproveActions button,.bUAAdG_planReviewActions button,.bUAAdG_planSecondaryActions button{flex:1}}@container bUAAdG_agent-team (width<=360px){.bUAAdG_planEditor{margin-inline:0;padding-inline:10px}.bUAAdG_planHeader>span{align-items:flex-start}.bUAAdG_planFlow li{gap:3px;font-size:7.5px}.bUAAdG_planFlow li:not(:last-child):after{min-width:4px;margin-right:2px}.bUAAdG_planSecondaryActions,.bUAAdG_planApproveActions{grid-template-columns:minmax(0,1fr);width:100%;display:grid}.bUAAdG_planSecondaryActions button,.bUAAdG_planApproveActions button{width:100%}}.bUAAdG_dagOwner{text-overflow:ellipsis;max-width:64px;margin-left:auto;font-size:9px;font-weight:400;overflow:hidden}.bUAAdG_team[data-workspace-team]{--workspace-surface:var(--dsw-alias-bg-layer-1);--workspace-line:color-mix(in srgb, var(--dsw-alias-border-l2) 75%, transparent);--workspace-shadow:0 3px 14px color-mix(in srgb, var(--dsw-alias-label-primary) 3%, transparent);background:0 0;border:0;gap:14px;padding:0;container:none}.bUAAdG_team[data-workspace-team] .bUAAdG_teamHead{flex-wrap:wrap;gap:8px;padding:0 2px 2px}.bUAAdG_team[data-workspace-team] .bUAAdG_teamName{flex-basis:160px;font-size:14px;line-height:1.5}.bUAAdG_team[data-workspace-team] .bUAAdG_teamStats{flex-wrap:wrap;font-size:11px}.bUAAdG_team[data-workspace-team] .bUAAdG_teamStopButton{border-radius:9px;width:32px;height:32px}.bUAAdG_team[data-workspace-team] .bUAAdG_delegationSection,.bUAAdG_team[data-workspace-team] .bUAAdG_dependencySection,.bUAAdG_completionCard,.bUAAdG_inboxCard{border:1px solid var(--workspace-line);background:var(--workspace-surface);min-width:0;box-shadow:var(--workspace-shadow);box-sizing:border-box;border-radius:18px;margin:0;padding:18px}.bUAAdG_team[data-workspace-team] .bUAAdG_captainNode{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 4%, var(--dsw-alias-bg-module-platform));border-color:var(--workspace-line);border-radius:12px;grid-template-columns:44px minmax(0,1fr);gap:8px;padding:10px}.bUAAdG_team[data-workspace-team] .bUAAdG_captainState{grid-column:2;justify-self:start;font-size:11px}.bUAAdG_team[data-workspace-team] .bUAAdG_captainName{font-size:14px}.bUAAdG_team[data-workspace-team] .bUAAdG_captainRole{font-size:11px}.bUAAdG_team[data-workspace-team] .bUAAdG_captainSummary{white-space:normal;font-size:12px;line-height:1.6}.bUAAdG_team[data-workspace-team] .bUAAdG_progressOverview{gap:9px;margin:16px 0}.bUAAdG_team[data-workspace-team] .bUAAdG_progressSegments{gap:4px}.bUAAdG_team[data-workspace-team] .bUAAdG_progressSegments>span{border-radius:4px;height:6px}.bUAAdG_team[data-workspace-team] .bUAAdG_progressLegend{gap:8px 12px;font-size:11px}.bUAAdG_team[data-workspace-team] .bUAAdG_progressSummary{font-size:11px;line-height:1.6}.bUAAdG_team[data-workspace-team] .bUAAdG_progressSummary>span:last-child{white-space:normal}.bUAAdG_team[data-workspace-team] .bUAAdG_membersToggle{background:var(--dsw-alias-bg-module-platform);border-radius:9px;padding:10px;font-size:11px}.bUAAdG_team[data-workspace-team] .bUAAdG_memberBlock{padding-top:14px;padding-bottom:8px}.bUAAdG_team[data-workspace-team] .bUAAdG_memberRow{border-radius:9px}.bUAAdG_team[data-workspace-team] .bUAAdG_memberLine{flex-wrap:wrap;gap:4px 6px}.bUAAdG_team[data-workspace-team] .bUAAdG_memberName{font-size:13px}.bUAAdG_team[data-workspace-team] .bUAAdG_memberRole,.bUAAdG_team[data-workspace-team] .bUAAdG_memberState,.bUAAdG_team[data-workspace-team] .bUAAdG_memberCount{font-size:11px}.bUAAdG_team[data-workspace-team] .bUAAdG_memberRole{background:var(--dsw-alias-bg-module-platform);border-radius:5px;padding:1px 5px}.bUAAdG_team[data-workspace-team] .bUAAdG_memberStatusLine{white-space:normal;font-size:12px;line-height:1.6}.bUAAdG_team[data-workspace-team] .bUAAdG_assignmentLine{flex-wrap:wrap;row-gap:5px}.bUAAdG_team[data-workspace-team] .bUAAdG_assignmentLabel{font-size:10px}.bUAAdG_team[data-workspace-team] .bUAAdG_assignmentChip{border-radius:5px;font-size:10px;line-height:18px}.bUAAdG_team[data-workspace-team] .bUAAdG_memberBlock[data-selected-member] .bUAAdG_memberRow{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:3px}.bUAAdG_team[data-workspace-team] .bUAAdG_sectionHead{flex-wrap:wrap;gap:8px;margin-bottom:18px}.bUAAdG_team[data-workspace-team] .bUAAdG_sectionToggleTitle{font-size:12px}.bUAAdG_team[data-workspace-team] .bUAAdG_sectionHint{white-space:normal;font-size:11px;line-height:1.6}.bUAAdG_team[data-workspace-team] .bUAAdG_dagViewport{padding:4px 2px 14px}.bUAAdG_team[data-workspace-team] .bUAAdG_dagNode{background:var(--workspace-surface);border-radius:11px;padding:10px 11px}.bUAAdG_team[data-workspace-team] .bUAAdG_dagNodeHead{margin-bottom:6px;font-size:11px}.bUAAdG_team[data-workspace-team] .bUAAdG_dagNodeLabel{white-space:normal;-webkit-line-clamp:2;letter-spacing:0;-webkit-box-orient:vertical;font-size:12px;line-height:1.4;display:-webkit-box;overflow:hidden}.bUAAdG_team[data-workspace-team] .bUAAdG_dagOwner{white-space:nowrap;max-width:105px;font-size:10px}.bUAAdG_team[data-workspace-team] .bUAAdG_taskDetail{border-radius:11px;margin-top:14px;padding:14px}.bUAAdG_team[data-workspace-team] .bUAAdG_taskDetailSubject{white-space:normal;font-size:13px;line-height:1.6}.bUAAdG_team[data-workspace-team] .bUAAdG_taskDetailLine,.bUAAdG_team[data-workspace-team] .bUAAdG_taskDetailMeta{font-size:12px;line-height:1.6}.bUAAdG_team[data-workspace-team] .bUAAdG_planEditor{background:var(--workspace-surface);border-color:var(--workspace-line);border-radius:18px;margin:0;padding:18px}.bUAAdG_team[data-workspace-team] .bUAAdG_planApproveRow{position:static}.bUAAdG_workspaceSummary{grid-template-columns:minmax(0,1fr);gap:14px;min-width:0;display:grid}.bUAAdG_completionCard h3,.bUAAdG_inboxCard h3{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;font-weight:600;line-height:1.6}.bUAAdG_completionBody{flex-wrap:wrap;align-items:center;gap:20px;margin-top:16px;display:flex}.bUAAdG_completionRing{flex:none;width:132px;height:132px;position:relative}.bUAAdG_completionRing svg{width:100%;height:100%;transform:rotate(-90deg)}.bUAAdG_completionRing circle{fill:none;stroke-width:7px}.bUAAdG_ringTrack{stroke:var(--dsw-alias-border-l2)}.bUAAdG_ringValue{stroke:var(--dsw-alias-state-business-primary)}.bUAAdG_completionRing>span{color:var(--dsw-alias-label-secondary);flex-direction:column;justify-content:center;align-items:center;gap:5px;font-size:11px;display:flex;position:absolute;inset:0}.bUAAdG_completionRing strong{color:var(--dsw-alias-label-primary);letter-spacing:-.7px;font-variant-numeric:tabular-nums;font-size:26px;font-weight:600;line-height:1.2}.bUAAdG_completionRing small{font-size:18px;font-weight:450}.bUAAdG_completionTasks{flex:200px;min-width:0;max-height:216px;margin:0;padding:2px;list-style:none;overflow:auto}.bUAAdG_completionTasks li{border-bottom:1px solid var(--workspace-line);grid-template-columns:18px auto minmax(0,1fr) auto;align-items:center;gap:8px;padding:7px 0;font-size:11px;display:grid}.bUAAdG_completionTasks li:last-child{border:0}.bUAAdG_completionDot{background:var(--dsw-alias-bg-module-platform);width:16px;height:16px;color:var(--dsw-alias-label-secondary);border-radius:50%;place-items:center;display:grid}.bUAAdG_completionTasks li[data-state=completed] .bUAAdG_completionDot{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_completionTasks li[data-state=failed] .bUAAdG_completionDot{background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-inverted)}.bUAAdG_completionTaskId{text-overflow:ellipsis;white-space:nowrap;max-width:6em;color:var(--dsw-alias-label-secondary);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden}.bUAAdG_completionTaskSubject{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.bUAAdG_completionTaskStatus{color:var(--dsw-alias-label-secondary);font-size:10px}.bUAAdG_completionTasks li[data-verdict-stale] .bUAAdG_completionDot{background:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-label-primary)}.bUAAdG_completionTasks li[data-verdict-stale] .bUAAdG_completionTaskStatus{font-weight:600}.bUAAdG_completionTasks:focus-visible,.bUAAdG_inboxMessages:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:3px;border-radius:4px}.bUAAdG_inboxCard>header{flex-wrap:wrap;align-items:baseline;gap:6px 12px;display:flex}.bUAAdG_inboxCard>header>span{color:var(--dsw-alias-label-secondary);font-size:10px}.bUAAdG_inboxMessages{max-height:260px;margin:14px 0 0;padding:0;list-style:none;overflow:auto}.bUAAdG_inboxMessages li{align-items:start;gap:9px;margin:0 0 12px;display:flex}.bUAAdG_inboxMessages img,.bUAAdG_inboxInitial{object-fit:contain;flex:none;width:30px;height:30px}.bUAAdG_inboxInitial{background:var(--dsw-alias-bg-module-platform);border-radius:9px;place-items:center;font-size:12px;display:grid}.bUAAdG_inboxMessages li>div{flex:1;min-width:0}.bUAAdG_inboxMessages strong{overflow-wrap:anywhere;font-size:11px;font-weight:550}.bUAAdG_inboxMessages p{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-module-platform));white-space:pre-wrap;overflow-wrap:anywhere;border-radius:0 10px 10px;margin:5px 0 0;padding:9px 11px;font-size:12px;line-height:1.6}.bUAAdG_summaryEmpty{color:var(--dsw-alias-label-secondary);margin:14px 0 0;font-size:12px;line-height:1.8}@container (width>=800px){.bUAAdG_team[data-workspace-team]{grid-template-columns:minmax(280px,.8fr) minmax(0,1.4fr);align-items:start;gap:16px;display:grid}.bUAAdG_team[data-workspace-team]>.bUAAdG_teamHead,.bUAAdG_team[data-workspace-team]>[data-staging-editor],.bUAAdG_workspaceSummary{grid-column:1/-1}.bUAAdG_workspaceSummary{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.bUAAdG_team[data-workspace-team] .bUAAdG_dependencySection{align-self:stretch}.bUAAdG_team[data-workspace-team] .bUAAdG_dagCanvas[data-layout=parallel]{grid-template-columns:repeat(2,minmax(0,1fr))}}@container (width<=400px){.bUAAdG_team[data-workspace-team] .bUAAdG_delegationSection,.bUAAdG_team[data-workspace-team] .bUAAdG_dependencySection,.bUAAdG_completionCard,.bUAAdG_inboxCard{border-radius:14px;padding:12px}.bUAAdG_team[data-workspace-team] .bUAAdG_teamStats{gap:6px;font-size:10px}.bUAAdG_completionBody{justify-content:center}}.bUAAdG_progressSegments>span[data-state=claimed],.bUAAdG_dagNode[data-state=claimed] .bUAAdG_dagNodeDot{background:var(--dsw-alias-state-warn-primary)}.bUAAdG_progressLegend>span[data-state=claimed]{color:var(--dsw-alias-state-warn-primary)}.bUAAdG_dagNode[data-state=claimed]{border-color:var(--dsw-alias-state-warn-primary)}.bUAAdG_dagNode[data-state=claimed] .bUAAdG_dagNodeHead{padding-right:38px}.bUAAdG_dagClaimedState{color:var(--dsw-alias-state-warn-primary);font-size:8px;line-height:10px;position:absolute;top:4px;right:5px}.bUAAdG_assignmentChip[data-state=claimed],.bUAAdG_taskDetailBadge[data-state=claimed]{background:var(--dsw-alias-state-warn-primary);color:var(--dsw-alias-label-primary-inverted)}";
 		const tagId$1 = "@nanmicoder/dsh-agent-teams/ActivityPanel.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$1) + "]") === null) {
 			const tag = document.createElement("style");
@@ -787,138 +849,154 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var ActivityPanel_module_css_default = {
-			"agent-team": "FqzhMq_agent-team",
-			"agentTeamsBreathe": "FqzhMq_agentTeamsBreathe",
-			"agentTeamsDot": "FqzhMq_agentTeamsDot",
-			"agentTeamsFloat": "FqzhMq_agentTeamsFloat",
-			"agentTeamsPanelIn": "FqzhMq_agentTeamsPanelIn",
-			"agentTeamsPulse": "FqzhMq_agentTeamsPulse",
-			"agentTeamsThink": "FqzhMq_agentTeamsThink",
-			"agentTeamsUnreadPulse": "FqzhMq_agentTeamsUnreadPulse",
-			"archiveLabel": "FqzhMq_archiveLabel",
-			"assignmentChip": "FqzhMq_assignmentChip",
-			"assignmentLabel": "FqzhMq_assignmentLabel",
-			"assignmentLine": "FqzhMq_assignmentLine",
-			"assignmentTasks": "FqzhMq_assignmentTasks",
-			"badge": "FqzhMq_badge",
-			"badgeCount": "FqzhMq_badgeCount",
-			"badgeDot": "FqzhMq_badgeDot",
-			"captainAvatar": "FqzhMq_captainAvatar",
-			"captainInfo": "FqzhMq_captainInfo",
-			"captainLine": "FqzhMq_captainLine",
-			"captainName": "FqzhMq_captainName",
-			"captainNode": "FqzhMq_captainNode",
-			"captainRole": "FqzhMq_captainRole",
-			"captainState": "FqzhMq_captainState",
-			"captainSummary": "FqzhMq_captainSummary",
-			"chevron": "FqzhMq_chevron",
-			"dagCanvas": "FqzhMq_dagCanvas",
-			"dagEdges": "FqzhMq_dagEdges",
-			"dagNode": "FqzhMq_dagNode",
-			"dagNodeDot": "FqzhMq_dagNodeDot",
-			"dagNodeHead": "FqzhMq_dagNodeHead",
-			"dagNodeLabel": "FqzhMq_dagNodeLabel",
-			"dagOwner": "FqzhMq_dagOwner",
-			"dagRunningState": "FqzhMq_dagRunningState",
-			"dagViewport": "FqzhMq_dagViewport",
-			"delegationSection": "FqzhMq_delegationSection",
-			"delegationTree": "FqzhMq_delegationTree",
-			"dependencySection": "FqzhMq_dependencySection",
-			"emptyHint": "FqzhMq_emptyHint",
-			"historicPill": "FqzhMq_historicPill",
-			"iconButton": "FqzhMq_iconButton",
-			"leadAvatar": "FqzhMq_leadAvatar",
-			"memberArt": "FqzhMq_memberArt",
-			"memberAvatar": "FqzhMq_memberAvatar",
-			"memberBlock": "FqzhMq_memberBlock",
-			"memberBranch": "FqzhMq_memberBranch",
-			"memberCount": "FqzhMq_memberCount",
-			"memberInfo": "FqzhMq_memberInfo",
-			"memberInitial": "FqzhMq_memberInitial",
-			"memberLine": "FqzhMq_memberLine",
-			"memberModel": "FqzhMq_memberModel",
-			"memberName": "FqzhMq_memberName",
-			"memberRole": "FqzhMq_memberRole",
-			"memberRow": "FqzhMq_memberRow",
-			"memberState": "FqzhMq_memberState",
-			"memberStatusLine": "FqzhMq_memberStatusLine",
-			"members": "FqzhMq_members",
-			"membersToggle": "FqzhMq_membersToggle",
-			"panel": "FqzhMq_panel",
-			"panelControls": "FqzhMq_panelControls",
-			"panelDot": "FqzhMq_panelDot",
-			"panelHead": "FqzhMq_panelHead",
-			"panelTitle": "FqzhMq_panelTitle",
-			"plan-feedback-in": "FqzhMq_plan-feedback-in",
-			"planActions": "FqzhMq_planActions",
-			"planApproveActions": "FqzhMq_planApproveActions",
-			"planApproveCopy": "FqzhMq_planApproveCopy",
-			"planApproveRow": "FqzhMq_planApproveRow",
-			"planCard": "FqzhMq_planCard",
-			"planCardBody": "FqzhMq_planCardBody",
-			"planCardHeader": "FqzhMq_planCardHeader",
-			"planCardIdentity": "FqzhMq_planCardIdentity",
-			"planCardMeta": "FqzhMq_planCardMeta",
-			"planChevron": "FqzhMq_planChevron",
-			"planConfirm": "FqzhMq_planConfirm",
-			"planDirty": "FqzhMq_planDirty",
-			"planEditor": "FqzhMq_planEditor",
-			"planEmpty": "FqzhMq_planEmpty",
-			"planFeedback": "FqzhMq_planFeedback",
-			"planFlow": "FqzhMq_planFlow",
-			"planGrid": "FqzhMq_planGrid",
-			"planHeader": "FqzhMq_planHeader",
-			"planList": "FqzhMq_planList",
-			"planModelEffortRow": "FqzhMq_planModelEffortRow",
-			"planModelHint": "FqzhMq_planModelHint",
-			"planModelMenu": "FqzhMq_planModelMenu",
-			"planModelMenuBack": "FqzhMq_planModelMenuBack",
-			"planModelMenuRow": "FqzhMq_planModelMenuRow",
-			"planModelNotice": "FqzhMq_planModelNotice",
-			"planModelPicker": "FqzhMq_planModelPicker",
-			"planModelTrigger": "FqzhMq_planModelTrigger",
-			"planModelTriggerCopy": "FqzhMq_planModelTriggerCopy",
-			"planNewTask": "FqzhMq_planNewTask",
-			"planReviewActions": "FqzhMq_planReviewActions",
-			"planSecondaryActions": "FqzhMq_planSecondaryActions",
-			"planSection": "FqzhMq_planSection",
-			"planSectionToggle": "FqzhMq_planSectionToggle",
-			"planTaskId": "FqzhMq_planTaskId",
-			"planTaskSummary": "FqzhMq_planTaskSummary",
-			"progressEmpty": "FqzhMq_progressEmpty",
-			"progressLegend": "FqzhMq_progressLegend",
-			"progressOverview": "FqzhMq_progressOverview",
-			"progressSegments": "FqzhMq_progressSegments",
-			"progressSummary": "FqzhMq_progressSummary",
-			"progressSummaryDot": "FqzhMq_progressSummaryDot",
-			"progressTitle": "FqzhMq_progressTitle",
-			"resizeHandle": "FqzhMq_resizeHandle",
-			"sectionHead": "FqzhMq_sectionHead",
-			"sectionHint": "FqzhMq_sectionHint",
-			"sectionTitle": "FqzhMq_sectionTitle",
-			"sectionToggleTitle": "FqzhMq_sectionToggleTitle",
-			"stageLabel": "FqzhMq_stageLabel",
-			"stateArt": "FqzhMq_stateArt",
-			"stopModalActions": "FqzhMq_stopModalActions",
-			"stopModalError": "FqzhMq_stopModalError",
-			"taskDetail": "FqzhMq_taskDetail",
-			"taskDetailBadge": "FqzhMq_taskDetailBadge",
-			"taskDetailHead": "FqzhMq_taskDetailHead",
-			"taskDetailId": "FqzhMq_taskDetailId",
-			"taskDetailLine": "FqzhMq_taskDetailLine",
-			"taskDetailMeta": "FqzhMq_taskDetailMeta",
-			"taskDetailModel": "FqzhMq_taskDetailModel",
-			"taskDetailSubject": "FqzhMq_taskDetailSubject",
-			"taskEmpty": "FqzhMq_taskEmpty",
-			"taskId": "FqzhMq_taskId",
-			"team": "FqzhMq_team",
-			"teamHead": "FqzhMq_teamHead",
-			"teamName": "FqzhMq_teamName",
-			"teamStats": "FqzhMq_teamStats",
-			"teamStopButton": "FqzhMq_teamStopButton",
-			"teams": "FqzhMq_teams",
-			"unreadPill": "FqzhMq_unreadPill",
-			"workGlyph": "FqzhMq_workGlyph"
+			"agent-team": "bUAAdG_agent-team",
+			"agentTeamsBreathe": "bUAAdG_agentTeamsBreathe",
+			"agentTeamsDot": "bUAAdG_agentTeamsDot",
+			"agentTeamsFloat": "bUAAdG_agentTeamsFloat",
+			"agentTeamsPanelIn": "bUAAdG_agentTeamsPanelIn",
+			"agentTeamsPulse": "bUAAdG_agentTeamsPulse",
+			"agentTeamsThink": "bUAAdG_agentTeamsThink",
+			"agentTeamsUnreadPulse": "bUAAdG_agentTeamsUnreadPulse",
+			"archiveLabel": "bUAAdG_archiveLabel",
+			"assignmentChip": "bUAAdG_assignmentChip",
+			"assignmentLabel": "bUAAdG_assignmentLabel",
+			"assignmentLine": "bUAAdG_assignmentLine",
+			"assignmentTasks": "bUAAdG_assignmentTasks",
+			"badge": "bUAAdG_badge",
+			"badgeCount": "bUAAdG_badgeCount",
+			"badgeDot": "bUAAdG_badgeDot",
+			"captainAvatar": "bUAAdG_captainAvatar",
+			"captainInfo": "bUAAdG_captainInfo",
+			"captainLine": "bUAAdG_captainLine",
+			"captainName": "bUAAdG_captainName",
+			"captainNode": "bUAAdG_captainNode",
+			"captainRole": "bUAAdG_captainRole",
+			"captainState": "bUAAdG_captainState",
+			"captainSummary": "bUAAdG_captainSummary",
+			"chevron": "bUAAdG_chevron",
+			"completionBody": "bUAAdG_completionBody",
+			"completionCard": "bUAAdG_completionCard",
+			"completionDot": "bUAAdG_completionDot",
+			"completionRing": "bUAAdG_completionRing",
+			"completionTaskId": "bUAAdG_completionTaskId",
+			"completionTaskStatus": "bUAAdG_completionTaskStatus",
+			"completionTaskSubject": "bUAAdG_completionTaskSubject",
+			"completionTasks": "bUAAdG_completionTasks",
+			"dagCanvas": "bUAAdG_dagCanvas",
+			"dagClaimedState": "bUAAdG_dagClaimedState",
+			"dagEdges": "bUAAdG_dagEdges",
+			"dagNode": "bUAAdG_dagNode",
+			"dagNodeDot": "bUAAdG_dagNodeDot",
+			"dagNodeHead": "bUAAdG_dagNodeHead",
+			"dagNodeLabel": "bUAAdG_dagNodeLabel",
+			"dagOwner": "bUAAdG_dagOwner",
+			"dagRunningState": "bUAAdG_dagRunningState",
+			"dagViewport": "bUAAdG_dagViewport",
+			"delegationSection": "bUAAdG_delegationSection",
+			"delegationTree": "bUAAdG_delegationTree",
+			"dependencySection": "bUAAdG_dependencySection",
+			"emptyHint": "bUAAdG_emptyHint",
+			"historicPill": "bUAAdG_historicPill",
+			"iconButton": "bUAAdG_iconButton",
+			"inboxCard": "bUAAdG_inboxCard",
+			"inboxInitial": "bUAAdG_inboxInitial",
+			"inboxMessages": "bUAAdG_inboxMessages",
+			"leadAvatar": "bUAAdG_leadAvatar",
+			"memberArt": "bUAAdG_memberArt",
+			"memberAvatar": "bUAAdG_memberAvatar",
+			"memberBlock": "bUAAdG_memberBlock",
+			"memberBranch": "bUAAdG_memberBranch",
+			"memberCount": "bUAAdG_memberCount",
+			"memberInfo": "bUAAdG_memberInfo",
+			"memberInitial": "bUAAdG_memberInitial",
+			"memberLine": "bUAAdG_memberLine",
+			"memberModel": "bUAAdG_memberModel",
+			"memberName": "bUAAdG_memberName",
+			"memberRole": "bUAAdG_memberRole",
+			"memberRow": "bUAAdG_memberRow",
+			"memberState": "bUAAdG_memberState",
+			"memberStatusLine": "bUAAdG_memberStatusLine",
+			"members": "bUAAdG_members",
+			"membersToggle": "bUAAdG_membersToggle",
+			"panel": "bUAAdG_panel",
+			"panelControls": "bUAAdG_panelControls",
+			"panelDot": "bUAAdG_panelDot",
+			"panelHead": "bUAAdG_panelHead",
+			"panelTitle": "bUAAdG_panelTitle",
+			"plan-feedback-in": "bUAAdG_plan-feedback-in",
+			"planActions": "bUAAdG_planActions",
+			"planApproveActions": "bUAAdG_planApproveActions",
+			"planApproveCopy": "bUAAdG_planApproveCopy",
+			"planApproveRow": "bUAAdG_planApproveRow",
+			"planCard": "bUAAdG_planCard",
+			"planCardBody": "bUAAdG_planCardBody",
+			"planCardHeader": "bUAAdG_planCardHeader",
+			"planCardIdentity": "bUAAdG_planCardIdentity",
+			"planCardMeta": "bUAAdG_planCardMeta",
+			"planChevron": "bUAAdG_planChevron",
+			"planConfirm": "bUAAdG_planConfirm",
+			"planDirty": "bUAAdG_planDirty",
+			"planEditor": "bUAAdG_planEditor",
+			"planEmpty": "bUAAdG_planEmpty",
+			"planFeedback": "bUAAdG_planFeedback",
+			"planFlow": "bUAAdG_planFlow",
+			"planGrid": "bUAAdG_planGrid",
+			"planHeader": "bUAAdG_planHeader",
+			"planList": "bUAAdG_planList",
+			"planModelEffortRow": "bUAAdG_planModelEffortRow",
+			"planModelHint": "bUAAdG_planModelHint",
+			"planModelMenu": "bUAAdG_planModelMenu",
+			"planModelMenuBack": "bUAAdG_planModelMenuBack",
+			"planModelMenuRow": "bUAAdG_planModelMenuRow",
+			"planModelNotice": "bUAAdG_planModelNotice",
+			"planModelPicker": "bUAAdG_planModelPicker",
+			"planModelTrigger": "bUAAdG_planModelTrigger",
+			"planModelTriggerCopy": "bUAAdG_planModelTriggerCopy",
+			"planNewTask": "bUAAdG_planNewTask",
+			"planReviewActions": "bUAAdG_planReviewActions",
+			"planSecondaryActions": "bUAAdG_planSecondaryActions",
+			"planSection": "bUAAdG_planSection",
+			"planSectionToggle": "bUAAdG_planSectionToggle",
+			"planTaskId": "bUAAdG_planTaskId",
+			"planTaskSummary": "bUAAdG_planTaskSummary",
+			"progressEmpty": "bUAAdG_progressEmpty",
+			"progressLegend": "bUAAdG_progressLegend",
+			"progressOverview": "bUAAdG_progressOverview",
+			"progressSegments": "bUAAdG_progressSegments",
+			"progressSummary": "bUAAdG_progressSummary",
+			"progressSummaryDot": "bUAAdG_progressSummaryDot",
+			"progressTitle": "bUAAdG_progressTitle",
+			"resizeHandle": "bUAAdG_resizeHandle",
+			"ringTrack": "bUAAdG_ringTrack",
+			"ringValue": "bUAAdG_ringValue",
+			"sectionHead": "bUAAdG_sectionHead",
+			"sectionHint": "bUAAdG_sectionHint",
+			"sectionTitle": "bUAAdG_sectionTitle",
+			"sectionToggleTitle": "bUAAdG_sectionToggleTitle",
+			"stageLabel": "bUAAdG_stageLabel",
+			"stateArt": "bUAAdG_stateArt",
+			"stopModalActions": "bUAAdG_stopModalActions",
+			"stopModalError": "bUAAdG_stopModalError",
+			"summaryEmpty": "bUAAdG_summaryEmpty",
+			"taskDetail": "bUAAdG_taskDetail",
+			"taskDetailBadge": "bUAAdG_taskDetailBadge",
+			"taskDetailHead": "bUAAdG_taskDetailHead",
+			"taskDetailId": "bUAAdG_taskDetailId",
+			"taskDetailLine": "bUAAdG_taskDetailLine",
+			"taskDetailMeta": "bUAAdG_taskDetailMeta",
+			"taskDetailModel": "bUAAdG_taskDetailModel",
+			"taskDetailSubject": "bUAAdG_taskDetailSubject",
+			"taskEmpty": "bUAAdG_taskEmpty",
+			"taskId": "bUAAdG_taskId",
+			"team": "bUAAdG_team",
+			"teamHead": "bUAAdG_teamHead",
+			"teamName": "bUAAdG_teamName",
+			"teamStats": "bUAAdG_teamStats",
+			"teamStopButton": "bUAAdG_teamStopButton",
+			"teams": "bUAAdG_teams",
+			"unreadPill": "bUAAdG_unreadPill",
+			"workGlyph": "bUAAdG_workGlyph",
+			"workspaceSummary": "bUAAdG_workspaceSummary"
 		};
 		//#endregion
 		//#region lib/client/StagingPlanEditor.js
@@ -2168,7 +2246,7 @@ window.__ModuleLoader__.load({
 		function accentOf(id) {
 			return ACCENTS[stableHash(id) % ACCENTS.length] ?? ACCENTS[0];
 		}
-		/** Badge text follows the raw task status (finer than the 4 visual states):
+		/** Badge text follows the raw task status:
 		* claimed/pending/failed/cancelled keep their own labels and colors. */
 		const TASK_STATUS_LABEL = {
 			pending: "task.status.pending",
@@ -2306,6 +2384,7 @@ window.__ModuleLoader__.load({
 			const completed = team.tasks.filter((task) => task.status === "completed");
 			const cancelled = team.tasks.filter((task) => task.status === "cancelled");
 			const running = team.tasks.filter((task) => task.state === "running");
+			const claimed = team.tasks.filter((task) => task.state === "claimed");
 			const blocked = team.tasks.filter((task) => task.state === "blocked");
 			const ready = team.tasks.filter((task) => task.state === "open" && task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled");
 			const failed = team.tasks.filter((task) => task.status === "failed");
@@ -2318,18 +2397,20 @@ window.__ModuleLoader__.load({
 				cancelled: cancelled.length,
 				failed: failed.length
 			});
-			if (failed.length > 0 && running.length === 0 && ready.length === 0 && blocked.length === 0) return t("task.summary.failedSettled", { count: failed.length });
+			if (failed.length > 0 && running.length === 0 && claimed.length === 0 && ready.length === 0 && blocked.length === 0) return t("task.summary.failedSettled", { count: failed.length });
 			if (blocked.length > 0 && running.length > 0) return t("task.summary.blockedAndRunning", {
 				tasks: formatTaskIds(blocked.slice(0, 3).map((task) => task.id), t),
 				more: blocked.length > 3 ? t("task.summary.more", { count: blocked.length - 3 }) : ""
 			});
 			if (running.length > 0) return t("task.summary.running", { tasks: formatTaskIds(running.map((task) => task.id), t) });
+			if (claimed.length > 0) return t("task.summary.claimed", { tasks: formatTaskIds(claimed.map((task) => task.id), t) });
 			if (ready.length > 0) return t("task.summary.ready", { tasks: formatTaskIds(ready.map((task) => task.id), t) });
 			if (blocked.length > 0) return t("task.summary.blocked", { tasks: formatTaskIds(blocked.map((task) => task.id), t) });
 			return t("task.summary.waitingSchedule");
 		}
 		function ProgressOverview({ team, t, discarded = false }) {
 			const running = discarded ? 0 : team.tasks.filter((task) => task.state === "running").length;
+			const claimed = discarded ? 0 : team.tasks.filter((task) => task.state === "claimed").length;
 			const blocked = discarded ? 0 : team.tasks.filter((task) => task.state === "blocked").length;
 			const completed = discarded ? 0 : team.tasks.filter((task) => task.status === "completed").length;
 			const settled = !discarded && team.tasks.length > 0 && team.tasks.every((task) => task.status === "completed" || task.status === "failed" || task.status === "cancelled");
@@ -2355,6 +2436,10 @@ window.__ModuleLoader__.load({
 								"data-state": "running",
 								children: t("progress.running", { count: running })
 							}),
+							claimed > 0 && (0, react_jsx_runtime.jsx)("span", {
+								"data-state": "claimed",
+								children: t("progress.claimed", { count: claimed })
+							}),
 							(0, react_jsx_runtime.jsx)("span", {
 								"data-state": "blocked",
 								children: t("progress.blocked", { count: blocked })
@@ -2371,6 +2456,110 @@ window.__ModuleLoader__.load({
 						children: [(0, react_jsx_runtime.jsx)("span", { className: ActivityPanel_module_css_default.progressSummaryDot }), (0, react_jsx_runtime.jsx)("span", { children: taskSummary(team, t, discarded) })]
 					})
 				]
+			});
+		}
+		/** Workspace-only summary of durable completion and the current unread inbox.
+		* The snapshot is not a chat transcript: it provides at most five unread
+		* captain messages, with no timestamps, so do not imply a complete history.
+		*/
+		function WorkspaceSummary({ team, t, discarded }) {
+			const completed = discarded ? 0 : team.tasks.filter((task) => task.status === "completed").length;
+			const total = team.tasks.length;
+			return (0, react_jsx_runtime.jsxs)("div", {
+				className: ActivityPanel_module_css_default.workspaceSummary,
+				children: [(0, react_jsx_runtime.jsxs)("section", {
+					className: ActivityPanel_module_css_default.completionCard,
+					"aria-label": t("progress.aria"),
+					children: [(0, react_jsx_runtime.jsx)("h3", { children: t("progress.title") }), (0, react_jsx_runtime.jsxs)("div", {
+						className: ActivityPanel_module_css_default.completionBody,
+						children: [(0, react_jsx_runtime.jsxs)("div", {
+							className: ActivityPanel_module_css_default.completionRing,
+							role: "img",
+							"aria-label": t("team.stats.completed", {
+								completed,
+								total
+							}),
+							"data-completed": completed,
+							"data-total": total,
+							children: [(0, react_jsx_runtime.jsxs)("svg", {
+								viewBox: "0 0 120 120",
+								"aria-hidden": true,
+								children: [(0, react_jsx_runtime.jsx)("circle", {
+									className: ActivityPanel_module_css_default.ringTrack,
+									cx: "60",
+									cy: "60",
+									r: "51"
+								}), (0, react_jsx_runtime.jsx)("circle", {
+									className: ActivityPanel_module_css_default.ringValue,
+									cx: "60",
+									cy: "60",
+									r: "51",
+									pathLength: "100",
+									strokeDasharray: `${total === 0 ? 0 : completed / total * 100} 100`
+								})]
+							}), (0, react_jsx_runtime.jsxs)("span", {
+								"aria-hidden": true,
+								children: [(0, react_jsx_runtime.jsxs)("strong", { children: [completed, (0, react_jsx_runtime.jsxs)("small", { children: [" / ", total] })] }), (0, react_jsx_runtime.jsx)("span", { children: t(discarded ? "task.status.notRun" : "workspace.completed") })]
+							})]
+						}), total === 0 ? (0, react_jsx_runtime.jsx)("p", {
+							className: ActivityPanel_module_css_default.summaryEmpty,
+							children: t("workspace.noTasks")
+						}) : (0, react_jsx_runtime.jsx)("ul", {
+							className: ActivityPanel_module_css_default.completionTasks,
+							tabIndex: 0,
+							"aria-label": t("workspace.taskSummary"),
+							children: team.tasks.map((task) => (0, react_jsx_runtime.jsxs)("li", {
+								"data-state": discarded ? "cancelled" : taskTone(task.state, task.status),
+								"data-verdict-stale": task.verdictStale === void 0 ? void 0 : "true",
+								title: taskTitle(task, taskModelLabel(task, team.members)),
+								children: [
+									(0, react_jsx_runtime.jsx)("span", {
+										className: ActivityPanel_module_css_default.completionDot,
+										"aria-hidden": true,
+										children: task.verdictStale !== void 0 ? "!" : !discarded && task.status === "completed" ? "✓" : "·"
+									}),
+									(0, react_jsx_runtime.jsx)("span", {
+										className: ActivityPanel_module_css_default.completionTaskId,
+										children: task.id
+									}),
+									(0, react_jsx_runtime.jsx)("span", {
+										className: ActivityPanel_module_css_default.completionTaskSubject,
+										title: task.subject,
+										children: task.subject
+									}),
+									(0, react_jsx_runtime.jsx)("span", {
+										className: ActivityPanel_module_css_default.completionTaskStatus,
+										children: discarded ? t("task.status.notRun") : task.verdictStale !== void 0 ? t("workspace.verdictStale") : taskStatusLabel(task.status, t)
+									})
+								]
+							}, task.id))
+						})]
+					})]
+				}), (0, react_jsx_runtime.jsxs)("section", {
+					className: ActivityPanel_module_css_default.inboxCard,
+					"aria-label": t("workspace.inbox"),
+					children: [(0, react_jsx_runtime.jsxs)("header", { children: [(0, react_jsx_runtime.jsx)("h3", { children: t("workspace.inbox") }), (0, react_jsx_runtime.jsx)("span", { children: t("workspace.inboxHint") })] }), team.captainInbox.length === 0 ? (0, react_jsx_runtime.jsx)("p", {
+						className: ActivityPanel_module_css_default.summaryEmpty,
+						children: t("workspace.inboxEmpty")
+					}) : (0, react_jsx_runtime.jsx)("ul", {
+						className: ActivityPanel_module_css_default.inboxMessages,
+						tabIndex: 0,
+						"aria-label": t("workspace.inbox"),
+						children: team.captainInbox.map((message, index) => {
+							const member = team.members.find((candidate) => candidate.name === message.from);
+							const art = message.from === CAPTAIN_ASSIGNEE ? LEAD_ART : memberArtUrl(message.from, member?.role ?? "");
+							return (0, react_jsx_runtime.jsxs)("li", { children: [art === null ? (0, react_jsx_runtime.jsx)("span", {
+								className: ActivityPanel_module_css_default.inboxInitial,
+								"aria-hidden": true,
+								children: memberInitial(message.from)
+							}) : (0, react_jsx_runtime.jsx)("img", {
+								src: art,
+								alt: "",
+								"aria-hidden": true
+							}), (0, react_jsx_runtime.jsxs)("div", { children: [(0, react_jsx_runtime.jsx)("strong", { children: message.from }), (0, react_jsx_runtime.jsx)("p", { children: message.content })] })] }, `${index}:${message.from}`);
+						})
+					})]
+				})]
 			});
 		}
 		function DependencyMap({ tasks, members, t, discarded = false, workspace = false, onSelectTask }) {
@@ -2420,7 +2609,7 @@ window.__ModuleLoader__.load({
 				};
 			}, [onSelectTask]);
 			if (tasks.length === 0) return null;
-			const fallbackTask = tasks.find((task) => task.state === "blocked") ?? tasks.find((task) => task.state === "running") ?? tasks[0];
+			const fallbackTask = tasks.find((task) => task.state === "blocked") ?? tasks.find((task) => task.state === "running") ?? tasks.find((task) => task.state === "claimed") ?? tasks[0];
 			const detailTask = tasks.find((task) => task.id === focusedTaskId) ?? fallbackTask;
 			const detailModel = taskModelLabel(detailTask, members);
 			const waitingOn = detailTask.dependencies.filter((dependency) => tasks.find((task) => task.id === dependency)?.status !== "completed");
@@ -2521,6 +2710,10 @@ window.__ModuleLoader__.load({
 									(0, react_jsx_runtime.jsx)("span", {
 										className: ActivityPanel_module_css_default.dagNodeLabel,
 										children: workspace ? task.subject : compactTaskLabel(task.subject)
+									}),
+									!discarded && task.state === "claimed" && (0, react_jsx_runtime.jsx)("span", {
+										className: ActivityPanel_module_css_default.dagClaimedState,
+										children: t("task.status.claimed")
 									}),
 									task.state === "running" && (0, react_jsx_runtime.jsx)("span", {
 										className: ActivityPanel_module_css_default.dagRunningState,
@@ -2882,6 +3075,11 @@ window.__ModuleLoader__.load({
 						discarded,
 						workspace,
 						onSelectTask: setSelectedTaskId
+					}),
+					workspace && (0, react_jsx_runtime.jsx)(WorkspaceSummary, {
+						team,
+						t,
+						discarded
 					})
 				]
 			}), (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Modal, {
@@ -3455,8 +3653,8 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
-		//#region \0dsh-css:C:\Project\dsh-upgrade\worktree\fork-plugins\dsh-agent-teams\src\client\WorkspaceActivity.module.css.mjs
-		const css = ".HsKp8G_root{height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);font-family:inherit;overflow:auto;container:HsKp8G_team-workspace/inline-size}.HsKp8G_content{max-width:1400px;margin:0 auto;padding:12px 20px 28px}.HsKp8G_selector{flex-wrap:wrap;gap:6px;margin-bottom:24px;display:flex}.HsKp8G_selector button{border:1px solid var(--dsw-alias-border-l2);text-align:left;overflow-wrap:anywhere;border-radius:8px;align-items:center;gap:12px;max-width:100%;padding:8px 10px;display:flex}.HsKp8G_selector span{color:var(--dsw-alias-label-tertiary);white-space:nowrap;font-size:10px}.HsKp8G_selector button[aria-pressed=true]{background:var(--dsw-alias-bg-module-platform);border-color:var(--dsw-alias-label-tertiary)}.HsKp8G_root button{color:inherit;cursor:pointer;font-family:inherit}.HsKp8G_root button:active{transform:scale(.98)}.HsKp8G_root button:focus-visible{outline:2px solid var(--dsw-alias-label-secondary);outline-offset:3px}.HsKp8G_empty{max-width:42ch;padding:36px 0}.HsKp8G_emptyMark{color:var(--dsw-alias-label-tertiary);font-size:32px}.HsKp8G_empty h3{margin:16px 0 10px;font-size:16px;font-weight:550}.HsKp8G_empty p{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.8}.HsKp8G_empty button,.HsKp8G_error button{background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 12px;font-size:12px}.HsKp8G_error{border:1px solid var(--dsw-alias-border-l2);border-radius:8px;align-items:start;gap:12px;margin-bottom:20px;padding:12px;font-size:12px;line-height:1.65;display:flex}.HsKp8G_error button{flex:none}.HsKp8G_skeleton{gap:16px;padding-top:20px;display:grid}.HsKp8G_skeleton i{background:var(--dsw-alias-bg-module-platform);border-radius:8px;height:66px;animation:1.8s ease-in-out infinite alternate HsKp8G_breathe}.HsKp8G_skeleton i:first-child{width:70%;height:36px}.HsKp8G_skeleton i:last-child{animation-delay:.3s}@keyframes HsKp8G_breathe{to{opacity:.45}}@container (width>=720px){.HsKp8G_content{padding:20px 28px 32px}}@media (prefers-reduced-motion:reduce){.HsKp8G_skeleton i{animation:none}}";
+		//#region \0dsh-css:C:\Project\dsh-agt\worktree\fork-plugins\dsh-agent-teams\src\client\WorkspaceActivity.module.css.mjs
+		const css = ".swEh6a_root{--dsw-alias-state-business-primary:light-dark(#2866d7,#82b4ff);height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:color-mix(in srgb, var(--dsw-alias-bg-module-platform) 78%, var(--dsw-alias-bg-base));font-variant-numeric:tabular-nums;font-family:inherit;overflow:auto;container:swEh6a_team-workspace/inline-size}.swEh6a_content{max-width:1400px;margin:0 auto;padding:16px 14px 28px}.swEh6a_heading{flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:20px;display:flex}.swEh6a_heading img{object-fit:contain;width:32px;height:32px}.swEh6a_heading h2{letter-spacing:-.4px;margin:0;font-size:17px;font-weight:650}.swEh6a_heading>span{color:var(--dsw-alias-label-secondary);margin-left:auto;font-size:12px}.swEh6a_selector{flex-wrap:wrap;gap:8px;margin-bottom:18px;display:flex}.swEh6a_selector button{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);text-align:left;overflow-wrap:anywhere;border-radius:10px;align-items:center;gap:10px;max-width:100%;padding:10px 12px;font-size:12px;transition:background-color .14s,border-color .14s;display:flex}.swEh6a_selector span{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:10px}.swEh6a_selector button[aria-pressed=true]{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, var(--dsw-alias-bg-layer-1));border-color:var(--dsw-alias-state-business-primary)}.swEh6a_selector button:hover{border-color:var(--dsw-alias-state-business-primary)}.swEh6a_root button{cursor:pointer;font-family:inherit}.swEh6a_selector button,.swEh6a_empty button,.swEh6a_error button{color:inherit}.swEh6a_root button:active{transform:scale(.98)}.swEh6a_root button:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:3px}.swEh6a_empty{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);border-radius:18px;padding:32px 24px}.swEh6a_emptyMark{width:44px;height:44px;color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent);border-radius:13px;place-items:center;font-size:26px;display:grid}.swEh6a_empty h3{margin:20px 0 10px;font-size:16px;font-weight:600}.swEh6a_empty p{max-width:45ch;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.8}.swEh6a_empty button,.swEh6a_error button{background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-border-l2);border-radius:9px;padding:9px 13px;font-size:12px}.swEh6a_empty button:hover,.swEh6a_error button:hover{border-color:var(--dsw-alias-state-business-primary)}.swEh6a_error{border:1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, var(--dsw-alias-border-l2));background:var(--dsw-alias-bg-layer-1);border-radius:12px;flex-wrap:wrap;align-items:start;gap:12px;margin-bottom:18px;padding:14px;font-size:12px;line-height:1.65;display:flex}.swEh6a_error>span{flex:180px}.swEh6a_error button{flex:none}.swEh6a_skeleton{gap:14px;display:grid}.swEh6a_skeleton i{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);border-radius:16px;height:130px;animation:1.8s ease-in-out infinite alternate swEh6a_breathe}.swEh6a_skeleton i:first-child{height:74px}.swEh6a_skeleton i:last-child{animation-delay:.3s}@keyframes swEh6a_breathe{to{opacity:.45}}@container swEh6a_team-workspace (width>=720px){.swEh6a_content{padding:24px 24px 32px}.swEh6a_heading{margin-bottom:24px}}@media (prefers-reduced-motion:reduce){.swEh6a_skeleton i{animation:none}.swEh6a_root button{transition:none}}";
 		const tagId = "@nanmicoder/dsh-agent-teams/WorkspaceActivity.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -3466,15 +3664,16 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var WorkspaceActivity_module_css_default = {
-			"breathe": "HsKp8G_breathe",
-			"content": "HsKp8G_content",
-			"empty": "HsKp8G_empty",
-			"emptyMark": "HsKp8G_emptyMark",
-			"error": "HsKp8G_error",
-			"root": "HsKp8G_root",
-			"selector": "HsKp8G_selector",
-			"skeleton": "HsKp8G_skeleton",
-			"team-workspace": "HsKp8G_team-workspace"
+			"breathe": "swEh6a_breathe",
+			"content": "swEh6a_content",
+			"empty": "swEh6a_empty",
+			"emptyMark": "swEh6a_emptyMark",
+			"error": "swEh6a_error",
+			"heading": "swEh6a_heading",
+			"root": "swEh6a_root",
+			"selector": "swEh6a_selector",
+			"skeleton": "swEh6a_skeleton",
+			"team-workspace": "swEh6a_team-workspace"
 		};
 		//#endregion
 		//#region lib/client/WorkspaceActivity.js
@@ -3517,11 +3716,12 @@ window.__ModuleLoader__.load({
 				state.status(current, "loading");
 				const controller = startActivityPolling(currentTargets, {
 					discoverySessionId: current,
+					getPublishedRows: getPublishedActivityRows,
 					onStatus(status) {
 						state.status(current, status);
 					},
-					publishSnapshots(update) {
-						updateActivitySnapshots(update);
+					publishSnapshots(update, scope) {
+						updateActivitySnapshots(update, scope);
 						if (update.teams === void 0) return;
 						const added = discover(update.teams.filter((team) => team.captainSessionId === current));
 						if (added !== void 0 && sidebar.mounted.getSnapshot() === current && !sidebar.isExpanded()) {
@@ -3604,6 +3804,18 @@ window.__ModuleLoader__.load({
 				children: (0, react_jsx_runtime.jsxs)("div", {
 					className: WorkspaceActivity_module_css_default.content,
 					children: [
+						(0, react_jsx_runtime.jsxs)("header", {
+							className: WorkspaceActivity_module_css_default.heading,
+							children: [
+								(0, react_jsx_runtime.jsx)("img", {
+									src: LEAD_ART,
+									alt: "",
+									"aria-hidden": true
+								}),
+								(0, react_jsx_runtime.jsx)("h2", { children: "AgentTeams" }),
+								(0, react_jsx_runtime.jsx)("span", { children: t("workspace.title") })
+							]
+						}),
 						status === "error" && (0, react_jsx_runtime.jsxs)("div", {
 							className: WorkspaceActivity_module_css_default.error,
 							role: "alert",
@@ -3895,6 +4107,11 @@ window.__ModuleLoader__.load({
 			"workspace.completed": "已完成",
 			"workspace.focus": "查看团队",
 			"workspace.noTasks": "等待队长拆解任务",
+			"workspace.inbox": "队长收件箱",
+			"workspace.inboxHint": "最近 5 条未读消息",
+			"workspace.inboxEmpty": "暂无未读消息。成员回报会在这里显示，队长读取后移出。",
+			"workspace.taskSummary": "任务完成情况",
+			"workspace.verdictStale": "结论已过期",
 			"card.memberCount": "{count} 名成员",
 			"action.openActivityPanel": "打开活动面板",
 			"activity.panelButton": "活动面板",
@@ -3956,6 +4173,7 @@ window.__ModuleLoader__.load({
 			"task.summary.blockedAndRunning": "{tasks}{more} 等待前置，其余已开工",
 			"task.summary.more": " 等 {count} 项",
 			"task.summary.running": "{tasks} 正在执行",
+			"task.summary.claimed": "已认领：{tasks}",
 			"task.summary.ready": "{tasks} 已就绪待开工",
 			"task.summary.blocked": "{tasks} 等待前置",
 			"task.summary.failedSettled": "{count} 项已失败，自动循环已停止",
@@ -3963,6 +4181,7 @@ window.__ModuleLoader__.load({
 			"progress.aria": "团队总进度",
 			"progress.title": "总进度",
 			"progress.running": "■ 进行中 {count}",
+			"progress.claimed": "■ 已认领 {count}",
 			"progress.blocked": "■ 等待依赖 {count}",
 			"progress.delivered": "■ 已交付 {count}",
 			"dependency.aria": "任务依赖链",
@@ -4108,6 +4327,11 @@ window.__ModuleLoader__.load({
 			"workspace.completed": "completed",
 			"workspace.focus": "View team",
 			"workspace.noTasks": "Waiting for the captain to define tasks",
+			"workspace.inbox": "Captain inbox",
+			"workspace.inboxHint": "Up to 5 recent unread messages",
+			"workspace.inboxEmpty": "No unread messages. Member reports appear here until the captain reads them.",
+			"workspace.taskSummary": "Task completion summary",
+			"workspace.verdictStale": "Verdict outdated",
 			"card.memberCount": "{count} members",
 			"action.openActivityPanel": "Open activity panel",
 			"activity.panelButton": "Activity panel",
@@ -4169,6 +4393,7 @@ window.__ModuleLoader__.load({
 			"task.summary.blockedAndRunning": "{tasks}{more} waiting on prerequisites; other work has started",
 			"task.summary.more": " and {count} more",
 			"task.summary.running": "{tasks} in progress",
+			"task.summary.claimed": "Claimed: {tasks}",
 			"task.summary.ready": "{tasks} ready to start",
 			"task.summary.blocked": "{tasks} waiting on prerequisites",
 			"task.summary.failedSettled": "{count} failed; the automatic loop has stopped",
@@ -4176,6 +4401,7 @@ window.__ModuleLoader__.load({
 			"progress.aria": "Overall team progress",
 			"progress.title": "Overall progress",
 			"progress.running": "■ In progress {count}",
+			"progress.claimed": "■ Claimed {count}",
 			"progress.blocked": "■ Waiting {count}",
 			"progress.delivered": "■ Delivered {count}",
 			"dependency.aria": "Task dependency chain",
