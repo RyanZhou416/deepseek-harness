@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: the timeline row sweep's lazy reads, slices, and completion marker.
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,7 +11,8 @@ import { createContextTimelineDefinition, TIMELINE_STATE_VERSION } from '../../s
 import { BASELINE_DSH_VERSION } from '../../src/shared/version'
 import { decodeKindOfBlock, firstTokenTimeOfStream, isTokenChunk, replaceRangeOf, streamTimingOf } from '../../src/host/logShapes'
 import { resolveBounds } from '../../src/host/config'
-import { watchTimelineRowSweep } from '../../src/host/sweep'
+import { TIMELINE_SWEEP_MARKER_FORMAT, watchTimelineRowSweep } from '../../src/host/sweep'
+import type { FileIo } from '../../src/host/storage'
 import { buildTimelineHead } from '../../src/host/foldWire'
 import { applyTimeline, createTimelineState, type TimelineEvent } from '../../src/host/fold'
 import { type TimelineState } from '../../src/host/foldState'
@@ -650,6 +652,8 @@ describe('sweep', () => {
 
 const ROW_KEY = 'contextTimeline'
 const LEGACY_VERSION = 36
+/** Matches the sweep's yield budget so the slice test forces a yield per record. */
+const SWEEP_SLICE_MS = 50
 
 interface Row {
   ver: number
@@ -666,6 +670,12 @@ interface TableHarness {
   records: Map<string, RecordShape>
   updates: number
   failNext: boolean
+  /** Keys the face lists but reads as absent (a concurrent delete). */
+  absent?: Set<string>
+  /** `keys()` calls; a completed marker must leave this at zero. */
+  keys?: number
+  /** `get()` calls; a completed marker must leave this at zero. */
+  reads?: number
 }
 
 function fullVal(): TimelineState {
@@ -683,26 +693,82 @@ function fullVal(): TimelineState {
 
 interface SweepHarness extends FakeCtx {
   ran(): Promise<void>
+  watch(): void
+  marker: MarkerFile
 }
 
-function ctxOf(table: TableHarness | undefined, onFirstUpdate?: () => void): SweepHarness {
+/** In-memory stand-in for the plugin's completion marker file. */
+interface MarkerFile {
+  text?: string
+  writes: number
+  failWrite: boolean
+}
+
+function markerFile(): MarkerFile {
+  return { writes: 0, failWrite: false }
+}
+
+function markerIoOf(file: MarkerFile): FileIo {
+  return {
+    read: async () => {
+      const text = file.text
+      if (text === undefined) throw new Error('no marker')
+      return text
+    },
+    write: async (_path, data) => {
+      if (file.failWrite) throw new Error('marker storage unavailable')
+      file.writes++
+      file.text = data
+    },
+  }
+}
+
+interface SweepContextOptions {
+  onFirstUpdate?: () => void
+  marker?: MarkerFile
+  warnings?: string[]
+}
+
+function ctxOf(table: TableHarness | undefined, options: SweepContextOptions = {}): SweepHarness {
+  const marker = options.marker ?? markerFile()
   const domain = table === undefined
     ? undefined
-    : { table: (name2: string) => name2 === 'sessions' ? tableFace(table, onFirstUpdate) : undefined }
+    : { table: (name2: string) => name2 === 'sessions' ? tableFace(table, options.onFirstUpdate) : undefined }
   const fake = fakeCtx({ storageDomain: { get: (name: string) => name === 'session_projcache' ? domain : undefined } }, {
     injectAll: true,
-    logger: { info: () => {}, warn: () => {} },
+    logger: {
+      info: () => {},
+      warn: (message: unknown) => { options.warnings?.push(String(message)) },
+    },
   })
   return {
     ...fake,
+    marker,
+    watch: () => {
+      watchTimelineRowSweep(fake.ctx, { markerPath: 'test/timeline-sweep.json', markerIo: markerIoOf(marker) })
+    },
     ran: async () => { await new Promise(resolve => setTimeout(resolve, 0)) },
+  }
+}
+
+/** Wait until a predicate holds; a sliced walk crosses several event-loop turns. */
+async function settle(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 500 && !predicate(); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1))
   }
 }
 
 function tableFace(harness: TableHarness, onFirstUpdate?: () => void) {
   let hooked = false
   return {
-    entries: () => harness.records.entries(),
+    keys: () => {
+      harness.keys = (harness.keys ?? 0) + 1
+      return [...harness.records.keys(), ...harness.absent ?? []]
+    },
+    get: (id: string) => {
+      harness.reads = (harness.reads ?? 0) + 1
+      return harness.absent?.has(id) === true ? undefined : harness.records.get(id)
+    },
     update: async (id: string, fn: (current: RecordShape) => RecordShape) => {
       harness.updates++
       if (onFirstUpdate !== undefined && !hooked) {
@@ -733,8 +799,8 @@ function legacyRecord(val: unknown, ver = LEGACY_VERSION): RecordShape {
 describe('the timeline row sweep (issue #217)', () => {
   test('a legacy full row rewrites to the head-only shape, exact head, other rows and identity intact', async () => {
     const harness: TableHarness = { records: new Map([['s1', legacyRecord(structuredClone(fullVal()))]]), updates: 0, failNext: false }
-    const { ctx, ran } = ctxOf(harness)
-    watchTimelineRowSweep(ctx)
+    const { ran, watch } = ctxOf(harness)
+    watch()
     await ran()
     assert.equal(harness.updates, 1)
     const row = harness.records.get('s1')!.rows[ROW_KEY]
@@ -752,8 +818,8 @@ describe('the timeline row sweep (issue #217)', () => {
   test('the migrated row serves the same head the legacy row served', async () => {
     const val = fullVal()
     const harness: TableHarness = { records: new Map([['s1', legacyRecord(structuredClone(val))]]), updates: 0, failNext: false }
-    const { ctx, ran } = ctxOf(harness)
-    watchTimelineRowSweep(ctx)
+    const { ran, watch } = ctxOf(harness)
+    watch()
     await ran()
     const migrated = harness.records.get('s1')!.rows[ROW_KEY].val as TimelineState
     assert.deepStrictEqual(buildTimelineHead(migrated), buildTimelineHead(val))
@@ -770,18 +836,20 @@ describe('the timeline row sweep (issue #217)', () => {
       updates: 0,
       failNext: false,
     }
-    const { ctx, ran } = ctxOf(harness)
-    watchTimelineRowSweep(ctx)
+    const { ran, watch } = ctxOf(harness)
+    watch()
     await ran()
     assert.equal(harness.updates, 0)
   })
 
   test('a concurrent current-version write at the update slot leaves the row untouched', async () => {
     const harness: TableHarness = { records: new Map([['s1', legacyRecord(fullVal())]]), updates: 0, failNext: false }
-    const { ctx, ran } = ctxOf(harness, () => {
-      harness.records.set('s1', legacyRecord(fullVal(), TIMELINE_STATE_VERSION))
+    const { ran, watch } = ctxOf(harness, {
+      onFirstUpdate: () => {
+        harness.records.set('s1', legacyRecord(fullVal(), TIMELINE_STATE_VERSION))
+      },
     })
-    watchTimelineRowSweep(ctx)
+    watch()
     await ran()
     assert.equal(harness.updates, 1)
     const row = harness.records.get('s1')!.rows[ROW_KEY]
@@ -798,8 +866,8 @@ describe('the timeline row sweep (issue #217)', () => {
       updates: 0,
       failNext: true,
     }
-    const { ctx, ran } = ctxOf(harness)
-    watchTimelineRowSweep(ctx)
+    const { ran, watch } = ctxOf(harness)
+    watch()
     await ran()
     assert.equal(harness.records.get('bad')!.rows[ROW_KEY].ver, LEGACY_VERSION, 'the failed row stays on the refold path')
     assert.equal(harness.records.get('good')!.rows[ROW_KEY].ver, 37, 'the sweep moved on')
@@ -816,6 +884,41 @@ describe('the timeline row sweep (issue #217)', () => {
     }
   })
 
+  test('skips a record a concurrent delete removed after the key snapshot', async () => {
+    const harness: TableHarness = {
+      records: new Map([['kept', legacyRecord(fullVal())]]),
+      updates: 0,
+      failNext: false,
+      absent: new Set(['ghost']),
+    }
+    const { ran, watch } = ctxOf(harness)
+    watch()
+    await ran()
+    assert.equal(harness.updates, 1, 'the readable legacy row still migrates')
+    assert.equal(harness.records.get('kept')!.rows[ROW_KEY].ver, 37)
+  })
+
+  test('yields between slices so a full catalog never blocks one turn', async () => {
+    const records = new Map<string, RecordShape>()
+    for (let index = 0; index < 4; index += 1) records.set(`s${String(index)}`, legacyRecord(structuredClone(fullVal())))
+    const harness: TableHarness = { records, updates: 0, failNext: false }
+    const { watch } = ctxOf(harness)
+    const realNow = Date.now
+    let clock = 0
+    // Every slice check crosses the budget, so each record forces a yield.
+    Date.now = () => { clock += SWEEP_SLICE_MS + 10; return clock }
+    try {
+      watch()
+      await settle(() => harness.updates === 4)
+    } finally {
+      Date.now = realNow
+    }
+    assert.equal(harness.updates, 4)
+    for (const [id, record] of records) {
+      assert.equal(record.rows[ROW_KEY].ver, 37, `${id} migrated across slices`)
+    }
+  })
+
   test('a junk domain or table face arms nothing', async () => {
     for (const domain of ['junk', {}, { table: () => 'junk' }, { table: () => ({}) }]) {
       const facility = { get: (name: string) => name === 'session_projcache' ? domain : undefined }
@@ -828,7 +931,7 @@ describe('the timeline row sweep (issue #217)', () => {
   test('a hostile table rejects the sweep through the outer guard', async () => {
     const facility = {
       get: (name: string) => name === 'session_projcache'
-        ? { table: () => ({ entries: () => { throw new Error('quarantined') }, update: () => Promise.resolve(undefined) }) }
+        ? { table: () => ({ keys: () => { throw new Error('quarantined') }, get: () => undefined, update: () => Promise.resolve(undefined) }) }
         : undefined,
     }
     const warnings: string[] = []
@@ -836,9 +939,103 @@ describe('the timeline row sweep (issue #217)', () => {
       injectAll: true,
       logger: { info: () => {}, warn: (message: unknown) => warnings.push(String(message)) },
     })
-    watchTimelineRowSweep(fake.ctx)
+    watchTimelineRowSweep(fake.ctx, { markerPath: 'test/hostile.json', markerIo: markerIoOf(markerFile()) })
     await new Promise(resolve => setTimeout(resolve, 0))
     assert.ok(warnings.some(message => message.includes('quarantined')), 'the outer guard reports the rejection')
+  })
+
+  test('a completed sweep records its state version and later boots read no record', async () => {
+    const marker = markerFile()
+    const first: TableHarness = { records: new Map([['s1', legacyRecord(fullVal())]]), updates: 0, failNext: false }
+    const firstBoot = ctxOf(first, { marker })
+    firstBoot.watch()
+    await firstBoot.ran()
+    assert.equal(first.updates, 1)
+    assert.deepEqual(JSON.parse(marker.text!), { format: TIMELINE_SWEEP_MARKER_FORMAT, version: 37 })
+
+    const second: TableHarness = { records: new Map([['s1', legacyRecord(fullVal())]]), updates: 0, failNext: false }
+    const secondBoot = ctxOf(second, { marker })
+    secondBoot.watch()
+    await secondBoot.ran()
+    assert.equal(second.keys ?? 0, 0, 'the marker skips even listing the catalog')
+    assert.equal(second.reads ?? 0, 0, 'no record is read on the next start')
+    assert.equal(second.updates, 0)
+  })
+
+  test('an older marker version sweeps the catalog again', async () => {
+    const marker = markerFile()
+    marker.text = JSON.stringify({ format: TIMELINE_SWEEP_MARKER_FORMAT, version: 36 })
+    const harness: TableHarness = { records: new Map([['s1', legacyRecord(fullVal())]]), updates: 0, failNext: false }
+    const { ran, watch } = ctxOf(harness, { marker })
+    watch()
+    await ran()
+    assert.equal(harness.reads, 1, 'the newer state version reads the catalog again')
+    assert.equal(harness.updates, 1)
+    assert.equal(JSON.parse(marker.text!).version, 37, 'the marker advances to the swept generation')
+  })
+
+  test('a malformed, foreign, or unversioned marker reads as absent', async () => {
+    for (const text of [
+      'junk',
+      '"swept"',
+      '{"format":2,"version":37}',
+      '{"format":1,"version":"37"}',
+      '{"format":1,"version":1.5}',
+    ]) {
+      const marker = markerFile()
+      marker.text = text
+      const harness: TableHarness = { records: new Map([['s1', legacyRecord(fullVal())]]), updates: 0, failNext: false }
+      const { ran, watch } = ctxOf(harness, { marker })
+      watch()
+      await ran()
+      assert.equal(harness.updates, 1, `${text} does not skip the sweep`)
+      assert.equal(JSON.parse(marker.text!).version, 37, `${text} is replaced by a completion marker`)
+    }
+  })
+
+  test('a dispose stops the walk and leaves no marker', async () => {
+    const marker = markerFile()
+    const harness: TableHarness = {
+      records: new Map([
+        ['s1', legacyRecord(structuredClone(fullVal()))],
+        ['s2', legacyRecord(structuredClone(fullVal()))],
+      ]),
+      updates: 0,
+      failNext: false,
+    }
+    const holder: { stop: () => void } = { stop: () => {} }
+    const sweepCtx = ctxOf(harness, { marker, onFirstUpdate: () => { holder.stop() } })
+    holder.stop = () => { sweepCtx.dispose() }
+    sweepCtx.watch()
+    await sweepCtx.ran()
+    assert.equal(harness.updates, 1, 'the walk stops after the in-flight record')
+    assert.equal(marker.writes, 0)
+    assert.equal(marker.text, undefined, 'an interrupted sweep records nothing')
+  })
+
+  test('a dispose during the last record still records nothing', async () => {
+    const marker = markerFile()
+    const harness: TableHarness = { records: new Map([['s1', legacyRecord(fullVal())]]), updates: 0, failNext: false }
+    const holder: { stop: () => void } = { stop: () => {} }
+    const sweepCtx = ctxOf(harness, { marker, onFirstUpdate: () => { holder.stop() } })
+    holder.stop = () => { sweepCtx.dispose() }
+    sweepCtx.watch()
+    await sweepCtx.ran()
+    assert.equal(harness.updates, 1)
+    assert.equal(marker.writes, 0, 'the finished walk is discarded once the fiber is gone')
+  })
+
+  test('a marker write failure keeps the sweep result and warns', async () => {
+    const marker = markerFile()
+    marker.failWrite = true
+    const warnings: string[] = []
+    const harness: TableHarness = { records: new Map([['s1', legacyRecord(fullVal())]]), updates: 0, failNext: false }
+    const { ran, watch } = ctxOf(harness, { marker, warnings })
+    watch()
+    await ran()
+    assert.equal(harness.updates, 1)
+    assert.equal(marker.writes, 0)
+    assert.ok(warnings.some(message => message.includes('could not record')), 'the write failure is reported')
   })
 })
 })

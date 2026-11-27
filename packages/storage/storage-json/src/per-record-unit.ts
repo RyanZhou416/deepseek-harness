@@ -27,11 +27,12 @@
  * @module @deepseek-ai/dsh-storage-json/src/per-record-unit
  */
 
+import { readFileSync } from 'node:fs'
 import { mkdir, readFile, readdir, rename, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { Dirent } from 'node:fs'
 import { StorageError } from '@deepseek-ai/dsh-storage'
-import type { KvUnit, KvUnitDescriptor } from '@deepseek-ai/dsh-storage'
+import type { KvRecordReader, KvUnit, KvUnitDescriptor } from '@deepseek-ai/dsh-storage'
 import { fsyncDirectory, writeAtomic } from './atomic.ts'
 import { parseRecord, serializeRecord } from './format.ts'
 import type { UnitState } from './format.ts'
@@ -55,13 +56,23 @@ const RECORD_LOAD_CONCURRENCY = 64
  * @param onClose - Backend callback releasing the unit's open-slot.
  * @returns the opened unit.
  */
-// oxlint-disable-next-line typescript/require-await -- async keeps both openers' call sites uniform
+
 export async function openPerRecordUnit(
   descriptor: KvUnitDescriptor,
   root: string,
   onClose: () => void,
 ): Promise<KvUnit> {
   return new PerRecordJsonUnit(descriptor, join(root, descriptor.name), onClose)
+}
+
+/** The unit's readable tree without record values: exactly what a lazy open costs. */
+interface PerRecordTree {
+  /** Whether the current layout left any trace (a declared table directory or the global document). */
+  found: boolean
+  /** Declared table → readable record keys, in directory order. */
+  tables: Map<string, string[]>
+  /** Parsed global value; `null` when never written, not declared, or unreadable. */
+  global: unknown
 }
 
 /**
@@ -76,44 +87,79 @@ export async function openPerRecordUnit(
  */
 async function loadPerRecordState(descriptor: KvUnitDescriptor, dir: string): Promise<UnitState> {
   const versions = acceptedStamps(descriptor)
-  const state: UnitState = {
-    version: descriptor.version,
-    global: null,
-    tables: new Map(descriptor.tables.map(table => [table, new Map<string, unknown>()])),
+  let tree = await readTree(descriptor, dir)
+  if (!tree.found) {
+    await bootstrapLegacyUnit(descriptor, dir)
+    tree = await readTree(descriptor, dir)
   }
-  let entries: Dirent[] | undefined
+  const state: UnitState = { version: descriptor.version, global: tree.global, tables: new Map() }
+  for (const [table, keys] of tree.tables) {
+    const records = new Map<string, unknown>()
+    await loadTableRecords(records, versions, join(dir, table), keys)
+    state.tables.set(table, records)
+  }
+  return state
+}
+
+/**
+ * Enumerate the unit's readable tree without reading record documents. A
+ * missing directory is the empty unit.
+ * @param descriptor - Static identity and shape of the unit.
+ * @param dir - Absolute unit directory path.
+ * @returns the tree's presence, table key lists, and global slot.
+ */
+async function readTree(descriptor: KvUnitDescriptor, dir: string): Promise<PerRecordTree> {
+  const versions = acceptedStamps(descriptor)
+  const tree: PerRecordTree = {
+    found: false,
+    tables: new Map(descriptor.tables.map(table => [table, []])),
+    global: null,
+  }
+  let entries: Dirent[]
   try {
     entries = await readdir(dir, { withFileTypes: true })
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    // Missing directory = empty unit; the legacy bootstrap below still runs
-    // (the fresh-upgrade shape is exactly an absent new tree).
+    return tree
   }
-  const hasNewState = entries === undefined
-    ? false
-    : (await Promise.all(entries.map(async (entry) => {
-      if (entry.isDirectory()) {
-        const records = state.tables.get(entry.name)
-        if (records !== undefined) {
-          await loadTableRecords(records, versions, join(dir, entry.name))
-          return true
-        }
-      }
-      if (entry.name === 'global.json' && descriptor.hasGlobal) {
-        const global = await readRecord(join(dir, entry.name), versions)
-        if (global !== undefined) state.global = global
-        return true
-      }
-      return false
-    }))).some(Boolean)
-  if (!hasNewState) await bootstrapLegacyUnit(descriptor, dir, state)
-  return state
+  for (const entry of entries) {
+    if (entry.isDirectory() && tree.tables.has(entry.name)) {
+      tree.found = true
+      tree.tables.set(entry.name, await listTableKeys(join(dir, entry.name)))
+      continue
+    }
+    if (entry.name === 'global.json' && descriptor.hasGlobal) {
+      tree.found = true
+      const global = await readRecord(join(dir, entry.name), versions)
+      if (global !== undefined) tree.global = global
+    }
+  }
+  return tree
+}
+
+/**
+ * List one table directory's readable record keys: `<key>.json` documents with
+ * a path-safe key. A missing directory lists nothing (an unreadable one still
+ * propagates).
+ * @param dir - Absolute table directory path.
+ * @returns the record keys in directory order.
+ */
+async function listTableKeys(dir: string): Promise<string[]> {
+  const files = await readdir(dir, { withFileTypes: true })
+  const keys: string[] = []
+  for (const file of files) {
+    if (!file.name.endsWith('.json')) continue
+    const key = file.name.slice(0, -'.json'.length)
+    if (SAFE_KEY_RE.test(key)) keys.push(key)
+  }
+  return keys
 }
 
 /** The version stamps this unit reads as its own: current plus declared compatible versions. */
 function acceptedStamps(descriptor: KvUnitDescriptor): readonly number[] {
   return [descriptor.version, ...descriptor.compatibleVersions ?? []]
 }
+
 
 /**
  * Bootstrap an unmaterialized per-record tree from a legacy whole-unit file
@@ -127,9 +173,8 @@ function acceptedStamps(descriptor: KvUnitDescriptor): readonly number[] {
  * read failures propagate.
  * @param descriptor - Static identity and shape of the unit.
  * @param dir - The per-record unit directory (`<root>/<name>`).
- * @param state - The empty tree state; bootstrapped records are added.
  */
-async function bootstrapLegacyUnit(descriptor: KvUnitDescriptor, dir: string, state: UnitState): Promise<void> {
+async function bootstrapLegacyUnit(descriptor: KvUnitDescriptor, dir: string): Promise<void> {
   const legacyPath = join(dirname(dir), `${descriptor.name}.json`)
   let text: string | undefined
   try {
@@ -154,31 +199,32 @@ async function bootstrapLegacyUnit(descriptor: KvUnitDescriptor, dir: string, st
   if (typeof tables !== 'object' || tables === null) return
   const recordsByTable = tables as Record<string, Record<string, unknown>>
   for (const [table, records] of Object.entries(recordsByTable)) {
-    const target = state.tables.get(table)
-    if (target === undefined) continue
+    if (!descriptor.tables.includes(table)) continue
     for (const [key, value] of Object.entries(records)) {
       const path = join(dir, table, `${key}.json`)
       await mkdir(dirname(path), { recursive: true, mode: 0o700 })
       await writeAtomic(path, serializeRecord(descriptor.version, value))
-      target.set(key, value)
     }
   }
 }
 
 /**
- * Read one declared table's record documents into `records`.
+ * Read one declared table's indexed record documents into `records`.
+ * @param records - Target map, filled in index order.
+ * @param versions - Accepted version stamps.
+ * @param dir - Absolute table directory path.
+ * @param keys - The table's readable record keys, as `readTree` listed them.
  */
-async function loadTableRecords(records: Map<string, unknown>, versions: readonly number[], dir: string): Promise<void> {
-  const files = await readdir(dir, { withFileTypes: true })
-  const loaded = await mapBounded(files, RECORD_LOAD_CONCURRENCY, async (file) => {
-    if (!file.name.endsWith('.json')) return
-    const key = file.name.slice(0, -'.json'.length)
-    if (!SAFE_KEY_RE.test(key)) return
-    const record = await readRecord(join(dir, file.name), versions)
-    if (record !== undefined) return [key, record] as const
-  })
-  for (const record of loaded) {
-    if (record !== undefined) records.set(...record)
+async function loadTableRecords(
+  records: Map<string, unknown>,
+  versions: readonly number[],
+  dir: string,
+  keys: readonly string[],
+): Promise<void> {
+  const loaded = await mapBounded(keys, RECORD_LOAD_CONCURRENCY, async key =>
+    [key, await readRecord(join(dir, `${key}.json`), versions)] as const)
+  for (const [key, record] of loaded) {
+    if (record !== undefined) records.set(key, record)
   }
 }
 
@@ -223,12 +269,23 @@ export class PerRecordJsonUnit implements KvUnit {
   private unusable: StorageError | undefined
   /** In-flight durable writes; close() drains them before releasing the unit. */
   private readonly inFlight = new Set<Promise<void>>()
+  /** Accepted record document stamps; every read path checks them. */
+  private readonly versions: readonly number[]
+  /** On-demand reads for a lazy domain: enumerate keys at open, read one document per read miss. */
+  readonly recordReader: KvRecordReader
 
   constructor(
     private readonly descriptor: KvUnitDescriptor,
     private readonly dir: string,
     private readonly onClose: () => void,
-  ) {}
+  ) {
+    this.versions = acceptedStamps(descriptor)
+    this.recordReader = {
+      listKeys: () => this.listRecordKeys(),
+      read: (table, key) => this.readRecordNow(table, key),
+      readAsync: (table, key) => this.readRecordLater(table, key),
+    }
+  }
 
   /** Re-read the tree: the directory is the authoritative state. */
   async loadAll(): Promise<{ tables: Record<string, Record<string, unknown>>; global: unknown }> {
@@ -239,6 +296,60 @@ export class PerRecordJsonUnit implements KvUnit {
       tables[table] = Object.fromEntries(records)
     }
     return { tables, global: state.global }
+  }
+
+  /**
+   * Enumerate the readable tree without reading record documents. This is the
+   * whole cost of a lazy open: two directory reads plus the small global
+   * document.
+   * @returns readable keys per declared table, plus the global slot.
+   */
+  private async listRecordKeys(): Promise<{ tables: Record<string, readonly string[]>; global: unknown }> {
+    this.assertOpen()
+    let tree = await readTree(this.descriptor, this.dir)
+    if (!tree.found) {
+      await bootstrapLegacyUnit(this.descriptor, this.dir)
+      tree = await readTree(this.descriptor, this.dir)
+    }
+    return { tables: Object.fromEntries(tree.tables), global: tree.global }
+  }
+
+  /**
+   * Read one record document synchronously. A document that is missing,
+   * malformed, or stamped with an unaccepted version reads as absent, exactly
+   * as the open-time load would have read it.
+   * @param table - Declared table name.
+   * @param key - Record key, a path segment.
+   * @returns the version-checked record value, or `undefined` when absent.
+   */
+  private readRecordNow(table: string, key: string): unknown {
+    this.assertOpen()
+    assertSafeKey(this.descriptor.name, key)
+    const path = join(this.tableDir(table), `${key}.json`)
+    let text: string
+    try {
+      text = readFileSync(path, 'utf8')
+    } catch {
+      return undefined // No readable document: the per-record contract's "absent".
+    }
+    return parseRecord(text, this.versions)
+  }
+
+  /**
+   * Read one record document without blocking the event loop. Same contract as
+   * {@link readRecordNow}, for the maintenance scans that stream a table.
+   * @param table - Declared table name.
+   * @param key - Record key, a path segment.
+   * @returns the version-checked record value, or `undefined` when absent.
+   */
+  private async readRecordLater(table: string, key: string): Promise<unknown> {
+    this.assertOpen()
+    assertSafeKey(this.descriptor.name, key)
+    try {
+      return parseRecord(await readFile(join(this.tableDir(table), `${key}.json`), 'utf8'), this.versions)
+    } catch {
+      return undefined // No readable document: the per-record contract's "absent".
+    }
   }
 
   /** Durably replace one record: its own document, atomically. */

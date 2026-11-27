@@ -29,13 +29,13 @@
 | Fork remote | `origin = https://github.com/RyanZhou416/deepseek-harness.git` | 唯一常规推送目标 |
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
 | Published fork | `main` after local integration | `dsh-v0.2.3-alpha.2` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
-| Current official target | `dsh-v0.2.3-alpha.2`（`4b399c39a6`）on 2026-11-26 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
+| Current official target | `dsh-v0.2.3-alpha.2` on 2026-11-26 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 | AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.31` + 本 fork `0.1.31-dsh023a2.1` 私有发布通道（0.2.3-alpha.2 适配）与有界未读邮箱缓存 |
 | Context subtree | `fork-plugins/dsh-context` | 上游 `v0.87.2` + 本 fork `0.87.2-dsh023a2.1` 的宿主侧参照价、head 视图与有界冷 detail；详见 [Local Context package](#local-context-package) |
 | Subscriptions subtree | `fork-plugins/dsh-plugin-subscriptions` | 上游 `v0.9.4` + 本 fork RC.1/V4 私有适配与 pinned Claude Code 2.1.288 wire；凭据与 Session 格式不变 |
 | Relay plugin | `fork-plugins/dsh-relay` | 本 fork 自有的 DshRelay 远程访问客户端：设置页 + 凭据服务 + DSH Cookie 铸造 + frpc 隧道托管；不含部署值 |
 
-当前维护的源码兼容基线是 `dsh-v0.2.3-alpha.2`（上游 tag `4b399c39a6`，合并分支 `merge/dsh-v0.2.3-alpha.2`，合入 `main` 后成为发布基线；上一基线 `dsh-v0.2.2-rc.1` 的承接见下文）。整合采用官方 Agent 创建、handle-based Session persistence、Session format V4、通用 `session.updateQueue`、引用拥有的 Client Session、Plugin Manager、Subagent activation limits（扁平 `SubagentActivationSpec`）、cursorless Assistant frame、Web Terminal、SSH、MCP resources、Browser/Computer Use、`packages/account/deepseek-account` 账户包、SQLite Segment persistence 后端和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
+当前维护的源码兼容基线是 `dsh-v0.2.3-alpha.2`（上游 tag，合并分支 `merge/dsh-v0.2.3-alpha.2`，合入 `main` 后成为发布基线；上一基线 `dsh-v0.2.2-rc.1` 的承接见下文）。整合采用官方 Agent 创建、handle-based Session persistence、Session format V4、通用 `session.updateQueue`、引用拥有的 Client Session、Plugin Manager、Subagent activation limits（扁平 `SubagentActivationSpec`）、cursorless Assistant frame、Web Terminal、SSH、MCP resources、Browser/Computer Use、`packages/account/deepseek-account` 账户包、SQLite Segment persistence 后端和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
 
 当前基线的 `SESSION_FORMAT_VERSION` 仍为 `4`；只读 open 可以准备受支持的历史 generation，写 open 在验证后发布 v4 successor。第三方插件即使磁盘数据可读，也必须重新构建并在隔离 profile 验证逻辑 API；旧代文件不得原地改写。
 
@@ -93,6 +93,18 @@ Delayed Assistant settlements commit at their sequence position without retiring
 **Preservation rule.** Keep ordered insertion separate from attempt retirement, count transient entries when routing commitment, and never mutate previously published windows. Do not globally disable slot abdication, expose reasoning in fallback, weaken footer action eligibility, or change Session formats. Source validation must not rebuild served Web artifacts or restart the running DSH without user coordination.
 
 **Focused verification.** Source Vitest suites under Session Controller, ui-conversation, ui-chat, ui-trajectory, ui-renderer, and ui-slots cover delayed commitment, immutable windows, tool preparation, isolated failures, and folding. [The recorded Turn-tail scenario](apps/web/tests/turn-tail-actions.e2e.ts) also asserts reply visibility and reachable tools after a later textless Step, including reload. Browser verification requires a coherent rebuilt artifact set and remains separate from source-only tests.
+
+### Bounded projection pushes for Session list rows and follow openings
+
+`session-projections` 的 `wire.hintView` 是注册方声明的「推送窄化」：一个 Client 值会无界增长的投影单元可以只把有界视图放进 Host 推送，而完整值仍留在 Host。Session Controller 只在三处推送面应用它——`session/list` 的每行 hints、`session/control` 的 baseline，以及 follow 的 opening projection block；`session.projections` 显式读取、`snapshot()`、checkpoint、`restore`/`hydrate` 与 Host 内部折叠仍是完整值。live 更新帧（control `projection` 帧与 follow `projectionChanges` 帧）保持完整值：已经通过显式读取拿到完整目录的 Client 不能被后续一次有界推送缩回。
+
+`subagentCatalog` 声明 `hintView` 为「最新的 `SUBAGENT_CATALOG_HINT_LIMIT`（32）条」（`packages/subagent/subagent/src/catalog.ts`），因为每个 Session 行、控制帧和打开帧否则都要序列化整份目录。合成 137 行 + 12,524 条子智能体目录的 Host 基准（`C:\Project\dsh-perf3\tools\c-measure.bench.ts`）：`session/list` 响应 5,575,166 B → 830,091 B（deflate level 1 后 379,588 B → 38,394 B）；大会话 follow 首帧 2,172,940 B → 76,197 B（deflate 216,524 B → 4,973 B）；control baseline 5,550,586 B → 805,511 B；显式 `session.projections` 读取仍是 2,103,042 B / 12,524 条。真实数据的 `session/list` 首包为 2.97 MB、大会话首帧为 949 KB（压缩后），其中 `subagentCatalog` 占 98% 以上。
+
+Client 侧不需要新的协议：`ui-subagent` 的 Session panel section 在显示时读取一次完整目录（`SubagentsSection` 的 mount effect → `prepareCatalog` → `refreshProjections`），breadcrumb switcher 打开时本来就会读取，因此页面展示的行、进度与切换器内容与完整值一致；推送里的 32 条只服务于 Sidebar 的运行中子智能体计数和 Context 插件的目录顺序，这些消费方在 `list` 行上只需要近期成员。
+
+**Preservation rule.** 推送窄化只作用于 `wire.hintView` 声明过的键，且只能出现在 Session summary（list/control baseline）与 follow opening 两类推送里；禁止把它加进 `snapshot()`、`cache`、`restore/hydrate`、`viewCheckpoint` 或 `session.projections`，禁止窄化 live 更新帧，也不要让 Host 侧 `listChildren`/`listDescendants`/AgentTeams 读到的值变成有界值。新增有界键时必须同时确认：该键的 Client 推送消费方能在需要时通过显式读取补全（当前是 `ui-subagent` 的 section 与 switcher），且窄化函数是纯函数、返回同一 wire 类型。`SUBAGENT_CATALOG_HINT_LIMIT` 必须大于一次 AgentTeams 并发展开可能创建的成员数，否则 Sidebar 的运行中子智能体计数会漏计。
+
+**Focused verification.** `node_modules/.bin/vitest run packages/session/session-projection/tests packages/api/session-controller/tests/subagent-catalog.host.spec.ts packages/subagent/subagent/tests/catalog.spec.ts packages/client/ui-subagent/tests` 覆盖窄化只影响推送、显式读取完整、control baseline 有界而 live 更新完整、目录 hintView 与 section 显示时的按需读取；`C:\Project\dsh-perf3\tools\c-measure.bench.ts` 用 `C_PUSHED_HINT=0|1` 产出 before/after 组合表。
 
 ### 0.2.1-rc.2 合并后的结构承接
 
@@ -426,9 +438,11 @@ Session search 和 event search 使用 exact-generation/request/cursor key 的 i
 
 #### Projection-cache budget and live-event reads
 
-`session-projection-cache` 的 domain 在启动时把每条历史记录加载进常驻内存表。fork 用 `maxRetainedBytes`（默认 256 MiB，按 checkpoint 最高 seq 作为最近性代理）在后台保留最新的完整记录；超出预算的记录不再整体删除，而是替换为只含身份与 `title`、`sessionListMetadata` 两行的轻量记录（会话列表据此命名与排序，未打开的旧会话不再显示为无名），两行皆无时删除。轻量记录刻意不完整：`cachedSnapshot` 只服务这两行提示；轻量记录没有完整 checkpoint，父 Session follow 仍从有界窗口打开并省略投影块，直到统计或 Context 界面的显式请求取得精确切点；保留会话的完整记录仍可提供完整块。预算过程按到达顺序即时计算记录字节、每 64 条让出事件循环，并跳过期间被活会话重写的记录。缓存始终是提示而非事实来源，丢弃折叠行只增加冷重放的 tail，不改变身份或值。本机 14,586 条 / 776.3 MB compact JSON 实测加载 1,163 MiB heap，256 MiB 预算保留 1,323 条 / 256.0 MB（约 384 MiB heap），其余记录收缩为轻量提示；128 MiB 预算可回收约 972 MiB，是更激进的部署选择。`session-query` 的 live 原始 event 读取只取 `snapshotEvents(start,end)` 的有界窗口并快照该窗口，不再为读一条事件深拷贝完整日志；`read` 工具的 UI `meta.lines` 另有 `readMaxMetaBytes`（默认 8 KiB），超预算只省略可选 meta，模型文本不变。`RuntimeContextProjection` 用倒序 `eventAt` 扫描，不再物化完整事件数组。
+`session-projection-cache` 的 domain 以按需读取（`storageDomain.open(spec, { lazyReads, maxResidentBytes })`）打开：启动只读键索引（per-record 目录的 `readdir` 加 `global.json`），不再把 2 GB 级语料全量 `JSON.parse` 并逐条 zod 校验。列表提示、`cachedSnapshot`、`cachedPredecessorTitle`、`hydratePrepared`、`coldSnapshot` 仍同步服务——需要哪一条就读哪一条（storage-json per-record unit 的 `recordReader.read`，`readFileSync` + 同一 schema 校验），`KvTable.get` 的同步契约不变；`entries()` 只返回常驻记录，`keys()`/`size` 覆盖全部已知键。载入记录进入有界常驻集（`maxRetainedBytes` 默认 256 MiB，LRU，超预算即释放，介质保留每个值）。fork 的落盘收缩保留为启动后的增量后台任务：`compactionStartDelayMs`（默认 10 s）后启动，经 `KvTable.scan()` 用 `recordReader.readAsync`（`fs.promises`）无驻留地流式读取整份语料，每 `compactionBatchSize`（默认 16）条让出事件循环；按 checkpoint 最高 seq 保留最新的完整记录直到预算，其余记录改写为只含身份与 `title`、`sessionListMetadata` 两行的轻量记录，两行皆无时删除。过程期间被缓存写入的记录在 `put()` 入队前登记到 `writtenDuringCompaction` 并整轮跳过，因此新检查点绝不会被更旧切点覆盖；维护写入失败或域关闭结束本轮，下次启动重试。轻量记录刻意不完整：`cachedSnapshot` 只服务其提示行，父 Session follow 仍从有界窗口打开并省略投影块，直到统计或 Context 界面的显式请求取得精确切点；保留记录的完整块与 `readWindow` 门槛不变。`fork-plugins/dsh-context` 的 timeline row sweep 随之改为遍历 `keys()` 后用 `get()` 按需读，并每 50 ms 让出事件循环。缓存始终是提示而非事实来源，丢弃折叠行只增加冷重放的 tail，不改变身份或值。`session-query` 的 live 原始 event 读取只取 `snapshotEvents(start,end)` 的有界窗口并快照该窗口，不再为读一条事件深拷贝完整日志；`read` 工具的 UI `meta.lines` 另有 `readMaxMetaBytes`（默认 8 KiB），超预算只省略可选 meta，模型文本不变。`RuntimeContextProjection` 用倒序 `eventAt` 扫描，不再物化完整事件数组。
 
-**Preservation rule.** 保留按保留字节预算收缩历史记录的做法、完整记录保留每一行、超预算记录只保留 `title` 与 `sessionListMetadata` 列表提示行（不得再保留其他折叠状态），以及 live raw-event 的有界读取；这些优化只能让缓存/展示提示退化，不能改变 durable 值、Session 格式或模型内容。上游合并若替换 projection cache 或 session-query 读取路径，必须重新证明历史记录不会无界驻留、单事件读取不会深拷贝完整日志、且列表行即使从未打开仍能显示标题与最近活动。
+**Preservation rule.** 保留按需同步读（打开只枚举键索引，记录在需要时读取并在文件边界逐条 zod 校验，`cachedSnapshot` 等同步面不得改成 Promise）、`maxRetainedBytes` 对常驻集与介质两侧的约束、完整记录保留每一行、超预算记录只保留 `title` 与 `sessionListMetadata` 列表提示行（不得再保留其他折叠状态），以及 live raw-event 的有界读取。落盘收缩必须是启动后的增量后台任务（异步读取、按 `compactionBatchSize` 让出事件循环、跳过并发写入的记录），不得改回打开时全量装载或启动时全量同步扫描；这些优化只能让缓存/展示提示退化，不能改变 durable 值、Session 格式或模型内容。上游合并若替换 projection cache 或 session-query 读取路径，必须重新证明启动不读整份语料、历史记录不会无界驻留、单事件读取不会深拷贝完整日志、且列表行即使从未打开仍能显示标题与最近活动。
+
+**Focused verification.** `node_modules/.bin/vitest run packages/storage/storage-domain packages/storage/storage-json packages/session/session-projection-cache`（触及 `src` 文件 100% 覆盖率；含「打开不读记录」「收缩不阻塞读」「并发写不被覆盖」的负向用例）。合成语料 39,057 条 / 2.25 GB 上，打开从 30.4 s 降到 32 ms，打开后 RSS 从 4.06 GB 降到 107 MB，首个 137 行列表的提示读取约 170 ms，2,000 次冷读约 2.1 s（约 1 ms/条）。`fork-plugins/dsh-context` 的时间线 sweep 改为 `keys()`+`get()` 按需读、50 ms 切片，并在整轮完成后写入版本标记，见插件 `FORK_MAINTENANCE.md` 的 “Timeline row sweep”。
 
 #### Idle Web Agent eviction
 
@@ -606,7 +620,7 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 ### 0.2.3-alpha.2 落地记录
 
-2026-11-26：集成分支 `merge/dsh-v0.2.3-alpha.2` 把上游 `dsh-v0.2.3-alpha.2`（`4b399c39a6`）合入 fork `main`。本节只登记这次合并改变的结构性前提；具体行为约束仍由上面的分节拥有，本节不重复。
+2026-11-26：集成分支 `merge/dsh-v0.2.3-alpha.2` 把上游 `dsh-v0.2.3-alpha.2` 合入 fork `main`。本节只登记这次合并改变的结构性前提；具体行为约束仍由上面的分节拥有，本节不重复。
 
 **Core registry 不再记录运行时归属。** `packages/core/agent` 移除了 `AgentRegistry.isOwnedBy` 与 `roots()`；`packages/api/session-controller/src/agent.ts` 的 `isSubagentChildOf` 改为读取子 Session header 的 `origin: 'subagent'` 与 `parentSession`，`hasApiSessionSubagentOwner` 同样只看 header。任何按注册表父子关系判定的代码必须改读 header，`roots()` 的调用点改用 `agents.list()` 过滤 `header.origin !== 'subagent'`。
 
@@ -626,7 +640,7 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 **Node 引擎下限。** 根 `package.json` 的 `engines.node` 随上游提高到 `^24.22.3 || >=26.13.1`（安全修复）；运行时不强制，只约束安装/构建环境。
 
-**Web bundle 依赖。** `packages/bundle/web-app/package.json` 必须声明 `@deepseek-ai/dsh-tool-session-message`；preset 行与 manifest 依赖缺一都会让新建会话报 `agent-preset/invalid`（本次合并丢过一次，由 `7af2588a74` 补回）。
+**Web bundle 依赖。** `packages/bundle/web-app/package.json` 必须声明 `@deepseek-ai/dsh-tool-session-message`；preset 行与 manifest 依赖缺一都会让新建会话报 `agent-preset/invalid`（本次合并丢过一次，冒烟测试发现后补回）。
 
 **持久化历史记录。** 按合并流程第 9 步，`verify-persistence-changes` 的 `2026-09-28-user-message-revisions` 已用 `--update` 按 same-version 对 `2026-11-19-cua-input-notices` 刷新，涉及 `event:agent/inbox/spliced`、`event:developer/message`、`event:llm/request-record`、`event:session/title-llm-request` 与 `event:user/message`；没有 Session 格式版本变化。
 
@@ -1008,6 +1022,8 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Agent initiator weak reference | Preserve | Store only `WeakRef<Agent>` in the initiator ALS and keep the registry's strong hold on live Agents; any object stored in that ALS must not strongly reach an Agent |
 | Read window line detachment | Preserve | Kept `read` window lines must not share storage with the decoded file; use a lossless copy |
 | Per-record storage load concurrency | Preserve | Per-record table loads keep a bounded number of record files open; drop only if upstream bounds them equivalently |
+| Projection-cache on-demand reads | Preserve | Opening the domain lists the key index only; a listing, fold, or resume reads and schema-validates the one record it needs synchronously (the sync faces must stay synchronous); keep the least-recently-used resident set bounded by `maxRetainedBytes` |
+| Incremental projection-cache retention | Preserve | After `compactionStartDelayMs`, stream the corpus with asynchronous reads, yield every `compactionBatchSize` records, keep the newest records complete within `maxRetainedBytes`, shrink the rest to `title`/`sessionListMetadata` (delete when neither), skip a record the cache wrote during the pass, and never block request handling |
 | SessionPersistence list exclusions | Preserve | Every provider, including the 0.2.3 `packages/session/session-persistence-sqlite` Segment backend, implements `excludeSessionIds` before the stored-header decode and `excludeSubagentSessions`, and keeps excluded ids in the stored set; the shared `listHeaders` contract is the guard |
 | DeepSeek account credential parking | Preserve | Park 401/`40003`/`rejectToken` grants as payload v2 (`needs-reauth`/`issuer-mismatch`, `invalid.at`), keep them stored and unreusable, emit `session-expired` once, remove only on sign-out; upstream merged `packages/credentials/deepseek-account*` into `packages/account/deepseek-account` |
 | API key normalization | Replaced by official `dsh-credentials` | Every provider uses `normalizeApiKey`/`ApiKeyCheck` from `packages/credentials/credentials/src/api-key.ts`; do not restore per-provider key regexes |
@@ -1141,7 +1157,7 @@ corepack pnpm@10.30.2 verify
 ## Known limitations
 
 - Host heap scales with **live decoded Session history**, not with the file corpus: measured ≈6.4 KB per live event (5,961–6,391 across runs). 18 GiB corresponds to ≈2.5–2.9M live events; current peak was 15.5 GiB at 1.68M events. Once live, each 153–163 MB Session is ≈1 GiB heap. Decoding and GC sawtooth add ~0.8 GiB; disposed Agents/Sessions are reclaimed (no retained-object leak), and followers/caches are not the root.
-- The projection-cache retained-byte budget, bounded live raw-event read, `readMaxMetaBytes` and runtime-context reverse scan reduce cache/transient copies (projection-cache reclaim ≈0.7–0.8 GiB at the 256 MiB default after retaining lightweight title/list rows), but they do not reduce the inherent live event payload. A further material reduction needs one of: fewer simultaneously live Agents/Sessions, a stream/assistant-message retention policy (assistant `stream` alone is ~22% of one session's event JSON and is format-adjacent), or an event-level lazy/compressed store. Tool-result spill is already active in the base bundle (`maxInlineTokens: 12500`); lowering it only bounds future results and changes what the model sees, and `read` is spill-exempt.
+- The projection-cache retained-byte budget, bounded live raw-event read, `readMaxMetaBytes` and runtime-context reverse scan reduce cache/transient copies (startup no longer materializes the projection cache: 21 ms open and 108 MB RSS over a 39,057-record / 2.25 GB synthetic corpus versus 5.4–6.8 s and 2.47 GB eager; the resident set and the stored-record shrink stay bounded by the 256 MiB default), but they do not reduce the inherent live event payload. A further material reduction needs one of: fewer simultaneously live Agents/Sessions, a stream/assistant-message retention policy (assistant `stream` alone is ~22% of one session's event JSON and is format-adjacent), or an event-level lazy/compressed store. Tool-result spill is already active in the base bundle (`maxInlineTokens: 12500`); lowering it only bounds future results and changes what the model sees, and `read` is spill-exempt.
 - `readMaxMetaBytes` (default 8 KiB) only bounds future `read` result meta: existing Session logs keep their previously written `meta.lines`; the cap can make an oversized read card replay as the generic text card, while model-visible text is unchanged.
 - 运行中的 Agent 仍完整持有 Host `Session.log`；一个持续输出的单会话仍可能线性增长。`SessionHandle.read(offset, length)` 目前也先解码整份 JSONL/Zstd 再切片；非 live 普通父 Session 的 follow 首帧和旧页已走窗口读取（检查点缺失/不完整时窗口打开并省略投影块，由显式统计/Context 请求按需读取精确投影），但 live、subagent、小于 2 MiB、seeded、历史代际、malformed/无法覆盖窗口、gap-repair 或索引不可用时仍回退完整观察，因此不是运行中 Agent 的 event-level paging。后续实现须先满足[同步事件读取弃用约束](.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md)，不能只给 `read()` 增加分页参数。
 - 大会话首次 `beforeSeq` 仍在读取进程内同步构建代际索引，没有后台或并行预建；构建只按帧统计换行记录以记录偏移，不再逐行解码事件。本机 32k 事件夹具的 `benchmarks/session-open/window` 实测：尾部约 240 ms、冷 `beforeSeq` 首次约 70 ms、预热约 10 ms（2/2 通过，断言窗口结构与索引复用，不设墙钟预算，因此不是 CI 性能门禁）。成功解析的索引由有界进程内 memo 复用，预热页不再每个重解析约 7.3 MB sidecar；小于 2 MiB 的日志由 history 直接完整读取，因为无索引尾部可能慢于完整读取（949 KB：80–98 ms vs 26 ms）。
@@ -2133,6 +2149,13 @@ Upstream raised `engines.node` to `^24.22.3 || >=26.13.1` for the undici securit
 **Preservation rule.** Keep `.node-version` an exact release inside `engines.node`, keep both launchers resolving it before their first `node` call, and keep the checksum check; raise the pin together with `engines.node`.
 
 **Focused verification.** `node_modules/.bin/vitest run scripts/fork-windows-launchers.spec.ts` (`runs both launchers on the pinned Node.js release, which satisfies the engine range`).
+### Same-realm JSON validation fast path
+
+`isJsonValue` and `snapshotJsonValue` (`packages/util/values/src/index.ts`) accept a container whose prototype is this realm's own `Array.prototype` or `Object.prototype` without re-reading the prototype's `constructor` and native source text, which the module checks once at load; other prototypes still take the full cross-realm intrinsic check. Object keys come from `Object.keys` plus an own-key count comparison instead of a per-key `propertyIsEnumerable` call. Rejected inputs are unchanged (hidden or symbol keys, sparse or decorated arrays, forged and subclass prototypes, cycles). Validating the projection cache at Host startup took about 15 s of a 33 s start on a 39,057-record cache; a synthetic 4,000-row projection corpus validates in about 230 ms instead of 780 ms.
+
+**Preservation rule.** Keep the fast path keyed on prototype identity with this realm's intrinsics verified at load, and keep every rejection the existing `packages/core/session/tests/json.spec.ts` cases cover.
+
+**Focused verification.** `node_modules/.bin/vitest run packages/util/values packages/core/session/tests/json.spec.ts` (`accepts parsed containers of this realm without rereading their prototype constructors` plus the cross-realm and rejection cases).
 ### Detail projections travel only to viewers
 
 The Host-wide `session/control` stream carries only Session summary keys (`sessionProjections.summaryKeys()` minus `listProjectionExcludeKeys`) in its baselines and updates. Detail keys, the units declaring `summary: false` such as `turnOutline`, `sessionStats`, `contextPressure`, `contextBreakdown`, `tokenUsage`, and `todos`, reach a client only through the follow stream of a Session it opened: the Web client requests `projectionChanges: true`, and `WebController.follow` attaches a `ProjectionListener` to the same queue, so one `projection` frame follows each committed event that changed a client-visible key. On the Client, `ProjectionValueStore.applySummary` applies a control block per key without establishing exactness or clearing omitted keys, and `SessionManager` ends exactness when a Session is dropped or a later opening serves no block. Before this change, sending one prompt in an 8000-turn Session pushed two 1.8 MB `turnOutline` arrays to every connected client, and every reconnect resent every live Session's detail values.

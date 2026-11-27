@@ -34,7 +34,11 @@ import {
 import {
   apply as storageDomainApply, Config as storageDomainConfig, inject as storageDomainInject, name as storageDomainName,
 } from '@deepseek-ai/dsh-storage-domain'
-import SessionProjectionCache, { DEFAULT_MAX_RETAINED_BYTES } from '../src/index.ts'
+import SessionProjectionCache, {
+  DEFAULT_COMPACTION_BATCH_SIZE,
+  DEFAULT_COMPACTION_START_DELAY_MS,
+  DEFAULT_MAX_RETAINED_BYTES,
+} from '../src/index.ts'
 import { checkpointRecord, projectionCacheDomainSpec } from '../src/spec.ts'
 import type { CheckpointRecord } from '../src/spec.ts'
 import { brandString } from '@deepseek-ai/dsh-brand'
@@ -1081,8 +1085,8 @@ describe('SessionProjectionCache cold-read seeding', () => {
   })
 })
 
-describe('SessionProjectionCache retained-byte budget', () => {
-  /** One heavy client-only row; a retained record must keep it byte-identical. */
+describe('SessionProjectionCache record budget', () => {
+  /** One heavy client-only row; a resident record must keep it byte-identical. */
   const heavyRow = (seq: number, label: string): CheckpointRecord['rows'][string] => ({
     ver: 1,
     seq: SessionSeq(seq),
@@ -1092,16 +1096,19 @@ describe('SessionProjectionCache retained-byte budget', () => {
     contextTimeline: heavyRow(seq, label),
     'cache-test/marks': { ver: 1, seq: SessionSeq(seq), val: { marks: [label] } },
   })
-  /** The two listing hint rows a record outside the budget keeps. */
   const titleRow = (seq: number, title: string): CheckpointRecord['rows'][string] =>
     ({ ver: 1, seq: SessionSeq(seq), val: title })
   const listMetadataRow = (seq: number): CheckpointRecord['rows'][string] =>
     ({ ver: 1, seq: SessionSeq(seq), val: { blank: false, lastPromptAt: null } })
-  /** The budget's unit: compact JSON bytes of one record's rows, as the cache measures it. */
+  /** The budget's unit as the store charges it: compact JSON bytes of the record. */
   const rowBytes = (rows: CheckpointRecord['rows']): number => Buffer.byteLength(JSON.stringify(rows))
 
   /** Boot the storage/domain/cache composition with a logger spy installed before init. */
-  async function budgetHarness(root: string, maxRetainedBytes: number) {
+  async function budgetHarness(
+    root: string,
+    maxRetainedBytes: number,
+    timing: { batchSize?: number; startDelayMs?: number } = {},
+  ) {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(Storage)
@@ -1114,59 +1121,101 @@ describe('SessionProjectionCache retained-byte budget', () => {
     void ctx.sessionProjections.register(listMetadataUnit)
     const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => {})
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
-    await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000, maxRetainedBytes })
-    return { ctx, cache: ctx.sessionProjectionCache, info, warn }
+    await ctx.plugin(SessionProjectionCache, {
+      writeEveryEvents: 100,
+      writeIntervalMs: 60_000,
+      maxRetainedBytes,
+      compactionBatchSize: timing.batchSize ?? 1,
+      // Tests that do not exercise the pass keep it beyond the suite's lifetime;
+      // the dispose in afterEach clears the timer.
+      compactionStartDelayMs: timing.startDelayMs ?? 60_000,
+    })
+    const table = ctx.storageDomain.get(projectionCacheDomainSpec.name)!.table('sessions')
+    return { ctx, cache: ctx.sessionProjectionCache, table, info, warn }
   }
 
-  it('validates the budget with a default and rejects a non-positive or fractional value', () => {
+  it('validates the budget and pass timing with defaults and rejects invalid values', () => {
     const resolved = SessionProjectionCache.Config({ writeEveryEvents: 1, writeIntervalMs: 1 })
     expect(resolved.maxRetainedBytes).toBe(DEFAULT_MAX_RETAINED_BYTES)
+    expect(resolved.compactionBatchSize).toBe(DEFAULT_COMPACTION_BATCH_SIZE)
+    expect(resolved.compactionStartDelayMs).toBe(DEFAULT_COMPACTION_START_DELAY_MS)
     expect(() => SessionProjectionCache.Config({ writeEveryEvents: 1, writeIntervalMs: 1, maxRetainedBytes: 0 }))
       .toThrow()
     expect(() => SessionProjectionCache.Config({ writeEveryEvents: 1, writeIntervalMs: 1, maxRetainedBytes: 1.5 }))
       .toThrow()
+    expect(() => SessionProjectionCache.Config({ writeEveryEvents: 1, writeIntervalMs: 1, compactionBatchSize: 0 }))
+      .toThrow()
+    expect(() => SessionProjectionCache.Config({ writeEveryEvents: 1, writeIntervalMs: 1, compactionBatchSize: 1.5 }))
+      .toThrow()
+    expect(() => SessionProjectionCache.Config({ writeEveryEvents: 1, writeIntervalMs: 1, compactionStartDelayMs: -1 }))
+      .toThrow()
   })
 
-  it('keeps the newest complete records within the budget and deletes the rest', async () => {
+  it('opens from the key index and reads a record only when a listing needs it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
     roots.push(root)
-    const newest = rowsFor(9, 'newest')
-    const middle = rowsFor(6, 'middle')
-    const oldest = rowsFor(2, 'oldest')
-    await seedRecord(root, 'newest', newest)
-    await seedRecord(root, 'middle', middle)
-    await seedRecord(root, 'oldest', oldest)
-    // Room for the two newest records and nothing else.
-    const { cache, info } = await budgetHarness(root, rowBytes(newest) + rowBytes(middle) + 16)
-    await vi.waitFor(async () => {
-      expect(await storedRecord(root, brandString<SessionId>('oldest'))).toBeUndefined()
-    }, { timeout: 5_000 })
-    // Retained records are complete: no wire row was dropped, including the heavy one.
-    expect(await storedRows(root, brandString<SessionId>('newest'))).toEqual(newest)
-    expect(await storedRows(root, brandString<SessionId>('middle'))).toEqual(middle)
-    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('newest')))?.values['cache-test/marks'])
-      .toEqual({ marks: ['newest'] })
-    // Bytes accounting: the pass reports exactly what it retained and pruned.
-    await vi.waitFor(() => {
-      expect(info).toHaveBeenCalledWith(expect.stringContaining(
-        `retained 2 records (${String(rowBytes(newest) + rowBytes(middle))} bytes)`,
-      ))
-    }, { timeout: 5_000 })
-    expect(info).toHaveBeenCalledWith(expect.stringContaining(
-      `pruned 1 records (${String(rowBytes(oldest))} bytes)`,
-    ))
+    await seedRecord(root, 'cold', rowsFor(9, 'cold'))
+    const { cache, table } = await budgetHarness(root, 1024 * 1024)
+    // The open listed the record without reading it: nothing is resident yet.
+    expect(table.size).toBe(1)
+    expect([...table.entries()]).toEqual([])
+    // Rewriting the document after the open proves the listing reads the
+    // medium then, not an open-time copy.
+    await seedRecord(root, 'cold', rowsFor(11, 'rewritten'))
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('cold')))?.values['cache-test/marks'])
+      .toEqual({ marks: ['rewritten'] })
+    expect([...table.entries()].map(([id]) => id)).toEqual(['cold'])
   })
 
-  it('keeps the newest record even when it alone exceeds the budget', async () => {
+  it('releases records beyond the resident budget and serves them again from the medium', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
     roots.push(root)
-    const newest = rowsFor(9, 'huge')
-    await seedRecord(root, 'huge', newest)
-    const { cache } = await budgetHarness(root, 16)
-    await new Promise<void>((resolve) => { setImmediate(resolve) })
-    expect(await storedRows(root, brandString<SessionId>('huge'))).toEqual(newest)
-    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('huge')))?.values['cache-test/marks'])
-      .toEqual({ marks: ['huge'] })
+    await seedRecord(root, 'first', rowsFor(1, 'first'))
+    await seedRecord(root, 'second', rowsFor(2, 'second'))
+    // A one-byte budget cannot hold any record: each read replaces the last one.
+    const { cache, table } = await budgetHarness(root, 1)
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('first')))?.values['cache-test/marks'])
+      .toEqual({ marks: ['first'] })
+    expect([...table.entries()].map(([id]) => id)).toEqual(['first'])
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('second')))?.values['cache-test/marks'])
+      .toEqual({ marks: ['second'] })
+    expect([...table.entries()].map(([id]) => id)).toEqual(['second'])
+    // A released record is read again from the medium, never lost.
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('first')))?.values['cache-test/marks'])
+      .toEqual({ marks: ['first'] })
+    expect([...table.entries()].map(([id]) => id)).toEqual(['first'])
+    expect(table.size).toBe(2)
+  })
+
+  it('leaves the stored record complete when the resident set releases it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    const rows = { ...rowsFor(5, 'complete'), title: titleRow(5, 'Title'), sessionListMetadata: listMetadataRow(5) }
+    await seedRecord(root, 'complete', rows)
+    const { cache } = await budgetHarness(root, 1)
+    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('complete')))?.values['cache-test/marks'])
+      .toEqual({ marks: ['complete'] })
+    // Releasing a record is a memory decision: the medium keeps every row.
+    expect(await storedRows(root, brandString<SessionId>('complete'))).toEqual(rows)
+  })
+
+  it('bounds the resident set of a history larger than the budget', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    for (let index = 0; index < 70; index += 1) {
+      await seedRecord(root, `resident-${String(index)}`, rowsFor(index + 1, `resident-${String(index)}`))
+    }
+    const { cache, table } = await budgetHarness(root, rowBytes(rowsFor(1, 'resident-0')) + 16)
+    // Every record serves through the listing face, from the medium once the
+    // budget forced it out of memory.
+    for (let index = 0; index < 70; index += 1) {
+      const label = `resident-${String(index)}`
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>(label)))?.values['cache-test/marks'])
+        .toEqual({ marks: [label] })
+    }
+    expect(table.size).toBe(70)
+    expect([...table.entries()].length).toBeGreaterThan(0)
+    expect([...table.entries()].length).toBeLessThan(70)
   })
 
   it('leaves an empty cache silent and throws nothing', async () => {
@@ -1178,127 +1227,251 @@ describe('SessionProjectionCache retained-byte budget', () => {
     expect(info).not.toHaveBeenCalled()
     expect(warn).not.toHaveBeenCalled()
   })
+  describe('retention pass', () => {
+    /** Start the pass immediately so a test can wait for its result. */
+    const passTiming = { batchSize: 1, startDelayMs: 0 }
 
-  it('bounds a history larger than one scan chunk and keeps the newest records', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
-    roots.push(root)
-    for (let index = 0; index < 70; index += 1) {
-      await seedRecord(root, `chunk-${String(index)}`, rowsFor(index + 1, `chunk-${String(index)}`))
-    }
-    const newest = rowsFor(70, 'chunk-69')
-    const { cache } = await budgetHarness(root, rowBytes(newest) + 16)
-    await vi.waitFor(async () => {
-      expect(await storedRecord(root, brandString<SessionId>('chunk-0'))).toBeUndefined()
-      expect(await storedRecord(root, brandString<SessionId>('chunk-68'))).toBeUndefined()
-    }, { timeout: 5_000 })
-    expect(await storedRows(root, brandString<SessionId>('chunk-69'))).toEqual(newest)
-    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('chunk-69')))?.values['cache-test/marks'])
-      .toEqual({ marks: ['chunk-69'] })
-  })
+    it('keeps the newest complete records within the budget and prunes the rest', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      const newest = rowsFor(9, 'newest')
+      const middle = rowsFor(6, 'middle')
+      const oldest = rowsFor(2, 'oldest')
+      await seedRecord(root, 'newest', newest)
+      await seedRecord(root, 'middle', middle)
+      await seedRecord(root, 'oldest', oldest)
+      // Room for the two newest records and nothing else.
+      const { cache, info } = await budgetHarness(root, rowBytes(newest) + rowBytes(middle) + 16, passTiming)
+      await vi.waitFor(async () => {
+        expect(await storedRecord(root, brandString<SessionId>('oldest'))).toBeUndefined()
+      }, { timeout: 5_000 })
+      // Retained records are complete: no wire row was dropped, including the heavy one.
+      expect(await storedRows(root, brandString<SessionId>('newest'))).toEqual(newest)
+      expect(await storedRows(root, brandString<SessionId>('middle'))).toEqual(middle)
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('newest')))?.values['cache-test/marks'])
+        .toEqual({ marks: ['newest'] })
+      // Bytes accounting: the pass reports exactly what it retained and pruned.
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(expect.stringContaining(
+          `retained 2 records (${String(rowBytes(newest) + rowBytes(middle))} bytes)`,
+        ))
+      }, { timeout: 5_000 })
+      expect(info).toHaveBeenCalledWith(expect.stringContaining(
+        `pruned 1 records (${String(rowBytes(oldest))} bytes)`,
+      ))
+    })
 
-  it('replaces an out-of-budget record with its listing hint rows', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
-    roots.push(root)
-    const newest = rowsFor(9, 'newest')
-    const identity = {
-      formatVersion: SESSION_FORMAT_VERSION,
-      createdAt: 7,
-      cwd: '/work',
-      isSeeded: false,
-      inheritedEventCount: SessionLogOffset(0),
-    }
-    await seedRecord(root, 'newest', newest)
-    await seedRecord(root, 'oldest', {
-      contextTimeline: heavyRow(4, 'oldest'),
-      title: titleRow(4, 'Old title'),
-      sessionListMetadata: listMetadataRow(4),
-    }, identity)
-    const { cache, info } = await budgetHarness(root, rowBytes(newest) + 16)
-    // Only the two cheap rows survive; the heavy fold state is gone.
-    await vi.waitFor(async () => {
-      expect(await storedRows(root, brandString<SessionId>('oldest'))).toEqual({
+    it('keeps the newest record even when it alone exceeds the budget', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      const newest = rowsFor(9, 'huge')
+      await seedRecord(root, 'huge', newest)
+      const { cache, info } = await budgetHarness(root, 16, passTiming)
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(expect.stringContaining('retained 1 records'))
+      }, { timeout: 5_000 })
+      expect(await storedRows(root, brandString<SessionId>('huge'))).toEqual(newest)
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('huge')))?.values['cache-test/marks'])
+        .toEqual({ marks: ['huge'] })
+    })
+
+    it('bounds a history larger than one scan chunk and keeps the newest records', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      for (let index = 0; index < 70; index += 1) {
+        await seedRecord(root, `chunk-${String(index)}`, rowsFor(index + 1, `chunk-${String(index)}`))
+      }
+      const newest = rowsFor(70, 'chunk-69')
+      const { cache, info } = await budgetHarness(root, rowBytes(newest) + 16, { batchSize: 4, startDelayMs: 0 })
+      await vi.waitFor(async () => {
+        expect(await storedRecord(root, brandString<SessionId>('chunk-0'))).toBeUndefined()
+        expect(await storedRecord(root, brandString<SessionId>('chunk-68'))).toBeUndefined()
+      }, { timeout: 5_000 })
+      expect(await storedRows(root, brandString<SessionId>('chunk-69'))).toEqual(newest)
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('chunk-69')))?.values['cache-test/marks'])
+        .toEqual({ marks: ['chunk-69'] })
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(expect.stringContaining('pruned 69 records'))
+      }, { timeout: 5_000 })
+    })
+
+    it('replaces an out-of-budget record with its listing hint rows', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      const newest = rowsFor(9, 'newest')
+      const identity = {
+        formatVersion: SESSION_FORMAT_VERSION,
+        createdAt: 7,
+        cwd: '/work',
+        isSeeded: false,
+        inheritedEventCount: SessionLogOffset(0),
+      }
+      await seedRecord(root, 'newest', newest)
+      await seedRecord(root, 'oldest', {
+        contextTimeline: heavyRow(4, 'oldest'),
         title: titleRow(4, 'Old title'),
         sessionListMetadata: listMetadataRow(4),
+      }, identity)
+      const { cache, info } = await budgetHarness(root, rowBytes(newest) + 16, passTiming)
+      // Only the two cheap rows survive; the heavy fold state is gone.
+      await vi.waitFor(async () => {
+        expect(await storedRows(root, brandString<SessionId>('oldest'))).toEqual({
+          title: titleRow(4, 'Old title'),
+          sessionListMetadata: listMetadataRow(4),
+        })
+      }, { timeout: 5_000 })
+      expect(await storedRows(root, brandString<SessionId>('newest'))).toEqual(newest)
+      // The lifecycle identity survives, so the listing read still serves the hints.
+      expect((await storedRecord(root, brandString<SessionId>('oldest')))?.identity).toEqual(identity)
+      const block = cache.cachedSnapshot(headerOf(brandString<SessionId>('oldest'), 7, '/work'))
+      expect(block?.values).toEqual({
+        title: 'Old title',
+        sessionListMetadata: { blank: false, lastPromptAt: null },
       })
-    }, { timeout: 5_000 })
-    expect(await storedRows(root, brandString<SessionId>('newest'))).toEqual(newest)
-    // The lifecycle identity survives, so the listing read still serves the hints.
-    expect((await storedRecord(root, brandString<SessionId>('oldest')))?.identity).toEqual(identity)
-    const block = cache.cachedSnapshot(headerOf(brandString<SessionId>('oldest'), 7, '/work'))
-    expect(block?.values).toEqual({
-      title: 'Old title',
-      sessionListMetadata: { blank: false, lastPromptAt: null },
+      expect(block?.asOfSeq).toBe(4)
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(expect.stringContaining('kept lightweight list rows for 1 records'))
+      }, { timeout: 5_000 })
     })
-    expect(block?.asOfSeq).toBe(4)
-    await vi.waitFor(() => {
-      expect(info).toHaveBeenCalledWith(expect.stringContaining('kept lightweight list rows for 1 records'))
-    }, { timeout: 5_000 })
-  })
 
-  it('deletes an out-of-budget record that has no listing hint rows', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
-    roots.push(root)
-    const newest = rowsFor(9, 'newest')
-    await seedRecord(root, 'newest', newest)
-    await seedRecord(root, 'empty', {})
-    await seedRecord(root, 'heavy-only', { contextTimeline: heavyRow(2, 'heavy') })
-    const { cache, info, warn } = await budgetHarness(root, rowBytes(newest) + 16)
-    await vi.waitFor(async () => {
-      expect(await storedRecord(root, brandString<SessionId>('empty'))).toBeUndefined()
-      expect(await storedRecord(root, brandString<SessionId>('heavy-only'))).toBeUndefined()
-    }, { timeout: 5_000 })
-    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('empty')))).toBeUndefined()
-    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('heavy-only')))).toBeUndefined()
-    await vi.waitFor(() => {
-      expect(info).toHaveBeenCalledWith(expect.stringContaining('pruned 2 records'))
-    }, { timeout: 5_000 })
-    expect(warn).not.toHaveBeenCalled()
-  })
+    it('deletes an out-of-budget record that has no listing hint rows', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      const newest = rowsFor(9, 'newest')
+      await seedRecord(root, 'newest', newest)
+      await seedRecord(root, 'empty', {})
+      await seedRecord(root, 'heavy-only', { contextTimeline: heavyRow(2, 'heavy') })
+      const { cache, info, warn } = await budgetHarness(root, rowBytes(newest) + 16, passTiming)
+      await vi.waitFor(async () => {
+        expect(await storedRecord(root, brandString<SessionId>('empty'))).toBeUndefined()
+        expect(await storedRecord(root, brandString<SessionId>('heavy-only'))).toBeUndefined()
+      }, { timeout: 5_000 })
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('empty')))).toBeUndefined()
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('heavy-only')))).toBeUndefined()
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(expect.stringContaining('pruned 2 records'))
+      }, { timeout: 5_000 })
+      expect(warn).not.toHaveBeenCalled()
+    })
 
-  it('accounts an already-lightweight record without rewriting it', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
-    roots.push(root)
-    const newest = rowsFor(9, 'newest')
-    const light: CheckpointRecord['rows'] = { title: titleRow(3, 'Kept title'), sessionListMetadata: listMetadataRow(3) }
-    await seedRecord(root, 'newest', newest)
-    await seedRecord(root, 'light', light)
-    const { cache, info } = await budgetHarness(root, rowBytes(newest) + 16)
-    await vi.waitFor(() => {
-      expect(info).toHaveBeenCalledWith(expect.stringContaining('kept lightweight list rows for 1 records'))
-    }, { timeout: 5_000 })
-    expect(await storedRows(root, brandString<SessionId>('light'))).toEqual(light)
-    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('light')))?.values.title).toBe('Kept title')
-  })
+    it('accounts an already-lightweight record without rewriting it', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      const newest = rowsFor(9, 'newest')
+      const light: CheckpointRecord['rows'] = { title: titleRow(3, 'Kept title'), sessionListMetadata: listMetadataRow(3) }
+      await seedRecord(root, 'newest', newest)
+      await seedRecord(root, 'light', light)
+      const { cache, info } = await budgetHarness(root, rowBytes(newest) + 16, passTiming)
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(expect.stringContaining('kept lightweight list rows for 1 records'))
+      }, { timeout: 5_000 })
+      expect(await storedRows(root, brandString<SessionId>('light'))).toEqual(light)
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('light')))?.values.title).toBe('Kept title')
+    })
 
-  it('keeps listing hints across a scan larger than one chunk', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
-    roots.push(root)
-    for (let index = 0; index < 70; index += 1) {
-      const seq = index + 1
-      await seedRecord(root, `hint-${String(index)}`, {
-        ...rowsFor(seq, `hint-${String(index)}`),
-        title: titleRow(seq, `title-${String(index)}`),
-        sessionListMetadata: listMetadataRow(seq),
-      })
-    }
-    const complete = {
-      ...rowsFor(70, 'hint-69'),
-      title: titleRow(70, 'title-69'),
-      sessionListMetadata: listMetadataRow(70),
-    }
-    const { cache } = await budgetHarness(root, rowBytes(complete) + 16)
-    await vi.waitFor(async () => {
-      expect(await storedRows(root, brandString<SessionId>('hint-0'))).toEqual({
-        title: titleRow(1, 'title-0'),
-        sessionListMetadata: listMetadataRow(1),
-      })
-      expect(await storedRows(root, brandString<SessionId>('hint-68'))).toEqual({
-        title: titleRow(69, 'title-68'),
-        sessionListMetadata: listMetadataRow(69),
-      })
-    }, { timeout: 5_000 })
-    expect(await storedRows(root, brandString<SessionId>('hint-69'))).toEqual(complete)
-    expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('hint-0')))?.values.title).toBe('title-0')
+    it('keeps listing hints across a scan larger than one chunk', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      for (let index = 0; index < 70; index += 1) {
+        const seq = index + 1
+        await seedRecord(root, `hint-${String(index)}`, {
+          ...rowsFor(seq, `hint-${String(index)}`),
+          title: titleRow(seq, `title-${String(index)}`),
+          sessionListMetadata: listMetadataRow(seq),
+        })
+      }
+      const complete = {
+        ...rowsFor(70, 'hint-69'),
+        title: titleRow(70, 'title-69'),
+        sessionListMetadata: listMetadataRow(70),
+      }
+      const { cache } = await budgetHarness(root, rowBytes(complete) + 16, { batchSize: 4, startDelayMs: 0 })
+      await vi.waitFor(async () => {
+        expect(await storedRows(root, brandString<SessionId>('hint-0'))).toEqual({
+          title: titleRow(1, 'title-0'),
+          sessionListMetadata: listMetadataRow(1),
+        })
+        expect(await storedRows(root, brandString<SessionId>('hint-68'))).toEqual({
+          title: titleRow(69, 'title-68'),
+          sessionListMetadata: listMetadataRow(69),
+        })
+      }, { timeout: 5_000 })
+      expect(await storedRows(root, brandString<SessionId>('hint-69'))).toEqual(complete)
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('hint-0')))?.values.title).toBe('title-0')
+    })
+
+    it('prunes records that share a watermark by key order', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      const newest = rowsFor(9, 'newest')
+      await seedRecord(root, 'newest', newest)
+      // Two records at the same watermark: the sort's key tie-break decides.
+      await seedRecord(root, 'tie-a', rowsFor(5, 'tie-a'))
+      await seedRecord(root, 'tie-b', rowsFor(5, 'tie-b'))
+      const { info } = await budgetHarness(root, rowBytes(newest) + 16, passTiming)
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(expect.stringContaining('pruned 2 records'))
+      }, { timeout: 5_000 })
+      expect(await storedRecord(root, brandString<SessionId>('tie-a'))).toBeUndefined()
+      expect(await storedRecord(root, brandString<SessionId>('tie-b'))).toBeUndefined()
+      expect(await storedRows(root, brandString<SessionId>('newest'))).toEqual(newest)
+    })
+
+    it('stays silent when a running pass has nothing to retain or prune', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      const { info, warn } = await budgetHarness(root, 1024, passTiming)
+      // Give the scheduled pass its turn: an empty inventory reports nothing.
+      await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+      expect(info).not.toHaveBeenCalled()
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    it('serves a listing read while the pass runs', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      for (let index = 0; index < 70; index += 1) {
+        await seedRecord(root, `live-${String(index)}`, rowsFor(index + 1, `live-${String(index)}`))
+      }
+      const newest = rowsFor(70, 'live-69')
+      const { cache, info } = await budgetHarness(root, rowBytes(newest) + 16, passTiming)
+      // Let the pass start, then serve a listing row synchronously while it streams.
+      await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+      const started = Date.now()
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('live-69')))?.values['cache-test/marks'])
+        .toEqual({ marks: ['live-69'] })
+      expect(Date.now() - started).toBeLessThan(1_000)
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(expect.stringContaining('retained 1 records'))
+      }, { timeout: 5_000 })
+      // The pass and the listing face agree afterwards.
+      expect(cache.cachedSnapshot(headerOf(brandString<SessionId>('live-69')))?.values['cache-test/marks'])
+        .toEqual({ marks: ['live-69'] })
+    })
+
+    it('never replaces a checkpoint written while the pass runs', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+      roots.push(root)
+      const target = brandString<SessionId>('live-target')
+      await seedRecord(root, 'live-target', rowsFor(1, 'seeded'))
+      for (let index = 0; index < 70; index += 1) {
+        await seedRecord(root, `other-${String(index)}`, rowsFor(index + 10, `other-${String(index)}`))
+      }
+      const newest = rowsFor(80, 'other-69')
+      const { cache, ctx, info } = await budgetHarness(root, rowBytes(newest) + 16, passTiming)
+      // Write a live checkpoint while the pass is scanning: the fresh cut must
+      // survive even though the pass ranked the older record for pruning.
+      await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+      const session = ctx.sessions.create(target)
+      mark(session, ['live-mark'])
+      await cache.write(session)
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(expect.stringContaining('pruned'))
+      }, { timeout: 5_000 })
+      const rows = await storedRows(root, target)
+      expect(rows?.['cache-test/marks']?.val).toEqual({ marks: ['live-mark'] })
+      expect(rows?.['contextTimeline']).toBeUndefined()
+    })
   })
 })
 

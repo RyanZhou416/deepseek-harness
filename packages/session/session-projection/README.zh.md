@@ -107,6 +107,8 @@ Session 摘要包含每个已注册客户端视图，但排除 `SessionProjectio
 
 标记决定客户端视图类型，`wire.summary` 决定运行时键集合，省略即 `true`。map 条目带标记的 key 应声明 `wire.summary: false` 以保持一致；该字段就是普通布尔值，而不是类型层的互锁。可空条目把 `null` 放在包装之外（`SessionProjectionSummaryExcluded<TodoItem[]> | null`），以便首次写入前的值仍可表达。另外，`wire.live: false` 会把单元移出 `liveKeys()`，即 Session Controller 变更流（control stream 与 follow `projectionChanges`）发布的集合；opening、显式读取与注册表变更回调仍携带它。只有当每个消费方都能从其已 follow 的 Session event 推导实时变化时才声明。当前被标记的 key 是 `turnOutline`、`sessionStats`、`todos`、`imageLimits`、`contextPressure` 和 `contextBreakdown`：outline 随整份日志增长，列表行不渲染统计、todo 清单或上下文用量，而图片上限是每个 Session 共享的同一个宿主级启动常量。
 
+会持续增长的客户端值还可以声明有界的推送形式：`wire.hintView(value)` 返回同一 wire 类型中「推送应携带」的部分，`hintValue(key, value)` 与 `hintValues(block)` 负责应用它。Session Controller 只在 Session 列表 hints、control baseline 与 follow opening block 三处调用，因此数万行的目录不再随每一次推送发送；`snapshot`、checkpoint、`restore`、变更回调、live control 与 projection 更新帧以及显式 `session.projections` 读取仍保持完整值。该上界属于单元自身的 wire 契约，而不是部署配置：需要完整值的消费方显式读取，无法窄化的值不声明 `hintView`。
+
 摘要服务于 Session 列表行，列表无需打开 Session。`@` 引用同样以列表方式枚举 Session，但只通过带 key 的 `snapshot(session, keys)` 与 `cachedSnapshot(header, keys)` 读取其 `title` 和 `subagent` 标签 key。`snapshot(session, keys)` 只计算它返回的单元；不传 key 子集时计算每个客户端可见单元、不计算 Host 专用单元，因此打开的 Session 仍会收到全部投影值，`viewCheckpoint` 不传 key 子集时同样返回每个 wire key。
 
 -----
@@ -167,7 +169,7 @@ Session 摘要包含每个已注册客户端视图，但排除 `SessionProjectio
 
 这些限制说明投影注册表在大规模下何时需要特别处理。它们是当前包约束，不是任务积压。
 
-- **只有带 key 子集的读取才省略 key；尾页仍携带每个客户端可见 key，也不存在惰性逐值请求**——摘要只省略那些 `SessionProjectionMap` 条目带有 `SessionProjectionSummaryExcluded<T>` 且注册声明了 `wire.summary: false` 的 key。该 opt-out 按 key 生效，不按值生效：没有任何读取会延后加载单个大值。
+- **只有带 key 子集的读取才省略 key；尾页仍携带每个客户端可见 key，也不存在惰性逐值请求**——摘要只省略那些 `SessionProjectionMap` 条目带有 `SessionProjectionSummaryExcluded<T>` 且注册声明了 `wire.summary: false` 的 key。该 opt-out 按 key 生效，不按值生效：没有任何读取会延后加载单个大值；有界的 `wire.hintView` 只窄化推送值，显式读取始终返回完整值。
 - **单元表是进程级的，因此 key 是否存在不能当作逐会话的能力信号**——任何 agent preset 注册的 key 都会出现在每个会话的快照里；客户端必须读值，不能把 key 缺席当作功能缺席。
 - **主动驱动逐事件触达每个单元**——按构造开销很低（全量值规则与 state/view 引用闸门），但若出现热点路径，可加按单元的事件类型预过滤。
 - **已释放单元的检查点行停止推进**——最后一个注册方释放 key 后，`checkpoint(session)` 保留每个 Session 的最后一个 cell，直到该 key 再次注册。在正常关停之外，这期间追加的事件会让存储的行落后于日志，冷列表读到的是这个较旧的值。

@@ -543,7 +543,8 @@ describe('SubagentHeaderLineage', () => {
     vi.useFakeTimers()
     expect(screen.getByText('index down')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /重试/ }))
-    expect(failed.prepareCatalog).toHaveBeenCalledExactlyOnceWith(PARENT)
+    // The shown section reads its level once, and the retry reads it again.
+    expect(failed.prepareCatalog.mock.calls).toEqual([[PARENT], [PARENT]])
     expect(failed.refreshProjection).not.toHaveBeenCalled()
   })
 
@@ -645,7 +646,8 @@ describe('SubagentHeaderLineage', () => {
 
     const switcher = screen.getByRole('button', { name: '切换子智能体：worker' })
     hoverCatalog(switcher)
-    expect(input.prepareCatalog).not.toHaveBeenCalled()
+    // Only the shown section's own level was read; hovering reads nothing.
+    expect(input.prepareCatalog).toHaveBeenCalledExactlyOnceWith(CHILD)
     expect(screen.getByText('尚未加载子智能体')).toBeTruthy()
     expect(screen.queryByText('正在加载子智能体…')).toBeNull()
     expect(screen.queryAllByRole('treeitem')).toEqual([])
@@ -710,7 +712,8 @@ describe('SubagentHeaderLineage', () => {
     const switcher = screen.getByRole('button', { name: '切换子智能体：正在扫描项目文件' })
     expect(input.refreshProjection).not.toHaveBeenCalled()
     hoverCatalog(switcher)
-    expect(input.prepareCatalog).not.toHaveBeenCalled()
+    // Only the shown section's own level was read; hovering reads nothing.
+    expect(input.prepareCatalog).toHaveBeenCalledExactlyOnceWith(CHILD)
     expect(screen.getByText('尚未加载子智能体')).toBeTruthy()
     expect(screen.queryByText('正在加载子智能体…')).toBeNull()
     expect(screen.queryAllByRole('treeitem')).toEqual([])
@@ -731,7 +734,8 @@ describe('SubagentHeaderLineage', () => {
     hoverCatalog(screen.getByRole('button', { name: '切换子智能体：worker' }))
     expect(screen.getByText(state === 'idle' ? zh['load.idle'] : zh['loading.label'])).toBeTruthy()
     expect(screen.queryByText(state === 'idle' ? zh['loading.label'] : zh['load.idle'])).toBeNull()
-    expect(input.prepareCatalog).not.toHaveBeenCalled()
+    // The section's own level is read on show; hovering the switcher adds no read.
+    expect(input.prepareCatalog).toHaveBeenCalledExactlyOnceWith(CHILD)
   })
 
   it('keeps a nested title switcher scoped to its direct-parent catalog', () => {
@@ -1186,7 +1190,7 @@ describe('SubagentsSection', () => {
   })
 
 
-  it('reads nothing when the section shows and prepares only the branch the reader expands', () => {
+  it('reads the section level once when it shows and prepares only the branch the reader expands', () => {
     const input = props(catalog(), {
       [CHILD]: catalog({ entries: [{ id: GRANDCHILD, mode: 'continuable', label: 'indexer', activity: 'inactive' }] }),
     })
@@ -1201,12 +1205,13 @@ describe('SubagentsSection', () => {
     state = { ...state, projectionsBySession: { ...state.projectionsBySession, [PARENT]: addedParent } }
     view.rerender(<HeaderCatalog {...current} />)
     expect(screen.getByRole('treeitem', { name: /critic/ })).toBeTruthy()
-    expect(input.prepareCatalog).not.toHaveBeenCalled()
+    // Showing the section reads its level once; a pushed update adds no read.
+    expect(input.prepareCatalog.mock.calls).toEqual([[PARENT]])
 
     fireEvent.click(screen.getByRole('button', { name: '展开 worker 的下级子智能体' }))
-    expect(input.prepareCatalog.mock.calls).toEqual([[CHILD]])
+    expect(input.prepareCatalog.mock.calls).toEqual([[PARENT], [CHILD]])
     fireEvent.click(screen.getByRole('button', { name: '收起 worker 的下级子智能体' }))
-    expect(input.prepareCatalog).toHaveBeenCalledOnce()
+    expect(input.prepareCatalog).toHaveBeenCalledTimes(2)
     expect(input.refreshProjection).not.toHaveBeenCalled()
   })
 
@@ -1296,13 +1301,15 @@ describe('SubagentsSection', () => {
     }
     render(<HeaderCatalog {...input} />)
     const switcher = screen.getByRole('button', { name: '切换子智能体：worker' })
+    // Showing the section reads its own level (the child); hovering reads nothing.
+    expect(input.prepareCatalog.mock.calls).toEqual([[CHILD]])
     hoverCatalog(switcher)
-    expect(input.prepareCatalog).not.toHaveBeenCalled()
+    expect(input.prepareCatalog.mock.calls).toEqual([[CHILD]])
     fireEvent.click(switcher)
-    expect(input.prepareCatalog.mock.calls).toEqual([[PARENT]])
+    expect(input.prepareCatalog.mock.calls).toEqual([[CHILD], [PARENT]])
     fireEvent.keyDown(document, { key: 'Escape' })
     fireEvent.keyDown(switcher, { key: 'ArrowDown' })
-    expect(input.prepareCatalog.mock.calls).toEqual([[PARENT], [PARENT]])
+    expect(input.prepareCatalog.mock.calls).toEqual([[CHILD], [PARENT], [PARENT]])
   })
 
   it('reports an unexpected catalog preparation failure', async () => {

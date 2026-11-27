@@ -10,17 +10,21 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
+import type { KvRecordReader, KvUnit } from '@deepseek-ai/dsh-storage'
 import { DomainError } from './error.ts'
 import { descriptorOf } from './spec.ts'
-import type { DomainSpec } from './spec.ts'
+import type { DomainOpenOptions, DomainSpec } from './spec.ts'
 import { DomainImpl } from './domain.ts'
 import type { Domain } from './domain.ts'
+import { parseRecord } from './record.ts'
+import { EagerTableRecords, ResidentTableRecords } from './records.ts'
+import type { TableRecords } from './records.ts'
 
 export { DomainError } from './error.ts'
 export type { DomainErrorCode, DomainErrorOptions, InvalidRecordDetail } from './error.ts'
 export { defineDomain, domainTable, descriptorOf } from './spec.ts'
 export type {
-  DomainSpec, DomainGlobalSpec, DomainTableSpec,
+  DomainSpec, DomainGlobalSpec, DomainTableSpec, DomainOpenOptions,
   TableKeyOf, TableValueOf, GlobalValueOf,
 } from './spec.ts'
 export type { DomainChanged } from './events.ts'
@@ -86,26 +90,32 @@ export class DomainFacility {
    * name that is already open (`already-open`); resolve the backend route
    * (`backend-not-found` passes through from the hub); require its `kv` facet
    * (`facet-unsupported`); open the unit projected from the spec (backend
-   * `version-mismatch`/`malformed-medium` pass through); load and validate
-   * every stored record against the spec's zod schemas (`invalid-record`
-   * with the offending table and key — unless the spec declares
-   * `invalidRecords: 'backup-and-skip'` and the unit can move documents aside, in
-   * which case the failing record is backed up, logged, and skipped);
-   * construct the domain.
+   * `version-mismatch`/`malformed-medium` pass through); load the stored
+   * records; construct the domain.
+   *
+   * Record loading is eager unless {@link DomainOpenOptions.lazyReads} asks
+   * otherwise: the eager path validates every stored record against the
+   * spec's zod schemas (`invalid-record` with the offending table and key —
+   * unless the spec declares `invalidRecords: 'backup-and-skip'` and the unit
+   * can move documents aside, in which case the failing record is backed up,
+   * logged, and skipped). The lazy path reads only the key index at open and
+   * validates each record when a table read loads it, with the same policy.
    *
    * Lifecycle: the CALLER owns the returned handle and closes it via
    * `Domain.close()` (typically as its own `ctx.effect` disposer) — the
    * facility does not tie the domain to any consumer fiber. Domains still
    * open when the facility unmounts are closed by the plugin disposer.
    * @param spec - The domain declaration, typically from `defineDomain`.
+   * @param options - Record-loading options; omitted means eager materialization.
    * @returns the opened domain handle, typed by the spec.
    */
-  async open<S extends DomainSpec>(spec: S): Promise<Domain<S>> {
+  async open<S extends DomainSpec>(spec: S, options?: DomainOpenOptions): Promise<Domain<S>> {
     if (this.reserved.has(spec.name)) {
       throw new DomainError('already-open', `domain '${spec.name}' is already open`)
     }
     this.reserved.add(spec.name)
     try {
+      const maxResidentBytes = resolveOpenOptions(spec, options)
       const backendName = this.config.routes?.[spec.name] ?? this.config.backend
       const backend = this.ctx.storage.backend.get(backendName)
       if (!backend.kv) {
@@ -116,43 +126,13 @@ export class DomainFacility {
       }
       const unit = await backend.kv.open(descriptorOf(spec))
       try {
-        const snapshot = await unit.loadAll()
-        const tables = new Map<string, Map<string, unknown>>()
-        for (const [table, tableSpec] of Object.entries(spec.tables)) {
-          const records = new Map<string, unknown>()
-          for (const [key, raw] of Object.entries(snapshot.tables[table] ?? {})) {
-            let parsed: unknown
-            try {
-              parsed = parseRecord(spec.name, table, key, () => tableSpec.valueSchema.parse(raw))
-            } catch (error) {
-              // Backup-and-skip policy (disposable derived data): move the record's
-              // document aside, log the concrete failure, and open without the
-              // record. Backends that cannot move a document keep the loud path.
-              if (spec.invalidRecords !== 'backup-and-skip' || unit.backupRecord === undefined) throw error
-              const moved = await unit.backupRecord(table, key)
-              // parseRecord always wraps the zod failure as the cause.
-              this.ctx.logger.error(
-                `domain '${spec.name}': stored record '${key}' in table '${table}' failed schema validation; `
-                + `moved to '${moved}' and treated as absent. Cause: ${String((error as DomainError).cause)}`,
-              )
-              continue
-            }
-            records.set(key, parsed)
-          }
-          tables.set(table, records)
-        }
-        // A null stored global means "never written": serve `initial` without
-        // materializing it — the first `set` writes.
-        const globalSpec = spec.global
-        const globalValue = globalSpec === undefined
-          ? undefined
-          : snapshot.global === null
-            ? globalSpec.initial
-            : parseRecord(spec.name, '', '', () => globalSpec.schema.parse(snapshot.global))
+        const loaded = maxResidentBytes !== undefined && unit.recordReader !== undefined
+          ? await loadResident(spec, unit, unit.recordReader, maxResidentBytes, this.ctx.logger)
+          : await this.loadEager(spec, unit, maxResidentBytes !== undefined)
         // The onClosed hook runs strictly after teardown completes: writes
         // landing during the drain still emit domain/changed, and the name
         // frees up for reopening only once the domain is fully closed.
-        const domain: DomainImpl = new DomainImpl(this.ctx, spec, unit, tables, globalValue, () => {
+        const domain: DomainImpl = new DomainImpl(this.ctx, spec, unit, loaded.tables, loaded.globalValue, () => {
           this.domains.delete(spec.name)
           this.reserved.delete(spec.name)
         })
@@ -171,6 +151,66 @@ export class DomainFacility {
       this.reserved.delete(spec.name)
       throw error
     }
+  }
+
+  /**
+   * Load every stored record and validate it against the spec: the default
+   * open-time materialization.
+   * @param spec - The domain declaration.
+   * @param unit - The opened unit.
+   * @param lazyRequested - Whether the caller asked for lazy reads and this
+   * unit cannot serve them (warned here).
+   * @returns the stores and validated global slot.
+   */
+  private async loadEager(spec: DomainSpec, unit: KvUnit, lazyRequested: boolean): Promise<LoadedTables> {
+    if (lazyRequested) {
+      this.ctx.logger.warn(
+        `domain '${spec.name}': the routed backend cannot read records on demand; opening eagerly`,
+      )
+    }
+    const snapshot = await unit.loadAll()
+    const tables = new Map<string, TableRecords>()
+    for (const [table, tableSpec] of Object.entries(spec.tables)) {
+      const records = new Map<string, unknown>()
+      for (const [key, raw] of Object.entries(snapshot.tables[table] ?? {})) {
+        let parsed: unknown
+        try {
+          parsed = parseRecord(spec.name, table, key, () => tableSpec.valueSchema.parse(raw))
+        } catch (error) {
+          // Backup-and-skip policy (disposable derived data): move the record's
+          // document aside, log the concrete failure, and open without the
+          // record. Backends that cannot move a document keep the loud path.
+          if (spec.invalidRecords !== 'backup-and-skip' || unit.backupRecord === undefined) throw error
+          const moved = await unit.backupRecord(table, key)
+          // parseRecord always wraps the zod failure as the cause.
+          this.ctx.logger.error(
+            `domain '${spec.name}': stored record '${key}' in table '${table}' failed schema validation; `
+            + `moved to '${moved}' and treated as absent. Cause: ${String((error as DomainError).cause)}`,
+          )
+          continue
+        }
+        records.set(key, parsed)
+      }
+      tables.set(table, new EagerTableRecords(records))
+    }
+    return { tables, globalValue: this.globalValueOf(spec, snapshot.global) }
+  }
+
+  /**
+   * Validate the stored global slot, or serve the spec's `initial` when the
+   * medium holds none.
+   * @param spec - The domain declaration.
+   * @param stored - The stored global value (`null` = never written).
+   * @returns the validated global, or `undefined` when the spec declares none.
+   */
+  private globalValueOf(spec: DomainSpec, stored: unknown): unknown {
+    // A null stored global means "never written": serve `initial` without
+    // materializing it — the first `set` writes.
+    const globalSpec = spec.global
+    if (globalSpec === undefined) return undefined
+    return stored === null
+      ? globalSpec.initial
+      : parseRecord(spec.name, '', '', () => globalSpec.schema.parse(stored))
   }
 
   /**
@@ -194,18 +234,82 @@ export class DomainFacility {
   }
 }
 
-/** Run one zod parse, translating failure to `invalid-record` with its location. */
-function parseRecord<T>(domain: string, table: string, key: string, parse: () => T): T {
-  try {
-    return parse()
-  } catch (error) {
-    const slot = table === '' ? 'global' : `record '${key}' in table '${table}'`
-    throw new DomainError(
-      'invalid-record',
-      `domain '${domain}': stored ${slot} does not match its schema`,
-      { detail: { table, key }, cause: error },
-    )
+/**
+ * The stores and validated global slot one open produced.
+ */
+interface LoadedTables {
+  /** One record store per declared table, keyed by table name. */
+  readonly tables: Map<string, TableRecords>
+  /** Validated stored global, or the spec's `initial`; `undefined` when not declared. */
+  readonly globalValue: unknown
+}
+
+/**
+ * Load a per-record domain for on-demand reads: the unit's key index plus a
+ * bounded resident store per declared table. Only the index is read here;
+ * every record is validated when a read loads it.
+ * @param spec - The domain declaration.
+ * @param unit - The opened unit; owns the document salvage used by the policy.
+ * @param reader - The unit's on-demand reader.
+ * @param maxResidentBytes - Serialized-byte ceiling of each table's resident set.
+ * @param logger - Domain logger for salvage diagnostics.
+ * @returns the stores and validated global slot.
+ */
+async function loadResident(
+  spec: DomainSpec,
+  unit: KvUnit,
+  reader: KvRecordReader,
+  maxResidentBytes: number,
+  logger: Context['logger'],
+): Promise<LoadedTables> {
+  const index = await reader.listKeys()
+  const backup = unit.backupRecord?.bind(unit)
+  const tables = new Map<string, TableRecords>()
+  for (const [table, tableSpec] of Object.entries(spec.tables)) {
+    tables.set(table, new ResidentTableRecords({
+      domain: spec.name,
+      table,
+      schema: tableSpec.valueSchema,
+      backupAndSkip: spec.invalidRecords === 'backup-and-skip',
+      ...backup === undefined ? {} : { backupRecord: backup },
+      reader,
+      maxResidentBytes,
+      logger,
+    }, index.tables[table] ?? []))
   }
+  // A null stored global means "never written": serve `initial`.
+  const globalSpec = spec.global
+  const globalValue = globalSpec === undefined
+    ? undefined
+    : index.global === null
+      ? globalSpec.initial
+      : parseRecord(spec.name, '', '', () => globalSpec.schema.parse(index.global))
+  return { tables, globalValue }
+}
+
+/**
+ * Validate the open options against the spec and resolve the record-loading
+ * mode: `undefined` means eager materialization.
+ * @param spec - The domain declaration.
+ * @param options - The caller's open options.
+ * @returns the resident-byte ceiling, or `undefined` for the eager path.
+ */
+function resolveOpenOptions(spec: DomainSpec, options: DomainOpenOptions | undefined): number | undefined {
+  const requested = options?.lazyReads === true
+  if (!requested) {
+    if (options?.maxResidentBytes !== undefined) {
+      throw new Error(`domain '${spec.name}': maxResidentBytes is only meaningful with lazyReads`)
+    }
+    return undefined
+  }
+  if (spec.layout !== 'per-record') {
+    throw new Error(`domain '${spec.name}': lazyReads requires the 'per-record' layout`)
+  }
+  const bytes = options.maxResidentBytes
+  if (bytes === undefined || !Number.isInteger(bytes) || bytes <= 0) {
+    throw new Error(`domain '${spec.name}': lazyReads requires a positive integer maxResidentBytes`)
+  }
+  return bytes
 }
 
 /**

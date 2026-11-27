@@ -31,6 +31,30 @@ export interface DomainTableSpec<K extends string = string, V = unknown> {
   readonly __key?: K
 }
 
+/**
+ * How one `open` call loads a domain, for specs whose records are large,
+ * sparse, or individually disposable. The default is eager materialization:
+ * one `loadAll` plus per-record schema validation at open, which is what
+ * authoritative data wants. `lazyReads` keeps the open to a key index and
+ * reads a record (with the same schema validation) only when a table read
+ * needs it, bounding the resident set by `maxResidentBytes`.
+ *
+ * Lazy reads require the `per-record` layout and a routed unit that exposes a
+ * `recordReader`; a unit without one falls back to eager materialization with
+ * a warning, so a deployment that routes the domain elsewhere keeps working.
+ */
+export interface DomainOpenOptions {
+  /** Read records on demand from a bounded resident set instead of loading every record at open. */
+  readonly lazyReads?: boolean
+  /**
+   * Serialized-byte ceiling of the resident record set. Required with
+   * `lazyReads`; a single record larger than the ceiling is served and may
+   * stay resident alone. A freshly read or written record displaces the least
+   * recently used ones until the set fits.
+   */
+  readonly maxResidentBytes?: number
+}
+
 /** Static declaration of one domain: identity, version, and record layout. */
 export interface DomainSpec {
   /** Domain name; must match `UNIT_NAME_RE` (doubles as the backend unit name). */

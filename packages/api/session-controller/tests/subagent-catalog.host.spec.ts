@@ -6,6 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionSeq, type SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import { SUBAGENT_CATALOG_HINT_LIMIT } from '@deepseek-ai/dsh-subagent/src/catalog.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createSessionTestController,
@@ -67,6 +68,94 @@ async function bench() {
 }
 
 describe('SessionController subagent catalog', () => {
+  it('pushes the newest catalog entries while an explicit read keeps the complete value', async () => {
+    const { ctx, controller } = await bench()
+    const parent = ctx.sessions.create(PARENT, { meta: { createdAt: header.createdAt, cwd: '/workspace' } })
+    const total = SUBAGENT_CATALOG_HINT_LIMIT + 8
+    for (let index = 0; index < total; index++) {
+      parent.append('subagent/catalog', {
+        version: 3,
+        childId: brandString<SessionId>(`child-${String(index)}`),
+        childCreatedAt: index + 1,
+        mode: 'continuable',
+        label: `worker ${String(index)}`,
+        name: `worker-${String(index)}`,
+      })
+    }
+    const newest = Array.from({ length: SUBAGENT_CATALOG_HINT_LIMIT }, (_, offset) => ({
+      id: `child-${String(total - SUBAGENT_CATALOG_HINT_LIMIT + offset)}`,
+      createdAt: total - SUBAGENT_CATALOG_HINT_LIMIT + offset + 1,
+      mode: 'continuable' as const,
+      label: `worker ${String(total - SUBAGENT_CATALOG_HINT_LIMIT + offset)}`,
+      name: `worker-${String(total - SUBAGENT_CATALOG_HINT_LIMIT + offset)}`,
+    }))
+
+    // A pushed Session summary carries the bounded catalog.
+    const listed = await controller.list({}, new AbortController().signal)
+    expect(listed.items.find(item => item.sessionId === PARENT)?.projections?.values.subagentCatalog).toEqual(newest)
+
+    // The control baseline and each live update carry the same bounded value.
+    const signal = new AbortController()
+    const stream = controller.control(signal.signal)[Symbol.asyncIterator]()
+    try {
+      const baseline = await stream.next()
+      expect(baseline.done).toBe(false)
+      if (baseline.done || baseline.value.type !== 'baseline') throw new Error('control did not open with a baseline')
+      expect(baseline.value.value.projections[PARENT]?.values.subagentCatalog).toEqual(newest)
+
+      parent.append('subagent/catalog', {
+        version: 3,
+        childId: brandString<SessionId>('child-newest'),
+        childCreatedAt: total + 1,
+        mode: 'continuable',
+        label: 'newest worker',
+        name: 'newest-worker',
+      })
+      let frame = await stream.next()
+      let catalog = frame.done || frame.value.type !== 'projection'
+        ? undefined : frame.value.changes.find(change => change.key === 'subagentCatalog')?.val
+      while (!frame.done && !(Array.isArray(catalog) && catalog.length === total + 1)) {
+        frame = await stream.next()
+        catalog = frame.done || frame.value.type !== 'projection'
+          ? undefined : frame.value.changes.find(change => change.key === 'subagentCatalog')?.val
+      }
+      // A live update keeps the whole value, so a Client that read the complete
+      // catalog never has it narrowed by a later change.
+      expect(Array.isArray(catalog)).toBe(true)
+      expect((catalog as { readonly id: string }[]).at(-1)?.id).toBe('child-newest')
+    } finally {
+      signal.abort()
+      await stream.return?.()
+    }
+
+    // The follow opening block is bounded too, and an explicit read is complete.
+    const openingAbort = new AbortController()
+    const follow = controller.follow({
+      address: { kind: 'session', sessionId: PARENT },
+      projectionChanges: true,
+    }, openingAbort.signal)[Symbol.asyncIterator]()
+    try {
+      const opening = await follow.next()
+      if (opening.done || opening.value.type !== 'snapshot') throw new Error('follow did not open with a snapshot')
+      expect(opening.value.projections?.values.subagentCatalog).toEqual([
+        ...newest.slice(1),
+        {
+          id: brandString<SessionId>('child-newest'),
+          createdAt: total + 1,
+          mode: 'continuable',
+          label: 'newest worker',
+          name: 'newest-worker',
+        },
+      ])
+    } finally {
+      openingAbort.abort()
+      await follow.return?.()
+    }
+    const complete = await controller.projections({ sessionId: PARENT }, new AbortController().signal)
+    expect(complete).toMatchObject({ kind: 'sequenced' })
+    expect((complete as { values: { subagentCatalog?: readonly unknown[] } }).values.subagentCatalog).toHaveLength(total + 1)
+  })
+
   it('pushes complete catalog values through the shared control stream', async () => {
     const { ctx, controller } = await bench()
     const signal = new AbortController()

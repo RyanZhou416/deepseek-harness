@@ -16,7 +16,7 @@
  */
 
 import { StorageError } from '@deepseek-ai/dsh-storage'
-import type { KvFacet, KvUnit, KvUnitDescriptor, StorageBackend } from '@deepseek-ai/dsh-storage'
+import type { KvFacet, KvRecordReader, KvUnit, KvUnitDescriptor, StorageBackend } from '@deepseek-ai/dsh-storage'
 
 /** One unit's medium: tables of records plus the global slot (`null` = never written). */
 export interface MemoryMedium {
@@ -44,6 +44,18 @@ export class MemoryMediaPool {
    */
   failNextWrites = 0
 
+  /** Whole-unit loads requested so far: a lazy open must leave this at 0. */
+  loads = 0
+
+  /** Single-record reads through the on-demand reader. */
+  recordReads = 0
+
+  /** Asynchronous single-record reads through the on-demand reader. */
+  recordAsyncReads = 0
+
+  /** Records the unit moved aside through {@link KvUnit.backupRecord}. */
+  readonly backups: string[] = []
+
   /** Consume one injected failure, throwing in a rejected write's place. */
   consumeInjectedFailure(): void {
     if (this.failNextWrites > 0) {
@@ -57,12 +69,47 @@ export class MemoryMediaPool {
 class MemoryKvUnit implements KvUnit {
   private closed = false
 
+  /** On-demand reads over the same medium, for the domain layer's lazy table mode. */
+  readonly recordReader: KvRecordReader
+  /** Present only when the backend declares document salvage. */
+  readonly backupRecord?: (table: string, key: string) => Promise<string>
+
   constructor(
     private readonly pool: MemoryMediaPool,
     private readonly medium: MemoryMedium,
     private readonly descriptor: KvUnitDescriptor,
     private readonly onClose: () => void,
-  ) {}
+    backup: boolean,
+  ) {
+    this.recordReader = {
+      listKeys: async () => {
+        this.assertOpen()
+        const tables: Record<string, string[]> = {}
+        for (const table of descriptor.tables) tables[table] = [...this.medium.tables.get(table)?.keys() ?? []]
+        return { tables, global: this.medium.global }
+      },
+      read: (table: string, key: string) => {
+        this.assertOpen()
+        this.pool.recordReads += 1
+        return this.medium.tables.get(table)?.get(key)
+      },
+      readAsync: async (table: string, key: string) => {
+        this.assertOpen()
+        this.pool.recordAsyncReads += 1
+        return this.medium.tables.get(table)?.get(key)
+      },
+    }
+    if (backup) {
+      this.backupRecord = async (table, key) => {
+        this.assertOpen()
+        const records = this.medium.tables.get(table)
+        if (records === undefined || !records.delete(key)) throw new Error(`memory unit: no record '${key}' to back up`)
+        const moved = `memory:${descriptor.name}/${table}/${key}.bak`
+        this.pool.backups.push(moved)
+        return moved
+      }
+    }
+  }
 
   private assertOpen(): void {
     if (this.closed) {
@@ -72,6 +119,7 @@ class MemoryKvUnit implements KvUnit {
 
   async loadAll(): Promise<{ tables: Record<string, Record<string, unknown>>; global: unknown }> {
     this.assertOpen()
+    this.pool.loads += 1
     const tables: Record<string, Record<string, unknown>> = {}
     for (const table of this.descriptor.tables) {
       tables[table] = Object.fromEntries(this.medium.tables.get(table) ?? [])
@@ -132,8 +180,14 @@ export class MemoryStorageBackend implements StorageBackend {
 
   /**
    * @param pool - Media shared across instances; a fresh private pool when omitted.
+   * @param options - `backup` declares document salvage (absent by default, so
+   * the `invalidRecords: 'backup-and-skip'` policy keeps its rejecting
+   * fallback). On-demand reads are always available.
    */
-  constructor(readonly pool: MemoryMediaPool = new MemoryMediaPool()) {
+  constructor(
+    readonly pool: MemoryMediaPool = new MemoryMediaPool(),
+    readonly options: { backup?: boolean } = {},
+  ) {
     this.kv = {
       open: async (descriptor: KvUnitDescriptor): Promise<KvUnit> => {
         if (this.closed) {
@@ -159,7 +213,13 @@ export class MemoryStorageBackend implements StorageBackend {
           this.pool.media.set(descriptor.name, medium)
         }
         this.openUnits.add(descriptor.name)
-        return new MemoryKvUnit(this.pool, medium, descriptor, () => this.openUnits.delete(descriptor.name))
+        return new MemoryKvUnit(
+          this.pool,
+          medium,
+          descriptor,
+          () => this.openUnits.delete(descriptor.name),
+          this.options.backup === true,
+        )
       },
     }
   }

@@ -13,6 +13,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { StorageError, type KvUnit } from '@deepseek-ai/dsh-storage'
 import { DomainError } from './error.ts'
+import type { TableRecords } from './records.ts'
 import type { DomainSpec, DomainGlobalSpec, TableKeyOf, TableValueOf } from './spec.ts'
 import type { DomainChanged } from './events.ts'
 
@@ -105,6 +106,18 @@ export interface KvTable<K extends string, V> {
    * @returns the stored next record.
    */
   update(key: K, fn: (current: V) => V): Promise<V>
+
+  /**
+   * Stream every stored record once without retaining it: the maintenance read
+   * a table owner uses to shrink or migrate its corpus. Records are read from
+   * the medium and validated at that boundary (the spec's `invalidRecords`
+   * policy applies); the resident set is neither used nor changed, so a
+   * streaming pass cannot evict what request handling just loaded. Present
+   * only on tables opened with `lazyReads`; an eager table omits it because
+   * its records are already in memory.
+   * @returns an async iterator over the pairs in key order.
+   */
+  scan?(): AsyncIterableIterator<readonly [K, V]>
 }
 
 /** Global handle of a spec: typed when declared, `never` (inaccessible) when not. */
@@ -177,9 +190,10 @@ export class DomainImpl {
    * @param ctx - Context that carries `domain/changed` emissions.
    * @param spec - The domain declaration.
    * @param unit - The opened backend unit; this instance owns its lifecycle.
-   * @param records - Validated records from the unit's `loadAll`, one entry
-   * per declared table (empty maps included) — the facility builds it from
-   * the spec, so the entry set IS the table set.
+   * @param tables - One record store per declared table (empty stores
+   * included) — the facility builds it from the spec, so the entry set IS the
+   * table set. An eager store holds the records the open validated; a resident
+   * store reads them from the medium on demand.
    * @param globalValue - Validated stored global, or the spec's `initial`
    * when the medium held none; `undefined` when the spec declares no global.
    * @param onClosed - Facility hook run once after teardown completes; frees
@@ -189,7 +203,7 @@ export class DomainImpl {
     private readonly ctx: Context,
     spec: DomainSpec,
     private readonly unit: KvUnit,
-    records: Map<string, Map<string, unknown>>,
+    tables: ReadonlyMap<string, TableRecords>,
     globalValue: unknown,
     private readonly onClosed: () => void,
   ) {
@@ -201,8 +215,8 @@ export class DomainImpl {
       assertReadable: () => { this.assertReadable() },
       emitChanged: (change) => { this.emitChanged(change) },
     }
-    for (const [table, tableRecords] of records) {
-      this.tables.set(table, new KvTableImpl(host, table, tableRecords))
+    for (const [table, records] of tables) {
+      this.tables.set(table, new KvTableImpl(host, table, records))
     }
     if (spec.global !== undefined) {
       this.globalValue = globalValue
@@ -309,13 +323,21 @@ export class DomainImpl {
   }
 }
 
-/** Table handle bound to one in-memory record map and its domain's write chain. */
+/** Table handle bound to one record store and its domain's write chain. */
 class KvTableImpl<K extends string, V> implements KvTable<K, V> {
+  /** Present only when the store can stream the medium without retaining it. */
+  readonly scan?: () => AsyncIterableIterator<readonly [K, V]>
+
   constructor(
     private readonly host: TableHost,
     private readonly tableName: string,
-    private readonly records: Map<string, unknown>,
-  ) {}
+    private readonly records: TableRecords,
+  ) {
+    const scan = this.records.scan
+    if (scan !== undefined) {
+      this.scan = () => scan.call(this.records, () => { this.host.assertReadable() }) as AsyncIterableIterator<readonly [K, V]>
+    }
+  }
 
   get(key: K): V | undefined {
     this.host.assertReadable()
@@ -339,8 +361,12 @@ class KvTableImpl<K extends string, V> implements KvTable<K, V> {
 
   put(key: K, value: V): Promise<void> {
     return this.host.enqueue(async () => {
+      // The resident charge is taken inside the write slot and before
+      // durability, so a value the store cannot charge rejects the write with
+      // memory and medium untouched.
+      const bytes = this.records.bytesOf(value)
       await this.host.unit.putRecord(this.tableName, key, value)
-      this.records.set(key, value)
+      this.records.set(key, value, bytes)
       this.emitPut(key, value)
     })
   }
@@ -351,7 +377,7 @@ class KvTableImpl<K extends string, V> implements KvTable<K, V> {
       // earlier queued put of the same key makes this delete observe it.
       if (!this.records.has(key)) return false
       await this.host.unit.deleteRecord(this.tableName, key)
-      this.records.delete(key)
+      this.records.remove(key)
       this.emitDeleted(key)
       return true
     })
@@ -366,7 +392,7 @@ class KvTableImpl<K extends string, V> implements KvTable<K, V> {
       await this.host.unit.deleteRecords(this.tableName, present)
       // Memory reaches the committed batch state before the first listener runs,
       // so every `domain/changed` observes the same removed set as the medium.
-      for (const key of present) this.records.delete(key)
+      for (const key of present) this.records.remove(key)
       for (const key of present) this.emitDeleted(key)
       return present.length
     })
@@ -374,18 +400,27 @@ class KvTableImpl<K extends string, V> implements KvTable<K, V> {
 
   update(key: K, fn: (current: V) => V): Promise<V> {
     return this.host.enqueue(async () => {
-      if (!this.records.has(key)) {
-        throw new DomainError(
-          'missing-key',
-          `domain '${this.host.domainName}' table '${this.tableName}' has no record '${key}' to update`,
-        )
-      }
-      const next = fn(this.records.get(key) as V)
+      // A key is missing when the store never listed it, and also when the
+      // medium could not serve it on this read (a removed or schema-rejected
+      // document reads as absent).
+      if (!this.records.has(key)) throw this.missingKey(key)
+      const current = this.records.get(key)
+      if (current === undefined) throw this.missingKey(key)
+      const next = fn(current as V)
+      const bytes = this.records.bytesOf(next)
       await this.host.unit.putRecord(this.tableName, key, next)
-      this.records.set(key, next)
+      this.records.set(key, next, bytes)
       this.emitPut(key, next)
       return next
     })
+  }
+
+  /** The `missing-key` failure of one update target. */
+  private missingKey(key: K): DomainError {
+    return new DomainError(
+      'missing-key',
+      `domain '${this.host.domainName}' table '${this.tableName}' has no record '${key}' to update`,
+    )
   }
 
   private emitPut(key: K, value: V): void {

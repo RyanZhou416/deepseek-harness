@@ -27,6 +27,13 @@
 # and no list config can add them back. The dsh-context agent graph reads them
 # for unopened child Sessions through its own on-demand head request.
 #
+# `subagentCatalog` itself is bounded where it is pushed: its registration
+# declares a `wire.hintView` (newest 32 entries), so a list row, a control
+# baseline and a follow opening carry only that suffix while
+# `session.projections` keeps the complete catalog. Do not exclude it here: the
+# sidebar's running-subagent count and the Context agent graph read it from
+# list rows, and the opened Session's panel reads it on demand.
+#
 # `historyPageMaxBytes` bounds each history page (Session open, live opening,
 # and Load earlier) to about 2 MiB of serialized records, trimmed at message
 # boundaries with the newest message always kept. Unbounded first frames of

@@ -179,6 +179,29 @@ describe('DomainFacility.open', () => {
     })
   })
 
+  it('backs up and skips an invalid stored record at open when the backend can move it', async () => {
+    const pool = new MemoryMediaPool()
+    pool.versions.set('salvage', 1)
+    pool.media.set('salvage', {
+      tables: new Map([['items', new Map([['bad', { label: 'x', count: 'NaN' }]])]]),
+      global: null,
+    })
+    const salvageSpec = defineDomain({
+      name: 'salvage',
+      version: 1,
+      invalidRecords: 'backup-and-skip',
+      tables: { items: domainTable<string, Item>(itemSchema) },
+    })
+    const backend = new MemoryStorageBackend(pool, { backup: true })
+    const { ctx, facility } = await harness({ backend })
+    const error = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    const domain = await facility.open(salvageSpec)
+    // The domain opened without the record, and the document was moved aside.
+    expect([...domain.table('items').keys()]).toEqual([])
+    expect(pool.backups).toEqual(['memory:salvage/items/bad.bak'])
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("record 'bad' in table 'items'"))
+  })
+
   it('rejects a stored global that fails its schema with the global marker', async () => {
     const pool = new MemoryMediaPool()
     pool.versions.set('demo', 1)
@@ -539,5 +562,383 @@ describe('close and lifecycle', () => {
     expect(changes).toHaveLength(1)
     // The chain is unpoisoned: subsequent writes proceed normally.
     await expect(table.delete('a')).resolves.toBe(true)
+  })
+})
+
+const residentSpec = defineDomain({
+  name: 'resident',
+  version: 1,
+  layout: 'per-record',
+  global: { schema: settingsSchema, initial: { theme: 'plain' } },
+  tables: { items: domainTable<string, Item>(itemSchema) },
+})
+
+const residentSalvageSpec = defineDomain({
+  name: 'resident',
+  version: 1,
+  layout: 'per-record',
+  invalidRecords: 'backup-and-skip',
+  tables: { items: domainTable<string, Item>(itemSchema) },
+})
+
+const residentSingleSpec = defineDomain({
+  name: 'resident',
+  version: 1,
+  tables: { items: domainTable<string, Item>(itemSchema) },
+})
+
+/** Medium of the `resident` unit, seeded without an open. */
+function residentMedium(records: Record<string, Item>, global: unknown = null): MemoryMediaPool {
+  const pool = new MemoryMediaPool()
+  pool.versions.set('resident', 1)
+  pool.media.set('resident', {
+    tables: new Map([['items', new Map(Object.entries(records))]]),
+    global,
+  })
+  return pool
+}
+
+/** Compact JSON bytes of one seeded value, the resident budget's unit. */
+const valueBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value))
+
+/** Open `residentSpec` for lazy reads over an in-memory backend. */
+async function lazyHarness(options: {
+  pool: MemoryMediaPool
+  maxResidentBytes?: number
+  backend?: StorageBackend
+  spec?: typeof residentSpec | typeof residentSalvageSpec
+}) {
+  const backend = options.backend ?? new MemoryStorageBackend(options.pool)
+  const mounted = await harness({ backend })
+  const domain = await mounted.facility.open(options.spec ?? residentSpec, {
+    lazyReads: true,
+    maxResidentBytes: options.maxResidentBytes ?? 1024 * 1024,
+  })
+  return { ...mounted, pool: options.pool, domain, table: domain.table('items') }
+}
+
+describe('lazy record reads', () => {
+  const a: Item = { label: 'a', count: 1 }
+  const b: Item = { label: 'b', count: 2 }
+  const c: Item = { label: 'c', count: 3 }
+
+  it('opens from the key index without loading any record', async () => {
+    const { table, pool } = await lazyHarness({ pool: residentMedium({ a, b }) })
+    expect(pool.loads).toBe(0)
+    expect(pool.recordReads).toBe(0)
+    // The index serves every identity cheaply; nothing is resident yet.
+    expect(table.size).toBe(2)
+    expect([...table.keys()].sort()).toEqual(['a', 'b'])
+    expect([...table.entries()]).toEqual([])
+    expect(table.get('missing')).toBeUndefined()
+    // A hit loads exactly that one record, and a re-read stays resident.
+    expect(table.get('a')).toEqual(a)
+    expect(pool.recordReads).toBe(1)
+    expect(table.get('a')).toEqual(a)
+    expect(pool.recordReads).toBe(1)
+    expect([...table.entries()]).toEqual([['a', a]])
+  })
+
+  it('validates a record when the read loads it, not at open', async () => {
+    const pool = residentMedium({ good: a, bad: b })
+    const { table } = await lazyHarness({ pool })
+    // The open survived a medium that no longer matches the schema.
+    pool.media.get('resident')!.tables.get('items')!.set('bad', { label: 'x', count: 'NaN' })
+    let failure: unknown
+    try {
+      table.get('bad')
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toMatchObject({ code: 'invalid-record', detail: { table: 'items', key: 'bad' } })
+    expect(table.get('good')).toEqual(a)
+  })
+
+  it('backs up and skips a record that fails validation when a read loads it', async () => {
+    const pool = residentMedium({ good: a, bad: b })
+    const backend = new MemoryStorageBackend(pool, { backup: true })
+    const { ctx, table } = await lazyHarness({ pool, backend, spec: residentSalvageSpec })
+    const error = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    pool.media.get('resident')!.tables.get('items')!.set('bad', { label: 'x', count: 'NaN' })
+    expect(table.get('bad')).toBeUndefined()
+    // The salvage is fail-soft and reported once it lands.
+    await vi.waitFor(() => {
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("record 'bad' in table 'items'"))
+    })
+    expect(pool.backups).toEqual(['memory:resident/items/bad.bak'])
+    // The policy's "treated as absent" is durable for this open: no key, no size.
+    expect([...table.keys()]).toEqual(['good'])
+    expect(table.size).toBe(1)
+    expect(pool.recordReads).toBe(1)
+  })
+
+  it('warns when a schema-failing record cannot be moved aside', async () => {
+    const pool = residentMedium({ bad: b })
+    const inner = new MemoryStorageBackend(pool, { backup: true })
+    const failing: StorageBackend = {
+      close: () => inner.close(),
+      kv: {
+        open: async (descriptor) => {
+          const kv = inner.kv
+          if (kv === undefined) throw new Error('memory backend is missing its kv facet')
+          const unit = await kv.open(descriptor)
+          return {
+            loadAll: () => unit.loadAll(),
+            putRecord: (table, key, value) => unit.putRecord(table, key, value),
+            deleteRecord: (table, key) => unit.deleteRecord(table, key),
+            deleteRecords: (table, keys) => unit.deleteRecords(table, keys),
+            setGlobal: value => unit.setGlobal(value),
+            close: () => unit.close(),
+            ...unit.recordReader === undefined ? {} : { recordReader: unit.recordReader },
+            backupRecord: async () => {
+              throw new Error('salvage refused')
+            },
+          }
+        },
+      },
+    }
+    const { ctx, table } = await lazyHarness({ pool, backend: failing, spec: residentSalvageSpec })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    pool.media.get('resident')!.tables.get('items')!.set('bad', { label: 'x', count: 'NaN' })
+    expect(table.get('bad')).toBeUndefined()
+    await vi.waitFor(() => {
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not be moved aside'))
+    })
+    expect(table.size).toBe(0)
+  })
+
+  it('reads a record the medium no longer holds as absent', async () => {
+    const { table, pool } = await lazyHarness({ pool: residentMedium({ a, b }) })
+    pool.media.get('resident')!.tables.get('items')!.delete('a')
+    expect(table.get('a')).toBeUndefined()
+    expect(pool.recordReads).toBe(1)
+    expect([...table.keys()]).toEqual(['b'])
+    // The vanished key is absent from now on, not re-read on every call.
+    expect(table.get('a')).toBeUndefined()
+    expect(pool.recordReads).toBe(1)
+  })
+
+  it('releases the least recently used record beyond the budget and reloads it on demand', async () => {
+    const pool = residentMedium({ a, b, c })
+    const budget = valueBytes(a) + valueBytes(b)
+    const { table } = await lazyHarness({ pool, maxResidentBytes: budget })
+    expect(table.get('a')).toEqual(a)
+    expect(table.get('b')).toEqual(b)
+    expect([...table.entries()].map(([key]) => key)).toEqual(['a', 'b'])
+    expect(table.get('c')).toEqual(c)
+    // The oldest record paid for the third; the medium still holds it.
+    expect([...table.entries()].map(([key]) => key)).toEqual(['b', 'c'])
+    expect(table.get('a')).toEqual(a)
+    expect([...table.entries()].map(([key]) => key)).toEqual(['c', 'a'])
+    expect(pool.recordReads).toBe(4)
+  })
+
+  it('keeps a record larger than the whole budget resident alone', async () => {
+    const huge: Item = { label: 'x'.repeat(4096), count: 9 }
+    const huge2: Item = { label: 'y'.repeat(4096), count: 10 }
+    const pool = residentMedium({ a, huge, huge2 })
+    const { table } = await lazyHarness({ pool, maxResidentBytes: valueBytes(a) })
+    expect(table.get('a')).toEqual(a)
+    expect(table.get('huge')).toEqual(huge)
+    expect([...table.entries()].map(([key]) => key)).toEqual(['huge'])
+    // A second oversized read replaces it: the resident set never exceeds one
+    // record above the budget.
+    expect(table.get('huge2')).toEqual(huge2)
+    expect([...table.entries()].map(([key]) => key)).toEqual(['huge2'])
+  })
+
+  it('charges writes against the budget and keeps them durable', async () => {
+    const pool = residentMedium({ a })
+    const { table, changes } = await lazyHarness({ pool, maxResidentBytes: valueBytes(a) })
+    await table.put('written', b)
+    expect(pool.media.get('resident')!.tables.get('items')!.get('written')).toEqual(b)
+    expect([...table.entries()].map(([key]) => key)).toEqual(['written'])
+    expect(changes.at(-1)).toMatchObject({ table: 'items', key: 'written', operation: 'put' })
+    // A value the store cannot charge rejects inside the write slot, before
+    // durability: the medium and the index are untouched.
+    await expect(table.put('undefined' as never, undefined as never)).rejects.toThrow(/not JSON-serializable/)
+    expect(table.size).toBe(2)
+    expect(pool.media.get('resident')!.tables.get('items')!.has('undefined')).toBe(false)
+  })
+
+  it('deletes and updates non-resident records without loading them unnecessarily', async () => {
+    const pool = residentMedium({ a, b, c })
+    const { table } = await lazyHarness({ pool, maxResidentBytes: valueBytes(a) })
+    // Deleting a record the open never loaded still removes its document.
+    await expect(table.delete('a')).resolves.toBe(true)
+    expect(pool.media.get('resident')!.tables.get('items')!.has('a')).toBe(false)
+    expect(table.size).toBe(2)
+    expect(pool.recordReads).toBe(0)
+    // update loads the current record, then writes the replacement durably.
+    await expect(table.update('b', current => ({ ...current, count: current.count + 10 }))).resolves.toEqual({ label: 'b', count: 12 })
+    expect(pool.recordReads).toBe(1)
+    expect(pool.media.get('resident')!.tables.get('items')!.get('b')).toEqual({ label: 'b', count: 12 })
+    // A missing target never touches the medium.
+    await expect(table.update('ghost', current => current)).rejects.toMatchObject({ code: 'missing-key' })
+  })
+
+  it('rejects an update whose record the medium cannot serve', async () => {
+    const pool = residentMedium({ b })
+    const backend = new MemoryStorageBackend(pool, { backup: true })
+    const { table } = await lazyHarness({ pool, backend, spec: residentSalvageSpec })
+    pool.media.get('resident')!.tables.get('items')!.set('b', { label: 'x', count: 'NaN' })
+    await expect(table.update('b', current => current)).rejects.toMatchObject({ code: 'missing-key' })
+  })
+
+  it('serves and validates the stored global on a lazy open', async () => {
+    const stored = await lazyHarness({ pool: residentMedium({}, { theme: 'dark' }) })
+    expect(stored.domain.global.get()).toEqual({ theme: 'dark' })
+    const plain = await lazyHarness({ pool: residentMedium({}) })
+    expect(plain.domain.global.get()).toEqual({ theme: 'plain' })
+    const broken = residentMedium({}, { theme: 42 })
+    await expect(lazyHarness({ pool: broken })).rejects.toMatchObject({
+      code: 'invalid-record',
+      detail: { table: '', key: '' },
+    })
+  })
+
+  it('rejects malformed lazy options before opening the unit', async () => {
+    const { facility, ctx } = await harness({ pool: residentMedium({ a }) })
+    await expect(facility.open(residentSpec, { lazyReads: true })).rejects.toThrow(/maxResidentBytes/)
+    await expect(facility.open(residentSpec, { lazyReads: true, maxResidentBytes: 0 })).rejects.toThrow(/maxResidentBytes/)
+    await expect(facility.open(residentSpec, { lazyReads: true, maxResidentBytes: 1.5 })).rejects.toThrow(/maxResidentBytes/)
+    await expect(facility.open(residentSpec, { maxResidentBytes: 8 })).rejects.toThrow(/lazyReads/)
+    await expect(facility.open(residentSingleSpec, { lazyReads: true, maxResidentBytes: 8 }))
+      .rejects.toThrow(/per-record/)
+    // Each rejected open released the reserved name: an eager open still works.
+    expect(ctx.storage.domain).toBe(facility)
+    await expect(facility.open(residentSingleSpec)).resolves.toBeDefined()
+  })
+
+  it('treats a declared table the reader index omits as empty', async () => {
+    const pool = residentMedium({})
+    const inner = new MemoryStorageBackend(pool)
+    const sparseIndex: StorageBackend = {
+      close: () => inner.close(),
+      kv: {
+        open: async (descriptor) => {
+          const kv = inner.kv
+          if (kv === undefined) throw new Error('memory backend is missing its kv facet')
+          const unit = await kv.open(descriptor)
+          if (unit.recordReader === undefined) throw new Error('memory unit must expose a recordReader')
+          const reader = unit.recordReader
+          return {
+            loadAll: () => unit.loadAll(),
+            putRecord: (table, key, value) => unit.putRecord(table, key, value),
+            deleteRecord: (table, key) => unit.deleteRecord(table, key),
+            deleteRecords: (table, keys) => unit.deleteRecords(table, keys),
+            setGlobal: value => unit.setGlobal(value),
+            close: () => unit.close(),
+            recordReader: {
+              listKeys: async () => ({ tables: {}, global: null }),
+              read: (table: string, key: string) => reader.read(table, key),
+              readAsync: (table: string, key: string) => reader.readAsync(table, key),
+            },
+          }
+        },
+      },
+    }
+    const { table } = await lazyHarness({ pool, backend: sparseIndex })
+    expect(table.size).toBe(0)
+    expect(table.get('a')).toBeUndefined()
+  })
+
+  it('falls back to eager materialization when the unit cannot read records on demand', async () => {
+    const pool = residentMedium({ a })
+    const inner = new MemoryStorageBackend(pool)
+    const eagerOnly: StorageBackend = {
+      close: () => inner.close(),
+      kv: {
+        open: async (descriptor) => {
+          const kv = inner.kv
+          if (kv === undefined) throw new Error('memory backend is missing its kv facet')
+          const unit = await kv.open(descriptor)
+          return {
+            loadAll: () => unit.loadAll(),
+            putRecord: (table, key, value) => unit.putRecord(table, key, value),
+            deleteRecord: (table, key) => unit.deleteRecord(table, key),
+            deleteRecords: (table, keys) => unit.deleteRecords(table, keys),
+            setGlobal: value => unit.setGlobal(value),
+            close: () => unit.close(),
+          }
+        },
+      },
+    }
+    const { ctx, facility } = await harness({ backend: eagerOnly })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const domain = await facility.open(residentSpec, { lazyReads: true, maxResidentBytes: 1024 })
+    // The fallback loaded the corpus and warned about the degradation.
+    expect(pool.loads).toBe(1)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('opening eagerly'))
+    expect(domain.table('items').get('a')).toEqual(a)
+  })
+})
+
+describe('lazy record scan', () => {
+  const a: Item = { label: 'a', count: 1 }
+  const b: Item = { label: 'b', count: 2 }
+
+  /** Drain one scan, collecting the keys it streamed. */
+  async function drain(iterator: AsyncIterableIterator<readonly [string, Item]>): Promise<string[]> {
+    const keys: string[] = []
+    for await (const [key] of iterator) keys.push(key)
+    return keys
+  }
+
+  it('streams every record without retaining it', async () => {
+    const { table, pool } = await lazyHarness({ pool: residentMedium({ a, b }) })
+    const seen = new Map<string, Item>()
+    for await (const [key, value] of table.scan!()) seen.set(key, value)
+    expect([...seen.keys()]).toEqual(['a', 'b'])
+    expect(seen.get('a')).toEqual(a)
+    expect(seen.get('b')).toEqual(b)
+    // The pass reads through the asynchronous path and leaves the resident set
+    // (and the synchronous read counter) untouched.
+    expect(pool.recordAsyncReads).toBe(2)
+    expect(pool.recordReads).toBe(0)
+    expect([...table.entries()]).toEqual([])
+    expect(table.size).toBe(2)
+  })
+
+  it('drops a key the medium no longer holds', async () => {
+    const { table, pool } = await lazyHarness({ pool: residentMedium({ a, b }) })
+    pool.media.get('resident')!.tables.get('items')!.delete('a')
+    expect(await drain(table.scan!() as AsyncIterableIterator<readonly [string, Item]>)).toEqual(['b'])
+    expect([...table.keys()]).toEqual(['b'])
+  })
+
+  it('applies the salvage policy while streaming', async () => {
+    const pool = residentMedium({ good: a, bad: b })
+    const backend = new MemoryStorageBackend(pool, { backup: true })
+    const { ctx, table } = await lazyHarness({ pool, backend, spec: residentSalvageSpec })
+    const error = vi.spyOn(ctx.logger, 'error').mockImplementation(() => {})
+    pool.media.get('resident')!.tables.get('items')!.set('bad', { label: 'x', count: 'NaN' })
+    expect(await drain(table.scan!() as AsyncIterableIterator<readonly [string, Item]>)).toEqual(['good'])
+    // The streaming path awaits the move, so the diagnostic is already logged.
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("record 'bad' in table 'items'"))
+    expect(pool.backups).toEqual(['memory:resident/items/bad.bak'])
+    expect(table.size).toBe(1)
+  })
+
+  it('rejects a schema-failing record when the policy cannot salvage it', async () => {
+    const pool = residentMedium({ bad: b })
+    const { table } = await lazyHarness({ pool })
+    pool.media.get('resident')!.tables.get('items')!.set('bad', { label: 'x', count: 'NaN' })
+    await expect(drain(table.scan!() as AsyncIterableIterator<readonly [string, Item]>))
+      .rejects.toMatchObject({ code: 'invalid-record', detail: { table: 'items', key: 'bad' } })
+  })
+
+  it('stops streaming once the domain is closed', async () => {
+    const { table, domain } = await lazyHarness({ pool: residentMedium({ a, b }) })
+    const iterator = table.scan!() as AsyncIterableIterator<readonly [string, Item]>
+    expect((await iterator.next()).done).toBe(false)
+    await domain.close()
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'closed' })
+  })
+
+  it('is absent on an eagerly loaded table', async () => {
+    const { facility } = await harness()
+    const domain = await facility.open(spec)
+    expect(domain.table('items').scan).toBeUndefined()
   })
 })

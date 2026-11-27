@@ -126,6 +126,29 @@ function subagentCatalogEntries(state: SubagentCatalogState): SubagentCatalogEnt
   return entries
 }
 
+/**
+ * Newest entries a pushed catalog carries.
+ *
+ * A parent can hold tens of thousands of direct children, and that whole value
+ * would otherwise enter every Session summary, control baseline and update,
+ * follow opening, and follow projection frame: one measured Session with
+ * 12,524 children put 949 KB of compressed projection into its first frame and
+ * about 22 KB of catalog into every one of 137 list rows. A Client renders one
+ * page (`CATALOG_PAGE`) and reads the complete value on demand through
+ * `session.projections`, so pushed payloads keep only the newest entries —
+ * which is also where a newly created child appears.
+ */
+export const SUBAGENT_CATALOG_HINT_LIMIT = 32
+
+/**
+ * Narrow one pushed catalog to its newest entries.
+ * @param entries - complete catalog view in catalog event order.
+ * @returns the newest entries, or the same array when the catalog is small.
+ */
+function catalogHint(entries: SubagentCatalogEntry[]): SubagentCatalogEntry[] {
+  return entries.length <= SUBAGENT_CATALOG_HINT_LIMIT ? entries : entries.slice(-SUBAGENT_CATALOG_HINT_LIMIT)
+}
+
 /** Parent-owned catalog; version-6 checkpoints retain unnamed facts, and invalid own facts reject restoration. */
 export const subagentCatalogProjectionDefinition = {
   key: 'subagentCatalog',
@@ -136,7 +159,7 @@ export const subagentCatalogProjectionDefinition = {
     return { ...state, head: appendChunkedList(state.head, eventDataSchema.parse(event.data)) }
   },
   stateVersion: 6,
-  wire: { viewSchema, view: subagentCatalogEntries },
+  wire: { viewSchema, view: subagentCatalogEntries, hintView: catalogHint },
 } satisfies ProjectionDefinition<'subagentCatalog', SubagentCatalogState>
 
 /**

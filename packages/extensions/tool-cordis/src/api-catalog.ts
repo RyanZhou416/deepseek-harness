@@ -3676,7 +3676,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'sessionProjectionCache',
     summary: 'The persisted projection cache service.',
-    description: 'The persisted projection cache service. Opens the `session_projcache` domain at init, checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus three mandatory points — session creation, `turn/end`, and session disposal (the live-to-cold moment) — and serves the cached rows for a session header. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write.',
+    description: 'The persisted projection cache service. Opens the `session_projcache` domain at init for on-demand record reads (the open costs a key index, not the corpus), checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus three mandatory points — session creation, `turn/end`, and session disposal (the live-to-cold moment) — and serves the cached rows for a session header. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write.',
     methods: [
       {
         signature: 'cachedSnapshot( meta: SessionHeader, keys?: ProjectionKeySelection, excludeKeys?: ReadonlySet<string>, ): ProjectionSnapshot | undefined',
@@ -3750,6 +3750,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Every registered client-visible key, in registration order: the complete key set one `snapshot` cut carries for the current composition. A cached block that omits one of these keys is partial, and a consumer that needs a complete baseline must not seed client values from it — adopting it would clear the values of the keys it omits. Host-only units never appear; the set follows registration, so it changes as domains load and unload.',
         parameters: [],
         returns: 'the registered client-visible keys; empty when no unit has a wire view.',
+      },
+      {
+        signature: 'hintValue<T>( key: Extract<keyof SessionProjectionMap, string>, value: T, ): T',
+        description: 'Narrow one pushed value to its unit\'s declared hint view.\n\nA Host push (Session summary, control frame, follow opening block, follow projection frame) may carry only the bounded value a unit declares for listings; an explicit `session.projections` read and a Host snapshot keep the complete view. A key without a hint view, and a key with no live registration, passes its value through unchanged.',
+        parameters: [{ name: 'key', description: 'client-visible projection key the value belongs to.' }, { name: 'value', description: 'schema-validated view value about to enter a push.' }],
+        returns: 'the narrowed value, or the same reference when the unit declares no hint.',
+      },
+      {
+        signature: 'hintValues<T extends Record<string, unknown>>(values: T): T',
+        description: 'Narrow every value of one pushed block through hintValue.',
+        parameters: [{ name: 'values', description: 'schema-validated view values about to enter a push.' }],
+        returns: 'the narrowed block, or the same reference when no selected unit declares a hint.',
       },
       {
         signature: 'summaryKeys(): ReadonlySet<Extract<keyof SessionProjectionMap, string>>',
@@ -4439,9 +4451,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'The mounted domain facility. Opens declared domains over routed backends; one facility instance owns the open-domain table and enforces single-open per domain name.',
     methods: [
       {
-        signature: 'async open<S extends DomainSpec>(spec: S): Promise<Domain<S>>',
-        description: 'Open one declared domain. Steps, each failing the whole call: reject a name that is already open (`already-open`); resolve the backend route (`backend-not-found` passes through from the hub); require its `kv` facet (`facet-unsupported`); open the unit projected from the spec (backend `version-mismatch`/`malformed-medium` pass through); load and validate every stored record against the spec\'s zod schemas (`invalid-record` with the offending table and key — unless the spec declares `invalidRecords: \'backup-and-skip\'` and the unit can move documents aside, in which case the failing record is backed up, logged, and skipped); construct the domain.\n\nLifecycle: the CALLER owns the returned handle and closes it via `Domain.close()` (typically as its own `ctx.effect` disposer) — the facility does not tie the domain to any consumer fiber. Domains still open when the facility unmounts are closed by the plugin disposer.',
-        parameters: [{ name: 'spec', description: 'The domain declaration, typically from `defineDomain`.' }],
+        signature: 'async open<S extends DomainSpec>(spec: S, options?: DomainOpenOptions): Promise<Domain<S>>',
+        description: 'Open one declared domain. Steps, each failing the whole call: reject a name that is already open (`already-open`); resolve the backend route (`backend-not-found` passes through from the hub); require its `kv` facet (`facet-unsupported`); open the unit projected from the spec (backend `version-mismatch`/`malformed-medium` pass through); load the stored records; construct the domain.\n\nRecord loading is eager unless DomainOpenOptions.lazyReads asks otherwise: the eager path validates every stored record against the spec\'s zod schemas (`invalid-record` with the offending table and key — unless the spec declares `invalidRecords: \'backup-and-skip\'` and the unit can move documents aside, in which case the failing record is backed up, logged, and skipped). The lazy path reads only the key index at open and validates each record when a table read loads it, with the same policy.\n\nLifecycle: the CALLER owns the returned handle and closes it via `Domain.close()` (typically as its own `ctx.effect` disposer) — the facility does not tie the domain to any consumer fiber. Domains still open when the facility unmounts are closed by the plugin disposer.',
+        parameters: [{ name: 'spec', description: 'The domain declaration, typically from `defineDomain`.' }, { name: 'options', description: 'Record-loading options; omitted means eager materialization.' }],
         returns: 'the opened domain handle, typed by the spec.',
       },
       {
@@ -7562,7 +7574,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'DomainImpl',
-    declaration: 'export class DomainImpl {\n    readonly name: string;\n    constructor(private readonly ctx: Context, spec: DomainSpec, private readonly unit: KvUnit, records: Map<string, Map<string, unknown>>, globalValue: unknown, private readonly onClosed: () => void);\n    get global(): DomainGlobal<unknown>;\n    table(name: string): KvTable<string, unknown>;\n    close(): Promise<void>;\n}',
+    declaration: 'export class DomainImpl {\n    readonly name: string;\n    constructor(private readonly ctx: Context, spec: DomainSpec, private readonly unit: KvUnit, tables: ReadonlyMap<string, TableRecords>, globalValue: unknown, private readonly onClosed: () => void);\n    get global(): DomainGlobal<unknown>;\n    table(name: string): KvTable<string, unknown>;\n    close(): Promise<void>;\n}',
+  },
+  {
+    name: 'DomainOpenOptions',
+    declaration: 'export interface DomainOpenOptions {\n    readonly lazyReads?: boolean;\n    readonly maxResidentBytes?: number;\n}',
   },
   {
     name: 'DomainSpec',
@@ -8409,12 +8425,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface KvFacet {\n    open(descriptor: KvUnitDescriptor): Promise<KvUnit>;\n}',
   },
   {
+    name: 'KvRecordReader',
+    declaration: 'export interface KvRecordReader {\n    listKeys(): Promise<{\n        tables: Record<string, readonly string[]>;\n        global: unknown;\n    }>;\n    read(table: string, key: string): unknown;\n    readAsync(table: string, key: string): Promise<unknown>;\n}',
+  },
+  {
     name: 'KvTable',
-    declaration: 'export interface KvTable<K extends string, V> {\n    get(key: K): V | undefined;\n    entries(): IterableIterator<[\n        K,\n        V\n    ]>;\n    keys(): IterableIterator<K>;\n    readonly size: number;\n    put(key: K, value: V): Promise<void>;\n    delete(key: K): Promise<boolean>;\n    deleteMany(keys: readonly K[]): Promise<number>;\n    update(key: K, fn: (current: V) => V): Promise<V>;\n}',
+    declaration: 'export interface KvTable<K extends string, V> {\n    get(key: K): V | undefined;\n    entries(): IterableIterator<[\n        K,\n        V\n    ]>;\n    keys(): IterableIterator<K>;\n    readonly size: number;\n    put(key: K, value: V): Promise<void>;\n    delete(key: K): Promise<boolean>;\n    deleteMany(keys: readonly K[]): Promise<number>;\n    update(key: K, fn: (current: V) => V): Promise<V>;\n    scan?(): AsyncIterableIterator<readonly [\n        K,\n        V\n    ]>;\n}',
   },
   {
     name: 'KvUnit',
-    declaration: 'export interface KvUnit {\n    loadAll(): Promise<{\n        tables: Record<string, Record<string, unknown>>;\n        global: unknown;\n    }>;\n    putRecord(table: string, key: string, value: unknown): Promise<void>;\n    deleteRecord(table: string, key: string): Promise<void>;\n    deleteRecords(table: string, keys: readonly string[]): Promise<void>;\n    backupRecord?(table: string, key: string): Promise<string>;\n    setGlobal(value: unknown): Promise<void>;\n    close(): Promise<void>;\n}',
+    declaration: 'export interface KvUnit {\n    loadAll(): Promise<{\n        tables: Record<string, Record<string, unknown>>;\n        global: unknown;\n    }>;\n    putRecord(table: string, key: string, value: unknown): Promise<void>;\n    deleteRecord(table: string, key: string): Promise<void>;\n    deleteRecords(table: string, keys: readonly string[]): Promise<void>;\n    readonly recordReader?: KvRecordReader;\n    backupRecord?(table: string, key: string): Promise<string>;\n    setGlobal(value: unknown): Promise<void>;\n    close(): Promise<void>;\n}',
   },
   {
     name: 'KvUnitDescriptor',
@@ -9346,7 +9366,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ProjectionDefinition',
-    declaration: 'export interface ProjectionDefinition<K extends string, S> {\n    key: K;\n    stateSchema: ZodType<S>;\n    init(header: SessionHeader, inheritedEventCount: SessionLogOffset): NoInfer<S>;\n    apply(state: NoInfer<S>, event: SessionEvent): NoInfer<S>;\n    wire?: K extends keyof SessionProjectionMap ? {\n        viewSchema: ZodType<SessionProjectionViewValue<SessionProjectionMap[K]>>;\n        view(state: NoInfer<S>): SessionProjectionViewValue<SessionProjectionMap[K]>;\n        summary?: boolean;\n        live?: boolean;\n    } : never;\n    stateVersion: number;\n}',
+    declaration: 'export interface ProjectionDefinition<K extends string, S> {\n    key: K;\n    stateSchema: ZodType<S>;\n    init(header: SessionHeader, inheritedEventCount: SessionLogOffset): NoInfer<S>;\n    apply(state: NoInfer<S>, event: SessionEvent): NoInfer<S>;\n    wire?: K extends keyof SessionProjectionMap ? {\n        viewSchema: ZodType<SessionProjectionViewValue<SessionProjectionMap[K]>>;\n        view(state: NoInfer<S>): SessionProjectionViewValue<SessionProjectionMap[K]>;\n        hintView?(value: SessionProjectionViewValue<SessionProjectionMap[K]>): SessionProjectionViewValue<SessionProjectionMap[K]>;\n        summary?: boolean;\n        live?: boolean;\n    } : never;\n    stateVersion: number;\n}',
   },
   {
     name: 'ProjectionEventChangeListener',
@@ -11171,6 +11191,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'TableKeyOf',
     declaration: 'export type TableKeyOf<S extends DomainSpec, N extends keyof S[\'tables\']> = S[\'tables\'][N] extends DomainTableSpec<infer K> ? K : never;',
+  },
+  {
+    name: 'TableRecords',
+    declaration: 'export interface TableRecords {\n    get(key: string): unknown;\n    has(key: string): boolean;\n    keys(): readonly string[];\n    entries(): readonly (readonly [\n        string,\n        unknown\n    ])[];\n    readonly size: number;\n    bytesOf(value: unknown): number;\n    set(key: string, value: unknown, bytes: number): void;\n    remove(key: string): void;\n    scan?(assertReadable: () => void): AsyncIterableIterator<readonly [\n        string,\n        unknown\n    ]>;\n}',
   },
   {
     name: 'TableValueOf',

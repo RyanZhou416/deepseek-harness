@@ -115,6 +115,19 @@ export interface ProjectionDefinition<K extends string, S> {
      */
     view(state: NoInfer<S>): SessionProjectionViewValue<SessionProjectionMap[K]>
     /**
+     * Narrow the value a baseline push carries: a Session summary, a control
+     * baseline, or a follow opening block. Live change frames, explicit
+     * `session.projections` reads, Host snapshots, checkpoints, and every
+     * Host-internal fold stay complete, so a unit whose client value grows
+     * without bound declares this while Host consumers keep the whole state.
+     * The result keeps the wire type — a bounded suffix of a growing list, or
+     * the value itself when it is small enough — and a Client that needs the
+     * whole value reads it explicitly. The function runs for every pushed value
+     * of this key and MUST be pure and cheap.
+     * @default undefined (pushes carry the complete view)
+     */
+    hintView?(value: SessionProjectionViewValue<SessionProjectionMap[K]>): SessionProjectionViewValue<SessionProjectionMap[K]>
+    /**
      * Whether a Session summary carries this unit; omitted means `true`.
      * Declare `false` on a key whose map entry carries the
      * `SessionProjectionSummaryExcluded` mark: the runtime key set follows this
@@ -228,6 +241,8 @@ interface ErasedDefinition {
   wire: {
     viewSchema: { parse(value: unknown): unknown }
     view(state: unknown): unknown
+    /** Declared wire narrowing for pushed values; absent means pushes carry the complete view. */
+    hint: ((value: unknown) => unknown) | undefined
     /** Whether a Session summary carries this unit (false when the unit declared `summary: false`). */
     summary: boolean
     /** Whether change streams publish this unit (false when the unit declared `live: false`). */
@@ -396,9 +411,11 @@ export class SessionProjectionRegistry extends Service {
     const wire = definition.wire as {
       viewSchema: ZodType
       view(state: S): unknown
+      hintView?(value: unknown): unknown
       summary?: boolean
       live?: boolean
     } | undefined
+    const hintView = wire?.hintView
     const erased: ErasedDefinition = {
       key: definition.key,
       stateSchema: definition.stateSchema,
@@ -410,7 +427,13 @@ export class SessionProjectionRegistry extends Service {
       // into the erased unit, where the key set reads it.
       wire: wire === undefined
         ? undefined
-        : { viewSchema: wire.viewSchema, view: state => wire.view(state as S), summary: wire.summary !== false, live: wire.live !== false },
+        : {
+          viewSchema: wire.viewSchema,
+          view: state => wire.view(state as S),
+          hint: hintView === undefined ? undefined : (value: unknown) => hintView(value),
+          summary: wire.summary !== false,
+          live: wire.live !== false,
+        },
       stateVersion: definition.stateVersion,
     }
     if (!Number.isSafeInteger(definition.stateVersion) || definition.stateVersion < 0) {
@@ -434,6 +457,9 @@ export class SessionProjectionRegistry extends Service {
         }
         if (existing.def.wire?.live !== erased.wire?.live) {
           throw new Error(`session projection key ${JSON.stringify(key)} is already registered with live=${String(existing.def.wire?.live)}; refusing to share it with live=${String(erased.wire?.live)}`)
+        }
+        if ((existing.def.wire?.hint === undefined) !== (erased.wire?.hint === undefined)) {
+          throw new Error(`session projection key ${JSON.stringify(key)} is already registered with a different wire hint declaration; refusing to share it`)
         }
         existing.refs += 1
         registration = existing
@@ -597,6 +623,51 @@ export class SessionProjectionRegistry extends Service {
       }
     }
     return asOfSeq === undefined ? undefined : { asOfSeq, values }
+  }
+
+  /**
+   * Narrow one pushed value to its unit's declared hint view.
+   *
+   * A Host push (Session summary, control frame, follow opening block, follow
+   * projection frame) may carry only the bounded value a unit declares for
+   * listings; an explicit `session.projections` read and a Host snapshot keep
+   * the complete view. A key without a hint view, and a key with no live
+   * registration, passes its value through unchanged.
+   * @param key - client-visible projection key the value belongs to.
+   * @param value - schema-validated view value about to enter a push.
+   * @returns the narrowed value, or the same reference when the unit declares no hint.
+   */
+  hintValue<T>(
+    key: Extract<keyof SessionProjectionMap, string>,
+    value: T,
+  ): T {
+    const registration = this.registrations.get(key)
+    const hint = registration === undefined || registration.refs === 0
+      ? undefined
+      : registration.def.wire?.hint
+    return (hint === undefined ? value : hint(value)) as T
+  }
+
+  /**
+   * Narrow every value of one pushed block through {@link hintValue}.
+   * @param values - schema-validated view values about to enter a push.
+   * @returns the narrowed block, or the same reference when no selected unit declares a hint.
+   */
+  hintValues<T extends Record<string, unknown>>(values: T): T {
+    let narrowed = false
+    for (const key of Object.keys(values)) {
+      const registration = this.registrations.get(key)
+      if (registration === undefined || registration.refs === 0) continue
+      if (registration.def.wire?.hint === undefined) continue
+      narrowed = true
+      break
+    }
+    if (!narrowed) return values
+    const block: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(values)) {
+      block[key] = this.hintValue(key as Extract<keyof SessionProjectionMap, string>, value)
+    }
+    return block as T
   }
 
   /**

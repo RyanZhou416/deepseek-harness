@@ -12,7 +12,7 @@ import {
 } from '../history.ts'
 import { EventListener, ListenerBuffer, ProjectionListener } from '../history/listener.ts'
 import { history, projections, resolveHistoryRequest, validateObservationAddress } from '../history/controller.ts'
-import type { SessionFollowFrame, SessionFollowRequest, SessionPageRequest } from '../types.ts'
+import type { SessionFollowFrame, SessionFollowRequest, SessionPageRequest, SessionProjectionBaseline } from '../types.ts'
 
 /** Combines opening data and consumes transformed listener output from one queue. */
 export class WebController {
@@ -23,6 +23,9 @@ export class WebController {
    * @param promote - background activation requested before an opening snapshot is delivered.
    * @param maxPageBytes - serialized-record byte budget for the opening page; `0` keeps the message limits alone.
    * @param retain - keeps the addressed Agent resident through opening delivery; returns its release.
+   * @param narrow - narrows one pushed projection block to the values each unit allows in a push. The Session
+   *   Controller supplies its registry-backed narrowing; a caller that aggregates raw observations, such as a
+   *   focused transport harness, keeps the complete values.
    */
   constructor(
     private readonly ctx: Context,
@@ -30,6 +33,7 @@ export class WebController {
     private readonly promote: (observation: SessionObservation) => void,
     private readonly maxPageBytes = 0,
     private readonly retain: (sessionId: SessionId) => () => void = () => () => {},
+    private readonly narrow: <T extends Record<string, unknown>>(values: T) => T = values => values,
   ) {}
 
   /**
@@ -75,7 +79,7 @@ export class WebController {
         header: { ...observation.header },
         // An observation without a projection cut carries no exact block; an empty
         // block would claim whole-log emptiness and clear cached client values.
-        ...observation.projections === undefined ? {} : { projections: projections(observation) },
+        ...observation.projections === undefined ? {} : { projections: this.hinting(projections(observation)) },
         ...history(observation, spec, this.maxPageBytes),
       }
     }
@@ -169,9 +173,25 @@ export class WebController {
         cursor,
         records: pageRecords(page.events),
         hasMore: page.hasMore,
-        ...read.projections === undefined ? {} : { projections: projectionBlock(read.projections) },
+        ...read.projections === undefined ? {} : { projections: this.hinting(projectionBlock(read.projections)) },
       }
     }
     return undefined
+  }
+
+  /**
+   * Narrow one opening projection block to the values each unit allows in a push.
+   *
+   * The block keeps its exact cut and remains the client's baseline for every
+   * key; a unit that declares a bounded push view contributes only that value,
+   * and a client that needs the whole value reads `session.projections`.
+   * @param block - exact projection block at the opening cut.
+   * @returns the block with every value narrowed where its unit declares a bound.
+   */
+  private hinting(block: SessionProjectionBaseline): SessionProjectionBaseline {
+    // A hintView is typed to return its unit's own wire view, so the narrowed
+    // block carries the same values the complete block did.
+    const values = this.narrow(block.values) as SessionProjectionBaseline['values']
+    return values === block.values ? block : { asOfSeq: block.asOfSeq, values }
   }
 }

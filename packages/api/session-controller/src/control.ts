@@ -39,6 +39,8 @@ export class SessionControlController {
         sessionId: session.id,
         seq,
         // Every projection definition validates its value before change publication.
+        // A live update keeps its whole value: a Client that already read the
+        // complete value must not have it narrowed by a bounded push.
         changes: summary as SessionProjectionUpdate['changes'],
       })
     })
@@ -82,8 +84,10 @@ export class SessionControlController {
       const snapshot = this.ctx.sessionProjections.snapshot(session, keys)
       blocks[session.id] = {
         asOfSeq: snapshot.asOfSeq,
-        // Every projection definition validates its value before snapshot publication.
-        values: snapshot.values as SessionProjectionValues,
+        // Every projection definition validates its value before snapshot
+        // publication; a bounded unit narrows the pushed baseline the same way
+        // its listing and opening values are narrowed.
+        values: this.ctx.sessionProjections.hintValues(snapshot.values) as SessionProjectionValues,
       }
     }
     return blocks

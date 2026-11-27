@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
 import type { Session, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
+import type { SessionProjectionSummaryValues } from '@deepseek-ai/dsh-session-projection/types'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 import type {} from '@deepseek-ai/dsh-workspace'
 import {
@@ -149,8 +150,7 @@ export class ApiSessionList {
    * @param signal - optional cancellation for persistence reads and summary generation.
    * @param options - when `includeArchived` is true, archived Sessions are listed too.
    * @returns visible Session summaries ordered by activity.
-   */
-  async list(signal?: AbortSignal, options?: { readonly includeArchived?: boolean }): Promise<SessionSummary[]> {
+   */  async list(signal?: AbortSignal, options?: { readonly includeArchived?: boolean }): Promise<SessionSummary[]> {
     signal?.throwIfAborted()
     const registry = options?.includeArchived === true ? undefined : this.ctx.get('workspaceRegistry')
     const archived = registry?.archivedSessionIds
@@ -478,14 +478,14 @@ export class ApiSessionList {
       if (session !== undefined) {
         // The live registry computes the block for this Session: its watermark
         // shares the sequence space of the Session's baselines and frames.
-        return hintsOf('sequenced', this.ctx.sessionProjections.snapshot(session, keys))
+        return hintsOf('sequenced', this.ctx.sessionProjections.snapshot(session, keys), this.hintValues)
       }
       // A cold row reads the persisted cache by header alone; the cache serves
       // seeded and unseeded lifecycles alike because a listing never seeds a
       // fold. The watermark is the stored record's own.
       const cache = this.ctx.get('sessionProjectionCache')
       return hintsOf('cached', cache?.cachedSnapshot(header, keys, this.excludedProjectionKeys)
-      ?? (this.excludedProjectionKeys.has('title') ? undefined : cache?.cachedPredecessorTitle(header)))
+      ?? (this.excludedProjectionKeys.has('title') ? undefined : cache?.cachedPredecessorTitle(header)), this.hintValues)
     } catch (error) {
       this.ctx.logger.warn(
         `api-session.list: projection column for "${header.id}" failed; serving the row without it: ${String(error)}`,
@@ -493,23 +493,41 @@ export class ApiSessionList {
       return undefined
     }
   }
+
+  /**
+   * Narrow one pushed block to the values its units allow in a listing.
+   * @param values - the block's complete summary values.
+   * @returns the narrowed block, or the same reference when no unit declares a bound.
+   */
+  private readonly hintValues = (
+    values: Partial<SessionProjectionSummaryValues>,
+  ): Partial<SessionProjectionSummaryValues> =>
+    // A hintView is typed to return its unit's own wire view, so the narrowed
+    // block carries the same values the complete block did.
+    this.ctx.sessionProjections.hintValues(values)
 }
 
 /**
  * Wrap one summary projection block as Session-list hints of the named sequence space.
- * The block is the summary key set's values, not every value the source holds.
+ * The block is the summary key set's values, not every value the source holds,
+ * narrowed to the values each unit allows in a pushed listing.
  * @param kind - which sequence space the block's watermark belongs to.
  * @param block - the block, or `undefined` when no source served one.
+ * @param narrow - unit-declared narrowing applied to every value the block carries.
  * @returns the hints, or `undefined` when the block is absent or carries no value.
  */
 function hintsOf(
   kind: SessionProjectionHints['kind'],
   block: ProjectionSnapshot | undefined,
+  narrow: (
+    values: Partial<SessionProjectionSummaryValues>,
+  ) => Partial<SessionProjectionSummaryValues>,
 ): SessionProjectionHints | undefined {
   if (block === undefined || Object.keys(block.values).length === 0) return undefined
-  // Listing hints contain every summary wire value the source holds; cached
-  // hints remain partial because missing cache rows are never folded here.
-  return { kind, asOfSeq: block.asOfSeq, values: block.values }
+  // Listing hints contain every summary wire value the source holds, bounded to
+  // what a listing needs; cached hints remain partial because missing cache rows
+  // are never folded here.
+  return { kind, asOfSeq: block.asOfSeq, values: narrow(block.values) }
 }
 
 /**

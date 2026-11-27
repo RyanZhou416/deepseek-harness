@@ -3955,7 +3955,7 @@ export interface Config extends JsonlConfigOptions {
 ## `@deepseek-ai/dsh-session-projection-cache`
 
 - `inject`: `storageDomain` · `sessionProjections` · `sessions`
-- `source`: [`packages/session/session-projection-cache/src/index.ts:97`](../packages/session/session-projection-cache/src/index.ts)
+- `source`: [`packages/session/session-projection-cache/src/index.ts:99`](../packages/session/session-projection-cache/src/index.ts)
 
 ```ts config-catalog
 /**
@@ -3971,16 +3971,34 @@ export interface Config {
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
   /**
-   * Largest total serialized checkpoint payload the cache keeps complete
-   * across all Sessions. At init the newest records (ranked by their highest
-   * checkpoint seq) stay complete until this budget is reached, and every
-   * remaining record is replaced by a lightweight record holding only its
-   * listing hint rows (`title`, `sessionListMetadata`) — or deleted when it
-   * has none. Dropping fold rows only costs a longer cold replay, never a
-   * value; the listing hints keep such a Session named and ordered in the
-   * list without opening it. Defaults to {@link DEFAULT_MAX_RETAINED_BYTES}.
+   * Largest total serialized checkpoint payload the cache keeps resident
+   * across all Sessions. Records are loaded on demand — a Session's row is
+   * read when a listing, fold, or resume needs it — and stay resident in
+   * least-recently-used order until this budget needs the space, so a long
+   * history never costs heap for records nothing uses. Releasing a record only
+   * costs the next read of it; the medium keeps every value. Defaults to
+   * {@link DEFAULT_MAX_RETAINED_BYTES}.
+   *
+   * The background retention pass also bounds the medium with this budget: the
+   * newest records by checkpoint watermark stay complete, and every older one
+   * is replaced by a record holding only its listing hint rows (or deleted
+   * when it has none). Defaults beyond the fallback resolve from the schema.
    */
   maxRetainedBytes?: number
+  /**
+   * Records one background retention pass reads between event-loop yields. Each
+   * record is one medium read plus one schema validation, so the batch bounds
+   * the pass's longest synchronous slice; a deployment on slower media lowers
+   * it. Defaults to {@link DEFAULT_COMPACTION_BATCH_SIZE}.
+   */
+  compactionBatchSize?: number
+  /**
+   * Delay (milliseconds) after init before the background retention pass starts,
+   * so the Host can serve its first listings and session opens before the pass
+   * competes for the event loop. Defaults to
+   * {@link DEFAULT_COMPACTION_START_DELAY_MS}.
+   */
+  compactionStartDelayMs?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-session-projection-cache -->
@@ -4369,7 +4387,7 @@ export type HelperLaunch = {
 ## `@deepseek-ai/dsh-storage-domain`
 
 - `inject`: `storage`
-- `source`: [`packages/storage/storage-domain/src/index.ts:52`](../packages/storage/storage-domain/src/index.ts)
+- `source`: [`packages/storage/storage-domain/src/index.ts:56`](../packages/storage/storage-domain/src/index.ts)
 
 ```ts config-catalog
 /**

@@ -144,7 +144,7 @@ interface Domain<S extends DomainSpec> {
 
 ## 领域 facility：`ctx.storageDomain`
 
-`DomainFacility`（[签名](#ctxstoragedomain--domainfacility)）在经过路由的后端之上打开已声明的领域。路由是领域插件的配置，绝不属于枢纽：`backend` 指定必填的默认路由，`routes` 按领域名逐个覆盖。`open(spec)` 按严格顺序执行，每一步失败都使整个调用失败：拒绝已打开或仍在关闭中的名称（`already-open`），解析路由（`backend-not-found`），要求后端具备 `kv` facet（`facet-unsupported`），打开 unit（后端的 `version-mismatch`/`malformed-medium` 原样透传），并按 spec 的 zod schema 校验每条已存储记录和 global（`invalid-record`，附带出错的表与键）。调用方拥有返回的句柄，并用 `Domain.close()` 释放它；插件卸载时仍处于打开状态的领域由 facility 负责关闭，已关闭领域的名称只有在拆除完全结束后才释放出来供重新打开。`get(name)` 是无类型的诊断查找，命中的是每个类型化句柄背后包内私有的 `DomainImpl` 运行时；`closeAll()` 是卸载路径。
+`DomainFacility`（[签名](#ctxstoragedomain--domainfacility)）在经过路由的后端之上打开已声明的领域。路由是领域插件的配置，绝不属于枢纽：`backend` 指定必填的默认路由，`routes` 按领域名逐个覆盖。`open(spec)` 按严格顺序执行，每一步失败都使整个调用失败：拒绝已打开或仍在关闭中的名称（`already-open`），解析路由（`backend-not-found`），要求后端具备 `kv` facet（`facet-unsupported`），打开 unit（后端的 `version-mismatch`/`malformed-medium` 原样透传），并按 spec 的 zod schema 校验每条已存储记录和 global（`invalid-record`，附带出错的表与键）。`open(spec, { lazyReads: true, maxResidentBytes })`（`DomainOpenOptions`）在 unit 提供 `recordReader` 时只在打开时读取记录键；`get` 在首次使用时读取并校验一条记录，已加载记录保存在以 `maxResidentBytes` 为上限的最近最少使用集合中，`keys()` 与 `size` 覆盖所有键，`entries()` 只报告常驻记录。没有记录读取器的 unit 以警告回退为立即加载。调用方拥有返回的句柄，并用 `Domain.close()` 释放它；插件卸载时仍处于打开状态的领域由 facility 负责关闭，已关闭领域的名称只有在拆除完全结束后才释放出来供重新打开。`get(name)` 是无类型的诊断查找，命中的是每个类型化句柄背后包内私有的 `DomainImpl` 运行时；`closeAll()` 是卸载路径。
 
 ## 变更事件：`domain/changed`
 
@@ -215,21 +215,26 @@ The mounted domain facility. Opens declared domains over routed backends; one fa
  * name that is already open (`already-open`); resolve the backend route
  * (`backend-not-found` passes through from the hub); require its `kv` facet
  * (`facet-unsupported`); open the unit projected from the spec (backend
- * `version-mismatch`/`malformed-medium` pass through); load and validate
- * every stored record against the spec's zod schemas (`invalid-record`
- * with the offending table and key — unless the spec declares
- * `invalidRecords: 'backup-and-skip'` and the unit can move documents aside, in
- * which case the failing record is backed up, logged, and skipped);
- * construct the domain.
+ * `version-mismatch`/`malformed-medium` pass through); load the stored
+ * records; construct the domain.
+ *
+ * Record loading is eager unless {@link DomainOpenOptions.lazyReads} asks
+ * otherwise: the eager path validates every stored record against the
+ * spec's zod schemas (`invalid-record` with the offending table and key —
+ * unless the spec declares `invalidRecords: 'backup-and-skip'` and the unit
+ * can move documents aside, in which case the failing record is backed up,
+ * logged, and skipped). The lazy path reads only the key index at open and
+ * validates each record when a table read loads it, with the same policy.
  *
  * Lifecycle: the CALLER owns the returned handle and closes it via
  * `Domain.close()` (typically as its own `ctx.effect` disposer) — the
  * facility does not tie the domain to any consumer fiber. Domains still
  * open when the facility unmounts are closed by the plugin disposer.
  * @param spec - The domain declaration, typically from `defineDomain`.
+ * @param options - Record-loading options; omitted means eager materialization.
  * @returns the opened domain handle, typed by the spec.
  */
-async open<S extends DomainSpec>(spec: S): Promise<Domain<S>>
+async open<S extends DomainSpec>(spec: S, options?: DomainOpenOptions): Promise<Domain<S>>
 
 /**
  * Look up an open domain by name, untyped. Diagnostic surface; typed

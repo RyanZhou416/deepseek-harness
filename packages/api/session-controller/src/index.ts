@@ -216,6 +216,7 @@ export class SessionController extends TypertRemoteService {
       (observation) => { this.promote(observation) },
       this.historyPageMaxBytes,
       sessionId => this.agents.retainForFollower(sessionId),
+      values => ctx.sessionProjections.hintValues(values),
     )
     this.listState = new ApiSessionList(ctx, this.listWorkSliceMs, this.listProjectionExcludeKeys)
     await this.commands.initialize()

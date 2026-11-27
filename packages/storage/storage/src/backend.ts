@@ -43,6 +43,56 @@ export interface KvFacet {
   open(descriptor: KvUnitDescriptor): Promise<KvUnit>
 }
 
+/**
+ * On-demand record reads for a unit whose layout keeps one document per
+ * record. A unit whose medium can serve one record without reading the others
+ * exposes this reader, and the domain layer can then serve table reads from
+ * the medium instead of materializing every stored record at open.
+ *
+ * The reader keeps values opaque JSON: the caller validates each record at the
+ * document boundary. A document that is malformed, foreign, or stamped with an
+ * unaccepted version reads as absent, exactly like the open-time load.
+ */
+export interface KvRecordReader {
+  /**
+   * Report every readable record key of every declared table plus the global
+   * slot, without reading record documents. This is what a lazy open costs.
+   * @returns table name → readable keys in medium order (declared tables with
+   * no directory are empty), and the global value (`null` when never written
+   * or not declared).
+   */
+  listKeys(): Promise<{ tables: Record<string, readonly string[]>; global: unknown }>
+
+  /**
+   * Read one record document synchronously. The sync signature is what keeps a
+   * `KvTable.get` synchronous: a read that misses the resident set returns the
+   * medium's value in the same call instead of a promise.
+   *
+   * It reads one document; it must not read the rest of the unit.
+   * @param table - Declared table name.
+   * @param key - Record key; in the `per-record` layout a key is a path
+   * segment and must match `[a-zA-Z0-9_-]+` (an unsafe key rejects).
+   * @returns the version-checked record value, or `undefined` when the medium
+   * holds no readable document for the key. Throws `closed` after
+   * {@link KvUnit.close}, and the backend's own medium error for an unreadable
+   * directory.
+   */
+  read(table: string, key: string): unknown
+
+  /**
+   * Read one record document without blocking the event loop. Maintenance
+   * tasks that stream a whole table (the projection cache's retention pass)
+   * use this path so their reads never stall request handling.
+   *
+   * Contract as {@link read}; a rejection after {@link KvUnit.close} carries
+   * `closed`.
+   * @param table - Declared table name.
+   * @param key - Record key.
+   * @returns the version-checked record value, or `undefined` when absent.
+   */
+  readAsync(table: string, key: string): Promise<unknown>
+}
+
 /** Static identity and shape of one KV unit, projected from its owner's spec. */
 export interface KvUnitDescriptor {
   /** Unit name; must match {@link UNIT_NAME_RE}. Also the file-name / SQL-identifier segment. */
@@ -138,6 +188,14 @@ export interface KvUnit {
    * @returns resolution after the backend accepted the batch.
    */
   deleteRecords(table: string, keys: readonly string[]): Promise<void>
+
+  /**
+   * On-demand record reads for a document-per-record medium. Present only on
+   * units that can serve one record without reading the others; the domain
+   * layer's lazy table mode requires it and falls back to eager materialization
+   * when a unit omits it.
+   */
+  readonly recordReader?: KvRecordReader
 
   /**
    * Move one record's stored document out of the unit's readable set,

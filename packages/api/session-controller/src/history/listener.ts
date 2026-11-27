@@ -152,7 +152,9 @@ export class ProjectionListener implements Disposable {
         const published = changes.filter(change => live.has(change.key))
         if (published.length === 0) return
         buffer.capture(() => {
-          // Every projection definition validates its value before change publication.
+          // Every projection definition validates its value before change
+          // publication. A live update keeps its whole value: a Client that
+          // already read the complete value must not have it narrowed here.
           input.append({ type: 'projection', seq, changes: published as SessionProjectionChange['changes'] })
         })
       })

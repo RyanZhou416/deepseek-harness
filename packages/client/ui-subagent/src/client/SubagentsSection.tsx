@@ -1,6 +1,7 @@
 /** Session panel section listing the current Session's subagents. */
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { HoverCardGroup } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { InjectFace, PropsLocale, PropsRenderFactories, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import type { NS } from './locales.ts'
 import type { PanelDetailsProps } from '@deepseek-ai/dsh-client-ui-session-panel/client'
@@ -85,8 +86,10 @@ function sectionOrder(
  * most recently active ones. The list shows five rows and then a fold control
  * that shows the rest, once that holds back two rows or more; the choice is
  * kept per Session. The section renders nothing while the Session has no
- * subagents and no failed catalog read. Showing it reads nothing: rows offer
- * expansion from locally known catalogs, and expanding a branch or retrying a
+ * subagents and no failed catalog read. Showing it reads the Session's
+ * complete catalog once — a pushed catalog value carries only the newest
+ * entries, so progress and the fold count need this read — and rows offer
+ * expansion from locally known catalogs, expanding a branch or retrying a
  * failed read prepares that level. Opening a subagent closes the panel's
  * overlay.
  * @param props - Session hooks, panel owner values, the fold store, catalog actions, and copy.
@@ -100,6 +103,14 @@ export function SubagentsSection({
   const catalog = catalogs[sessionId]
   const unfolded = useStore(state => state.unfolded)
   const prepareLevel = useMemo(() => levelPreparer(prepareCatalog), [prepareCatalog])
+  // The catalog a push carries is bounded to its newest entries, so a shown
+  // section reads the complete value once per Session.
+  const preparedSession = useRef<SessionId | undefined>(undefined)
+  useEffect(() => {
+    if (preparedSession.current === sessionId) return
+    preparedSession.current = sessionId
+    prepareLevel(sessionId)
+  }, [prepareLevel, sessionId])
   const panelDetails = useCallback(
     (details: PanelDetailsProps) => renderFactorySlot('conversation.session.panel.details', details), [renderFactorySlot],
   )

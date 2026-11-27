@@ -13,6 +13,7 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   catalogNames,
   establishExternalCatalogChild,
+  SUBAGENT_CATALOG_HINT_LIMIT,
   subagentCatalogProjectionDefinition,
 } from '../src/catalog.ts'
 import type { SubagentCatalogState } from '../src/catalog.ts'
@@ -54,6 +55,26 @@ function fact(
 }
 
 describe('subagent catalog projection', () => {
+  it('narrows a pushed catalog to its newest entries while the view keeps every entry', () => {
+    const events = Array.from({ length: SUBAGENT_CATALOG_HINT_LIMIT + 8 }, (_, index) => fact(
+      index,
+      `child-${String(index)}`,
+      1_000 + index,
+      { mode: 'continuable', label: `worker ${String(index)}` },
+    ))
+    const view = subagentCatalogProjectionDefinition.wire.view(fold(events))
+    expect(view).toHaveLength(SUBAGENT_CATALOG_HINT_LIMIT + 8)
+    const hint = subagentCatalogProjectionDefinition.wire.hintView
+    if (hint === undefined) throw new Error('the catalog must declare a pushed hint view')
+    const pushed = hint(view)
+    expect(pushed.map(entry => entry.id)).toEqual(
+      view.slice(-SUBAGENT_CATALOG_HINT_LIMIT).map(entry => entry.id),
+    )
+    // A catalog that already fits is served as one reference, not copied.
+    const small = subagentCatalogProjectionDefinition.wire.view(fold(events.slice(0, SUBAGENT_CATALOG_HINT_LIMIT)))
+    expect(hint(small)).toBe(small)
+  })
+
   it('records an external child once with its label and creation time', async () => {
     const ctx = new Context()
     try {

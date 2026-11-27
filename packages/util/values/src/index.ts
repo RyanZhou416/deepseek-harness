@@ -33,9 +33,21 @@ function isIntrinsicObjectPrototype(value: object): boolean {
   return Object.getPrototypeOf(value) === null && hasIntrinsicConstructor(value, 'Object')
 }
 
+/**
+ * This realm's intrinsic prototypes, captured at module load. Values built here
+ * (parsed JSON, object literals) reach them directly, so the walk accepts them
+ * without re-reading their `constructor` and source text on every container;
+ * prototypes from other realms still take the full intrinsic check.
+ */
+const OWN_OBJECT_PROTOTYPE: object = Object.prototype
+const OWN_ARRAY_PROTOTYPE: object = Array.prototype
+const OWN_PROTOTYPES_INTRINSIC = hasIntrinsicConstructor(OWN_OBJECT_PROTOTYPE, 'Object')
+  && hasIntrinsicConstructor(OWN_ARRAY_PROTOTYPE, 'Array')
+
 /** Whether an array uses one realm's intrinsic `Array.prototype`, not a subclass or forged prototype. */
 function hasPlainArrayPrototype(value: unknown[]): boolean {
   const prototype: unknown = Object.getPrototypeOf(value)
+  if (prototype === OWN_ARRAY_PROTOTYPE && OWN_PROTOTYPES_INTRINSIC) return true
   if (!Array.isArray(prototype) || !hasIntrinsicConstructor(prototype, 'Array')) return false
   const objectPrototype: unknown = Object.getPrototypeOf(prototype)
   return typeof objectPrototype === 'object'
@@ -46,15 +58,17 @@ function hasPlainArrayPrototype(value: unknown[]): boolean {
 /** Whether an object is a plain or null-prototype record from any JavaScript realm. */
 function hasPlainObjectPrototype(value: object): boolean {
   const prototype: unknown = Object.getPrototypeOf(value)
+  if (prototype === OWN_OBJECT_PROTOTYPE && OWN_PROTOTYPES_INTRINSIC) return true
   return prototype === null
     || typeof prototype === 'object' && isIntrinsicObjectPrototype(prototype)
 }
 
 /** Return every JSON-visible object key, or reject own data JSON would discard. */
 function enumerableStringKeys(value: object): string[] | undefined {
-  const keys = Reflect.ownKeys(value)
-  if (keys.some(key => typeof key !== 'string' || !Object.prototype.propertyIsEnumerable.call(value, key))) return undefined
-  return keys as string[]
+  // Object.keys lists exactly the enumerable own string keys, in own-key order;
+  // equal counts mean no symbol or non-enumerable own key exists.
+  const keys = Object.keys(value)
+  return keys.length === Reflect.ownKeys(value).length ? keys : undefined
 }
 
 /** One active container, with child reads in its captured key or index order. */

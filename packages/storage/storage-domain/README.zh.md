@@ -57,6 +57,10 @@ domain.table('workspaces').update(id, (r) => ({ ...r, path: newPath }))
 
 调用方拥有句柄的生命周期，并在功能关闭时用 `domain.close()` 释放它（通常作为其自身的 `ctx.effect` 资源释放函数）；插件卸载时，设施会关闭仍处于打开状态的领域。
 
+### 按需读取记录
+
+记录较大、稀疏或可单独丢弃的领域可以要求按需读取：`ctx.storageDomain.open(spec, { lazyReads: true, maxResidentBytes })` 在打开时只读取单元的键索引，并在表读取需要某条记录时才载入它（在该边界按领域 schema 校验）。已载入记录留在有界的最近最少使用常驻集中，下一次载入会超出 `maxResidentBytes` 时释放；介质保留每个值，因此释放只让下次读取变贵。该模式要求 `per-record` 布局与暴露 `recordReader` 的后端单元；其他单元会警告并回退到全量物化。在这种表上，`keys()` 与 `size` 覆盖全部已存记录，`entries()` 只报告常驻集，`scan()` 以不驻留的方式把全部记录各流式读取一次（缓存所有者用来约束介质的维护读取）。
+
 ### 把领域路由到后端
 
 哪个后端服务哪个领域由领域插件的配置决定——绝非枢纽。`backend` 指定默认路由；`routes` 按领域名覆盖。路由到未注册后端的领域会在打开时以 `backend-not-found` 明确报错。

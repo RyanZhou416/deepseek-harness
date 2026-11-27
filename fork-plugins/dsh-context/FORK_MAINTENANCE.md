@@ -33,6 +33,12 @@ Two earlier fork behaviors from the `v0.78.2` baseline stay retired: lazy `/cont
 
 The fork pins `zod` to the exact version the installed harness registry uses (`4.6.6` in this checkout; the host's `packages/session/session-projection` declares `4.6.6`). Its `_zod.version` participates in type identity, so a different copy can make `ctx.sessionProjections.register()` reject every unit at type-check time. The plugin's development dependencies stay on the lowest supported Harness floor (`0.2.0-rc.2`) as `tests/compat/bundle.spec.ts` requires; the runtime works on all five declared releases and degrades to the legacy detail fold where the newer read faces are absent.
 
+## Timeline row sweep
+
+`src/host/sweep.ts` rewrites every legacy persisted `contextTimeline` row (`ver: 36`) into the head-only shape generation 37. The projection-cache domain reads records on demand, so the sweep walks `sessions.keys()` and calls `get(id)` per record instead of `entries()`, and it yields to the event loop after at most 50 ms of synchronous work (`SWEEP_SLICE_MS`) so a full catalog never blocks a request turn. A record whose `update` fails stays on the refold path and does not block the completion marker, and a record deleted between the key snapshot and the read is skipped.
+
+The walk is not repeated on every Host start. After the whole scan finishes, the sweep records its completion marker in the plugin's own storage, `<DSH_HOME>/storages/dsh-context/timeline-sweep.v1.json`, as `{"format":1,"version":37}`; it uses the plugin's existing `storagePathOf`/`FileIo` state-file helpers, not a new global singleton or service. The next start reads the marker before touching the catalog and returns when the recorded version is at or above the head-only generation, so `keys()` and every `get()` are skipped. Rows written after the sweep are already at the current version and need no rescan. An interrupted scan — process exit or fiber dispose — writes nothing and the next start sweeps again from the beginning; bumping the head-only shape generation makes the recorded version stale and triggers one more sweep. The marker is an optimization, not an authority: a missing, malformed, or foreign-format marker reads as absent and only costs another sweep.
+
 ## Host compatibility
 
 `docs/compatibility.md` is the compatibility source of truth. The fork adds the `0.2.3-alpha.2` baseline to `package.json` (`engines.dsh`, the `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-client-ui-primitives` peers, and `dsh.compatibility.dshReleases`), `tests/baselines.ts`, and both CI workflows' tag fetch lists, so `tests/compat/bundle.spec.ts` keeps the five in lockstep and the seam matrix runs against the tag's real sources. `0.2.3-alpha.2` moved the account wallet to `packages/account/deepseek-account` (same service, `getBalance` face, and bundle entry) and narrowed the Session control stream to summary keys; the baseline descriptor records both. `engines.dsh` decides admission on the `0.2.2`/`0.2.3` lines (peers only gate `0.2.0` and pre-alpha.4 `0.2.1`), and the engine floor stays `0.2.0-rc.2`.
@@ -58,6 +64,18 @@ corepack pnpm@11.9.0 exec vitest run tests/host/detail.spec.ts tests/host/detail
 corepack pnpm@11.9.0 run lint && corepack pnpm@11.9.0 run test && corepack pnpm@11.9.0 run build
 corepack pnpm@11.9.0 pack --pack-destination ..\releases
 ```
+
+The shared worktree keeps this plugin without `node_modules`, so prepare an isolated copy instead of installing here. Copy this directory to `C:\Project\dsh-perf3\ctx-verify\dsh-context` while excluding only its own top-level `node_modules`, `lib`, `.tmp`, `coverage`, and `.git` entries — the version fixtures under `tests/host/fixtures/version/homes` carry their own `node_modules` and must be copied. Then run:
+
+```powershell
+$env:NODE_OPTIONS=''
+..\..\worktree\scripts\fork-windows-pnpm.cmd install --frozen-lockfile --ignore-scripts --config.auto-install-peers=true --config.trust-lockfile=true --offline
+node_modules\.bin\tsc.cmd --noEmit -p tsconfig.tests.json
+node_modules\.bin\tsdown.cmd
+node_modules\.bin\vitest.cmd run --coverage --maxWorkers=2
+```
+
+The build precedes the suite because `tests/host/foldWorkerBuilt.spec.ts` loads the built `lib/index.js`. `tests/host/index.spec.ts` pins the sweep's completion marker: a completed sweep leaves the next boot without any `keys()` or `get()` call, an older marker version sweeps again, a malformed or foreign-format marker reads as absent, a dispose during the walk stops the scan and writes nothing, and a marker write failure only warns. The coverage run enforces the per-file 100% thresholds.
 
 `tests/host/detail-cold.spec.ts` pins the stored-session detail rungs: a head read costs one metadata stat and no log read, a missing cached head or malformed header serves null, the bounded window is marked `partial` and a complete window is not, `full: true` folds the whole log once and replays it by revision, and cancellation answers the aborted envelope. `tests/host/headViews.spec.ts` pins the live-snapshot and degraded head-view reads. `tests/host/model-pricing.spec.ts` and `tests/shared/modelPricing.spec.ts` pin the `long` bucket and the reference table, `tests/host/cost.spec.ts` pins reference pricing with a cold catalogue and the long price tag, and `tests/client/components/statsContext.spec.ts` pins the dated disclosure and long-context tag. `tests/client/agentHeads.spec.ts` pins the head views and the activity-keyed cache. The compat matrix runs when `DSH_REPO` names a DeepSeek Harness checkout carrying the `dsh-v0.2.0-rc.2`, `dsh-v0.2.1-rc.2`, `dsh-v0.2.2-rc.1`, `dsh-v0.2.2-rc.3`, and `dsh-v0.2.3-alpha.2` tags; per baseline it stages that tag's real sources (synthesizing the `FiberState` object the published cordis erases from its `const enum`), boots the BUILT plugin into the tag's registry, and probes the host and client seams. Its first run per baseline installs that tag's cordis and session packages into `.tmp/compat`, so pre-install them if a cold run exceeds the hook timeout. Store the packed artifact's uppercase SHA-256 beside it and inspect the tarball manifest and its embedded `package.json` version before installation.
 

@@ -340,6 +340,16 @@ describe('isJsonValue', () => {
     expect(isJsonValue(nullPrototype)).toBe(true)
   })
 
+  it('accepts parsed containers of this realm without rereading their prototype constructors', () => {
+    const parsed = JSON.parse('{"a":[1,{"b":"c"}],"d":{"e":null}}') as unknown
+    const constructorRead = vi.spyOn(Object, 'getOwnPropertyDescriptor')
+    try {
+      expect(isJsonValue(parsed)).toBe(true)
+      expect(constructorRead).not.toHaveBeenCalled()
+    } finally {
+      constructorRead.mockRestore()
+    }
+  })
   it('rejects sparse or decorated arrays, invalid children, exotic objects, and cycles', () => {
     class Exotic {
       readonly value = 1

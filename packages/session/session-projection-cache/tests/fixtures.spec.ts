@@ -327,21 +327,25 @@ describe('archived version recovery', () => {
     // The boot survives the broken record — this line rejecting IS the fixed bug.
     await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
 
-    // Concrete console diagnostics: which record, where it went, and why.
-    expect(error).toHaveBeenCalledWith(expect.stringContaining("record 'broken'"))
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('.json.bak.'))
-
-    // The document was moved aside as <key>.json.bak.<YYYYMMDDHHmm>, bytes intact.
-    const entries = await readdir(sessionsDir)
-    expect(entries).not.toContain('broken.json')
-    const backup = entries.find(name => /^broken\.json\.bak\.\d{12}$/.test(name))
-    expect(backup).toBeDefined()
-    expect(JSON.parse(await readFile(join(sessionsDir, backup!), 'utf8')))
-      .toMatchObject({ record: { rows: 'not-an-object' } })
+    // The record is validated when a read loads it, so the broken document
+    // costs the boot nothing and the salvage happens behind the read that hit it.
+    const cache = ctx.sessionProjectionCache
+    expect(cache.cachedSnapshot(headerFor(brandString<SessionId>('broken'), { createdAt: 0 }))).toBeUndefined()
+    await vi.waitFor(async () => {
+      // Concrete console diagnostics: which record, where it went, and why.
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("record 'broken'"))
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('.json.bak.'))
+      // The document was moved aside as <key>.json.bak.<YYYYMMDDHHmm>, bytes intact.
+      const entries = await readdir(sessionsDir)
+      expect(entries).not.toContain('broken.json')
+      const backup = entries.find(name => /^broken\.json\.bak\.\d{12}$/.test(name))
+      expect(backup).toBeDefined()
+      expect(JSON.parse(await readFile(join(sessionsDir, backup!), 'utf8')))
+        .toMatchObject({ record: { rows: 'not-an-object' } })
+    })
 
     // The broken record reads as absent; its predecessor-stamped neighbor
     // remains available for a safe current rewrite.
-    const cache = ctx.sessionProjectionCache
     expect(cache.cachedSnapshot(headerFor(brandString<SessionId>('broken'), { createdAt: 0 })))
       .toBeUndefined()
     expect(cache.cachedSnapshot(

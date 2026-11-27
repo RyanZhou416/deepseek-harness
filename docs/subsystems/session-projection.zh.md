@@ -87,6 +87,19 @@ interface ProjectionDefinition<K extends string, S> {
      */
     view(state: NoInfer<S>): SessionProjectionViewValue<SessionProjectionMap[K]>
     /**
+     * Narrow the value a baseline push carries: a Session summary, a control
+     * baseline, or a follow opening block. Live change frames, explicit
+     * `session.projections` reads, Host snapshots, checkpoints, and every
+     * Host-internal fold stay complete, so a unit whose client value grows
+     * without bound declares this while Host consumers keep the whole state.
+     * The result keeps the wire type — a bounded suffix of a growing list, or
+     * the value itself when it is small enough — and a Client that needs the
+     * whole value reads it explicitly. The function runs for every pushed value
+     * of this key and MUST be pure and cheap.
+     * @default undefined (pushes carry the complete view)
+     */
+    hintView?(value: SessionProjectionViewValue<SessionProjectionMap[K]>): SessionProjectionViewValue<SessionProjectionMap[K]>
+    /**
      * Whether a Session summary carries this unit; omitted means `true`.
      * Declare `false` on a key whose map entry carries the
      * `SessionProjectionSummaryExcluded` mark: the runtime key set follows this
@@ -255,7 +268,7 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 ### `ctx.sessionProjectionCache` — `SessionProjectionCache`
 
-The persisted projection cache service. Opens the `session_projcache` domain at init, checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus three mandatory points — session creation, `turn/end`, and session disposal (the live-to-cold moment) — and serves the cached rows for a session header. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write.
+The persisted projection cache service. Opens the `session_projcache` domain at init for on-demand record reads (the open costs a key index, not the corpus), checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus three mandatory points — session creation, `turn/end`, and session disposal (the live-to-cold moment) — and serves the cached rows for a session header. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write.
 
 ```ts cordis-catalog
 /**
@@ -410,6 +423,27 @@ snapshot( session: Session, keys?: ProjectionKeySelection, ): ProjectionSnapshot
  * @returns the registered client-visible keys; empty when no unit has a wire view.
  */
 wireKeys(): readonly Extract<keyof SessionProjectionMap, string>[]
+
+/**
+ * Narrow one pushed value to its unit's declared hint view.
+ *
+ * A Host push (Session summary, control frame, follow opening block, follow
+ * projection frame) may carry only the bounded value a unit declares for
+ * listings; an explicit `session.projections` read and a Host snapshot keep
+ * the complete view. A key without a hint view, and a key with no live
+ * registration, passes its value through unchanged.
+ * @param key - client-visible projection key the value belongs to.
+ * @param value - schema-validated view value about to enter a push.
+ * @returns the narrowed value, or the same reference when the unit declares no hint.
+ */
+hintValue<T>( key: Extract<keyof SessionProjectionMap, string>, value: T, ): T
+
+/**
+ * Narrow every value of one pushed block through {@link hintValue}.
+ * @param values - schema-validated view values about to enter a push.
+ * @returns the narrowed block, or the same reference when no selected unit declares a hint.
+ */
+hintValues<T extends Record<string, unknown>>(values: T): T
 
 /**
  * The keys a Session summary carries: every registered client-visible key

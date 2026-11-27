@@ -57,6 +57,10 @@ domain.table('workspaces').update(id, (r) => ({ ...r, path: newPath }))
 
 The caller owns the handle's lifecycle and releases it with `domain.close()` when the feature shuts down (typically its own `ctx.effect` disposer); domains still open when the plugin unmounts are closed by the facility.
 
+### Reading records on demand
+
+A spec whose records are large, sparse, or individually disposable can ask for on-demand reads: `ctx.storageDomain.open(spec, { lazyReads: true, maxResidentBytes })` reads only the unit's key index at open and loads a record — validating it against the spec schema at that boundary — when a table read needs it. Loaded records stay in a bounded least-recently-used resident set and are released when the next load would exceed `maxResidentBytes`; the medium keeps every value, so releasing one only costs its next read. The mode requires the `per-record` layout and a routed unit that exposes a `recordReader`; any other unit falls back to eager materialization with a warning. On such a table, `keys()` and `size` cover every stored record while `entries()` reports the resident set, and `scan()` streams every record once without retaining it (the maintenance read a cache owner uses to bound the medium).
+
 ### Routing domains to backends
 
 The domain plugin's configuration decides which backend serves which domain — never the hub. `backend` names the default route; `routes` overrides it per domain name. A route naming an unregistered backend fails loudly at open with `backend-not-found`.

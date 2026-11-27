@@ -144,7 +144,7 @@ Reads are synchronous from authoritative in-memory state: `KvTable` exposes `get
 
 ## The domain facility: `ctx.storageDomain`
 
-`DomainFacility` ([signatures](#ctxstoragedomain--domainfacility)) opens declared domains over routed backends. Routing is the domain plugin's configuration, never the hub's: `backend` names the required default route and `routes` overrides it per domain name. `open(spec)` runs a strict sequence, each step failing the whole call: it rejects a name already open or still closing (`already-open`), resolves the route (`backend-not-found`), requires the backend's `kv` facet (`facet-unsupported`), opens the unit (backend `version-mismatch`/`malformed-medium` pass through), and validates every stored record and global against the spec's zod schemas (`invalid-record` with the offending table and key). The caller owns the returned handle and releases it with `Domain.close()`; domains still open when the plugin unmounts are closed by the facility, and a closed domain's name frees for reopening only after teardown fully completes. `get(name)` is an untyped diagnostic lookup onto the package-private `DomainImpl` runtime behind every typed handle; `closeAll()` is the unmount path.
+`DomainFacility` ([signatures](#ctxstoragedomain--domainfacility)) opens declared domains over routed backends. Routing is the domain plugin's configuration, never the hub's: `backend` names the required default route and `routes` overrides it per domain name. `open(spec)` runs a strict sequence, each step failing the whole call: it rejects a name already open or still closing (`already-open`), resolves the route (`backend-not-found`), requires the backend's `kv` facet (`facet-unsupported`), opens the unit (backend `version-mismatch`/`malformed-medium` pass through), and validates every stored record and global against the spec's zod schemas (`invalid-record` with the offending table and key). `open(spec, { lazyReads: true, maxResidentBytes })` (`DomainOpenOptions`) instead reads only the record keys at open when the unit offers a `recordReader`; `get` then reads and validates one record on first use and keeps loaded records in a least-recently-used set bounded by `maxResidentBytes`, `keys()` and `size` cover every key, and `entries()` reports only resident records. A unit without a record reader opens eagerly with a warning. The caller owns the returned handle and releases it with `Domain.close()`; domains still open when the plugin unmounts are closed by the facility, and a closed domain's name frees for reopening only after teardown fully completes. `get(name)` is an untyped diagnostic lookup onto the package-private `DomainImpl` runtime behind every typed handle; `closeAll()` is the unmount path.
 
 ## The change event: `domain/changed`
 
@@ -215,21 +215,26 @@ The mounted domain facility. Opens declared domains over routed backends; one fa
  * name that is already open (`already-open`); resolve the backend route
  * (`backend-not-found` passes through from the hub); require its `kv` facet
  * (`facet-unsupported`); open the unit projected from the spec (backend
- * `version-mismatch`/`malformed-medium` pass through); load and validate
- * every stored record against the spec's zod schemas (`invalid-record`
- * with the offending table and key — unless the spec declares
- * `invalidRecords: 'backup-and-skip'` and the unit can move documents aside, in
- * which case the failing record is backed up, logged, and skipped);
- * construct the domain.
+ * `version-mismatch`/`malformed-medium` pass through); load the stored
+ * records; construct the domain.
+ *
+ * Record loading is eager unless {@link DomainOpenOptions.lazyReads} asks
+ * otherwise: the eager path validates every stored record against the
+ * spec's zod schemas (`invalid-record` with the offending table and key —
+ * unless the spec declares `invalidRecords: 'backup-and-skip'` and the unit
+ * can move documents aside, in which case the failing record is backed up,
+ * logged, and skipped). The lazy path reads only the key index at open and
+ * validates each record when a table read loads it, with the same policy.
  *
  * Lifecycle: the CALLER owns the returned handle and closes it via
  * `Domain.close()` (typically as its own `ctx.effect` disposer) — the
  * facility does not tie the domain to any consumer fiber. Domains still
  * open when the facility unmounts are closed by the plugin disposer.
  * @param spec - The domain declaration, typically from `defineDomain`.
+ * @param options - Record-loading options; omitted means eager materialization.
  * @returns the opened domain handle, typed by the spec.
  */
-async open<S extends DomainSpec>(spec: S): Promise<Domain<S>>
+async open<S extends DomainSpec>(spec: S, options?: DomainOpenOptions): Promise<Domain<S>>
 
 /**
  * Look up an open domain by name, untyped. Diagnostic surface; typed

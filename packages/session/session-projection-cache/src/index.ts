@@ -58,25 +58,27 @@ type CurrentCheckpointIdentity = CheckpointIdentity & {
 const PREDECESSOR_TITLE_KEY = 'title' as Extract<keyof SessionProjectionMap, string>
 
 /**
- * Listing hint rows a record outside the retained-byte budget keeps. Both are
- * small zero-fold values the Session list names and orders a row by; every
- * other row is fold state that only an opened Session reads. The metadata key
- * is contributed by the API layer, so it is matched by its stored name rather
- * than through this package's projection-map declaration.
- */
-const LIST_HINT_KEYS = ['title', 'sessionListMetadata'] as const
-
-/**
- * Default ceiling on the serialized checkpoint bytes the cache keeps complete.
- * The storage domain materializes every stored record at open and holds it for
- * the process lifetime, so this budget is what bounds that always-resident set;
- * a deployment with a long history stores far more than it can use. Records
- * outside it keep only their listing hint rows.
+ * Default ceiling on the serialized checkpoint bytes the cache keeps resident.
+ * Loaded records stay in memory only until this budget needs the space; the
+ * medium keeps every record, so a released one is simply read again when a
+ * later listing or fold needs it.
  */
 export const DEFAULT_MAX_RETAINED_BYTES = 256 * 1024 * 1024
 
-/** Records visited between event-loop yields in the startup budget pass. */
-const BUDGET_YIELD_INTERVAL = 64
+/** Default records one background retention pass reads between event-loop yields. */
+export const DEFAULT_COMPACTION_BATCH_SIZE = 16
+
+/** Default delay before the background retention pass starts, so startup traffic lands first. */
+export const DEFAULT_COMPACTION_START_DELAY_MS = 10_000
+
+/**
+ * Rows a record outside the retention budget keeps on the medium. They are the
+ * listing hints the Session list names and orders a row by; every other row is
+ * fold state that only an opened Session reads. The metadata key is contributed
+ * by the API layer, so it is matched by its stored name rather than through this
+ * package's projection-map declaration.
+ */
+const LIST_HINT_KEYS = ['title', 'sessionListMetadata'] as const
 
 export { checkpointIdentity, checkpointRecord, checkpointRow, projectionCacheDomainSpec } from './spec.ts'
 export type { CheckpointIdentity, CheckpointRecord } from './spec.ts'
@@ -100,22 +102,42 @@ export interface Config {
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
   /**
-   * Largest total serialized checkpoint payload the cache keeps complete
-   * across all Sessions. At init the newest records (ranked by their highest
-   * checkpoint seq) stay complete until this budget is reached, and every
-   * remaining record is replaced by a lightweight record holding only its
-   * listing hint rows (`title`, `sessionListMetadata`) — or deleted when it
-   * has none. Dropping fold rows only costs a longer cold replay, never a
-   * value; the listing hints keep such a Session named and ordered in the
-   * list without opening it. Defaults to {@link DEFAULT_MAX_RETAINED_BYTES}.
+   * Largest total serialized checkpoint payload the cache keeps resident
+   * across all Sessions. Records are loaded on demand — a Session's row is
+   * read when a listing, fold, or resume needs it — and stay resident in
+   * least-recently-used order until this budget needs the space, so a long
+   * history never costs heap for records nothing uses. Releasing a record only
+   * costs the next read of it; the medium keeps every value. Defaults to
+   * {@link DEFAULT_MAX_RETAINED_BYTES}.
+   *
+   * The background retention pass also bounds the medium with this budget: the
+   * newest records by checkpoint watermark stay complete, and every older one
+   * is replaced by a record holding only its listing hint rows (or deleted
+   * when it has none). Defaults beyond the fallback resolve from the schema.
    */
   maxRetainedBytes?: number
+  /**
+   * Records one background retention pass reads between event-loop yields. Each
+   * record is one medium read plus one schema validation, so the batch bounds
+   * the pass's longest synchronous slice; a deployment on slower media lowers
+   * it. Defaults to {@link DEFAULT_COMPACTION_BATCH_SIZE}.
+   */
+  compactionBatchSize?: number
+  /**
+   * Delay (milliseconds) after init before the background retention pass starts,
+   * so the Host can serve its first listings and session opens before the pass
+   * competes for the event loop. Defaults to
+   * {@link DEFAULT_COMPACTION_START_DELAY_MS}.
+   */
+  compactionStartDelayMs?: number
 }
 
 export const Config: z<Config> = z.object({
   writeEveryEvents: z.natural().min(1).required(),
   writeIntervalMs: z.natural().min(1).required(),
   maxRetainedBytes: z.natural().min(1).default(DEFAULT_MAX_RETAINED_BYTES),
+  compactionBatchSize: z.natural().min(1).default(DEFAULT_COMPACTION_BATCH_SIZE),
+  compactionStartDelayMs: z.natural().default(DEFAULT_COMPACTION_START_DELAY_MS),
 })
 
 /** Per-session write-behind bookkeeping (live sessions only; dropped at retire). */
@@ -128,7 +150,8 @@ interface DirtyState {
 
 /**
  * The persisted projection cache service. Opens the `session_projcache`
- * domain at init, checkpoints live sessions on a throttled write-behind
+ * domain at init for on-demand record reads (the open costs a key index, not
+ * the corpus), checkpoints live sessions on a throttled write-behind
  * (count/interval triggers from {@link Config}) plus three mandatory points —
  * session creation, `turn/end`, and session disposal (the live-to-cold
  * moment) — and serves the
@@ -142,20 +165,45 @@ export class SessionProjectionCache extends Service {
 
   private table?: KvTable<SessionId, CheckpointRecord>
   private readonly dirty = new Map<Session, DirtyState>()
+  /** Keys the cache wrote while a retention pass runs; the pass must not replace them. */
+  private readonly writtenDuringCompaction = new Set<SessionId>()
+  private compacting = false
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'sessionProjectionCache')
   }
 
-  /** Open the domain, install the write-behind listeners, then bound the inherited records. */
+  /**
+   * Open the domain for bounded on-demand reads, install the write-behind
+   * listeners, then schedule the background retention pass. Nothing reads a
+   * stored record here: a listing, fold, or resume loads the one row it needs,
+   * the domain releases rows beyond {@link Config.maxRetainedBytes}, and the
+   * pass bounds the medium afterwards without blocking startup.
+   */
   protected async [Service.init](): Promise<void> {
-    const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec)
+    /* v8 ignore next -- Config resolves maxRetainedBytes to its default before construction */
+    const maxResidentBytes = this.config.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES
+    const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec, {
+      lazyReads: true,
+      maxResidentBytes,
+    })
     this.ctx.effect(() => () => domain.close(), 'sessionProjectionCache.domainClose')
     this.table = domain.table('sessions')
     this.installWritePath()
-    // The domain materializes every stored record at open, so the byte budget
-    // only reaches an already-populated deployment through this first pass.
-    void this.boundRetainedBytes()
+    this.scheduleRetentionPass()
+  }
+
+  /**
+   * Start the background retention pass after {@link Config.compactionStartDelayMs},
+   * so startup requests are served first. The timer is unref'd (it must not keep
+   * a short-lived process alive) and the plugin's disposer clears it.
+   */
+  private scheduleRetentionPass(): void {
+    /* v8 ignore next -- Config resolves compactionStartDelayMs to its default before construction */
+    const delay = this.config.compactionStartDelayMs ?? DEFAULT_COMPACTION_START_DELAY_MS
+    const timer = setTimeout(() => { void this.compactRetainedBytes() }, delay)
+    timer.unref?.()
+    this.ctx.effect(() => () => { clearTimeout(timer) }, 'sessionProjectionCache.retentionTimer')
   }
 
   /**
@@ -349,113 +397,129 @@ export class SessionProjectionCache extends Service {
   }
 
   /**
-   * Bound the always-resident checkpoint set to {@link Config.maxRetainedBytes}.
+   * Bound the medium with {@link Config.maxRetainedBytes}, after startup.
    *
-   * The storage domain materializes every stored record at open, so a long
-   * history costs heap for records nothing can use. Records rank by their
-   * highest checkpoint seq (the recency proxy: a Session that commits further
-   * has a newer row); the newest stay complete until the budget is reached.
-   * Every remaining record is then REPLACED by a lightweight record that keeps
-   * its identity and only the listing hint rows (`title`, `sessionListMetadata`)
-   * — the zero-I/O list face can still name and order the Session — and a
-   * record with no listing hint row is deleted. A retained record keeps every
-   * row, so `readWindow`'s complete-checkpoint gate and cached reads are
-   * unchanged for it; a dropped fold row only costs a longer cold replay, never
-   * a value.
+   * The pass streams every stored record without retaining it (the table's
+   * `scan`), so it costs the resident set nothing and never blocks a request
+   * with a document read: each record is one asynchronous medium read, and the
+   * pass yields to the event loop every {@link Config.compactionBatchSize}
+   * records. Records rank by their highest checkpoint seq (the recency proxy: a
+   * Session that committed further has a newer row); the newest stay complete
+   * until the budget is reached. Every remaining record is REPLACED by a
+   * lightweight record that keeps its identity and only the listing hint rows
+   * (`title`, `sessionListMetadata`) — the zero-I/O list face can still name and
+   * order the Session — and a record with no listing hint row is deleted.
+   * Dropping fold rows only costs a longer cold replay, never a value.
    *
-   * The pass runs in the background after init, sizes records only as it
-   * reaches them, yields to the event loop while it scans, and never rejects:
-   * a failed replace or delete warns and the pass continues, and a closed
-   * domain ends it. A record rewritten by a live Session while the pass runs is
-   * left alone (the ranked reference no longer matches), so the pass never
-   * clobbers a fresher checkpoint. The newest record is always retained, so a
-   * deployment whose single newest record exceeds the budget still keeps one
-   * complete checkpoint.
+   * Fail-soft: a failed maintenance write warns and ends the pass (the next
+   * start retries), a failed scan warns and ends it, and a closed domain ends
+   * it. A record the cache wrote while the pass runs is skipped: its fresh
+   * checkpoint must never be replaced by a cut the pass ranked before that
+   * write. Records read concurrently are unaffected — their readers see the
+   * complete record or its replacement, never a partial one.
    */
-  private async boundRetainedBytes(): Promise<void> {
+  private async compactRetainedBytes(): Promise<void> {
     const table = this.table
     /* v8 ignore next -- Service.init assigns the table before this pass starts */
     if (table === undefined) return
-    /* v8 ignore next -- Config resolves maxRetainedBytes to its default before construction */
-    const budget = this.config.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES
-    let ranked: { id: SessionId; record: CheckpointRecord; seq: number }[]
+    const scan = table.scan
+    /* v8 ignore next -- the cache opens the domain for lazy reads, whose table always scans */
+    if (scan === undefined) return
+    this.compacting = true
     try {
-      ranked = [...table.entries()]
-        .map(([id, record]) => ({ id, record, seq: newestSeq(record.rows) }))
-        .sort((left, right) => right.seq - left.seq || left.id.localeCompare(right.id))
-    } catch (error: unknown) {
-      /* v8 ignore start -- fail-soft scan fault; the suite has no fault-injecting domain */
-      this.ctx.logger.warn(`session projection cache: retained-byte scan failed (cache stays complete): ${String(error)}`)
-      return
-      /* v8 ignore stop */
-    }
-    let retainedBytes = 0
-    let retained = 0
-    let lightened = 0
-    let lightBytes = 0
-    let droppedBytes = 0
-    let deleted = 0
-    let reclaimed = 0
-    let scanned = 0
-    let withinBudget = true
-    for (const entry of ranked) {
-      scanned += 1
-      if (scanned % BUDGET_YIELD_INTERVAL === 0) await yieldToEventLoop()
-      const record = table.get(entry.id)
-      // A live Session's checkpoint write replaced this record since the scan:
-      // keep the fresh complete checkpoint instead of an older lightweight cut.
-      /* v8 ignore next -- interleaving a live checkpoint write with the startup pass is not reachable from the suite */
-      if (record === undefined || record !== entry.record) continue
-      const bytes = jsonBytes(record.rows)
-      if (withinBudget && (retained === 0 || retainedBytes + bytes <= budget)) {
-        retainedBytes += bytes
-        retained += 1
-        continue
-      }
-      withinBudget = false
-      const light = listHintRows(record.rows)
-      if (light === undefined) {
-        try {
-          // `delete` is idempotent; the record was read from this table moments
-          // ago, so a missing key would only mean a concurrent delete.
-          await table.delete(entry.id)
-          deleted += 1
-          reclaimed += bytes
-        } catch (error: unknown) {
-          /* v8 ignore start -- fail-soft domain close; the suite has no fault-injecting domain */
-          if (this.table === undefined) return
-          this.ctx.logger.warn(`session projection cache: delete of "${entry.id}" failed (record kept): ${String(error)}`)
-          /* v8 ignore stop */
-        }
-        continue
-      }
-      const keptBytes = jsonBytes(light)
-      if (keptBytes === bytes) {
-        // Written lightweight by an earlier pass: account it without rewriting.
-        lightened += 1
-        lightBytes += keptBytes
-        continue
-      }
+      /* v8 ignore next -- Config resolves compactionBatchSize to its default before construction */
+      const batchSize = this.config.compactionBatchSize ?? DEFAULT_COMPACTION_BATCH_SIZE
+      /* v8 ignore next -- Config resolves maxRetainedBytes to its default before construction */
+      const budget = this.config.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES
+      const inventory: InventoryEntry[] = []
+      let scanned = 0
       try {
-        await table.put(entry.id, { identity: { ...record.identity }, rows: light })
-        lightened += 1
-        lightBytes += keptBytes
-        droppedBytes += bytes - keptBytes
+        for await (const [id, record] of scan()) {
+          const rows = record.rows
+          inventory.push({
+            id,
+            seq: newestSeq(rows),
+            bytes: jsonBytes(rows),
+            identity: record.identity,
+            light: listHintRows(rows),
+          })
+          scanned += 1
+          if (scanned % batchSize === 0) await yieldToEventLoop()
+        }
       } catch (error: unknown) {
-        /* v8 ignore start -- fail-soft domain close; the suite has no fault-injecting domain */
-        if (this.table === undefined) return
-        this.ctx.logger.warn(`session projection cache: lightweight replace of "${entry.id}" failed (record kept complete): ${String(error)}`)
+        /* v8 ignore start -- fail-soft scan fault; the suite has no fault-injecting domain */
+        this.ctx.logger.warn(`session projection cache: retention scan failed (records stay as stored): ${String(error)}`)
+        return
         /* v8 ignore stop */
       }
-    }
-    if (retained > 0 || lightened > 0 || deleted > 0) {
-      this.ctx.logger.info(
-        `session projection cache: retained ${String(retained)} records (${String(retainedBytes)} bytes) within the ${String(budget)}-byte budget; `
-        + `pruned ${String(deleted)} records (${String(reclaimed)} bytes)`
-        + (lightened === 0
-          ? ''
-          : `; kept lightweight list rows for ${String(lightened)} records (${String(lightBytes)} bytes), dropping ${String(droppedBytes)} bytes of fold state`),
-      )
+      inventory.sort((left, right) => right.seq - left.seq || left.id.localeCompare(right.id))
+      let retainedBytes = 0
+      let retained = 0
+      let lightened = 0
+      let lightBytes = 0
+      let droppedBytes = 0
+      let deleted = 0
+      let reclaimed = 0
+      let processed = 0
+      let withinBudget = true
+      for (const entry of inventory) {
+        // A live Session's checkpoint write replaced this record since the scan:
+        // keep the fresh complete checkpoint instead of an older lightweight cut.
+        if (this.writtenDuringCompaction.has(entry.id)) continue
+        if (withinBudget && (retained === 0 || retainedBytes + entry.bytes <= budget)) {
+          retainedBytes += entry.bytes
+          retained += 1
+          continue
+        }
+        withinBudget = false
+        processed += 1
+        if (entry.light === undefined) {
+          try {
+            // `delete` is idempotent; the pass inventoried this record moments
+            // ago, so a missing key would only mean a concurrent delete.
+            await table.delete(entry.id)
+            deleted += 1
+            reclaimed += entry.bytes
+          } catch (error: unknown) {
+            /* v8 ignore start -- fail-soft maintenance fault; the suite has no fault-injecting medium */
+            this.ctx.logger.warn(`session projection cache: delete of "${entry.id}" failed (record kept): ${String(error)}`)
+            return
+            /* v8 ignore stop */
+          }
+        } else {
+          const keptBytes = jsonBytes(entry.light)
+          if (keptBytes === entry.bytes) {
+            // Written lightweight by an earlier pass: account it without rewriting.
+            lightened += 1
+            lightBytes += keptBytes
+          } else {
+            try {
+              await table.put(entry.id, { identity: { ...entry.identity }, rows: entry.light })
+              lightened += 1
+              lightBytes += keptBytes
+              droppedBytes += entry.bytes - keptBytes
+            } catch (error: unknown) {
+              /* v8 ignore start -- fail-soft maintenance fault; the suite has no fault-injecting medium */
+              this.ctx.logger.warn(`session projection cache: lightweight replace of "${entry.id}" failed (record kept complete): ${String(error)}`)
+              return
+              /* v8 ignore stop */
+            }
+          }
+        }
+        if (processed % batchSize === 0) await yieldToEventLoop()
+      }
+      if (retained > 0 || lightened > 0 || deleted > 0) {
+        this.ctx.logger.info(
+          `session projection cache: retained ${String(retained)} records (${String(retainedBytes)} bytes) within the ${String(budget)}-byte budget; `
+          + `pruned ${String(deleted)} records (${String(reclaimed)} bytes)`
+          + (lightened === 0
+            ? ''
+            : `; kept lightweight list rows for ${String(lightened)} records (${String(lightBytes)} bytes), dropping ${String(droppedBytes)} bytes of fold state`),
+        )
+      }
+    } finally {
+      this.compacting = false
+      this.writtenDuringCompaction.clear()
     }
   }
 
@@ -550,6 +614,10 @@ export class SessionProjectionCache extends Service {
     if (detached === undefined || ownership === 'owned' && !isJsonValue(detached)) {
       throw new TypeError('projection checkpoint is not losslessly JSON-serializable (a unit state violates the plain-JSON contract)')
     }
+    // Registered at call time, before the write chain runs: the retention pass
+    // checks this set immediately before its own replacement, so a checkpoint
+    // write that is already queued can never be overwritten by a stale cut.
+    if (this.compacting) this.writtenDuringCompaction.add(id)
     await this.requireTable().put(id, { identity, rows: detached as CheckpointRecord['rows'] })
   }
 
@@ -627,10 +695,23 @@ function lifecycleIdentityMatches(
     && (stored.isSeeded ?? false) === expected.isSeeded
 }
 
+/** One stored record as the retention pass inventoried it: no full rows retained. */
+interface InventoryEntry {
+  /** Session key. */
+  readonly id: SessionId
+  /** Highest checkpoint watermark, the retention plan's recency proxy. */
+  readonly seq: number
+  /** Serialized bytes of the record's rows, the budget's unit. */
+  readonly bytes: number
+  /** The record's stored log identity, kept for the lightweight replacement. */
+  readonly identity: CheckpointIdentity
+  /** The listing hint rows the record keeps outside the budget; `undefined` when it has none. */
+  readonly light: CheckpointRecord['rows'] | undefined
+}
+
 /**
- * Highest checkpoint watermark in one record, the retention plan's recency
- * proxy: a Session that committed further has a newer row. An empty record
- * ranks below every written one.
+ * Highest checkpoint watermark in one record: a Session that committed further
+ * has a newer row. An empty record ranks below every written one.
  * @param rows - The record's checkpoint rows.
  * @returns The highest row seq, or -1 when the record has no rows.
  */
@@ -669,8 +750,8 @@ function jsonBytes(value: unknown): number {
 }
 
 /**
- * Yield to the event loop between budget-pass chunks so bounding a large
- * history cannot stall the caller in one long synchronous pass.
+ * Yield to the event loop between retention-pass chunks so bounding a large
+ * history cannot stall request handling in one long synchronous slice.
  * @returns Resolution on the next immediate turn.
  */
 function yieldToEventLoop(): Promise<void> {
