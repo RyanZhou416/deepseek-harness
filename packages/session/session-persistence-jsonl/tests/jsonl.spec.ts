@@ -3363,6 +3363,26 @@ describe('JsonlSessionPersistence listing concurrency', () => {
     listingProbe.failures.set(earlierSession, earlierSessionFailure)
     await expect(listingCtx.sessionPersistence.list()).rejects.toBe(earlierSessionFailure)
   })
+  it('serves a listing that skips directories without waiting behind a complete listing', async () => {
+    const ids = Array.from({ length: 10 }, (_, index) => `queue-${String(index)}`)
+    await seed('/work', ids)
+    await listingCtx.sessionPersistence.list()
+    listingProbe.delayMs = 20
+    listingProbe.active = true
+    const settled: string[] = []
+    const complete = listingCtx.sessionPersistence.list().then(() => { settled.push('complete') })
+    // Start once the complete listing has queued its per-directory reads.
+    await new Promise(resolve => setTimeout(resolve, 70))
+    const selective = listingCtx.sessionPersistence.list({
+      excludeSessionIds: new Set(ids.slice(1).map(id => brandString<SessionId>(id))),
+    }).then((listed) => {
+      settled.push('selective')
+      expect(listed.map(item => item.header.id)).toEqual(['queue-0'])
+    })
+    await Promise.all([complete, selective])
+    listingProbe.active = false
+    expect(settled).toEqual(['selective', 'complete'])
+  })
   it('skips excluded Session directories before reading their contents', async () => {
     await seed('/work', ['keep-one', 'archived-one'])
     listingProbe.active = true

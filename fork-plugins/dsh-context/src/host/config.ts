@@ -17,9 +17,18 @@ export type FoldBounds = typeof DEFAULT_BOUNDS & {
   headOnly?: boolean
 }
 
-export type Config = Partial<FoldBounds> & Partial<PluginSettings>
+export type Config = Partial<FoldBounds> & Partial<PluginSettings> & {
+  backfillStartDelayMs?: number
+  backfillRefreshDelayMs?: number
+}
 
 export const HISTORY_LIMIT = Number.MAX_SAFE_INTEGER
+
+/** Default wait before the first automatic backfill pass: the Host serves its first list and openings first. */
+export const DEFAULT_BACKFILL_START_DELAY_MS = 60_000
+
+/** Default wait between a Session disposal and its backfill pass. */
+export const DEFAULT_BACKFILL_REFRESH_DELAY_MS = 60_000
 
 export function historyBounds(bounds: FoldBounds): FoldBounds {
   return {
@@ -67,7 +76,17 @@ export const Config = z.object({
   balanceSource: volatileField(z.union(['account', 'api']).default('account').loose()),
   promptPrefix: volatileField(z.string().default('').loose()),
   promptSuffix: volatileField(z.string().default('').loose()),
+  backfillStartDelayMs: z.number().min(0).step(1).default(DEFAULT_BACKFILL_START_DELAY_MS)
+    .description('Milliseconds between Host readiness and the first automatic activity backfill pass.'),
+  backfillRefreshDelayMs: z.number().min(0).step(1).default(DEFAULT_BACKFILL_REFRESH_DELAY_MS)
+    .description('Milliseconds a Session disposal waits before its backfill pass; disposals inside that wait join the same pass.'),
 })
+
+/** Backfill delays the plugin config resolves to. */
+export function resolveBackfillDelays(config: Config | undefined): { startDelayMs: number; refreshDelayMs: number } {
+  const resolved = Config(config ?? {}) as Record<string, unknown>
+  return { startDelayMs: resolved.backfillStartDelayMs as number, refreshDelayMs: resolved.backfillRefreshDelayMs as number }
+}
 
 export function resolveBounds(config: Config | undefined): FoldBounds {
   const resolved = Config(config ?? {}) as FoldBounds & Record<string, unknown>

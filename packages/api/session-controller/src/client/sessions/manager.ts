@@ -525,6 +525,8 @@ export class SessionManager {
     if (existing !== undefined) return existing.promise
     const end = this.projectionPages.unread(sessionId, key)
     if (end === 0) return Promise.resolve()
+    // The merged pages surface through this Session's projection snapshot.
+    this.projectionStore(sessionId)
     const generation = this.hostGeneration
     const token = {}
     const operation = (async () => {

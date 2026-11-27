@@ -144,7 +144,7 @@ describe('apply', () => {
     expect(ctx.slots.entries('conversation.session.panel.section').map(entry => entry.options.id)).toEqual(['subagents'])
   })
 
-  it('reads the parent, then the shown children together, newest first', async () => {
+  it('reads a level without a pushed window once, then the shown children by page together, newest first', async () => {
     const { ctx, face } = await fullBench([...FAMILY, summary({ id: sid('legacy'), formatStatus: 'migration-required' })])
     onTestFinished(() => ctx.fiber.dispose())
     const entry = ctx.slots.entries('conversation.session.header.lineage')
@@ -159,28 +159,56 @@ describe('apply', () => {
         { id: sid('c1'), mode: 'one-shot', createdAt: 2 },
         { id: sid('c2'), mode: 'one-shot', createdAt: 3 },
       ] } }
+    })
+    const pageLoad = face.loadProjectionPage
+    const load = vi.spyOn(face, 'loadProjectionPage').mockImplementation(async (id, key, limit) => {
       if (id === sid('c1')) {
         await held.promise
-        projections[id] = { state: 'ready', error: null, values: { subagentCatalog: [
-          { id: sid('grandchild'), mode: 'one-shot', createdAt: 1 },
-        ] } }
+        projections[id] = { state: 'idle', error: null, values: { subagentCatalog: [{ id: sid('grandchild'), mode: 'one-shot', createdAt: 1 }] } }
+        return
       }
+      await pageLoad(id, key, limit)
     })
-    onTestFinished(() => { refresh.mockRestore() })
+    onTestFinished(() => { refresh.mockRestore(); load.mockRestore() })
     projections[sid('blocked')] = { state: 'migration-required', error: null, values: {} }
     projections[sid('failed')] = { state: 'error', error: null, values: {} }
     const reading = actions.prepareCatalog(sid('parent'))
-    // c2 is requested while c1 is still pending: children are read together, newest first.
-    await vi.waitFor(() => { expect(refresh.mock.calls).toEqual([[sid('parent')], [sid('c2')], [sid('c1')]]) })
+    // c2 is requested while c1 is still pending: children are read together, newest first, by page.
+    await vi.waitFor(() => {
+      expect(load.mock.calls.map(([id]) => id)).toEqual([sid('parent'), sid('c2'), sid('c1')])
+    })
     held.resolve(undefined)
     await reading
-    expect(projections[sid('c1')]?.values.subagentCatalog).toHaveLength(1)
-    // A level that is not ready reads no children; a ready level without a catalog reads none either.
+    expect(refresh.mock.calls).toEqual([[sid('parent')]])
+    expect(load.mock.calls.slice(1).map(([, key, limit]) => [key, limit])).toEqual([['subagentCatalog', CATALOG_PAGE], ['subagentCatalog', CATALOG_PAGE]])
+    // A level with a pushed window starts from it without the exact read.
     refresh.mockClear()
-    await actions.prepareCatalog(sid('c2'))
-    projections[sid('c2')] = { state: 'ready', error: null, values: {} }
-    await actions.prepareCatalog(sid('c2'))
-    expect(refresh.mock.calls).toEqual([[sid('c2')], [sid('c2')]])
+    await actions.prepareCatalog(sid('c1'))
+    expect(refresh).not.toHaveBeenCalled()
+    // A level the exact read leaves without a catalog reads no pages.
+    load.mockClear()
+    await actions.prepareCatalog(sid('lonely'))
+    expect(refresh.mock.calls).toEqual([[sid('lonely')]])
+    expect(load).not.toHaveBeenCalled()
+  })
+
+  it('reports a failed child page after every shown child was requested', async () => {
+    const { ctx, face } = await fullBench(FAMILY)
+    onTestFinished(() => ctx.fiber.dispose())
+    const entry = ctx.slots.entries('conversation.session.header.lineage')
+      .find(entry => entry.component === SubagentHeaderLineage)!
+    const actions = (entry.inject as (id: SessionId) => SubagentCatalogInjected)(sid('parent'))
+    face.projections[sid('parent')] = { state: 'idle', error: null, values: { subagentCatalog: [
+      { id: sid('c1'), mode: 'one-shot', createdAt: 1 },
+      { id: sid('c2'), mode: 'one-shot', createdAt: 2 },
+    ] }, unread: { subagentCatalog: 0 } }
+    const failure = new Error('page failed')
+    const load = vi.spyOn(face, 'loadProjectionPage').mockImplementation(async (id) => {
+      if (id === sid('c2')) throw failure
+    })
+    onTestFinished(() => { load.mockRestore() })
+    await expect(actions.prepareCatalog(sid('parent'))).rejects.toBe(failure)
+    expect(load.mock.calls.map(([id]) => id)).toEqual([sid('c2'), sid('c1')])
   })
 
   it('reads only the child catalogs of the shown page and the next page on request', async () => {
@@ -189,22 +217,19 @@ describe('apply', () => {
     const entry = ctx.slots.entries('conversation.session.header.lineage')
       .find(entry => entry.component === SubagentHeaderLineage)!
     const actions = (entry.inject as (id: SessionId) => SubagentCatalogInjected)(sid('parent'))
-    const projections = face.projections
     const children = Array.from({ length: CATALOG_PAGE + 7 }, (_, index) => ({
       id: sid(`many-${String(index)}`), mode: 'one-shot' as const, createdAt: index,
     }))
-    const refresh = vi.spyOn(face, 'refreshProjections').mockImplementation(async (id) => {
-      if (id === sid('parent')) projections[id] = { state: 'ready', error: null, values: { subagentCatalog: children } }
-    })
-    onTestFinished(() => { refresh.mockRestore() })
+    face.projections[sid('parent')] = { state: 'idle', error: null, values: { subagentCatalog: children } }
+    const childReads = () => face.actionCalls
+      .filter(call => call.method === 'loadProjectionPage' && call.args[0] !== sid('parent')).map(call => call.args[0])
     await actions.prepareCatalog(sid('parent'))
-    const firstPage = refresh.mock.calls.slice(1).map(([id]) => id)
+    const firstPage = childReads()
     expect(firstPage).toHaveLength(CATALOG_PAGE)
     expect(firstPage[0]).toBe(sid(`many-${String(CATALOG_PAGE + 6)}`))
     expect(firstPage).not.toContain(sid('many-0'))
-    refresh.mockClear()
     await actions.prepareCatalog(sid('parent'), CATALOG_PAGE * 2)
-    expect(refresh.mock.calls.map(([id]) => id)).toContain(sid('many-0'))
+    expect(childReads()).toContain(sid('many-0'))
   })
 
   it('reads older catalog pages until the shown rows are known', async () => {
@@ -215,13 +240,13 @@ describe('apply', () => {
     const actions = (entry.inject as (id: SessionId) => SubagentCatalogInjected)(sid('parent'))
     const all = Array.from({ length: 500 }, (_, index) => ({ id: sid(`old-${String(index)}`), mode: 'one-shot' as const, createdAt: index }))
     face.older[sid('parent')] = all.slice(0, 468)
-    const refresh = vi.spyOn(face, 'refreshProjections').mockImplementation(async (id) => {
-      if (id === sid('parent')) face.projections[id] ??= { state: 'ready', error: null, values: { subagentCatalog: all.slice(468) } }
-    })
+    face.projections[sid('parent')] = { state: 'idle', error: null, values: { subagentCatalog: all.slice(468) } }
+    const refresh = vi.spyOn(face, 'refreshProjections')
     onTestFinished(() => { refresh.mockRestore() })
     await actions.prepareCatalog(sid('parent'))
-    const pageReads = () => face.actionCalls.filter(call => call.method === 'loadProjectionPage')
-    // The first activation reads one older page even when the pushed window already fills the shown rows.
+    const pageReads = () => face.actionCalls.filter(call => call.method === 'loadProjectionPage' && call.args[0] === sid('parent'))
+    // The pushed window starts the level; the first activation still reads one older page.
+    expect(refresh).not.toHaveBeenCalled()
     expect(pageReads()).toEqual([{ method: 'loadProjectionPage', args: [sid('parent'), 'subagentCatalog', 200] }])
     expect(face.projections[sid('parent')]?.unread).toEqual({ subagentCatalog: 268 })
     await actions.prepareCatalog(sid('parent'), 400)

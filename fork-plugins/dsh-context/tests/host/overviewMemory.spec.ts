@@ -623,6 +623,7 @@ describe('overview memory: disk cache, idle release, incremental updates', () =>
       records,
       values,
       yieldEvery: 2,
+      yieldBudgetMs: Number.POSITIVE_INFINITY,
       yieldTo: async () => {
         yields += 1
       },
@@ -634,6 +635,26 @@ describe('overview memory: disk cache, idle release, incremental updates', () =>
     yielding.dispose()
   })
 
+  test('a rebuild also yields once its slice has run for the time budget', async () => {
+    const records = Array.from({ length: 5 }, (_, index) => recordOf(`t${index}`))
+    const values: Record<string, Record<string, unknown>> = {}
+    for (let index = 0; index < 5; index++) values[`t${index}`] = valuesOf(index + 1)
+    let yields = 0
+    const harness = await boot({
+      persistence: PERSISTENCE,
+      records,
+      values,
+      yieldEvery: 0,
+      yieldBudgetMs: 0,
+      yieldTo: async () => {
+        yields += 1
+      },
+    })
+    for (let index = 0; index < 5; index++) harness.state.captureIdentities.set(`t${index}`, identityOf(`t${index}`))
+    await call(harness, { part: 'summary' })
+    assert.equal(yields, 5, 'a spent budget yields after every rebuilt session')
+    harness.dispose()
+  })
   test('legacy mode (no persistence face) keeps working and rebuilds after an idle release', async () => {
     const harness = await boot({ records: [recordOf('a'), recordOf('b')], values: { a: valuesOf(10), b: valuesOf(20) }, idleMs: 5 })
     const first = await call(harness, { part: 'summary' })

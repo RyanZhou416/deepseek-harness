@@ -111,6 +111,7 @@ export interface BootOptions {
   captureDelayMs?: number
   capturePollMs?: number
   yieldEvery?: number
+  yieldBudgetMs?: number
   yieldTo?: () => Promise<void>
   buildRows?: typeof buildRowsOf
   cachePath?: string
@@ -459,6 +460,7 @@ export function boot(options: BootOptions = {}): Promise<Harness> {
     ...(options.captureDelayMs === undefined ? {} : { captureDelayMs: options.captureDelayMs }),
     ...(options.capturePollMs === undefined ? {} : { capturePollMs: options.capturePollMs }),
     ...(options.yieldEvery === undefined ? {} : { yieldEvery: options.yieldEvery }),
+    ...(options.yieldBudgetMs === undefined ? {} : { yieldBudgetMs: options.yieldBudgetMs }),
     ...(options.yieldTo === undefined ? {} : { yieldTo: options.yieldTo }),
     ...(options.buildRows === undefined ? {} : { buildRows: options.buildRows }),
     ...(options.cachePath === undefined ? {} : { cachePath: options.cachePath }),

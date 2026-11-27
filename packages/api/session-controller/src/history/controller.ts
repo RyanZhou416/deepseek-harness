@@ -170,7 +170,9 @@ export class HistoryController {
   }
 
   /**
-   * Read one older slice of a paged projection key without activating the Session.
+   * Read one older slice of a paged projection key without activating the
+   * Session. A live Session slices its current value; a stored one slices its
+   * newest durable checkpoint when that holds the key, and otherwise its folded log.
    * @param request - Session, paged key, exclusive end index, and item count.
    * @param signal - read cancellation.
    * @returns the items `[start, end)` of the complete array and its length, or null when the Session is absent.
@@ -200,9 +202,12 @@ export class HistoryController {
       if (live !== undefined) return slice(this.ctx.sessionProjections.snapshot(live, [pagedKey]).values[pagedKey])
       const stored = await this.ctx.get('sessionPersistence')?.stat(sessionId, { signal })
       signal.throwIfAborted()
-      if (stored?.formatStatus === 'migration-required') {
-        return slice(this.ctx.get('sessionProjectionCache')?.cachedSnapshot(stored.header)?.values[pagedKey])
-      }
+      // A stored Session's page comes from its newest durable checkpoint when one
+      // holds the key: a paged view only appends, so its older items equal the
+      // log's, and the pushed window carries the newer ones. Only a Session
+      // without such a checkpoint folds its log.
+      const cached = stored === undefined ? undefined : this.ctx.get('sessionProjectionCache')?.cachedSnapshot(stored.header, [pagedKey])?.values[pagedKey]
+      if (cached !== undefined || stored?.formatStatus === 'migration-required') return slice(cached)
       return await this.usingObservation({ sessionId, projection: true }, signal,
         observation => slice(projections(observation).values[pagedKey]))
     } catch (error: unknown) {

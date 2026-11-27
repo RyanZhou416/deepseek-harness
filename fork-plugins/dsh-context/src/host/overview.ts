@@ -219,6 +219,7 @@ export interface OverviewRouteOptions {
   captureDelayMs?: number
   capturePollMs?: number
   yieldEvery?: number
+  yieldBudgetMs?: number
   yieldTo?: () => Promise<void>
   buildRows?: typeof buildRows
   cache?: OverviewCache
@@ -514,12 +515,11 @@ export function watchOverviewRoute(
             const session = feed.sessions.get(entry.id)
             if (session !== undefined) session.signature = entry.signature
           }
-          const buildOptions = options.yieldEvery === undefined && options.yieldTo === undefined
-            ? {}
-            : {
-              ...(options.yieldEvery === undefined ? {} : { yieldEvery: options.yieldEvery }),
-              ...(options.yieldTo === undefined ? {} : { yieldTo: options.yieldTo }),
-            }
+          const buildOptions = {
+            ...(options.yieldEvery === undefined ? {} : { yieldEvery: options.yieldEvery }),
+            ...(options.yieldBudgetMs === undefined ? {} : { yieldBudgetMs: options.yieldBudgetMs }),
+            ...(options.yieldTo === undefined ? {} : { yieldTo: options.yieldTo }),
+          }
           const previousSessions = feed.sessions
           const build = options.buildRows ?? buildRows
           const built = await build(feed.sessions, { entries }, workspace, cacheFace, projections, c, buildOptions)

@@ -46,7 +46,7 @@ Choose this backend when consumers benefit from one artifact per session — nav
 |---|---|---|
 | `root` | required | Root directory for all session files |
 | `compression` | `'zstd'` | Physical encoding: `'zstd'` checksummed frames, or `'none'` newline-delimited UTF-8 text |
-| `listConcurrency` | `3` | Maximum directory, header, and stat reads in flight, shared by every concurrent listing of this backend |
+| `listConcurrency` | `3` | Maximum directory, header, and stat reads in flight per listing queue: complete listings share one queue, and listings that skip excluded Session directories (the ordinary Session list) share the other, so they never wait behind a complete listing |
 
 JSONL fork creation copies the supplied child history into the child's file before returning its writer; it does not read the parent artifact. Read opens wait for an in-progress local writer close to finish draining before reading that Session's history; a failed drain stops the open.
 

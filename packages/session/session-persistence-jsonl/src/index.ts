@@ -126,9 +126,10 @@ export interface Config {
   /** Idle milliseconds a decoded cold log stays reusable; zero disables the memo. Defaults to 10000. */
   coldLogMemoRetentionMs?: number
   /**
-   * Maximum directory, header, and stat reads in flight across all concurrent
-   * listings of this backend (`list()`/`listHeaders()` and historical
-   * fingerprints). Defaults to 3.
+   * Maximum directory, header, and stat reads in flight in each of the
+   * backend's two listing queues: complete listings (`list()`/`listHeaders()`
+   * without exclusions, historical fingerprints) share one, and listings that
+   * skip excluded Session directories share the other. Defaults to 3.
    */
   listConcurrency?: number
 }
@@ -419,11 +420,18 @@ export class JsonlSessionPersistence extends SessionPersistence {
   private root: string
   private compression: JsonlCompression
   /**
-   * Bounds directory, header, and stat I/O across every concurrent listing of
-   * this backend (`list()`/`listHeaders()`, historical fingerprints). Queued
-   * tasks of a cancelled listing run and reject at their signal check.
+   * Bounds directory, header, and stat I/O of complete listings
+   * (`list()`/`listHeaders()` without exclusions, historical fingerprints).
+   * Queued tasks of a cancelled listing run and reject at their signal check.
    */
   private readonly listLimit: LimitFunction
+  /**
+   * Bounds the same I/O for listings that skip excluded Session directories,
+   * such as the ordinary Session list. A separate queue keeps such a listing,
+   * which reads a few hundred directories, from waiting behind every queued
+   * task of a complete listing over tens of thousands.
+   */
+  private readonly selectiveListLimit: LimitFunction
   private readonly generationFormat: Omit<JsonlGenerationFormatAdapter, 'createRestore'>
   /**
    * Bounded LRU of parsed, validated stored logs keyed by session id and
@@ -489,6 +497,7 @@ export class JsonlSessionPersistence extends SessionPersistence {
     this.catalog = new SessionCatalog(this.root, (message) => { this.ctx.logger.warn(message) })
     this.compression = config.compression ?? DEFAULT_COMPRESSION
     this.listLimit = pLimit(config.listConcurrency ?? DEFAULT_LIST_CONCURRENCY)
+    this.selectiveListLimit = pLimit(config.listConcurrency ?? DEFAULT_LIST_CONCURRENCY)
     this.generationFormat = {
       currentVersion: sessionFormatCatalog.currentVersion,
       encodeHeader: (header, inheritedEventCount) =>
@@ -1529,7 +1538,7 @@ export class JsonlSessionPersistence extends SessionPersistence {
     signal?: AbortSignal,
     skipSegments?: ReadonlySet<string>,
   ): Promise<R[]> {
-    const limit = this.listLimit
+    const limit = this.listLimitFor(skipSegments)
     // The root read counts against the same bound as every other listing read.
     const projectDirs = await limit(() => this.listProjectDirs(signal))
     const projects = await settleLimited(limit, projectDirs, project => this.listSessionDirs(project, signal))
@@ -1547,6 +1556,15 @@ export class JsonlSessionPersistence extends SessionPersistence {
     const results = settledValues(await settleLimited(limit, considered, task))
     if (projectFailure !== undefined) throw projectFailure.reason
     return results
+  }
+
+  /**
+   * Select the listing queue: a listing that skips directories uses its own.
+   * @param skipSegments - Session directories the listing need not read.
+   * @returns the limiter that bounds this listing's reads.
+   */
+  private listLimitFor(skipSegments: ReadonlySet<string> | undefined): LimitFunction {
+    return skipSegments === undefined ? this.listLimit : this.selectiveListLimit
   }
 
   /** Historical logical events depend on the corpus, including members with unreadable headers. */
@@ -1627,7 +1645,7 @@ export class JsonlSessionPersistence extends SessionPersistence {
     for (const path of this.listedHeaders.keys()) {
       if (!selectedPaths.has(path)) this.listedHeaders.delete(path)
     }
-    const headers = await settleLimited(this.listLimit, generations, async (selected) => {
+    const headers = await settleLimited(this.listLimitFor(skipSegments), generations, async (selected) => {
       try {
         const identity = await stat(selected.sourcePath, { bigint: true })
         const revision = fileRevision(identity)

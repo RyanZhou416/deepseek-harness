@@ -76,11 +76,16 @@ export function apply(ctx: ClientContext): void {
       })
     },
     async prepareCatalog(parentSessionId: SessionId, shown = CATALOG_PAGE) {
-      await ctx.sessions.refreshProjections(parentSessionId)
+      // A pushed window (list hints, control baseline, opening block) already
+      // starts the level. Only a level without one reads the Session's exact
+      // projections, which folds the whole log of a stored Session.
+      if (ctx.sessions.list.getSnapshot().projectionsBySession[parentSessionId]?.values.subagentCatalog === undefined) {
+        await ctx.sessions.refreshProjections(parentSessionId)
+      }
       // Pushes carry only the newest entries: read older pages until the shown rows are known.
       for (;;) {
         const snapshot = ctx.sessions.list.getSnapshot().projectionsBySession[parentSessionId]
-        if (snapshot?.state !== 'ready') return
+        if (snapshot?.values.subagentCatalog === undefined && snapshot?.state !== 'ready') return
         const unread = snapshot.unread?.subagentCatalog
         const known = snapshot.values.subagentCatalog?.length ?? 0
         if (unread !== undefined && (unread === 0 || known >= shown)) break
@@ -89,13 +94,16 @@ export function apply(ctx: ClientContext): void {
       }
       const state = ctx.sessions.list.getSnapshot()
       const parent = state.projectionsBySession[parentSessionId]
-      // Only the rows a level shows need their child catalogs; they are read together,
-      // and a child already read in this connection generation answers without a request.
+      // Only the rows a level shows need their child catalogs. They are read by
+      // page, which a stored child serves from its checkpoint without folding
+      // its log, together; a child already read in this generation answers locally.
       const children = newestFirst(parent?.values.subagentCatalog ?? []).slice(0, shown).filter(entry => entry.mode !== 'external'
         && state.byId[entry.id]?.formatStatus !== 'migration-required'
         && state.projectionsBySession[entry.id]?.state !== 'migration-required'
         && state.projectionsBySession[entry.id]?.state !== 'error')
-      await Promise.all(children.map(entry => ctx.sessions.refreshProjections(entry.id)))
+      const reads = await Promise.allSettled(children.map(entry => ctx.sessions.loadProjectionPage(entry.id, 'subagentCatalog', CATALOG_PAGE)))
+      const failed = reads.find(read => read.status === 'rejected')
+      if (failed !== undefined) throw failed.reason
     },
     refreshProjection(parentSessionId: SessionId) {
       void ctx.sessions.refreshProjections(parentSessionId)

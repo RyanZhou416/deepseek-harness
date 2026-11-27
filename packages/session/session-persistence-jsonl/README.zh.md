@@ -46,7 +46,7 @@ kind: "package-reference"
 |---|---|---|
 | `root` | 必填 | 所有会话文件的根目录 |
 | `compression` | `'zstd'` | 物理编码：`'zstd'` 带校验和帧，或 `'none'` 换行分隔 UTF-8 文本 |
-| `listConcurrency` | `3` | 同时进行的目录、header 与 stat 读取上限，由该后端所有并发的列举共用 |
+| `listConcurrency` | `3` | 每个列举队列同时进行的目录、header 与 stat 读取上限：完整列举共用一个队列，跳过被排除 Session 目录的列举（普通 Session 列表）共用另一个，因此后者不会排在完整列举之后 |
 
 JSONL fork 创建会把提供的子会话历史复制到子文件，再返回写句柄；它不读取父会话文件。读取打开会等待本进程中正在关闭的写者排空后，再读取该会话历史；排空失败会停止打开。
 

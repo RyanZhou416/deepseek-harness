@@ -23,7 +23,9 @@ import { OVERVIEW_ROUTE as HOST_OVERVIEW_ROUTE } from '../../src/host/overview'
 import { ATTACHMENT_ROUTE, BACKFILL_ROUTE, BALANCE_ROUTE, COMMANDS_ROUTE, DETAIL_ROUTE, FLEET_ROUTE, OVERVIEW_ROUTE, SKILLS_ROUTE } from '../../src/client/apiRoutes'
 import { serviceIdentityOf } from '../../src/host/serviceIdentity'
 import z from '@deepseek-ai/schemastery'
-import { Config, DEFAULT_BOUNDS, resolveBounds, volatileField } from '../../src/host/config'
+import {
+  Config, DEFAULT_BACKFILL_REFRESH_DELAY_MS, DEFAULT_BACKFILL_START_DELAY_MS, DEFAULT_BOUNDS, resolveBackfillDelays, resolveBounds, volatileField,
+} from '../../src/host/config'
 
 describe('backfill-sliced', () => {
 
@@ -876,7 +878,11 @@ describe('Config validator (cordis Standard Schema face)', () => {
       balanceSource: 'account',
       promptPrefix: '',
       promptSuffix: '',
+      backfillStartDelayMs: DEFAULT_BACKFILL_START_DELAY_MS,
+      backfillRefreshDelayMs: DEFAULT_BACKFILL_REFRESH_DELAY_MS,
     })
+    assert.deepEqual(resolveBackfillDelays(undefined), { startDelayMs: 60_000, refreshDelayMs: 60_000 })
+    assert.deepEqual(resolveBackfillDelays({ backfillStartDelayMs: 0, backfillRefreshDelayMs: 5 }), { startDelayMs: 0, refreshDelayMs: 5 })
     assert.deepEqual(resolveBounds(undefined), DEFAULT_BOUNDS)
     assert.deepEqual(resolveBounds({}), DEFAULT_BOUNDS)
     assert.equal(resolveBounds({ maxRequestSteps: 7 }).maxRequestSteps, 7)

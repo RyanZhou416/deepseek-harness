@@ -238,6 +238,54 @@ describe('watchActivityBackfill', () => {
     assert.deepEqual(state.coldSnapshots, ['a', 'b'])
   })
 
+  test('automatic passes wait for their delays; disposals inside the wait join one pass', async () => {
+    const ctx = new Context()
+    const listed = [{ header: { id: 'a', cwd: '/repo/a' } }]
+    const state = fakeState(listed)
+    coldFaces(ctx, state)
+    let ready: (() => void) | null = null
+    ctx.provide('appReady', { onReady: (listener: () => void) => { ready = listener; return () => {} } })
+    let started = 0
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING, {
+      autoStart: true, startDelayMs: 60, refreshDelayMs: 60, onStart: () => { started++ },
+    })
+    ;(ready as unknown as () => void)()
+    await settle()
+    assert.equal(started, 0, 'readiness only schedules the first pass')
+    await until(() => (state.coldSnapshots.length === 1 ? true : undefined), 'the delayed startup pass ran')
+    assert.equal(started, 1)
+    state.served.add('a')
+    listed.push({ header: { id: 'b', cwd: '/repo/b' } })
+    ctx.emit('session/disposed', { id: 'x' } as never)
+    ctx.emit('session/disposed', { id: 'y' } as never)
+    ctx.emit('session/disposed', { id: 'b' } as never)
+    await settle()
+    assert.equal(started, 1, 'disposals wait for the refresh delay')
+    await until(() => (state.coldSnapshots.length === 2 ? true : undefined), 'the coalesced disposal pass ran')
+    await new Promise(resolve => setTimeout(resolve, 120))
+    assert.equal(started, 2, 'three disposals inside one wait start one pass')
+    // A route request stays immediate while an automatic pass is scheduled.
+    ctx.emit('session/disposed', { id: 'z' } as never)
+    handle.request()
+    await until(() => (started === 3 ? true : undefined), 'the manual request ran without waiting')
+    handle()
+    await new Promise(resolve => setTimeout(resolve, 120))
+    assert.equal(started, 3, 'disposing the backfill cancels the scheduled automatic pass')
+  })
+
+  test('a delayed startup pass is cancelled with its plugin, also without a readiness face', async () => {
+    const ctx = new Context()
+    const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])
+    coldFaces(ctx, state)
+    let started = 0
+    const handle = watchActivityBackfill(ctx, undefined, FAST_PACING, { autoStart: true, startDelayMs: 40, onStart: () => { started++ } })
+    await settle()
+    assert.equal(started, 0)
+    await ctx.fiber.dispose()
+    handle()
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal(started, 0, 'the scheduled pass never started')
+  })
   test('startup fallback resumes after heap admission without a browser retry', async () => {
     const ctx = new Context()
     const state = fakeState([{ header: { id: 'a', cwd: '/repo/a' } }])

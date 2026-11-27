@@ -3918,9 +3918,10 @@ export interface Config {
   /** Idle milliseconds a decoded cold log stays reusable; zero disables the memo. Defaults to 10000. */
   coldLogMemoRetentionMs?: number
   /**
-   * Maximum directory, header, and stat reads in flight across all concurrent
-   * listings of this backend (`list()`/`listHeaders()` and historical
-   * fingerprints). Defaults to 3.
+   * Maximum directory, header, and stat reads in flight in each of the
+   * backend's two listing queues: complete listings (`list()`/`listHeaders()`
+   * without exclusions, historical fingerprints) share one, and listings that
+   * skip excluded Session directories share the other. Defaults to 3.
    */
   listConcurrency?: number
 }

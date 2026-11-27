@@ -9,7 +9,7 @@ import { watchBalanceChannel } from './balance'
 import { watchActivityBackfill } from './backfill'
 import { makeColdReadGate } from './coldRead'
 import { watchCommandPageChannel } from './commandPages'
-import { Config, historyBounds, resolveBounds } from './config'
+import { Config, historyBounds, resolveBackfillDelays, resolveBounds } from './config'
 import { createColdTimelineStates } from './coldTimeline'
 import { watchDetailChannel, createDetailGate, type DetailChannelGate } from './detail'
 import { watchDeltaChannel } from './delta'
@@ -90,6 +90,7 @@ export function apply(ctx: Context, config: Config): void {
     ownCache: cache,
     config,
     autoStart: true,
+    ...resolveBackfillDelays(config),
     onStart: () => { catalog.ensure() },
     onChange: () => {
       if (warmTimer !== null) return

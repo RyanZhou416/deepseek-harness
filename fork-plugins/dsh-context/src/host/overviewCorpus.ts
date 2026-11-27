@@ -590,10 +590,20 @@ function rowsOf(
 
 export interface BuildRowsOptions {
   yieldEvery?: number
+  /** Milliseconds of rebuilding after which the build yields even before `yieldEvery` Sessions. */
+  yieldBudgetMs?: number
+  now?: () => number
   yieldTo?: () => Promise<void>
 }
 
 const YIELD_EVERY = 64
+
+/**
+ * A Session rebuild reads its stored projection record, which costs from well
+ * under a millisecond to seconds for a large Session, so the build also yields
+ * by elapsed time and lets interactive requests run between slices.
+ */
+const YIELD_BUDGET_MS = 1
 
 export interface BuildRowsResult {
   rows: HostRow[]
@@ -614,6 +624,9 @@ export async function buildRows(
 ): Promise<BuildRowsResult> {
   const yieldEvery = options.yieldEvery ?? YIELD_EVERY
   const yieldTo = options.yieldTo ?? (() => new Promise<void>((resolve) => { setImmediate(resolve) }))
+  const yieldBudgetMs = options.yieldBudgetMs ?? YIELD_BUDGET_MS
+  const now = options.now ?? (() => performance.now())
+  let sliceStart = now()
   const current = new Map<string, HostSession>()
   const reusable = new Map<string, HostSession>()
   let rebuilt = 0
@@ -632,7 +645,10 @@ export async function buildRows(
     else incomplete++
     rebuilt++
     rebuiltIds.push(entry.id)
-    if (yieldEvery > 0 && rebuilt % yieldEvery === 0) await yieldTo()
+    if ((yieldEvery > 0 && rebuilt % yieldEvery === 0) || now() - sliceStart >= yieldBudgetMs) {
+      await yieldTo()
+      sliceStart = now()
+    }
   }
   const rows = rowsOf([...current.values()], workspace, ctx)
   return { rows, reusableSessions: reusable, rebuilt, rebuiltIds, incomplete }

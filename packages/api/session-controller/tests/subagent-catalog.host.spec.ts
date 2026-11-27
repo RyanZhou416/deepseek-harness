@@ -229,6 +229,17 @@ describe('SessionController subagent catalog', () => {
     expect(ctx.agents.get(PARENT)).toBeUndefined()
   })
 
+  it('pages a stored parent from its checkpoint without folding its log', async () => {
+    const { ctx, controller } = await bench()
+    const entries = Array.from({ length: 6 }, (_, index) => ({ id: `cached-${String(index)}`, mode: 'one-shot', createdAt: index }))
+    const cachedSnapshot = vi.fn(() => ({ asOfSeq: 1, values: { subagentCatalog: entries } }))
+    ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
+    const observe = vi.spyOn(ctx.sessionQuery, 'observeSession')
+    await expect(controller.projectionPage({ sessionId: PARENT, key: 'subagentCatalog', end: 4, limit: 2 }, new AbortController().signal))
+      .resolves.toEqual({ items: entries.slice(2, 4), start: 2, total: 6 })
+    expect(cachedSnapshot).toHaveBeenCalledWith(expect.objectContaining({ id: PARENT }), ['subagentCatalog'])
+    expect(observe).not.toHaveBeenCalled()
+  })
   it('uses disk migration status instead of the normalized header version to defer a cold catalog read', async () => {
     const { ctx, controller } = await bench()
     const stored = await ctx.sessionPersistence.stat(PARENT)

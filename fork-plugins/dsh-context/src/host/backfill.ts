@@ -90,6 +90,10 @@ export interface BackfillOptions {
   config?: Config
   pool?: FoldPool
   autoStart?: boolean
+  /** Milliseconds between Host readiness and the first automatic pass. */
+  startDelayMs?: number
+  /** Milliseconds a Session disposal waits before its pass; disposals inside that wait join it. */
+  refreshDelayMs?: number
   retryBaseMs?: number
   onStart?: () => void
   onChange?: () => void
@@ -724,30 +728,54 @@ export function watchActivityBackfill(
     }
   })
 
+  // Automatic passes list and probe the whole corpus, so they wait: the first
+  // one until the Host has served its first requests, and a disposal's pass
+  // until the disposals around it have arrived. A route request stays immediate.
+  let autoTimer: ReturnType<typeof setTimeout> | null = null
+  const scheduleAutoPass = (delayMs: number): void => {
+    if (disposed || autoTimer !== null) return
+    if (delayMs <= 0) {
+      requestFreshPass()
+      return
+    }
+    autoTimer = setTimeout(() => {
+      autoTimer = null
+      requestFreshPass()
+    }, delayMs)
+    ;(autoTimer as { unref?: () => void }).unref?.()
+  }
+  const cancelAutoPass = (): void => {
+    if (autoTimer !== null) clearTimeout(autoTimer)
+    autoTimer = null
+  }
+  const startDelayMs = options.startDelayMs ?? 0
+  const refreshDelayMs = options.refreshDelayMs ?? 0
   if (options.autoStart === true) ctx.effect(() => {
-    cancelDisposed = ctx.on('session/disposed', requestFreshPass)
+    cancelDisposed = ctx.on('session/disposed', () => { scheduleAutoPass(refreshDelayMs) })
     const ready = asRecord(ctx.get('appReady'))
     if (ready !== null && typeof ready.onReady === 'function') {
       try {
-        const disposer = (ready.onReady as (listener: () => void) => unknown)(requestFreshPass)
+        const disposer = (ready.onReady as (listener: () => void) => unknown)(() => { scheduleAutoPass(startDelayMs) })
         if (typeof disposer === 'function') cancelStartup = disposer as () => void
       } catch {
-        requestFreshPass()
+        scheduleAutoPass(startDelayMs)
       }
     } else {
-      requestFreshPass()
+      scheduleAutoPass(startDelayMs)
     }
     return () => {
       cancelDisposed?.()
       cancelDisposed = null
       cancelStartup?.()
       cancelStartup = null
+      cancelAutoPass()
     }
   }, 'dsh-context: startup backfill')
 
   function disposeAll(): void {
     disposed = true
     clearRetry()
+    cancelAutoPass()
     cancelDisposed?.()
     cancelDisposed = null
     cancelStartup?.()
