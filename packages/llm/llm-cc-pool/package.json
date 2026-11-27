@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-llm-cc-pool",
   "description": "Fork-only mac-pool provider: one fixed cc-pool Anthropic Messages route with a configurable model catalogue (built-in default), installed as an opt-in profile bundle",
-  "version": "0.2.2-rc.1",
+  "version": "0.2.3-alpha.2",
   "private": true,
   "repository": {
     "type": "git",
@@ -18,12 +18,17 @@
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./src/*": "./src/*",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
+    "locale/*.json",
     "lib/index.js",
     "cordis.patch.yml",
-    "lib/types/**/*.d.ts"
+    "lib/types/**/*.d.ts",
+    "lib/types/**/*.d.ts.map",
+    "lib/**/*.js.map",
+    "src"
   ],
   "license": "MIT",
   "dsh": {
