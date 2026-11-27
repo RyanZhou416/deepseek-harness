@@ -1,6 +1,7 @@
 /** In-memory profile package routing for Node's default ESM and CommonJS loaders. */
 
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { createRealpathCache } from './realpath-cache.ts'
 import { createRequire, isBuiltin } from 'node:module'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -182,32 +183,35 @@ function realSpellings(path: string): string[] {
   }
 }
 
-function canonicalPath(path: string): string {
+function canonicalPath(path: string, realpath: (path: string) => string = realpathSync): string {
   try {
-    return realpathSync(path)
+    return realpath(path)
   } catch {
     // A runtime resolution may name a profile scope before that directory is materialized.
     return resolve(path)
   }
 }
 
-function prefixes(path: string): readonly string[] {
+function prefixes(path: string, realpath?: (path: string) => string): readonly string[] {
   const configured = resolve(path) + sep
-  const canonical = canonicalPath(path) + sep
+  const canonical = canonicalPath(path, realpath) + sep
   return canonical === configured ? [configured] : [configured, canonical]
 }
 
 function compileResolution(resolution: RuntimeResolution): CompiledResolution {
+  // One component cache for the whole pass: hundreds of package directories share
+  // their parents, and Node's JavaScript realpath checks every component.
+  const realpath = createRealpathCache()
   return {
-    entries: new Map(resolution.entries.map(entry => [entry.name, { ...entry, realDir: canonicalPath(entry.packageDir) }])),
+    entries: new Map(resolution.entries.map(entry => [entry.name, { ...entry, realDir: canonicalPath(entry.packageDir, realpath) }])),
     profilesDir: resolution.profilesDir,
     profileDir: resolution.profileDir,
-    profilePaths: prefixes(resolution.profilesDir),
-    profile: resolution.profileDir === undefined ? [] : prefixes(resolution.profileDir),
+    profilePaths: prefixes(resolution.profilesDir, realpath),
+    profile: resolution.profileDir === undefined ? [] : prefixes(resolution.profileDir, realpath),
     installationPaths: [...new Set(resolution.entries
       .filter(entry => entry.scope === 'installation')
-      .flatMap(entry => prefixes(entry.packageDir)))],
-    linkedPaths: resolution.linkedRoots.flatMap(root => prefixes(root.realPath)),
+      .flatMap(entry => prefixes(entry.packageDir, realpath)))],
+    linkedPaths: resolution.linkedRoots.flatMap(root => prefixes(root.realPath, realpath)),
     localPackageNames: new Set(resolution.localPackageNames),
     esmRoutes: new Map(),
     cjsRoutes: new Map(),

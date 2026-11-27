@@ -47,7 +47,7 @@ Client journal 在发布 follow 快照、live entry 或历史页之前验证当�
 
 列表行在状态可用时携带 `formatStatus`，Client 无需请求其投影即可识别需要迁移的 Session。
 
-Host 仅在配置的工作时间片耗尽时，于完整条目之间让出事件循环；剩余工作较少时直接返回，不强制让出。每行及每次让出之后检查请求取消，取消时拒绝返回部分结果。每行同步计算；列表不承诺跨 Session 的统一快照。已经进入冷态队列的 Session 若在让出期间接入，仍返回缓存行：Client 对进行中请求的变更重放会纠正其可用性，带序号的投影会覆盖缓存提示。已接入 Session 的摘要通过[`sessionQuery.getListMetadata`](../../session-query/session-query/README.zh.md#session-list-metadata)读取是否为空和最后一次提示词的最近活动时间，其投影提示携带通过 `snapshot` 计算的每个摘要 key。已接入 Session 的首次摘要在其完整内存日志上计算这些投影，之后的摘要增量推进；这次计算在单行的同步工作内进行，`listWorkSliceMs` 无法切分它。
+Host 仅在配置的工作时间片耗尽时，于完整条目之间让出事件循环；剩余工作较少时直接返回，不强制让出。投影缓存提供 `cachedSnapshotAsync` 时，冷条目先以 `listCacheReadConcurrency` 的并发度从磁盘异步读取缓存记录，不占用事件循环，每次读取前检查取消。每行及每次让出之后检查请求取消，取消时拒绝返回部分结果。每行同步计算；列表不承诺跨 Session 的统一快照。已经进入冷态队列的 Session 若在让出期间接入，仍返回缓存行：Client 对进行中请求的变更重放会纠正其可用性，带序号的投影会覆盖缓存提示。已接入 Session 的摘要通过[`sessionQuery.getListMetadata`](../../session-query/session-query/README.zh.md#session-list-metadata)读取是否为空和最后一次提示词的最近活动时间，其投影提示携带通过 `snapshot` 计算的每个摘要 key。已接入 Session 的首次摘要在其完整内存日志上计算这些投影，之后的摘要增量推进；这次计算在单行的同步工作内进行，`listWorkSliceMs` 无法切分它。
 
 `listProjectionExcludeKeys` 默认为 `[]`，保留所有可用目录提示，包括其他插件贡献的 key。部署可以从 `session.list` 和 Session-added 摘要中排除 `contextHeaders`、`turnOutline` 等详情专用 key。配置校验拒绝排除 `sessionListMetadata`，因为空白状态和最近活动时间的推导依赖它。排除发生在投影视图构造与校验之前；其他提示继续提供冷标题、日程、子目录、用量及 Context 概览卡片所需的数据。排除规则也适用于 predecessor-title 回退。control stream 的 baseline 与更新携带同一摘要 key 集合，并应用同样的排除。follow `projection` frame 与显式 `session.projections` 读取仍然完整；follow opening 除声明有界推送形式的单元外也保持完整。列表提示是部分数据，不会清除从这些完整来源获得的投影 key。单元还可以声明有界的推送形式（`wire.hintView`）：Session 列表提示、control baseline 与 follow opening block 只携带该有界值，而显式读取与 live control/projection 更新帧仍保持完整。`subagentCatalog` 以这种方式只发布最新 32 条，因此拥有上万子智能体的 Session 不再把整份目录序列化进每个列表行与打开帧；子智能体面板与面包屑切换器在显示时通过 `session.projections` 读取完整目录。
 
@@ -120,6 +120,7 @@ GUI 模型选择要求确切提供方／模型对出现在可用目录中；不�
 | `idleSessionRetentionMs` | `60000` | Controller 自己持有、已持久化的空闲 Agent 保持驻留的毫秒数；`0` 禁用淘汰 |
 | `nativeOpen` | 平台探测 | 是否能把 Session 工作区路径交给原生桌面打开器 |
 | `listWorkSliceMs` | `16` | 列表工作时间片，单位为毫秒，取正整数；在完整条目之间检查 |
+| `listCacheReadConcurrency` | `16` | 列表通过 `cachedSnapshotAsync` 同时读取投影缓存记录的冷条目数，取正整数；没有该接口的缓存逐条读取 |
 | `historyPageMaxBytes` | `0` | 一页可携带的记录序列化 UTF-8 字节数，超过即在消息组边界停止；`0` 关闭上限 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-api-session-controller)是所有受支持字段及其 JSDoc 的完整来源。

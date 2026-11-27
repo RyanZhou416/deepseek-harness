@@ -307,6 +307,8 @@ export interface Config {
   readonly listWorkSliceMs?: number
   /** Projection keys the catalog omits before rendering its hint values. */
   readonly listProjectionExcludeKeys?: string[]
+  /** Positive integral number of cold list rows whose projection-cache records are read at once. */
+  readonly listCacheReadConcurrency?: number
   /**
    * Serialized UTF-8 bytes of records one history page may carry before it
    * stops extending backwards at a message boundary. The budget overrides the

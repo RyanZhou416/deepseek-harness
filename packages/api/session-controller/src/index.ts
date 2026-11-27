@@ -92,6 +92,8 @@ export interface Config {
   readonly listWorkSliceMs?: number
   /** Projection keys the catalog omits before rendering its hint values. */
   readonly listProjectionExcludeKeys?: string[]
+  /** Positive integral number of cold list rows whose projection-cache records are read at once. */
+  readonly listCacheReadConcurrency?: number
   /**
    * Serialized UTF-8 bytes of records one history page may carry before it
    * stops extending backwards at a message boundary. The budget overrides the
@@ -107,6 +109,7 @@ type ResolvedConfig = Config & {
   readonly idleSessionRetentionMs: number
   readonly listWorkSliceMs: number
   readonly listProjectionExcludeKeys: string[]
+  readonly listCacheReadConcurrency: number
   readonly historyPageMaxBytes: number
 }
 
@@ -147,6 +150,7 @@ export class SessionController extends TypertRemoteService {
     idleSessionRetentionMs: z.natural().default(DEFAULT_IDLE_SESSION_RETENTION_MS),
     listWorkSliceMs: z.natural().min(1).default(16),
     listProjectionExcludeKeys: z.array(z.string().min(1).pattern(/^(?!sessionListMetadata$)/u).required()).default([]),
+    listCacheReadConcurrency: z.natural().min(1).default(16),
     historyPageMaxBytes: z.natural().default(0),
   })
 
@@ -164,6 +168,7 @@ export class SessionController extends TypertRemoteService {
   private readonly revealPath: (path: string, signal: AbortSignal) => Promise<void>
   private readonly canOpenPath: () => boolean
   private readonly listWorkSliceMs: number
+  private readonly listCacheReadConcurrency: number
   private readonly historyPageMaxBytes: number
   private readonly idleSessionRetentionMs: number
   private readonly listProjectionExcludeKeys: ReadonlySet<string>
@@ -178,6 +183,7 @@ export class SessionController extends TypertRemoteService {
     super(ctx, 'sessionController', { namespace: 'session' })
     const resolved = SessionController.Config(config)
     this.listWorkSliceMs = resolved.listWorkSliceMs
+    this.listCacheReadConcurrency = resolved.listCacheReadConcurrency
     this.historyPageMaxBytes = resolved.historyPageMaxBytes
     this.idleSessionRetentionMs = resolved.idleSessionRetentionMs
     this.listProjectionExcludeKeys = new Set(resolved.listProjectionExcludeKeys ?? [])
@@ -218,7 +224,7 @@ export class SessionController extends TypertRemoteService {
       sessionId => this.agents.retainForFollower(sessionId),
       values => ctx.sessionProjections.hintValues(values),
     )
-    this.listState = new ApiSessionList(ctx, this.listWorkSliceMs, this.listProjectionExcludeKeys)
+    this.listState = new ApiSessionList(ctx, this.listWorkSliceMs, this.listProjectionExcludeKeys, this.listCacheReadConcurrency)
     await this.commands.initialize()
     ctx.fiber.assertActive()
     await this.listState.initialize()

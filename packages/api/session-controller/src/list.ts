@@ -7,7 +7,7 @@ import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
 import type { Session, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
-import type { SessionProjectionSummaryValues } from '@deepseek-ai/dsh-session-projection/types'
+import type { SessionProjectionMap, SessionProjectionSummaryValues } from '@deepseek-ai/dsh-session-projection/types'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 import type {} from '@deepseek-ai/dsh-workspace'
 import {
@@ -87,11 +87,13 @@ export class ApiSessionList {
    * @param ctx - Host context carrying Session, query, persistence, and projection services.
    * @param workSliceMs - Resolved positive integral list-work budget in milliseconds.
    * @param excludedProjectionKeys - deployment-selected keys omitted before rendering catalog hints.
+   * @param cacheReadConcurrency - cold rows whose projection-cache records are read at once.
    */
   constructor(
     private readonly ctx: Context,
     private readonly workSliceMs: number,
     private readonly excludedProjectionKeys: ReadonlySet<string> = new Set(),
+    private readonly cacheReadConcurrency = 16,
   ) {}
 
   /**
@@ -180,13 +182,28 @@ export class ApiSessionList {
         yieldDeadline = performance.now() + this.workSliceMs
       }
     }
-    for (const record of cold) {
+    if (this.ctx.get('sessionProjectionCache')?.cachedSnapshotAsync !== undefined) {
+      // Cold rows read their cache records from disk concurrently, off the event loop.
+      let nextCold = 0
+      const readCold = async (): Promise<void> => {
+        for (let index = nextCold++; index < cold.length; index = nextCold++) {
+          signal?.throwIfAborted()
+          const { header } = cold[index] as SessionRecord
+          coldBlocks.set(header.id, await this.coldProjections(header))
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(this.cacheReadConcurrency, cold.length) }, readCold))
       signal?.throwIfAborted()
-      coldBlocks.set(record.header.id, this.projectionsFor(record.header, undefined))
-      if (performance.now() >= yieldDeadline) {
-        await scheduler.yield()
+      yieldDeadline = performance.now() + this.workSliceMs
+    } else {
+      for (const record of cold) {
         signal?.throwIfAborted()
-        yieldDeadline = performance.now() + this.workSliceMs
+        coldBlocks.set(record.header.id, this.cachedProjections(record.header))
+        if (performance.now() >= yieldDeadline) {
+          await scheduler.yield()
+          signal?.throwIfAborted()
+          yieldDeadline = performance.now() + this.workSliceMs
+        }
       }
     }
     // Cache first: only rows the cache could not name pay the bounded title read.
@@ -463,33 +480,68 @@ export class ApiSessionList {
 
   private projectionsFor(
     header: SessionHeader,
-    session: Session | undefined,
+    session: Session,
   ): SessionProjectionHints | undefined {
     try {
-      // The registry derives the summary key set from its registrations and
-      // hands back one stable set until the key table changes; both faces below
-      // serve only those keys, so a list row cannot carry a unit that declares
-      // itself summary-excluded. Deployment-selected exclusions then narrow that
-      // set before either face computes a value.
-      const summary = this.ctx.sessionProjections.summaryKeys()
-      const keys = this.excludedProjectionKeys.size === 0
-        ? summary
-        : new Set([...summary].filter(key => !this.excludedProjectionKeys.has(key)))
-      if (session !== undefined) {
-        // The live registry computes the block for this Session: its watermark
-        // shares the sequence space of the Session's baselines and frames.
-        return hintsOf('sequenced', this.ctx.sessionProjections.snapshot(session, keys), this.hintValues)
-      }
-      // A cold row reads the persisted cache by header alone; the cache serves
-      // seeded and unseeded lifecycles alike because a listing never seeds a
-      // fold. The watermark is the stored record's own.
-      const cache = this.ctx.get('sessionProjectionCache')
-      return hintsOf('cached', cache?.cachedSnapshot(header, keys, this.excludedProjectionKeys)
-      ?? (this.excludedProjectionKeys.has('title') ? undefined : cache?.cachedPredecessorTitle(header)), this.hintValues)
+      // The live registry computes the block for this Session: its watermark
+      // shares the sequence space of the Session's baselines and frames.
+      return hintsOf('sequenced', this.ctx.sessionProjections.snapshot(session, this.listedKeys()), this.hintValues)
     } catch (error) {
       this.ctx.logger.warn(
         `api-session.list: projection column for "${header.id}" failed; serving the row without it: ${String(error)}`,
       )
+      return undefined
+    }
+  }
+
+  /**
+   * The summary keys a list row serves: the registry's summary key set minus the
+   * deployment exclusions. The registry derives that set from its registrations
+   * and hands back one stable set until the key table changes, so a row cannot
+   * carry a unit that declares itself summary-excluded.
+   * @returns the keys both projection faces serve.
+   */
+  private listedKeys(): ReadonlySet<Extract<keyof SessionProjectionMap, string>> {
+    const summary = this.ctx.sessionProjections.summaryKeys()
+    return this.excludedProjectionKeys.size === 0
+      ? summary
+      : new Set([...summary].filter(key => !this.excludedProjectionKeys.has(key)))
+  }
+
+  /**
+   * The cached block of one cold row through the synchronous cache face, for a
+   * cache without `cachedSnapshotAsync`. A failing read serves the row without it.
+   * @param header - the cold row's stored header.
+   * @returns the row's cached hints, or `undefined` without a usable record.
+   */
+  private cachedProjections(header: SessionHeader): SessionProjectionHints | undefined {
+    const cache = this.ctx.get('sessionProjectionCache')
+    try {
+      return hintsOf('cached', cache?.cachedSnapshot(header, this.listedKeys(), this.excludedProjectionKeys)
+        ?? (this.excludedProjectionKeys.has('title') ? undefined : cache?.cachedPredecessorTitle(header)), this.hintValues)
+    } catch (error) {
+      this.ctx.logger.warn(`api-session.list: projection column for "${header.id}" failed; serving the row without it: ${String(error)}`)
+      return undefined
+    }
+  }
+
+  /**
+   * The cached block of one cold row, read from disk without blocking the event
+   * loop. A cold row reads the persisted cache by header alone; the cache serves
+   * seeded and unseeded lifecycles alike because a listing never seeds a fold,
+   * and the watermark is the stored record's own. Like {@link projectionsFor}, a
+   * failing read serves the row without it.
+   * @param header - the cold row's stored header.
+   * @returns the row's cached hints, or `undefined` without a usable record.
+   */
+  private async coldProjections(header: SessionHeader): Promise<SessionProjectionHints | undefined> {
+    const cache = this.ctx.get('sessionProjectionCache')
+    try {
+      const block = await cache?.cachedSnapshotAsync?.(header, this.listedKeys(), this.excludedProjectionKeys)
+      return hintsOf('cached', block
+        ?? (this.excludedProjectionKeys.has('title') ? undefined : cache?.cachedPredecessorTitle(header)), this.hintValues)
+    } catch (error) {
+      this.ctx.logger.warn(`api-session.list: projection column for "${header.id}" failed; serving the row without it: ${String(error)}`)
       return undefined
     }
   }

@@ -595,3 +595,120 @@ describe('cold-row title backfill', () => {
     await expect(h.list.list(controller.signal)).rejects.toBe(reason)
   })
 })
+
+describe('Session-list cold rows through the asynchronous cache face', () => {
+  /** Rows backed by a cache whose asynchronous reads are held until released. */
+  async function asyncHarness(
+    ids: readonly string[],
+    concurrency: number,
+    failing: ReadonlySet<string> = new Set(),
+    options: { absent?: boolean; excludeTitle?: boolean } = {},
+  ) {
+    const ctx = new Context()
+    contexts.add(ctx)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('attachments', { imageLimits: TEST_IMAGE_LIMITS } as never)
+    const list = new ApiSessionList(ctx, 8, new Set(options.excludeTitle === true ? ['title'] : []), concurrency)
+    await list.initialize()
+    const records: SessionRecord[] = ids.map((id) => {
+      const session = ctx.sessions.prepare(brandString<SessionId>(id), { meta: { createdAt: 100, cwd: resolve('list-scheduling-fixture') } })
+      return { header: session.header, live: false, persisted: true }
+    })
+    ctx.provide('sessionQuery', {
+      listSessions: async () => records,
+      getListMetadata: () => ({ blank: true, lastPromptAt: null }),
+      readTitleSnapshots: async () => [],
+    } as never)
+    let inFlight = 0
+    let maxInFlight = 0
+    const pending: (() => void)[] = []
+    const started: string[] = []
+    ctx.provide('sessionProjectionCache', {
+      cachedSnapshot: () => { throw new Error('the asynchronous face must serve cold rows') },
+      cachedSnapshotAsync: async (header: SessionRecord['header']) => {
+        started.push(String(header.id))
+        inFlight += 1
+        maxInFlight = Math.max(maxInFlight, inFlight)
+        await new Promise<void>((resolve) => { pending.push(resolve) })
+        inFlight -= 1
+        if (failing.has(String(header.id))) throw new Error('unreadable record')
+        if (options.absent === true) return undefined
+        return { asOfSeq: -1, values: { title: `cached ${String(header.id)}`, sessionListMetadata: { blank: false, lastPromptAt: null } } }
+      },
+      cachedPredecessorTitle: (header: SessionRecord['header']) => ({ asOfSeq: -1, values: { title: `previous ${String(header.id)}` } }),
+    } as never)
+    const release = async (): Promise<void> => {
+      for (;;) {
+        await new Promise<void>((resolve) => { setImmediate(resolve) })
+        const next = pending.splice(0)
+        if (next.length === 0) return
+        for (const resolve of next) resolve()
+      }
+    }
+    return { ctx, list, started, release, maxInFlight: () => maxInFlight, pending }
+  }
+
+  it('reads cold cache records concurrently up to the configured bound and keeps row order', async () => {
+    const h = await asyncHarness(['a', 'b', 'c', 'd', 'e'], 2)
+    const listing = h.list.list()
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(h.started).toEqual(['a', 'b'])
+    await h.release()
+    const items = await listing
+    expect(h.maxInFlight()).toBe(2)
+    expect(items.map(item => item.sessionId)).toEqual(['a', 'b', 'c', 'd', 'e'])
+    expect(items.map(item => item.projections?.values.title)).toEqual(['cached a', 'cached b', 'cached c', 'cached d', 'cached e'])
+  })
+
+  it('serves a row whose cache read fails without its projections', async () => {
+    const h = await asyncHarness(['good', 'bad'], 4, new Set(['bad']))
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const listing = h.list.list()
+    await h.release()
+    const items = await listing
+    expect(items.find(item => item.sessionId === 'bad')?.projections).toBeUndefined()
+    expect(items.find(item => item.sessionId === 'good')?.projections?.values.title).toBe('cached good')
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"bad" failed'))
+  })
+
+  it('stops reading after cancellation and rejects with its reason', async () => {
+    const h = await asyncHarness(['a', 'b', 'c'], 1)
+    const controller = new AbortController()
+    const reason = new Error('stop the listing')
+    const listing = h.list.list(controller.signal)
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    controller.abort(reason)
+    const outcome = expect(listing).rejects.toBe(reason)
+    await h.release()
+    await outcome
+    expect(h.started).toEqual(['a'])
+  })
+
+  it('falls back to the predecessor title without a current record unless titles are excluded', async () => {
+    for (const excludeTitle of [false, true]) {
+      const h = await asyncHarness(['older'], 2, new Set(), { absent: true, excludeTitle })
+      const listing = h.list.list()
+      await h.release()
+      const [item] = await listing
+      expect(item?.projections?.values.title).toBe(excludeTitle ? undefined : 'previous older')
+    }
+  })
+
+  it('serves a synchronous cache row whose read throws without its projections', async () => {
+    const h = await harness([{ id: 'broken', phase: 'cold' }])
+    vi.spyOn(h.ctx.sessionProjectionCache, 'cachedSnapshot').mockImplementation(() => { throw new Error('unreadable record') })
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const [item] = await h.list.list()
+    expect(item?.projections).toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"broken" failed'))
+  })
+  it('resolves and validates the read concurrency', () => {
+    expect(SessionController.Config({}).listCacheReadConcurrency).toBe(16)
+    expect(SessionController.Config({ listCacheReadConcurrency: 4 }).listCacheReadConcurrency).toBe(4)
+    for (const listCacheReadConcurrency of [0, -1, 1.5]) {
+      expect(() => SessionController.Config({ listCacheReadConcurrency })).toThrow()
+    }
+  })
+})

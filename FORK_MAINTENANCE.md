@@ -2164,6 +2164,16 @@ On a home with about 39,000 Session directories (most of them subagents), three 
 **Preservation rule.** Keep the selective listing queue, keep automatic corpus passes delayed and coalesced, keep catalog levels off the exact projection read when a pushed window exists, and keep stored-Session page reads on the checkpoint.
 
 **Focused verification.** `node_modules/.bin/vitest run packages/session/session-persistence-jsonl/tests/jsonl.spec.ts -t "without waiting behind"`, `packages/api/session-controller/tests/subagent-catalog.host.spec.ts` (`pages a stored parent from its checkpoint without folding its log`), and `packages/client/ui-subagent/tests/browser-plugin.client.spec.ts`; the plugin cases are listed in its own maintenance note.
+### Startup resolution and list cache reads
+
+Two more costs sat between `run.cmd` and a loaded Session list on a home with about 39,000 Sessions:
+
+- `app-boot` canonicalizes every installation package directory while compiling the runtime resolution. It used Node's JavaScript `fs.realpathSync`, which checks every path component with `lstat`, once per directory. `createRealpathCache()` (`profile-resolution/realpath-cache.ts`) runs the same algorithm, returns the same spelling (the ESM loader's, which can differ from `realpathSync.native`), and shares resolved components across one compilation pass; about 3,900 package directories canonicalize in roughly half the time.
+- `session-controller` reads the cold rows' projection-cache records concurrently through `cachedSnapshotAsync` (`listCacheReadConcurrency`, default 16) when the cache offers it, so their file I/O no longer runs synchronously on the main thread; a cache without that face keeps the row-by-row synchronous read.
+
+**Preservation rule.** Keep one realpath cache per compilation pass (never process-wide) and the exact `fs.realpathSync` result; keep the list's cold-row reads asynchronous and bounded.
+
+**Focused verification.** `node_modules/.bin/vitest run packages/boot/app-boot/tests/realpath-cache.spec.ts` (equality with `fs.realpathSync` across plain, linked, chained, dangling, relative, and missing paths) and `packages/api/session-controller/tests/list-scheduling.host.spec.ts` ("Session-list cold rows through the asynchronous cache face").
 ### Optional model-facing skill catalog
 
 `@deepseek-ai/dsh-tool-skill` accepts `modelCatalog` (default `true`). `false` skips registering the `skill` loader tool; the catalog listener publishes only while that exact tool is visible, so no catalog or replacement catalog enters the context, while the user `/name` invocation listener is unchanged. A Session that already received a catalog gets one empty replacement. The user's Web profile sets it to `false` in each preset's `tool-skill` row because repeated catalog replacements (skill changes, plugin reloads, compactions) cost context in long Sessions.
