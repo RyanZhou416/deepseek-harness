@@ -47,6 +47,7 @@ Load the plugin together with the skill registry and at least one provider. The 
 |---|---|---|
 | `catalogDescriptionMaxLength` | `500` | Maximum normalized description length rendered in the session catalog; minimum 3 |
 | `excludedSkills` | `[]` | Exact skill names this tool omits from the session catalog, named loads and user `/name` invocations |
+| `modelCatalog` | `true` | `false` registers neither the `skill` loader tool nor the session catalog, so the catalog never enters the context; user `/name` invocations still work, and a Session that already received a catalog gets one empty replacement |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-skill) is the exhaustive source for every accepted field.
 

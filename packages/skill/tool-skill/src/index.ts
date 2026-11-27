@@ -67,12 +67,21 @@ export interface Config {
   catalogDescriptionMaxLength?: number
   /** Exact skill names omitted from this tool's catalog, named loads and user invocations. */
   excludedSkills?: string[]
+  /**
+   * Whether the model sees the `skill` loader tool and its session catalog.
+   * `false` registers neither, so no catalog enters the context; user `/name`
+   * invocations still inject a skill's instructions. A Session that already
+   * received a catalog receives one empty replacement.
+   * @default true
+   */
+  modelCatalog?: boolean
 }
 
 /** Validate and default the model-facing skill catalog configuration. */
 export const Config: z<Config> = z.object({
   catalogDescriptionMaxLength: z.number().default(DEFAULT_CATALOG_DESCRIPTION_MAX_LENGTH),
   excludedSkills: z.array(z.string()).default([]),
+  modelCatalog: z.boolean().default(true),
 })
 
 /**
@@ -171,7 +180,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       return { card: 'generic', title: `Load skill ${args.name}`, kind: 'read', rawInput: args.name }
     },
   })
-  ctx.tools.register(skillTool)
+  // Without the model-facing tool, the catalog listener below sees no visible
+  // `skill` tool and publishes no catalog.
+  if (config.modelCatalog !== false) ctx.tools.register(skillTool)
 
   // User-explicit skill invocation: a claimed user message whose first line
   // starts with `/<name>` naming a user-invocable skill is a deterministic

@@ -5426,6 +5426,14 @@ export interface Config {
   catalogDescriptionMaxLength?: number
   /** Exact skill names omitted from this tool's catalog, named loads and user invocations. */
   excludedSkills?: string[]
+  /**
+   * Whether the model sees the `skill` loader tool and its session catalog.
+   * `false` registers neither, so no catalog enters the context; user `/name`
+   * invocations still inject a skill's instructions. A Session that already
+   * received a catalog receives one empty replacement.
+   * @default true
+   */
+  modelCatalog?: boolean
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-tool-skill -->

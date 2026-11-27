@@ -1142,6 +1142,18 @@ describe('user-explicit invocation injection', () => {
     expect(decision.messages.flatMap(({ source }) => source.kind === 'skill-catalog' ? source.entries.map(entry => entry.name) : [])).toEqual(['visible'])
   })
 
+  it('registers neither the loader tool nor a catalog when the model catalog is off, and keeps user invocations', async () => {
+    const home = await tempDir('no-model-catalog')
+    const ctx = await setup(home, { modelCatalog: false })
+    for (const name of ['first', 'second']) {
+      ctx.skills.register({ name, description: name, source: 'runtime', content: `${name} body` })
+    }
+    expect(ctx.tools.get('skill')).toBeUndefined()
+    const decision = await proposeStep(ctx, agentForCwd(home), [gesture('/second now')])
+    if (decision.kind !== 'enter') throw new Error('expected enter')
+    expect(decision.messages.flatMap(({ source }) => source.kind === 'skill-invocation' ? [source.name] : [])).toEqual(['second'])
+    expect(decision.messages.some(({ source }) => source.kind === 'skill-catalog')).toBe(false)
+  })
   it('rejects invalid excluded skill names at startup', async () => {
     await expect(setup(await tempDir('invalid-exclusion'), { excludedSkills: ['bad/name'] }))
       .rejects.toThrow('invalid excluded skill name "bad/name"')

@@ -2164,6 +2164,13 @@ On a home with about 39,000 Session directories (most of them subagents), three 
 **Preservation rule.** Keep the selective listing queue, keep automatic corpus passes delayed and coalesced, keep catalog levels off the exact projection read when a pushed window exists, and keep stored-Session page reads on the checkpoint.
 
 **Focused verification.** `node_modules/.bin/vitest run packages/session/session-persistence-jsonl/tests/jsonl.spec.ts -t "without waiting behind"`, `packages/api/session-controller/tests/subagent-catalog.host.spec.ts` (`pages a stored parent from its checkpoint without folding its log`), and `packages/client/ui-subagent/tests/browser-plugin.client.spec.ts`; the plugin cases are listed in its own maintenance note.
+### Optional model-facing skill catalog
+
+`@deepseek-ai/dsh-tool-skill` accepts `modelCatalog` (default `true`). `false` skips registering the `skill` loader tool; the catalog listener publishes only while that exact tool is visible, so no catalog or replacement catalog enters the context, while the user `/name` invocation listener is unchanged. A Session that already received a catalog gets one empty replacement. The user's Web profile sets it to `false` in each preset's `tool-skill` row because repeated catalog replacements (skill changes, plugin reloads, compactions) cost context in long Sessions.
+
+**Preservation rule.** Keep the option and its default; keep user invocation independent of it.
+
+**Focused verification.** `node_modules/.bin/vitest run packages/skill/tool-skill` (`registers neither the loader tool nor a catalog when the model catalog is off, and keeps user invocations`).
 ### Detail projections travel only to viewers
 
 The Host-wide `session/control` stream carries only Session summary keys (`sessionProjections.summaryKeys()` minus `listProjectionExcludeKeys`) in its baselines and updates. Detail keys, the units declaring `summary: false` such as `turnOutline`, `sessionStats`, `contextPressure`, `contextBreakdown`, `tokenUsage`, and `todos`, reach a client only through the follow stream of a Session it opened: the Web client requests `projectionChanges: true`, and `WebController.follow` attaches a `ProjectionListener` to the same queue, so one `projection` frame follows each committed event that changed a client-visible key. On the Client, `ProjectionValueStore.applySummary` applies a control block per key without establishing exactness or clearing omitted keys, and `SessionManager` ends exactness when a Session is dropped or a later opening serves no block. Before this change, sending one prompt in an 8000-turn Session pushed two 1.8 MB `turnOutline` arrays to every connected client, and every reconnect resent every live Session's detail values.
