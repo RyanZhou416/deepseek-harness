@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { type CatalogService } from '../../src/host/catalog'
 import { createCostSource, withCost, withDetailCost } from '../../src/host/cost'
+import { sessionCostReadSchema } from '../../src/host/timeline'
 import { pricesBookOf, type ModelBook } from '../../src/shared/pricing'
 import { type SessionCostUsage } from '../../src/shared/types'
 
@@ -202,6 +203,10 @@ describe('host cost source — verified reference routes', () => {
       long: true,
     }])
     assert.equal(read.misses, undefined, 'a cold catalogue is not a per-model miss')
+    // The folded timeline state stores this read; its strict schema must accept the long tag.
+    const costRead = sessionCostReadSchema
+    assert.equal(costRead.safeParse(read).success, true)
+    assert.equal(costRead.safeParse({ ...read, faces: [{ ...read.faces?.[0], tier: 'x' }] }).success, false)
     assert.equal(cost.complete(long), true)
 
     const standard = cost.read({ codex: { 'gpt-6-sol': { peak: { uncached: 1_000_000, cacheRead: 0, cacheWrite: 0, output: 0 } } } })

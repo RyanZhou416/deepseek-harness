@@ -244,6 +244,7 @@ const costFaceSchema = z.object({
   via: z.string(),
   confidence: z.enum(['high', 'medium', 'low']),
   canonical: z.string().optional(),
+  long: z.literal(true).optional(),
 }).strict()
 
 const costMissSchema = z.object({
@@ -253,7 +254,8 @@ const costMissSchema = z.object({
   candidates: z.number().int().nonnegative().optional(),
 }).strict()
 
-const sessionCostReadSchema = z.object({
+/** One folded cost read, as SessionCostRead stores it. */
+export const sessionCostReadSchema = z.object({
   usd: z.number().nullable(),
   ready: z.boolean(),
   faces: z.array(costFaceSchema).optional(),
