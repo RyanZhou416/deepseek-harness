@@ -17,8 +17,12 @@ import SessionStore, { type SessionId, SessionLogOffset, SessionSeq } from '@dee
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as SessionTurnOutlinePlugin from '@deepseek-ai/dsh-session-turn-outline'
-import { turnOutlineProjectionDefinition } from '@deepseek-ai/dsh-session-turn-outline/src/projection.ts'
-import type { TurnOutlineEntry, TurnOutlineState } from '@deepseek-ai/dsh-session-turn-outline/types'
+import {
+  createTurnOutlineProjectionDefinition,
+  DEFAULT_HINT_TURNS,
+  turnOutlineProjectionDefinition,
+} from '@deepseek-ai/dsh-session-turn-outline/src/projection.ts'
+import type { TurnOutlineEntry, TurnOutlineItem, TurnOutlineState } from '@deepseek-ai/dsh-session-turn-outline/types'
 import { brandString } from '@deepseek-ai/dsh-brand'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -60,8 +64,8 @@ function endTurn(session: Session, turn: number): SessionSeq {
   return session.append('turn/end', { turn, reason: { kind: 'completed' } }).seq
 }
 
-function outlineOf(ctx: Context, session: Session): readonly TurnOutlineEntry[] {
-  return ctx.sessionProjections.snapshot(session).values.turnOutline as readonly TurnOutlineEntry[]
+function outlineOf(ctx: Context, session: Session): readonly TurnOutlineItem[] {
+  return ctx.sessionProjections.snapshot(session).values.turnOutline as readonly TurnOutlineItem[]
 }
 
 describe('turn outline projection unit', () => {
@@ -87,8 +91,8 @@ describe('turn outline projection unit', () => {
     const secondBoundary = session.append('turn/start', { turn: 2 }).seq
     appendPrompt(session, 'second prompt')
     expect(outlineOf(ctx, session)).toEqual([
-      { turn: 1, seq: firstBoundary, prompt: 'hello world', response: 'final answer of turn one' },
-      { turn: 2, seq: secondBoundary, prompt: 'second prompt', response: '' },
+      { id: '1', turn: 1, seq: firstBoundary, prompt: 'hello world', response: 'final answer of turn one' },
+      { id: '2', turn: 2, seq: secondBoundary, prompt: 'second prompt', response: '' },
     ])
   })
 
@@ -147,7 +151,7 @@ describe('turn outline projection unit', () => {
       source: { kind: 'test-injector', form: 'relay' },
     }), { surfaceOp: 'append' })
     expect(outlineOf(ctx, session)).toEqual([
-      { turn: 1, seq: 1, prompt: '', response: '' },
+      { id: '1', turn: 1, seq: 1, prompt: '', response: '' },
     ])
   })
 
@@ -176,7 +180,7 @@ describe('turn outline projection unit', () => {
     // Whitespace-only prompt text normalizes to nothing: the entry stays unlabeled.
     appendPrompt(session, ' \t  ')
     endTurn(session, 1)
-    expect(outlineOf(ctx, session)).toEqual([{ turn: 1, seq: 0, prompt: '', response: '' }])
+    expect(outlineOf(ctx, session)).toEqual([{ id: '1', turn: 1, seq: 0, prompt: '', response: '' }])
   })
 
   it('bounds preview reading and keeps repeated or empty drafts quiet (fabricated envelopes)', () => {
@@ -230,7 +234,7 @@ describe('turn outline projection unit', () => {
     session.append('turn/start', { turn: 1 })
     appendPrompt(session, 'pre-mount prompt')
     await ctx.plugin(SessionTurnOutlinePlugin)
-    expect(outlineOf(ctx, session)).toEqual([{ turn: 1, seq: 0, prompt: 'pre-mount prompt', response: '' }])
+    expect(outlineOf(ctx, session)).toEqual([{ id: '1', turn: 1, seq: 0, prompt: 'pre-mount prompt', response: '' }])
   })
 
   it('has no key without the plugin and drops it when the plugin unloads (HMR safety)', async () => {
@@ -274,5 +278,48 @@ describe('turn outline projection unit', () => {
         },
       },
     }, [], SessionLogOffset(0), session.header, session.inheritedEventCount)).not.toThrow()
+  })
+})
+
+describe('paged turn outline payloads', () => {
+  it('carries the newest configured items in Client payloads while Host snapshots stay complete', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SessionTurnOutlinePlugin, { hintTurns: 2 })
+    const session = ctx.sessions.create(brandString<SessionId>('paged'))
+    for (let turn = 1; turn <= 3; turn++) session.append('turn/start', { turn })
+
+    const complete = outlineOf(ctx, session)
+    expect(complete.map(item => item.id)).toEqual(['1', '2', '3'])
+    expect(ctx.sessionProjections.pagedKey('turnOutline')).toBe(true)
+    expect(ctx.sessionProjections.hintValue('turnOutline', complete)).toEqual(complete.slice(1))
+    await ctx.fiber.dispose()
+  })
+
+  it('reuses the viewed items for one outline and keeps a short outline whole', () => {
+    const definition = createTurnOutlineProjectionDefinition(2)
+    const state: TurnOutlineState = {
+      turns: [{ turn: 1, seq: SessionSeq(0), prompt: '', response: '' }, { turn: 4, seq: SessionSeq(3), prompt: 'p', response: '' }],
+      draft: '',
+    }
+    const items = definition.wire.view(state)
+    expect(definition.wire.view({ ...state, draft: 'draft' })).toBe(items)
+    expect(items.map(item => item.id)).toEqual(['1', '4'])
+    expect(definition.wire.hintView(items)).toBe(items)
+    expect(turnOutlineProjectionDefinition.wire.hintView(items)).toBe(items)
+    expect(DEFAULT_HINT_TURNS).toBe(200)
+  })
+
+  it('rejects an item whose id is not its turn number', () => {
+    const schema = turnOutlineProjectionDefinition.wire.viewSchema
+    expect(schema.safeParse([{ id: '1', turn: 1, seq: 0, prompt: '', response: '' }]).success).toBe(true)
+    expect(schema.safeParse([{ id: '2', turn: 1, seq: 0, prompt: '', response: '' }]).success).toBe(false)
+  })
+
+  it('validates the hint count', () => {
+    expect(SessionTurnOutlinePlugin.Config({})).toEqual({ hintTurns: DEFAULT_HINT_TURNS })
+    expect(SessionTurnOutlinePlugin.Config({ hintTurns: 5 })).toEqual({ hintTurns: 5 })
+    for (const hintTurns of [0, 1.5, -1]) expect(() => SessionTurnOutlinePlugin.Config({ hintTurns })).toThrow()
   })
 })

@@ -325,6 +325,17 @@ export interface PerformanceUsageInjected {
   }
 }
 
+/**
+ * The `turnOutline` items a Session's Client holds: loaded older pages merged
+ * under the newest window its payloads carry.
+ */
+export interface TurnOutlinePages {
+  /** Known items ascending by turn, treated as wire data; absent before the Session's projections arrive. */
+  readonly items: unknown
+  /** Older items not yet read; `undefined` until a first page is read, so whether older items exist is unknown. */
+  readonly older: number | undefined
+}
+
 /** Business callbacks injected into the Chat view. */
 export interface ChatViewInjected {
   /** File preparation and failure callbacks owned by the file-drag plugin. */
@@ -338,6 +349,8 @@ export interface ChatViewInjected {
     interactionIds: ObservableSnapshot<readonly string[]>
     /** Live presentation policy derived from the accepted work-details mode. */
     presentation: ObservableSnapshot<ChatPresentationPolicy>
+    /** Known `turnOutline` items of this Session and how many older ones are still unread. */
+    turnOutline: ObservableSnapshot<TurnOutlinePages>
   }
   keyedHooks: {
     /** Resolve the stable source for one Chat Node key. */
@@ -362,6 +375,8 @@ export interface ChatViewInjected {
   consumeOlder: () => boolean
   /** Jump loader: page history back through seq; resolves when the window covers it. */
   loadThrough: (seq: SessionSeq) => Promise<void>
+  /** Read the next older page of `turnOutline` items; a failed read rejects. */
+  loadOlderTurns: () => Promise<void>
   loadImage: MessageImageLoader
   chatScroll: {
     save: (position: ChatScrollPosition | null) => void

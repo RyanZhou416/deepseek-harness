@@ -10,7 +10,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { turnOutlineProjectionDefinition } from './projection.ts'
+import z from '@deepseek-ai/schemastery'
+import { createTurnOutlineProjectionDefinition, DEFAULT_HINT_TURNS } from './projection.ts'
 
 export type * from './types.ts'
 
@@ -19,12 +20,33 @@ export const name = 'session-turn-outline'
 /** The projection registry is the plugin's whole purpose; without it the fiber stays pending. */
 export const inject = ['sessionProjections']
 
+/** Plugin configuration. */
+export interface Config {
+  /**
+   * Newest outline items every Client payload carries (follow openings and
+   * explicit reads); a Client reads older items by page. @default 200
+   */
+  hintTurns?: number
+}
+
+/** Configuration with its default applied by {@link Config}. */
+export interface ResolvedConfig extends Config {
+  /** Newest outline items every Client payload carries. */
+  hintTurns: number
+}
+
+/** Validate the hint count and apply its default. */
+export const Config: z<Config, ResolvedConfig> = z.object({
+  hintTurns: z.natural().min(1).default(DEFAULT_HINT_TURNS),
+})
+
 /**
  * Register the `turnOutline` unit; the registration is an effect on this
  * plugin's fiber, so unloading removes the key.
  * @param ctx - registrant context carrying the projection registry.
+ * @param config - validated hint count.
  * @returns when the plugin is ready.
  */
-export async function apply(ctx: Context): Promise<void> {
-  await ctx.sessionProjections.register(turnOutlineProjectionDefinition)
+export async function apply(ctx: Context, config: ResolvedConfig): Promise<void> {
+  await ctx.sessionProjections.register(createTurnOutlineProjectionDefinition(config.hintTurns))
 }

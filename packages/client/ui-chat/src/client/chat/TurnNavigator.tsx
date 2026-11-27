@@ -14,6 +14,12 @@ interface TurnNavigatorProps {
   /** Turn whose jump is still paging history in; its mark pulses. */
   readonly busyTurn: number | null
   readonly onNavigate: (item: TurnRailItem) => void
+  /**
+   * Called while the rail shows its first marks and older turns may exist;
+   * the caller reads them, and marks inserted before the first one keep the
+   * rail's visible position.
+   */
+  readonly onReachStart?: (() => void) | undefined
   readonly t: ChatViewSlotProps['t']
 }
 
@@ -79,7 +85,7 @@ const TurnMark = memo(function TurnMark({
 })
 
 function TurnNavigatorRail(
-  { items, activeTurn, busyTurn, onNavigate, t }: TurnNavigatorProps,
+  { items, activeTurn, busyTurn, onNavigate, onReachStart, t }: TurnNavigatorProps,
   ref: ForwardedRef<TurnNavigatorHandle>,
 ) {
   const [previewTurn, setPreviewTurn] = useState<number | null>(null)
@@ -179,6 +185,28 @@ function TurnNavigatorRail(
   const viewHeight = virtualizer.scrollRect?.height ?? 0
   const virtualItems = virtualizer.getVirtualItems()
 
+  // Older marks inserted before the first one move every mark down; scrolling
+  // by the same distance keeps the marks under the reader where they were.
+  // Runs after the virtualizer's own layout effect has sized the container.
+  const firstTurn = useRef<number | undefined>(undefined)
+  useLayoutEffect(() => {
+    const previous = firstTurn.current
+    firstTurn.current = items[0]?.turn
+    const element = scrollerRef.current
+    if (previous === undefined || element === null || !initialization.current.placed) return
+    const inserted = turnIndexes.get(previous)
+    if (inserted === undefined || inserted === 0) return
+    element.scrollTop += inserted * TURN_SPACING_PX
+    // The active mark moved by the insertion, not by reading: following it
+    // now would undo the compensation.
+    const follow = initialization.current.follow
+    if (follow !== null && activeIndex !== undefined) initialization.current.follow = { ...follow, index: activeIndex, count: items.length }
+  }, [items, turnIndexes, activeIndex])
+
+  const atStart = initialization.current.placed && viewHeight > 0 && scrollTop <= FADE_PX
+  useEffect(() => {
+    if (atStart) onReachStart?.()
+  }, [atStart, onReachStart])
   const scrollToIndex = useCallback((
     index: number, reveal: 'if-needed' | 'always', behavior: 'auto' | 'smooth' | 'instant' = preferredScrollBehavior(),
   ): void => {

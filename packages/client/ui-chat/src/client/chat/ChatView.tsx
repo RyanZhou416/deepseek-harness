@@ -66,8 +66,8 @@ const MOTION_TAIL_MS = 800
 export function ChatView({
   useSession, useChat, useConversation, useSessions, renderSlot,
   sessionId, openFile, openExternalLink, resolveFilePath, useContextMenu,
-  loadOlder, consumeOlder, loadThrough, loadImage, inspectCall, chatScroll, forkAt, editLastMessage,
-  usePresentation, useProjection, useInteractionIds, dispatchInteraction, t, fileDrag,
+  loadOlder, consumeOlder, loadThrough, loadOlderTurns, loadImage, inspectCall, chatScroll, forkAt, editLastMessage,
+  usePresentation, useProjection, useInteractionIds, useTurnOutline, dispatchInteraction, t, fileDrag,
 }: ChatViewSlotProps) {
   const { getTriggerProps } = useContextMenu()
   const getMarkdownTriggerProps = useCallback((target: MarkdownMenuTarget) => getTriggerProps(() => {
@@ -92,13 +92,26 @@ export function ChatView({
   // both the data and its change signal: the array identity moves only when a
   // Turn enters, leaves, or changes its preview.
   const turnNavigationItems = useChat(s => s.navigation.items())
-  // Host-computed whole-log outline; the merge is view-layer only (the
-  // conversation snapshot never carries projection values).
-  const turnOutline = useProjection('turnOutline')
+  // Host-computed whole-log outline, read by page: payloads carry its newest
+  // items and the rail reads older ones as it reaches its first mark. The
+  // merge is view-layer only (the conversation snapshot never carries
+  // projection values).
+  const turnOutline = useTurnOutline(pages => pages.items)
+  const olderTurns = useTurnOutline(pages => pages.older)
   const railItems = useMemo(
     () => mergeTurnRailItems(turnNavigationItems, turnOutline),
     [turnNavigationItems, turnOutline],
   )
+  // The rail asks again only when it newly reaches its start or the unread
+  // count changes, so a failed read waits for the reader to scroll back.
+  const turnPagePending = useRef(false)
+  const readOlderTurns = useMemo(() => (olderTurns === 0 ? undefined : () => {
+    if (turnPagePending.current) return
+    turnPagePending.current = true
+    loadOlderTurns().catch(() => {
+      // The rail keeps the marks it has; reaching its start again retries.
+    }).finally(() => { turnPagePending.current = false })
+  }), [olderTurns, loadOlderTurns])
   const inbox = useProjection('inbox') as InboxState | undefined
   // Workspace root off the session list row: path summaries display relative to it.
   const cwd = useSessions(s => s.byId[sessionId]?.cwd)
@@ -253,6 +266,7 @@ export function ChatView({
           activeTurn={scroll.activeTurn}
           busyTurn={scroll.busyTurn}
           onNavigate={scroll.navigateToTurn}
+          onReachStart={readOlderTurns}
           t={t}
         />
       )}

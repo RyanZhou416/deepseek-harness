@@ -25,6 +25,15 @@ export interface TurnOutlineEntry {
 }
 
 /**
+ * One wire outline item: an entry plus the identity Client paging merges
+ * loaded older pages under the pushed newest window by.
+ */
+export interface TurnOutlineItem extends TurnOutlineEntry {
+  /** The decimal turn number. */
+  readonly id: string
+}
+
+/**
  * Fold state: the served entries plus the open turn's response draft. The
  * draft buffers the newest text-bearing assistant message until `turn/end`
  * commits it, and the wire view projects only `turns` — draft-only applies
@@ -42,10 +51,11 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     /**
      * Every started turn with its `turn/start` seq and bounded previews,
-     * strictly increasing by turn; see {@link TurnOutlineEntry}. Excluded from
+     * strictly increasing by turn; see {@link TurnOutlineItem}. Excluded from
      * Session summary payloads: the outline grows with the whole log and no
-     * list row renders it.
+     * list row renders it. A paged key: Client payloads carry only the newest
+     * items, and `session.projectionPage` reads older ones.
      */
-    turnOutline: SessionProjectionSummaryExcluded<readonly TurnOutlineEntry[]>
+    turnOutline: SessionProjectionSummaryExcluded<readonly TurnOutlineItem[]>
   }
 }

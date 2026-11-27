@@ -7,7 +7,9 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const css = readFileSync(fileURLToPath(new URL('../src/client/rows/WorkspaceBrowser.module.css', import.meta.url)), 'utf8')
+const fileCss = readFileSync(fileURLToPath(new URL('../src/client/rows/WorkspaceBrowser.module.css', import.meta.url)), 'utf8')
+// The touch block restates expanded-section selectors; pointer-agnostic rules are read before it.
+const [css = '', touchCss = ''] = fileCss.split('/* Touch: one native scroller.')
 const rowsCss = readFileSync(fileURLToPath(new URL('../src/client/rows/Rows.module.css', import.meta.url)), 'utf8')
 
 /**
@@ -90,6 +92,21 @@ describe('WorkspaceBrowser.module.css list', () => {
     expect(declarations('.searchExpanded')?.get('margin-inline')).toBe('0')
   })
 
+  it('scrolls the navigation and every row in one native scroller on touch, with the toolbar kept at the top', () => {
+    const block = /@media \(pointer: coarse\) \{([\s\S]*?)\n\}/.exec(touchCss)?.[1] ?? ''
+    for (const selector of ['.root:not(.rail)', '.root:not(.rail):has(.searchExpanded)']) {
+      expect(declarationsFrom(block, selector)?.get('max-height')).toBe('none')
+      expect(declarationsFrom(block, selector)?.get('height')).toBe('auto')
+    }
+    expect(declarationsFrom(block, '.root:not(.rail) .listArea')?.get('overflow')).toBe('visible')
+    expect(declarationsFrom(block, '.root:not(.rail) .listArea')?.get('overflow-x')).toBe('clip')
+    const header = declarationsFrom(block, '.root:not(.rail) .sectionHeader')
+    expect(header?.get('position')).toBe('sticky')
+    expect(header?.get('top')).toBe('0')
+    expect(header?.get('background')).toBe('var(--dsw-specific-sidebar-fill)')
+    // The touch rules follow the scroll-state rule, so they win at equal specificity.
+    expect(fileCss.indexOf('/* Touch: one native scroller.')).toBeGreaterThan(fileCss.indexOf('@container scroll-state(scrollable: bottom)'))
+  })
   it('keeps 2px between rows and 4px between workspace groups', () => {
     expect(declarations('.flatList > * + *')?.get('margin-top')).toBe('2px')
     expect(declarations(".searchTree > [role='treeitem'] + [role='treeitem']")?.get('margin-top')).toBe('2px')

@@ -647,3 +647,31 @@
     transition: none;
   }
 }
+
+/* Touch: one native scroller. The section takes its natural height, the list
+   seat stops being a scroll container (a `clip` axis does not turn the other
+   axis into one), and the sidebar viewport scrolls the navigation and every
+   row together, so no touch gesture depends on scroll-state container queries
+   or on nested scroll chaining, which mobile browsers support and hand off
+   differently. The toolbar stays at the top of the viewport while rows scroll
+   under it. These rules follow the scroll-state rule above so they win at
+   equal specificity. */
+@media (pointer: coarse) {
+  .root:not(.rail),
+  .root:not(.rail):has(.searchExpanded) {
+    max-height: none;
+    height: auto;
+  }
+
+  .root:not(.rail) .listArea {
+    overflow: visible;
+    overflow-x: clip;
+  }
+
+  .root:not(.rail) .sectionHeader {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--dsw-specific-sidebar-fill);
+  }
+}

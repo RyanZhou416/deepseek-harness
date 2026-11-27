@@ -59,9 +59,19 @@
 # wire instead of going out raw below the 1 KiB default: one 4,000-character
 # streamed reply measured 320 KB on the wire at the default and about 17 KB
 # here, which matters on a relay link.
+#
+# Ping every 15 s instead of every 2 s. The Host ends a connection after two
+# unanswered Pings, and a browser answers a Ping only after it has received
+# every byte queued before it. Behind the relay, frpc takes the Host's bytes at
+# local speed, so a large frame still crossing a slow phone link leaves no
+# write progress for the Host to see: at 2 s, an 8 s link stall or a 2.7 MB
+# opening snapshot on a 5 Mbit/s link ended the connection, and the reconnect
+# sent the same snapshot again. At 15 s the same stall kept the connection;
+# a dead peer is detected within 45 s.
 - id: typert-gateway
   config:
     websocketCompressionThreshold: 0
+    websocketHeartbeatIntervalMs: 15000
 
 # The retention pass reads and validates every stored checkpoint record (about
 # 39,000 records and 640 MB on the measured home) to rank them, which took about

@@ -88,6 +88,50 @@ describe('TurnNavigator', () => {
     expect(first.isConnected).toBe(false)
   })
 
+  it('asks for older turns only while a laid-out rail shows its first marks', () => {
+    const observer = installTurnNavigatorObserver(null)
+    const onReachStart = vi.fn()
+    const newest = items.slice(500)
+    const view = render(
+      <TurnNavigator items={newest} activeTurn={501} busyTurn={null} onNavigate={vi.fn()} onReachStart={onReachStart} t={t} />,
+    )
+    // A rail without a size (hidden on a narrow screen) never asks.
+    act(() => { observer.resize(0) })
+    expect(onReachStart).not.toHaveBeenCalled()
+
+    act(() => { observer.resize(300) })
+    expect(onReachStart).toHaveBeenCalledOnce()
+
+    // Away from the start, a new callback is not called.
+    const scroller = view.getByRole('navigation').firstElementChild as HTMLElement
+    act(() => {
+      scroller.scrollTop = 2_000
+      scroller.dispatchEvent(new Event('scroll'))
+    })
+    const later = vi.fn()
+    view.rerender(<TurnNavigator items={newest} activeTurn={501} busyTurn={null} onNavigate={vi.fn()} onReachStart={later} t={t} />)
+    expect(later).not.toHaveBeenCalled()
+  })
+
+  it('keeps the visible marks still when older marks are inserted before the first one', () => {
+    const observer = installTurnNavigatorObserver(null)
+    const newest = items.slice(500)
+    const view = render(<TurnNavigator items={newest} activeTurn={1_000} busyTurn={null} onNavigate={vi.fn()} t={t} />)
+    act(() => { observer.resize(300) })
+    const scroller = view.getByRole('navigation').firstElementChild as HTMLElement
+    act(() => {
+      scroller.scrollTop = 100
+      scroller.dispatchEvent(new Event('scroll'))
+    })
+
+    view.rerender(<TurnNavigator items={items} activeTurn={1_000} busyTurn={null} onNavigate={vi.fn()} t={t} />)
+
+    // 500 inserted marks at the fixed 10px pitch; the active mark is not re-centered.
+    expect(scroller.scrollTop).toBe(5_100)
+    // A browser reports the assignment as a scroll; jsdom does not.
+    act(() => { scroller.dispatchEvent(new Event('scroll')) })
+    expect(view.getByRole('button', { name: '跳转到第 511 轮' })).toBeTruthy()
+  })
   it('keeps active marks inside the safe band still and centers only after crossing either edge', async () => {
     installTurnNavigatorObserver(288)
     const props = { items, activeTurn: 50, busyTurn: null, onNavigate: vi.fn(), t }

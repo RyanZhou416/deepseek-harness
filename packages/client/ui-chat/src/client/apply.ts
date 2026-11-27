@@ -27,7 +27,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {
   ChatFlowDataInjected, ChatFlowInjected, ChatNodeInjected, ChatScrollPosition, ChatViewInjected,
-  QuotaNoticeInjected, QuotaNoticeState,
+  QuotaNoticeInjected, QuotaNoticeState, TurnOutlinePages,
 } from './contract/slots.ts'
 import type { ChatSnapshot } from './contract/snapshot.ts'
 import { EMPTY_CHAT_SNAPSHOT } from './contract/snapshot.ts'
@@ -77,6 +77,9 @@ export const CHAT_NODE_INJECT: ChatNodeInjected = {
   },
 }
 
+/** `turnOutline` items one rail read requests: the most `session.projectionPage` serves. */
+const TURN_OUTLINE_PAGE = 500
+
 /** Services required by the Chat target and its presentation registrations. */
 export const inject = [
   'slots', 'sessions', 'uiWorkspace', 'uiSession', 'uiConversation', 'locale',
@@ -99,6 +102,19 @@ export function apply(ctx: Context): void {
   ctx.effect(() => async () => {
     await Promise.all([...quotaSubscriptions].map(dispose => dispose()))
   }, 'ui-chat: live quota notices')
+  const turnOutlineSource = (sessionId: SessionId): ObservableSnapshot<TurnOutlinePages> => {
+    let cached: TurnOutlinePages = { items: undefined, older: undefined }
+    return {
+      getSnapshot: () => {
+        const projections = ctx.sessions.list.getSnapshot().projectionsBySession[sessionId]
+        const items = projections?.values.turnOutline
+        const older = projections?.unread?.turnOutline
+        if (cached.items !== items || cached.older !== older) cached = { items, older }
+        return cached
+      },
+      subscribe: listener => ctx.sessions.list.subscribe(listener),
+    }
+  }
   const chatSource = (binding: SessionBinding): ObservableSnapshot<ChatSnapshot> => {
     let source = chatSources.get(binding)
     if (source === undefined) {
@@ -274,7 +290,7 @@ export function apply(ctx: Context): void {
         return {
           ...nodeSources(binding),
           fileDrag: ctx.fileDrag.actions,
-          hooks: { presentation, interactionIds: ctx.uiConversation.interactions },
+          hooks: { presentation, interactionIds: ctx.uiConversation.interactions, turnOutline: turnOutlineSource(sessionId) },
           dispatchInteraction: gesture => ctx.uiConversation.interactions.dispatch(sessionId, gesture),
           // Files open in the right Sidebar, not in a desktop application: the
           // content stays in the product, beside the conversation that produced
@@ -307,6 +323,7 @@ export function apply(ctx: Context): void {
           loadOlder: () => { void session.loadOlder({ deferConsumption: true }) },
           consumeOlder: () => session.consumeOlder(),
           loadThrough: seq => session.loadThrough(seq),
+          loadOlderTurns: () => ctx.sessions.loadProjectionPage(sessionId, 'turnOutline', TURN_OUTLINE_PAGE),
           loadImage: Object.assign(
             (attachment: ImageAttachmentRef) => ctx.uiConversation.imageUrl(sessionId, attachment),
             { peek: (attachment: ImageAttachmentRef) => ctx.uiConversation.peekImageUrl(sessionId, attachment) },

@@ -452,8 +452,10 @@ function makeHarness(
     session.set({ loadingOlder: false, historyLoadStatus: 'pendingConsumption' })
   }
   const loadThrough = vi.fn<(seq: number) => Promise<void>>().mockResolvedValue(undefined)
+  const loadOlderTurns = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
   // Mutable outline holder: tests swap the value and drive a re-render via set().
   let outlineValue: unknown
+  let olderTurnsValue: number | undefined = 0
   const openView = vi.fn<(view: string, focus: string) => void>()
   // In-memory scroll memory matching the apply.ts per-session map contract.
   let savedScroll: ReturnType<ChatViewSlotProps['chatScroll']['read']> = null
@@ -563,8 +565,9 @@ function makeHarness(
     ...allowAllAccess,
     useProjection: (key: string) => {
       const inbox = useTestSession(snapshot => snapshot.testInbox)
-      return key === 'inbox' ? inbox : outlineValue
+      return key === 'inbox' ? inbox : undefined
     },
+    useTurnOutline: selector => selector({ items: outlineValue, older: olderTurnsValue }),
     useInput: (() => { throw new Error('unused') }),
     inputActions: {
       insertQuote: () => false,
@@ -594,6 +597,7 @@ function makeHarness(
     loadOlder,
     consumeOlder,
     loadThrough,
+    loadOlderTurns,
     loadImage: vi.fn(() => Promise.reject(new Error('not used'))),
     chatScroll,
     forkAt,
@@ -623,7 +627,12 @@ function makeHarness(
     set, setSession: session.set, setChat: chatSource.set, ChatView, props,
     setConnection: (state: ConnectionState) => { connection.set(state) },
     openFile, openUserFile, loadOlder, consumeOlder, prepareOlder, loadThrough, openView,
-    setOutline: (value: unknown) => { outlineValue = value },
+    // No count: none older. An explicit undefined: no page read yet.
+    setOutline: (value: unknown, ...older: [] | [number | undefined]) => {
+      outlineValue = value
+      olderTurnsValue = older.length === 0 ? 0 : older[0]
+    },
+    loadOlderTurns,
     chatScroll, forkAt, openCompaction, toolOwners, fenceCalls, asideRenders,
     setCompactionPreview: (available: boolean) => { compactionPreview.set(available) },
     setPerformanceUsage: (mode: 'compact' | 'detailed') => { performanceUsage.set(mode) },
@@ -1614,6 +1623,41 @@ describe('ChatView', () => {
     expect(second.queryByRole('button', { name: '已到会话开头' })).toBeNull()
   })
 
+  it('reads older outline turns once at a time while the rail shows its first marks, and stops when none remain', async () => {
+    const later = [userInTurn(8, 'third prompt', 3), assistant(9, 'third response', 3)]
+    const h = makeHarness({ nodes: later }, { hasMore: true })
+    const read = Promise.withResolvers<undefined>()
+    h.loadOlderTurns.mockReturnValueOnce(read.promise as Promise<void>)
+    h.setOutline([
+      { id: '2', turn: 2, seq: 4, prompt: 'second prompt', response: '' },
+      { id: '3', turn: 3, seq: 8, prompt: 'third prompt', response: '' },
+    ], undefined)
+    const view = render(<h.ChatView {...h.props} />)
+    await view.findByRole('button', { name: '加载并跳转到第 2 轮' })
+    await waitFor(() => { expect(h.loadOlderTurns).toHaveBeenCalledOnce() })
+
+    // A changed unread count asks again only after the pending read settles.
+    act(() => {
+      h.setOutline([
+        { id: '2', turn: 2, seq: 4, prompt: 'second prompt', response: '' },
+        { id: '3', turn: 3, seq: 8, prompt: 'third prompt', response: '' },
+      ], 1)
+      view.rerender(<h.ChatView {...h.props} />)
+    })
+    expect(h.loadOlderTurns).toHaveBeenCalledOnce()
+    // A failed read leaves the rail as it is.
+    await act(async () => { read.reject(new Error('page failed')) })
+    act(() => {
+      h.setOutline([
+        { id: '1', turn: 1, seq: 0, prompt: 'first prompt', response: '' },
+        { id: '2', turn: 2, seq: 4, prompt: 'second prompt', response: '' },
+        { id: '3', turn: 3, seq: 8, prompt: 'third prompt', response: '' },
+      ], 0)
+      view.rerender(<h.ChatView {...h.props} />)
+    })
+    await view.findByRole('button', { name: '加载并跳转到第 1 轮' })
+    expect(h.loadOlderTurns).toHaveBeenCalledOnce()
+  })
   it('holds a jump issued while a plain pull owns the pager and resumes it when the pull settles', async () => {
     const later = [userInTurn(8, 'third prompt', 3), assistant(9, 'third response', 3)]
     const h = makeHarness({ nodes: later }, { hasMore: true, loadingOlder: true })

@@ -4194,6 +4194,32 @@ export interface Config extends SessionTitleLlmConfig {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-session-title-first-prompt-llm -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-session-turn-outline -->
+<a id="deepseek-aidsh-session-turn-outline"></a>
+
+## `@deepseek-ai/dsh-session-turn-outline`
+
+- `inject`: `sessionProjections`
+- `source`: [`packages/session/session-turn-outline/src/index.ts:33`](../packages/session/session-turn-outline/src/index.ts)
+
+```ts config-catalog
+/** Configuration with its default applied by {@link Config}. */
+export interface ResolvedConfig extends Config {
+  /** Newest outline items every Client payload carries. */
+  hintTurns: number
+}
+
+/** Plugin configuration. */
+export interface Config {
+  /**
+   * Newest outline items every Client payload carries (follow openings and
+   * explicit reads); a Client reads older items by page. @default 200
+   */
+  hintTurns?: number
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-session-turn-outline -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-shell-env -->
 <a id="deepseek-aidsh-shell-env"></a>
 
@@ -6147,7 +6173,6 @@ export interface Config {
 | `@deepseek-ai/dsh-session-checkpoint-policy` | `llm` · `sessionPersistence` · `sessions` · `tools` | [`packages/session/session-checkpoint-policy/src/index.ts`](../packages/session/session-checkpoint-policy/src/index.ts) |
 | `@deepseek-ai/dsh-session-projection` | — | [`packages/session/session-projection/src/index.ts`](../packages/session/session-projection/src/index.ts) |
 | `@deepseek-ai/dsh-session-stats` | `sessionProjections` | [`packages/session/session-stats/src/index.ts`](../packages/session/session-stats/src/index.ts) |
-| `@deepseek-ai/dsh-session-turn-outline` | `sessionProjections` | [`packages/session/session-turn-outline/src/index.ts`](../packages/session/session-turn-outline/src/index.ts) |
 | `@deepseek-ai/dsh-settings` | `configEditor` · `profileContext` | [`packages/settings/settings/src/index.ts`](../packages/settings/settings/src/index.ts) |
 | `@deepseek-ai/dsh-skill-badge` | `skills` | [`packages/experimental/skill-badge/src/index.ts`](../packages/experimental/skill-badge/src/index.ts) |
 | `@deepseek-ai/dsh-storage` | — | [`packages/storage/storage/src/index.ts`](../packages/storage/storage/src/index.ts) |

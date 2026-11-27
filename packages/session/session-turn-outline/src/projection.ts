@@ -23,7 +23,7 @@ import { z } from 'zod'
 import type { ZodType } from 'zod'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
-import type { TurnOutlineEntry, TurnOutlineState } from './types.ts'
+import type { TurnOutlineEntry, TurnOutlineItem, TurnOutlineState } from './types.ts'
 
 /** Prompt budget: one rail-card line (13px over ~276px), ASCII worst case included. */
 const PROMPT_PREVIEW_LIMIT = 50
@@ -58,12 +58,15 @@ function preview(content: MessageContent, limit: number): string {
   return unread ? `${normalized}…` : normalized
 }
 
-const turnOutlineEntriesSchema: ZodType<readonly TurnOutlineEntry[]> = z.array(z.object({
+const entryFields = {
   turn: z.number().int().nonnegative(),
   seq: z.number().int().nonnegative().transform(SessionSeq),
   prompt: z.string().max(PROMPT_PREVIEW_LIMIT),
   response: z.string().max(RESPONSE_PREVIEW_LIMIT),
-}).strict()).superRefine((turns, context) => {
+}
+
+/** Reject an outline whose turns do not strictly increase. */
+function strictlyIncreasing(turns: readonly { readonly turn: number }[], context: z.RefinementCtx): void {
   let previous = -1
   for (const entry of turns) {
     if (entry.turn <= previous) {
@@ -72,7 +75,30 @@ const turnOutlineEntriesSchema: ZodType<readonly TurnOutlineEntry[]> = z.array(z
     }
     previous = entry.turn
   }
-})
+}
+
+const turnOutlineEntriesSchema: ZodType<readonly TurnOutlineEntry[]> = z.array(z.object(entryFields).strict())
+  .superRefine(strictlyIncreasing)
+
+const turnOutlineItemsSchema: ZodType<readonly TurnOutlineItem[]> = z.array(z.object({ id: z.string(), ...entryFields }).strict()
+  .refine(item => item.id === String(item.turn), { message: 'a turn outline item id is its decimal turn number' }))
+  .superRefine(strictlyIncreasing)
+
+/** Wire items per `turns` array, so an unchanged array keeps its viewed reference. */
+const viewedItems = new WeakMap<readonly TurnOutlineEntry[], readonly TurnOutlineItem[]>()
+
+/** The wire items of one outline, reusing the result for the same `turns` array. */
+function outlineItems(turns: readonly TurnOutlineEntry[]): readonly TurnOutlineItem[] {
+  let items = viewedItems.get(turns)
+  if (items === undefined) {
+    items = turns.map(entry => ({ id: String(entry.turn), ...entry }))
+    viewedItems.set(turns, items)
+  }
+  return items
+}
+
+/** Newest outline items every Client payload carries when the plugin config does not choose a count. */
+export const DEFAULT_HINT_TURNS = 200
 
 const turnOutlineStateSchema: ZodType<TurnOutlineState> = z.object({
   turns: turnOutlineEntriesSchema,
@@ -81,63 +107,74 @@ const turnOutlineStateSchema: ZodType<TurnOutlineState> = z.object({
 
 const EMPTY_OUTLINE: TurnOutlineState = { turns: [], draft: '' }
 
-/** The `turnOutline` unit registered on `ctx.sessionProjections` (exported for the unit spec). */
-export const turnOutlineProjectionDefinition = {
-  key: 'turnOutline',
-  stateVersion: 2,
-  stateSchema: turnOutlineStateSchema,
-  init: () => EMPTY_OUTLINE,
-  apply: (state, event) => {
-    // Every uninteresting event returns the same reference (Object.is gates
-    // the drive), and draft-only changes keep `turns` identity (the raw-view
-    // identity gate then keeps the change feed quiet).
-    switch (event.type) {
-      case 'turn/start': {
-        const last = state.turns.at(-1)
-        // Order guard: a boundary that does not advance the turn number keeps
-        // the outline sorted, and a retried turn's previews land on the
-        // standing entry.
-        if (last !== undefined && event.data.turn <= last.turn) return state
-        return {
-          turns: [...state.turns, { turn: event.data.turn, seq: event.seq, prompt: '', response: '' }],
-          draft: '',
+/**
+ * Build the `turnOutline` unit. Client payloads carry the newest `hintTurns`
+ * items; Host snapshots and checkpoints stay complete.
+ * @param hintTurns - newest outline items every Client payload carries.
+ * @returns the unit to register on `ctx.sessionProjections`.
+ */
+export function createTurnOutlineProjectionDefinition(hintTurns: number) {
+  return {
+    key: 'turnOutline',
+    stateVersion: 2,
+    stateSchema: turnOutlineStateSchema,
+    init: () => EMPTY_OUTLINE,
+    apply: (state, event) => {
+      // Every uninteresting event returns the same reference (Object.is gates
+      // the drive), and draft-only changes keep `turns` identity (the raw-view
+      // identity gate then keeps the change feed quiet).
+      switch (event.type) {
+        case 'turn/start': {
+          const last = state.turns.at(-1)
+          // Order guard: a boundary that does not advance the turn number keeps
+          // the outline sorted, and a retried turn's previews land on the
+          // standing entry.
+          if (last !== undefined && event.data.turn <= last.turn) return state
+          return {
+            turns: [...state.turns, { turn: event.data.turn, seq: event.seq, prompt: '', response: '' }],
+            draft: '',
+          }
         }
+        case 'user/message': {
+          // Only the newest turn can still be waiting for its opening human
+          // prompt; later human messages in the same turn (steering) keep the
+          // first preview.
+          if (event.data.source.kind !== 'user') return state
+          const last = state.turns.at(-1)
+          if (last === undefined || last.prompt !== '') return state
+          const prompt = preview(event.data.content, PROMPT_PREVIEW_LIMIT)
+          if (prompt === '') return state
+          return { turns: [...state.turns.slice(0, -1), { ...last, prompt }], draft: state.draft }
+        }
+        case 'assistant/message': {
+          // Newest text-bearing message wins; the buffer commits at turn/end.
+          const draft = preview(event.data.message.content, RESPONSE_PREVIEW_LIMIT)
+          if (draft === '' || draft === state.draft) return state
+          return { turns: state.turns, draft }
+        }
+        case 'turn/end': {
+          if (state.draft === '') return state
+          const last = state.turns.at(-1)
+          if (last === undefined || last.response === state.draft) return { turns: state.turns, draft: '' }
+          return { turns: [...state.turns.slice(0, -1), { ...last, response: state.draft }], draft: '' }
+        }
+        default:
+          return state
       }
-      case 'user/message': {
-        // Only the newest turn can still be waiting for its opening human
-        // prompt; later human messages in the same turn (steering) keep the
-        // first preview.
-        if (event.data.source.kind !== 'user') return state
-        const last = state.turns.at(-1)
-        if (last === undefined || last.prompt !== '') return state
-        const prompt = preview(event.data.content, PROMPT_PREVIEW_LIMIT)
-        if (prompt === '') return state
-        return { turns: [...state.turns.slice(0, -1), { ...last, prompt }], draft: state.draft }
-      }
-      case 'assistant/message': {
-        // Newest text-bearing message wins; the buffer commits at turn/end.
-        const draft = preview(event.data.message.content, RESPONSE_PREVIEW_LIMIT)
-        if (draft === '' || draft === state.draft) return state
-        return { turns: state.turns, draft }
-      }
-      case 'turn/end': {
-        if (state.draft === '') return state
-        const last = state.turns.at(-1)
-        if (last === undefined || last.response === state.draft) return { turns: state.turns, draft: '' }
-        return { turns: [...state.turns.slice(0, -1), { ...last, response: state.draft }], draft: '' }
-      }
-      default:
-        return state
-    }
-  },
-  wire: {
-    viewSchema: turnOutlineEntriesSchema,
-    view: state => state.turns,
-    summary: false,
-    // The rail reads loaded turns before the outline, and a followed Session
-    // receives every new turn as events, so the value is needed only at an
-    // opening or explicit read; streaming it would resend the whole log
-    // outline up to three times per turn.
-    live: false,
-  },
-} satisfies ProjectionDefinition<'turnOutline', TurnOutlineState>
+    },
+    wire: {
+      viewSchema: turnOutlineItemsSchema,
+      view: state => outlineItems(state.turns),
+      hintView: items => (items.length <= hintTurns ? items : items.slice(-hintTurns)),
+      summary: false,
+      // The rail reads loaded turns before the outline, and a followed Session
+      // receives every new turn as events, so the value is needed only at an
+      // opening or explicit read; streaming it would resend the whole log
+      // outline up to three times per turn.
+      live: false,
+    },
+  } satisfies ProjectionDefinition<'turnOutline', TurnOutlineState>
+}
+
+/** The `turnOutline` unit with the default hint count (exported for the unit spec). */
+export const turnOutlineProjectionDefinition = createTurnOutlineProjectionDefinition(DEFAULT_HINT_TURNS)

@@ -35,16 +35,23 @@ Mount the plugin beside the session store and the projection registry when clien
 - name: '@deepseek-ai/dsh-session-turn-outline'
 ```
 
+### Configuration
+
+| Key | Default | Meaning |
+|---|---|---|
+| `hintTurns` | `200` | Positive integral number of newest outline items every Client payload carries (follow openings and explicit `session.projections` reads); a Client reads older items through `session.projectionPage` |
+
 ### What an entry means
 
 | Field | Meaning |
 |---|---|
+| `id` | The decimal turn number, the identity a Client merges loaded older pages by |
 | `turn` | Host-assigned turn number from the `turn/start` payload |
 | `seq` | The turn's `turn/start` event seq — paging a window back through this seq loads the whole turn |
 | `prompt` | Preview of the turn's first human prompt (space-joined text blocks, collapsed whitespace, 50-character cap with a trailing ellipsis when clipped — one rail-card line); `''` until an eligible prompt lands |
 | `response` | Preview of the turn's final text-bearing assistant message (same normalization, 120-character cap — up to three rail-card lines); `''` until the turn ends with assistant text |
 
-The wire value is the complete entry array, strictly increasing by `turn` (whole-value rule): consumers replace, never merge. Prompts fill only from `user/message` events with the human `user` source, so injected context and tool results never leak into navigation; a turn whose prompt is images-only keeps `''` and consumers label it by number. The response buffers as a draft while its turn streams and commits at `turn/end`; the change feed's raw-view identity gate keeps draft-only changes quiet, so the outline pushes at most three times per turn — boundary, prompt, settled response. Preview budgets match the chat rail's loaded-turn previews, so a turn shows the same words before and after its events load.
+The Host value is the complete entry array, strictly increasing by `turn` (whole-value rule). `turnOutline` is a paged key: every Client payload carries its newest `hintTurns` items, and a Client reads older items by index through `session.projectionPage` and merges them under the pushed window by `id`, so opening a Session with tens of thousands of turns sends a bounded outline. Prompts fill only from `user/message` events with the human `user` source, so injected context and tool results never leak into navigation; a turn whose prompt is images-only keeps `''` and consumers label it by number. The response buffers as a draft while its turn streams and commits at `turn/end`; the change feed's raw-view identity gate keeps draft-only changes quiet, so the outline pushes at most three times per turn — boundary, prompt, settled response. Preview budgets match the chat rail's loaded-turn previews, so a turn shows the same words before and after its events load.
 
 ### Failures and recovery
 
@@ -68,15 +75,15 @@ The unit is a pure fold over committed session events. `turn/start` — not the 
 
 | File | Role |
 |---|---|
-| [`src/index.ts`](src/index.ts) | Plugin entry: `inject`, unit registration on the mounting fiber |
-| [`src/projection.ts`](src/projection.ts) | The fold: entry append, preview fill, wire view |
+| [`src/index.ts`](src/index.ts) | Plugin entry: `inject`, `Config`, unit registration on the mounting fiber |
+| [`src/projection.ts`](src/projection.ts) | The fold: entry append, preview fill, wire view and its newest-items hint |
 | [`src/types.ts`](src/types.ts) | One home of the `turnOutline` projection-key declaration and entry types |
 
 ### Fold rules
 
 - Uninteresting events return the same state reference, and draft-only changes keep the `turns` array's identity; the registry's two `Object.is` gates then hold the feed to at most three changes per turn. The unit declares `wire.live: false`: the rail reads loaded turns before the outline, and a followed Session receives each new turn as events, so Session Controller change streams never carry the outline; it arrives with each opening and explicit read.
 - A `turn/start` that does not advance the turn number is skipped, keeping the outline sorted; a retried boundary's previews then land on the standing entry.
-- The wire view projects `state.turns`; the persisted-cache state schema wraps the wire schema with the draft field.
+- The wire view projects `state.turns` with each entry's `id`, reusing one viewed array per `turns` array so the identity gates hold; the persisted-cache state schema holds the entries without `id` beside the draft field, so adding the paging identity left stored checkpoints valid.
 
 </details>
 
@@ -109,7 +116,7 @@ None; the package never assembles or sends provider requests.
 
 These limits define what the outline describes and when the unit is absent. They are current package constraints.
 
-- **The wire value grows with the session** — every opening and explicit read carries the complete outline (whole-value rule), up to ~600 bytes per turn at full CJK budgets and typically far less; splitting previews into an on-demand read is deferred until sessions with many thousands of turns need it.
+- **Older items cost one read per page** — a Client payload carries the newest `hintTurns` items (up to ~600 bytes per turn at full CJK budgets), and each older page is one `session.projectionPage` read, which for an unopened stored Session reads its checkpoint.
 - **The response previews only settled turns** — it commits at `turn/end`, so an open turn (or one whose end never logged) shows a prompt-only preview until the boundary lands.
 - **A turn without eligible text keeps `''`** — images-only and command-only turns are navigable but labeled by number, and a turn whose steps emit no text gets no response preview.
 - **Mounted only where the projection registry is composed** — other assemblies serve no `turnOutline` key, and their consumers fall back to loaded-window navigation.

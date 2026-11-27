@@ -17,7 +17,7 @@ import {
   apply as sessionStatsApply, inject as sessionStatsInject, name as sessionStatsName,
 } from '@deepseek-ai/dsh-session-stats'
 import {
-  apply as turnOutlineApply, inject as turnOutlineInject, name as turnOutlineName,
+  apply as turnOutlineApply, Config as turnOutlineConfig, inject as turnOutlineInject, name as turnOutlineName,
 } from '@deepseek-ai/dsh-session-turn-outline'
 import {
   apply as toolTodoApply, Config as toolTodoConfig, inject as toolTodoInject, name as toolTodoName,
@@ -65,7 +65,7 @@ async function harness(): Promise<{ ctx: Context; sessionContext: Context }> {
   await ctx.plugin(SessionProjectionRegistry)
   ctx.provide('tools', { register: () => () => {} } as never)
   await ctx.sessionProjections.register(agentPresetProjectionDefinition)
-  await ctx.plugin({ name: turnOutlineName, inject: turnOutlineInject, apply: turnOutlineApply })
+  await ctx.plugin({ name: turnOutlineName, inject: turnOutlineInject, Config: turnOutlineConfig, apply: turnOutlineApply }, {})
   await ctx.plugin({ name: sessionStatsName, inject: sessionStatsInject, apply: sessionStatsApply })
   await ctx.plugin({
     name: toolTodoName,

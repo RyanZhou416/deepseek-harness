@@ -20,9 +20,12 @@
 /deepseek-ai-dsh-session-turn-outline/use-this-package/composition:
   en: 1ff253c3946b4ebe
   zh: 103f66630a01e5f8
+/deepseek-ai-dsh-session-turn-outline/use-this-package/configuration:
+  en: cf72f48f0d741d81
+  zh: 130117fe764ae5a9
 /deepseek-ai-dsh-session-turn-outline/use-this-package/what-an-entry-means:
-  en: faf6f2af56847bd3
-  zh: fdf0e21dccde33d5
+  en: 768611d5f1f0d3da
+  zh: 051fd620428fe1d3
 /deepseek-ai-dsh-session-turn-outline/use-this-package/failures-and-recovery:
   en: cdfa6afebdb1926a
   zh: d762a515be9de75f
@@ -33,11 +36,11 @@
   en: a20da800a1fbe258
   zh: 7123399bb8d80806
 /deepseek-ai-dsh-session-turn-outline/understand-the-implementation/source-map:
-  en: 819a644c4681b4f8
-  zh: 0f02af23ab8f59ea
+  en: 5f57b7e534a2ff0f
+  zh: aeddf7fb619bd48f
 /deepseek-ai-dsh-session-turn-outline/understand-the-implementation/fold-rules:
-  en: d6f9303d9c8b6cff
-  zh: 644ac56a1cdd5dfd
+  en: 9589961de1856267
+  zh: c9ce7fe8101ee9bb
 /deepseek-ai-dsh-session-turn-outline/further-exploration:
   en: 39e2876d4cea3c71
   zh: 55916dda642538dc
@@ -48,8 +51,8 @@
   en: 47f982e326fe77fd
   zh: c2241315dc0c89c9
 /deepseek-ai-dsh-session-turn-outline/known-limitations-and-deferred-work:
-  en: 254acdcb54c8df88
-  zh: 557f0b96ecc2f264
+  en: 6b3d119d27d8f13f
+  zh: 1ee83b702efca114
 /deepseek-ai-dsh-session-turn-outline/known-limitations-and-deferred-work/dev-note:
   en: e67f633dc6fe7773
   zh: 3bb0c20c93f16f98

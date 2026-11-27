@@ -312,6 +312,34 @@ describe('Chat inject API', () => {
     await b.runtime.dispose()
   })
 
+  it('reads the paged turn outline from the Session list and requests older pages by key', async () => {
+    const b = await bench()
+    const { injected } = b.chatViewApi(b.rootReference)
+    const list = b.runtime.sessions.list
+    const base = list.getSnapshot()
+    let snapshot = base
+    const read = vi.spyOn(list, 'getSnapshot').mockImplementation(() => snapshot)
+    const outline = injected.hooks.turnOutline
+    expect(outline.getSnapshot()).toEqual({ items: undefined, older: undefined })
+
+    const items = [{ id: '3', turn: 3, seq: SessionSeq(8), prompt: 'p', response: '' }]
+    snapshot = { ...base, projectionsBySession: { [ROOT]: { values: { turnOutline: items }, state: 'ready', error: null, unread: { turnOutline: 2 } } } }
+    const first = outline.getSnapshot()
+    expect(first).toEqual({ items, older: 2 })
+    // Unchanged inputs keep the snapshot identity a selector hook relies on.
+    snapshot = { ...snapshot }
+    expect(outline.getSnapshot()).toBe(first)
+    const listener = vi.fn()
+    const unsubscribe = outline.subscribe(listener)
+    expect(typeof unsubscribe).toBe('function')
+    unsubscribe()
+    read.mockRestore()
+
+    const page = vi.spyOn(b.runtime.sessions, 'loadProjectionPage').mockResolvedValue(undefined)
+    await injected.loadOlderTurns()
+    expect(page).toHaveBeenCalledExactlyOnceWith(ROOT, 'turnOutline', 500)
+    await b.runtime.dispose()
+  })
   it('addresses file paths under the Session\'s scope and opens them in the right Sidebar', async () => {
     const b = await bench()
     const { injected } = b.chatViewApi(b.rootReference)
