@@ -151,7 +151,7 @@ function standaloneHistory(
   snapshot: TrajectorySnapshot,
 ): Pick<
   ComponentProps<typeof TrajectoryView>,
-  'useSession' | 'useTrajectory' | 'loadOlder'
+  'useSession' | 'useTrajectory' | 'loadOlder' | 'requireEventDetails'
 > {
   const session = createSnapshotStore(sessionSnapshot(snapshot.eventNodes))
   const trajectory = createSnapshotStore(snapshot)
@@ -159,6 +159,7 @@ function standaloneHistory(
     useSession: bindSnapshotSelector(session),
     useTrajectory: bindSnapshotSelector(trajectory),
     loadOlder: () => Promise.resolve(false),
+    requireEventDetails: () => () => {},
   }
 }
 
@@ -205,7 +206,7 @@ const useProjection: UseProjection = emptyProjection
 
 type StandaloneBaseProps = Omit<
   ComponentProps<typeof TrajectoryView>,
-  'useSession' | 'useTrajectory' | 'useDuration' | 'loadOlder' | 'setActualDuration'
+  'useSession' | 'useTrajectory' | 'useDuration' | 'loadOlder' | 'requireEventDetails' | 'setActualDuration'
 >
 
 /** Standalone view props: the session-scope standard kit the outlet would bake. */
@@ -400,6 +401,7 @@ function mount(fixture: Awaited<ReturnType<typeof bench>>) {
         const trajectory = injected as TrajectoryViewInjected
         return {
           loadOlder: trajectory.loadOlder,
+          requireEventDetails: trajectory.requireEventDetails,
           loadImage: trajectory.loadImage,
           setActualDuration: trajectory.setActualDuration,
           useDuration: bindSnapshotSelector(trajectory.hooks.duration),
@@ -1328,6 +1330,23 @@ describe('timeline projection', () => {
     })
   })
 
+  it('holds complete event details while mounted and releases them on unmount', () => {
+    const release = vi.fn()
+    const requireEventDetails = vi.fn(() => release)
+    const view = render(createElement(
+      TrajectoryView,
+      {
+        ...standaloneProps([]),
+        ...standaloneHistory(historySnapshot([])),
+        ...standaloneDuration(),
+        requireEventDetails,
+      },
+    ))
+    expect(requireEventDetails).toHaveBeenCalledOnce()
+    expect(release).not.toHaveBeenCalled()
+    view.unmount()
+    expect(release).toHaveBeenCalledOnce()
+  })
   it('empty inputs produce no model and the standalone view reports its empty form', () => {
     expect(deriveTrajectoryTimeline([])).toBeNull()
     render(createElement(
@@ -1493,6 +1512,7 @@ describe('TrajectoryView state', () => {
         {...standaloneDuration()}
         useTrajectory={bindSnapshotSelector(trajectory)}
         loadOlder={loadOlder}
+        requireEventDetails={() => () => {}}
       />,
     )
 
@@ -1705,6 +1725,7 @@ describe('TrajectoryView state', () => {
         {...standaloneDuration()}
         useTrajectory={bindSnapshotSelector(store)}
         loadOlder={vi.fn(() => Promise.resolve(false))}
+        requireEventDetails={() => () => {}}
       />,
     )
     fireEvent.click(screen.getByRole('row', { name: /selected current response/ }))

@@ -163,6 +163,14 @@ export class FixtureSession implements SessionFace {
   }
 
   /**
+   * Fixture events are complete, so holding their detail fields changes nothing.
+   * @returns a no-op release.
+   */
+  requireEventDetails(): () => void {
+    return () => {}
+  }
+
+  /**
    * Fail-loud stub; supply `loadOlder` on the fixture's session face to exercise it.
    * @returns never — always throws.
    */

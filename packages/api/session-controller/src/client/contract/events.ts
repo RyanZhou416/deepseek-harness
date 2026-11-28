@@ -21,7 +21,8 @@ export type SessionEventLike = SessionEvent | AssistantLiveChunkEvent
 
 /** Client history entry retaining its coarse transport discriminator. */
 export type SessionEventLikeEntry =
-  | { readonly type: 'event'; readonly event: SessionEvent }
+  /** `elided` marks a history read that emptied the event's detail fields (`SessionPageRequest.elideDetails`). */
+  | { readonly type: 'event'; readonly event: SessionEvent; readonly elided?: true }
   | { readonly type: 'transient'; readonly event: AssistantLiveChunkEvent }
 
 /** Scalar live entry accepted by append-only Client paths. */
@@ -191,6 +192,28 @@ export class MutableSessionEventSource implements SessionEventSource {
     })
   }
 
+  /**
+   * Replace elided durable entries with complete reads of the same seqs; every other entry stays. Publishes one
+   * `replace` change when an entry was replaced.
+   * @param complete - durable entries read without `elideDetails`.
+   */
+  restoreDetails(complete: readonly SessionEventLikeEntry[]): void {
+    const bySeq = new Map<number, SessionEventLikeEntry>()
+    for (const entry of complete) {
+      if (entry.type === 'event' && entry.elided !== true) bySeq.set(entry.event.seq, entry)
+    }
+    let changed = false
+    const entries = materialize(this.window).map((entry) => {
+      if (entry.type !== 'event' || entry.elided !== true) return entry
+      const restored = bySeq.get(entry.event.seq)
+      if (restored?.event.type !== entry.event.type) return entry
+      changed = true
+      return restored
+    })
+    if (!changed) return
+    this.window = leaf(entries)
+    this.publish(this.snapshot.hasMore, { kind: 'replace', entries })
+  }
   /**
    * Commit one durable Assistant settlement at its published sequence position,
    * retaining that attempt's transient rows. A sequence above the published

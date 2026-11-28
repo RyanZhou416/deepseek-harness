@@ -30,6 +30,8 @@ import type {
   SessionEventLike, SessionEventLikeEntry, SessionLiveEventEntry,
 } from '../contract/events.ts'
 import { Notifier } from './notifier.ts'
+import { historyEntries } from './history-records.ts'
+import { assertSessionWireEvent } from '../session-wire-event.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
@@ -190,6 +192,12 @@ export class Session implements SessionFace {
   }>()
   /** Owns the addressed page/follow lifecycle while this Session is open. */
   private events: SessionEventStream | undefined
+  /** Holders of complete event detail fields; reads elide them while zero. */
+  private detailHolders = 0
+  /** Ends the detail re-reads and their window subscription when the last holder releases. */
+  private detailReads: { readonly controller: AbortController; readonly unsubscribe: () => void } | undefined
+  private readingDetails = false
+  private detailsRequestedAgain = false
 
   /**
    * Per-session projection value store (push model; see the session-projection
@@ -800,7 +808,85 @@ export class Session implements SessionFace {
     await events?.dispose()
   }
 
+  /**
+   * Keep complete event detail fields in the event window until the returned release runs. While no holder exists,
+   * openings and older pages omit the fields `SessionPageRequest.elideDetails` names; a holder makes later reads
+   * complete and re-reads every elided entry in the window, including entries that enter it later from buffered
+   * history. A failed re-read is logged and retried with the next window replacement or prepend.
+   * @returns idempotent release.
+   */
+  requireEventDetails(): () => void {
+    this.detailHolders++
+    if (this.detailHolders === 1) {
+      const controller = new AbortController()
+      const unsubscribe = this.eventSource.subscribe(() => {
+        const change = this.eventSource.getSnapshot().change
+        if ((change.kind === 'replace' || change.kind === 'prepend')
+          && change.entries.some(entry => entry.type === 'event' && entry.elided === true)) {
+          void this.readEventDetails()
+        }
+      })
+      this.detailReads = { controller, unsubscribe }
+      void this.readEventDetails()
+    }
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.detailHolders--
+      if (this.detailHolders > 0) return
+      this.detailReads?.controller.abort()
+      this.detailReads?.unsubscribe()
+      this.detailReads = undefined
+    }
+  }
+
   // ---- Private ----
+
+  /**
+   * Re-read elided window entries for the current holders. One pass runs at a time; a request during it runs one
+   * more pass, under the holders current then, so a release and a new hold during a pass still re-read.
+   */
+  private async readEventDetails(): Promise<void> {
+    if (this.readingDetails) {
+      this.detailsRequestedAgain = true
+      return
+    }
+    this.readingDetails = true
+    try {
+      do {
+        this.detailsRequestedAgain = false
+        const signal = this.detailReads?.controller.signal
+        if (signal === undefined) return
+        try {
+          await this.restoreElidedEntries(signal)
+        } catch (error: unknown) {
+          if (!signal.aborted && !isRemoteFailure(error)) console.error('[session-controller] event detail read failed:', error)
+        }
+      } while (this.detailsRequestedAgain)
+    } finally {
+      this.readingDetails = false
+    }
+  }
+
+  /** Read complete pages ending at the newest elided entry until none remains or the Host no longer serves it. */
+  private async restoreElidedEntries(signal: AbortSignal): Promise<void> {
+    for (;;) {
+      let newest = -1
+      for (const entry of this.eventSource.getSnapshot().entries) {
+        if (entry.type === 'event' && entry.elided === true) newest = Math.max(newest, entry.event.seq)
+      }
+      if (newest < 0 || signal.aborted) return
+      const result = await this.remote.session.page({
+        address: this.sessionAddress(), throughSeq: newest, beforeSeq: newest + 1, ...HISTORY_PAGE_OPTIONS,
+      }, signal)
+      if (!result.ok) throw result.error
+      if (signal.aborted) return
+      for (const record of result.value.records) assertSessionWireEvent(record.event)
+      if (!result.value.records.some(record => record.event.seq === newest)) return
+      this.eventSource.restoreDetails(historyEntries(result.value.records))
+    }
+  }
 
   /** @param generation - openGeneration at launch; stale passes cannot publish after replacement. */
   private async doOpen(generation: number): Promise<void> {
@@ -816,6 +902,7 @@ export class Session implements SessionFace {
       failed: (error) => {
         this.failEventStream(events, generation, error)
       },
+      elideDetails: () => this.detailHolders === 0,
     })
     this.events = events
     try {

@@ -27,6 +27,8 @@ The Trajectory tab lets you inspect agent activity as a turn-aware ledger and in
 
 Open the Trajectory tab in the conversation's view ring to inspect agent activity as an event ledger and timeline. The ledger covers records with an explicit loading row until the initial tail is positioned; while an older prefix remains unloaded, a first-row control loads one earlier page on click and shows the shared ongoing loader while that page is pending.
 
+While the tab is mounted it holds `requireEventDetails()` on the Session, so the Assistant streams, request tool catalogs, provider replay state and request records that Session openings omit are read again in full; until those reads finish, first-token timing, tool catalogs and message sources of the affected records show as not recorded.
+
 ### Inspecting records
 
 The toolbar folds turns, calls, and subcalls independently. Subcalls fold into a summary beneath their parent tool; click the summary or press Enter or Space to expand it. Search includes folded subcalls, and cross-view inspection expands the requested call. Toolbar controls and search wrap onto additional lines when the pane is narrow.

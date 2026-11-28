@@ -104,6 +104,7 @@ export function apply(ctx: Context): void {
           await session.loadOlder()
           return trajectory.getSnapshot() !== before
         },
+        requireEventDetails: () => session.requireEventDetails(),
         loadImage: Object.assign(
           (attachment: ImageAttachmentRef) => ctx.uiConversation.imageUrl(sessionId, attachment),
           { peek: (attachment: ImageAttachmentRef) => ctx.uiConversation.peekImageUrl(sessionId, attachment) },

@@ -82,6 +82,11 @@ export interface TrajectoryViewInjected {
     duration: SnapshotStore<boolean>
   }
   loadOlder: () => Promise<boolean>
+  /**
+   * Keep complete event detail fields (Assistant streams, request tool catalogs, provider replay state and request
+   * records) in the Session's event window while the view is mounted; returns the release.
+   */
+  requireEventDetails: () => () => void
   loadImage: MessageImageLoader
   setActualDuration: (actualDuration: boolean) => void
   watchToolResult?: WatchToolResult
@@ -132,7 +137,7 @@ function addUsage(
 }
 
 export function TrajectoryView({
-  useSession, useTrajectory, useDuration, watchToolResult, loadOlder, loadImage, setActualDuration,
+  useSession, useTrajectory, useDuration, watchToolResult, loadOlder, requireEventDetails, loadImage, setActualDuration,
   viewRequest, completeViewRequest, renderSlot, t, jsonStringWrapping,
 }: ConvViewProps
   & Pick<PropsRenderSlots<'conversation.trajectory.images'>, 'renderSlot'>
@@ -157,6 +162,7 @@ export function TrajectoryView({
   const [timelineRecordFocus, setTimelineRecordFocus] = useState<{
     readonly index: number
   } | null>(null)
+  useEffect(() => requireEventDetails(), [requireEventDetails])
   const completeInspection = useTrajectory(snapshot => snapshot)
   const latestNodeSeq = completeInspection.eventNodes.at(-1)?.seq
   const [historyTailSeq, setHistoryTailSeq] = useState(latestNodeSeq)

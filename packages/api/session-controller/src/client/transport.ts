@@ -116,6 +116,8 @@ export interface SessionEventStreamOptions {
   readonly carrierFailed?: (error: RemoteStreamCarrierFailure) => void
   /** Publish a terminal stream, page, or protocol failure after opening. */
   readonly failed: (error: unknown) => void
+  /** Whether openings and Host page reads request `elideDetails`; read at each request. */
+  readonly elideDetails: () => boolean
 }
 
 /**
@@ -194,9 +196,11 @@ export class SessionEventStream extends RemoteJournalStream<
       failed: options.failed,
     })
     this.buffered = buffered
+    this.elideDetails = options.elideDetails
   }
 
   private readonly buffered: BufferedRecords
+  private readonly elideDetails: () => boolean
 
   /**
    * Release the start of the published window into memory; later pages before the window return it without a
@@ -225,6 +229,7 @@ export class SessionEventStream extends RemoteJournalStream<
       assistantStream: true,
       projectionChanges: true,
       ...this.repairRequest(request),
+      ...this.elideDetails() ? { elideDetails: true } : {},
     }, signal)) {
       if (frame.type === 'snapshot') {
         for (const record of frame.records) assertSessionWireEvent(record.event)
@@ -282,7 +287,7 @@ export class SessionEventStream extends RemoteJournalStream<
       return { records: buffered.slice(start), hasMore: start > 0 || this.buffered.hostHasMore }
     }
     const result = await this.remote.session.page(
-      { address: this.address, throughSeq, ...request },
+      { address: this.address, throughSeq, ...request, ...this.elideDetails() ? { elideDetails: true } : {} },
       signal,
     )
     if (!result.ok) throw result.error

@@ -54,6 +54,7 @@ function fixture(running = false) {
     cancel: vi.fn(),
     rename: vi.fn(),
     loadOlder: vi.fn(),
+    requireEventDetails: vi.fn(),
     consumeOlder: vi.fn(),
     loadThrough: vi.fn(),
     command: vi.fn(),

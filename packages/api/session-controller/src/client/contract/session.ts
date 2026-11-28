@@ -149,6 +149,12 @@ export interface ISession {
    */
   loadOlder(options?: { deferConsumption?: boolean }): Promise<void>
   /**
+   * Keep complete event detail fields in the event window until the returned release runs. Without a holder,
+   * openings and older pages omit the fields `SessionPageRequest.elideDetails` names, which the Chat view does not
+   * render; a holder re-reads the elided entries and makes later reads complete.
+   * @returns idempotent release.
+   */
+  requireEventDetails(): () => void  /**
    * Publish the prepared page synchronously if its generation and starting cursor still match.
    * A terminal empty page may publish hasMore=false; an invalidated page is discarded.
    * @returns whether a prepared page was published; false while loading, absent, or invalidated.

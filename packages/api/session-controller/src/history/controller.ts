@@ -11,6 +11,7 @@ import {
   rejectNotFound, SESSION_WINDOW_FIRST_EVENTS,
 } from '../history.ts'
 import { EventListener, ProjectionListener } from './listener.ts'
+import { elideRecordDetails } from './details.ts'
 import { SessionAssistantStreamsListener } from './assistant-stream.ts'
 import type {
   SessionEventFrame, SessionEventsPage, SessionPageRequest,
@@ -76,6 +77,11 @@ export class HistoryController {
    * @returns a page at the supplied cut, or the observed log end when omitted.
    */
   async events(request: SessionPageRequest, signal: AbortSignal): Promise<SessionEventsPage> {
+    const page = await this.completeEvents(request, signal)
+    return request.elideDetails === true ? { ...page, records: elideRecordDetails(page.records) } : page
+  }
+
+  private async completeEvents(request: SessionPageRequest, signal: AbortSignal): Promise<SessionEventsPage> {
     const spec = resolveHistoryRequest(request)
     const windowId = windowSessionId(this.ctx, request.address)
     // Only the empty tail cut and older pages use a bounded stored window: a

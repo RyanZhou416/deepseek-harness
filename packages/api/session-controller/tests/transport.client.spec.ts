@@ -227,7 +227,7 @@ describe.each(['snapshot', 'live', 'page'] as const)('Session %s wire acceptance
     const publish = vi.fn()
     const failed = vi.fn()
     const carrierFailed = vi.fn()
-    const stream = new SessionEventStream(sessionClient(remote), ADDRESS, { publish, failed, carrierFailed })
+    const stream = new SessionEventStream(sessionClient(remote), ADDRESS, { publish, failed, carrierFailed, elideDetails: () => false })
     try {
       if (path === 'snapshot') {
         await expect(stream.open({})).rejects.toThrow()
@@ -286,6 +286,7 @@ describe('Session Client stream adapters', () => {
       let appended!: () => void
       const ready = new Promise<void>((resolve) => { appended = resolve })
       const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+        elideDetails: () => false,
         publish: (change) => { changes.push(change); if (change.type === 'append') appended() },
         failed: vi.fn(),
       })
@@ -324,6 +325,7 @@ describe('Session Client stream adapters', () => {
     )
     const changes: SessionJournalChange[] = []
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: (change) => { changes.push(change) },
       failed: vi.fn(),
     })
@@ -348,6 +350,7 @@ describe('Session Client stream adapters', () => {
     )
     const changes: SessionJournalChange[] = []
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: (change) => { changes.push(change) },
       failed: vi.fn(),
     })
@@ -376,6 +379,7 @@ describe('Session Client stream adapters', () => {
       }],
     }], [])
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: vi.fn(),
       failed: vi.fn(),
     })
@@ -398,6 +402,7 @@ describe('Session Client stream adapters', () => {
       })],
     }], [])
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: vi.fn(),
       failed: vi.fn(),
     })
@@ -443,6 +448,7 @@ describe('Session Client stream adapters', () => {
     const changes: SessionJournalChange[] = []
     const carrierFailed = vi.fn()
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: (change) => { changes.push(change) },
       carrierFailed,
       failed: vi.fn(),
@@ -501,6 +507,7 @@ describe('Session Client stream adapters', () => {
     const changes: SessionJournalChange[] = []
     const carrierFailed = vi.fn()
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: (change) => { changes.push(change) },
       carrierFailed,
       failed: vi.fn(),
@@ -528,6 +535,7 @@ describe('Session Client stream adapters', () => {
     )
     const changes: SessionJournalChange[] = []
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: (change) => { changes.push(change) },
       failed: vi.fn(),
     })
@@ -563,6 +571,7 @@ describe('Session Client stream adapters', () => {
     )
     const changes: SessionJournalChange[] = []
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: (change) => { changes.push(change) },
       failed: vi.fn(),
     })
@@ -602,6 +611,7 @@ describe('Session Client stream adapters', () => {
     const changes: SessionJournalChange[] = []
     const carrierFailed = vi.fn()
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: (change) => { changes.push(change) },
       carrierFailed,
       failed: vi.fn(),
@@ -640,6 +650,7 @@ describe('Session Client stream adapters', () => {
       [],
     )
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: vi.fn(),
       failed: vi.fn(),
     })
@@ -662,6 +673,7 @@ describe('Session Client stream adapters', () => {
     )
     const changes: SessionJournalChange[] = []
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: (change) => { changes.push(change) },
       failed: vi.fn(),
     })
@@ -682,6 +694,7 @@ describe('Session Client stream adapters', () => {
       [{ ok: false, error: failure }],
     )
     const stream = new SessionEventStream(sessionClient(remote), ADDRESS, {
+      elideDetails: () => false,
       publish: vi.fn(),
       failed: vi.fn(),
     })

@@ -462,6 +462,11 @@ export type SessionProjectionPageValue = {
 export interface SessionEventEntry {
   readonly type: 'event'
   readonly event: SessionWireEvent
+  /**
+   * Set when a read with `elideDetails` emptied this event's detail fields; a read of the same seq without it
+   * returns them.
+   */
+  readonly elided?: true
 }
 
 /** Current logical Session metadata carried on the browser wire. */
@@ -523,10 +528,20 @@ export interface SessionPageRequest {
     /** Minimum Turn starts crossed, including the partial Turn at beforeSeq. */
     readonly minTurns: number
   }
+  /**
+   * Empty the detail fields the Chat view does not render, after the page cut is chosen, so the page covers the same
+   * events as without it: an `assistant/message` `stream` becomes `[]` and its `message.source.replayState` is
+   * removed, a `request/header` `header.tools` is removed, and an `llm/request-record` `systemBlocks` becomes `[]`.
+   * Each changed record carries `elided: true`.
+   */
+  readonly elideDetails?: true
 }
 
-/** One live event request for a durable Session address. */
-export interface SessionFollowRequest extends Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'> {
+/**
+ * One live event request for a durable Session address. `elideDetails` applies to the opening snapshot; live events
+ * that follow it are complete.
+ */
+export interface SessionFollowRequest extends Pick<SessionPageRequest, 'maxMessages' | 'turnWindow' | 'elideDetails'> {
   readonly address: SessionAddress
   /** Request background activation; omission leaves the read passive. */
   readonly activate?: boolean

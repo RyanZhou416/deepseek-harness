@@ -19,6 +19,7 @@
     "src/file-references.ts",
     "src/history.ts",
     "src/history/controller.ts",
+    "src/history/details.ts",
     "src/history/fold-slots.ts",
     "src/history/listener.ts",
     "src/history/assistant-stream.ts",

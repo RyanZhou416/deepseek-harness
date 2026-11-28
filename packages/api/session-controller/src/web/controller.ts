@@ -11,6 +11,7 @@ import {
   tailTurnSettled, validateWindow, windowReadBounds, windowSessionId, wireHeader,
 } from '../history.ts'
 import { EventListener, ListenerBuffer, ProjectionListener } from '../history/listener.ts'
+import { elideRecordDetails } from '../history/details.ts'
 import { history, projections, resolveHistoryRequest, validateObservationAddress } from '../history/controller.ts'
 import type { SessionFollowFrame, SessionFollowRequest, SessionPageRequest, SessionProjectionBaseline } from '../types.ts'
 
@@ -90,6 +91,7 @@ export class WebController {
       }
     }
     listener.setCursor(opening.cursor)
+    if (request.elideDetails === true) opening = { ...opening, records: elideRecordDetails(opening.records) }
     if (assistantListener !== undefined) {
       const { baseline: assistantStream, ordinal } = assistantListener.snapshot()
       opening = { ...opening, assistantStream }
