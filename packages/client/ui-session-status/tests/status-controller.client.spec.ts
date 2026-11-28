@@ -136,7 +136,7 @@ it('applies ordered whole-record reading changes after the baseline', async ({ m
   await vi.waitFor(() => { expect(status.getSnapshot().get(parentId)?.completionUnread).toBe(false) })
 })
 
-it('retains reminders after a stream ends, replaces the reconnect baseline, and reports terminal failure', async ({ mock, start }) => {
+it('retains reminders after a stream ends, reports terminal failure, and reopens the stream after a delay', async ({ mock, start }) => {
   const report = vi.spyOn(console, 'error').mockImplementation(() => {})
   onTestFinished(() => { report.mockRestore() })
   let generation = 0
@@ -147,7 +147,7 @@ it('retains reminders after a stream ends, replaces the reconnect baseline, and 
       manualUnread: false,
     }] })
     if (generation === 1) stream.end()
-    else stream.fail(new RemoteError('session-status/unavailable', 'Reading storage unavailable', {}))
+    else if (generation === 2) stream.fail(new RemoteError('session-status/unavailable', 'Reading storage unavailable', {}))
   })
   const client = await start()
   const status = client.ctx.uiSession.sessionStatus
@@ -157,5 +157,15 @@ it('retains reminders after a stream ends, replaces the reconnect baseline, and 
   })
   expect(generation).toBe(2)
   await expect(status.mark(parentId, false)).rejects.toThrow('Reload the page')
-  expect(report).toHaveBeenCalledWith(expect.stringContaining('Reminders could not be synchronized'), expect.any(Error))
+  expect(report).toHaveBeenCalledWith(expect.stringContaining('reconnecting in 1 s'), expect.any(Error))
+
+  // A Host service that serves again restores reading without a page reload.
+  await vi.waitFor(() => {
+    expect(status.readingReady.getSnapshot()).toBe(true)
+    expect(status.getSnapshot().get(parentId)).toMatchObject({ completionUnread: true, completionFailed: false })
+  }, { timeout: 5_000 })
+  expect(generation).toBe(3)
+  mock.remote.sessionStatus.mark.mockResolvedValue(ok(undefined))
+  await expect(status.mark(parentId, false)).resolves.toBeUndefined()
+  expect(mock.remote.sessionStatus.mark).toHaveBeenLastCalledWith(parentId, { type: 'read', throughTurn: 3 })
 })
