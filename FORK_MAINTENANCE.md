@@ -2198,6 +2198,15 @@ The cold opening now takes about 2.0–2.2 s with the main thread mostly idle af
 **Preservation rule.** Keep stored projection pages behind running openings and bounded, keep the selected-key fold, keep the retry baseline reuse, keep the retention delay restated with the base row's values, and keep the Sidebar's own release out of the error log.
 
 **Focused verification.** `node_modules/.bin/vitest run packages/api/session-controller/tests/fold-slots.host.spec.ts`, `packages/api/session-controller/tests/subagent-catalog.host.spec.ts` (`folds only the paged key ...`), `packages/api/session-controller/tests/session-history-paging.host.spec.ts` (`grows a follow opening ...`, `reads the baseline again when the log grows between window reads`), `packages/session-query/session-query/tests/observation.spec.ts` (`computes only the selected keys ...`), `packages/session-query/session-query/tests/window-read.spec.ts`, and `packages/client/ui-sidebar-right/tests/session-views.client.spec.ts` (`does not report its own release ...`).
+### Launch overlays are not hot-reloaded
+
+The profile HMR watched every `--patch` overlay, including `fork-runtime/web/perf.patch.yml` in the repository checkout that `run.cmd` starts from. Merging into that checkout reconfigured the running Host about three seconds later; on 2026-11-27 at 17:48 and 19:26, twelve and nine running Sessions ended their Turns as `aborted / disposed`, which the user saw as "Error: tool call aborted" in several Sessions at once. `@deepseek-ai/dsh-hmr` gained `watchOverlays` (default `true`, the upstream behavior); the perf overlay sets it to `false` and restates the base bundle's `root: []`. An overlay edit applies at the next restart or the next profile patch reload. Measured on the real home copy: editing a watched overlay closed and reopened the page's WebSocket 2.6 s later; with `watchOverlays: false` nothing happened.
+
+A merge into the checkout that a Host started before this change is still watching still reconfigures that Host once; restart it before merging.
+
+**Preservation rule.** Keep `watchOverlays: false` in the perf overlay with `root: []`; keep the upstream default `true`.
+
+**Focused verification.** `node_modules/.bin/vitest run packages/boot/hmr/tests/profile.spec.ts`.
 ### Cold opening without corpus-wide scans in its way
 
 Measured on the real home copy (about 40,000 Sessions) by opening six Sessions of 0.2 to 731 MB with Host CPU sampling. Without interference an opening took 0.6 to 1.9 s, of which the Host main thread was busy 0.17 to 0.9 s. Two corpus-wide listings, each a `readdir` and `stat` of every Session directory (3.5 to 15 s), ran beside openings and roughly doubled them (121 MB Session: 1.9 s alone, 4.1 to 7.3 s overlapped):

@@ -27,7 +27,9 @@ vi.mock('chokidar', async (original) => {
 type Overlay = string | { home: 'path' | 'link' }
 
 /** Write each overlay beside the home patch. */
-async function fixture(beforeWatch?: (profile: ProfileContext) => void, overlays: readonly Overlay[] = []) {
+async function fixture(
+  beforeWatch?: (profile: ProfileContext) => void, overlays: readonly Overlay[] = [], hmr: Record<string, unknown> = {},
+) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'hmr-profile-')))
   const dir = join(home, 'profiles', 'test')
   initProfile(dir, [])
@@ -52,7 +54,7 @@ async function fixture(beforeWatch?: (profile: ProfileContext) => void, overlays
   }
   const rows = [{ insert: [
     { id: 'timer', name: 'cordis:timer' },
-    { id: 'hmr', name: 'cordis:hmr', config: { root: [] } },
+    { id: 'hmr', name: 'cordis:hmr', config: { root: [], ...hmr } },
     { id: 'probe', name: 'cordis:probe', config: { value: 'initial' } },
   ] }]
   writeFileSync(profile.patchPath, JSON.stringify(rows))
@@ -71,7 +73,11 @@ async function fixture(beforeWatch?: (profile: ProfileContext) => void, overlays
   const configWatches = watchers.slice(start, start + 3 + overlayPaths.length)
   const emit = (index: number, filename: string) => { configWatches[index]!.emit('change', filename) }
   const drain = () => ctx.hmr.runExclusive(async () => {})
-  return { ctx, profile, dir, home, emit, drain, commit: () => commit?.() }
+  // Watches this boot opened, counted before a later fixture opens its own.
+  const opened = watchers.length - start
+  const watchCount = (): number => opened
+  const rewriteProfile = (): void => { writeFileSync(profile.patchPath, `${JSON.stringify(rows)}\n`) }
+  return { ctx, profile, dir, home, emit, drain, watchCount, rewriteProfile, commit: () => commit?.() }
 }
 
 it('waits for application readiness and applies profile, home and manifest changes', async () => {
@@ -270,4 +276,23 @@ it('watches a home patch also named by repeated or linked-directory overlays onc
   f.emit(1, homePatch)
   await f.drain()
   expect(f.ctx.get('profileProbe')).toBe('home')
+})
+
+it('leaves launch overlays unwatched when watchOverlays is false and reads them at the next profile reload', async () => {
+  const baseline = await fixture()
+  const watched = await fixture(undefined, ['- id: probe\n  config: { value: overlay }\n'])
+  const f = await fixture(undefined, ['- id: probe\n  config: { value: overlay }\n'], { watchOverlays: false })
+  f.commit()
+  expect(watched.watchCount()).toBe(baseline.watchCount() + 1)
+  expect(f.watchCount()).toBe(baseline.watchCount())
+  expect(f.ctx.get('profileProbe')).toBe('overlay')
+  const [overlay] = f.profile.overlayPaths
+  writeFileSync(overlay!, '- id: probe\n  config: { value: edited-overlay }\n')
+  await f.drain()
+  expect(f.ctx.get('profileProbe')).toBe('overlay')
+  // A watched profile patch change recomposes from every patch as it is on disk now.
+  f.rewriteProfile()
+  f.emit(0, f.profile.patchPath)
+  await f.drain()
+  expect(f.ctx.get('profileProbe')).toBe('edited-overlay')
 })

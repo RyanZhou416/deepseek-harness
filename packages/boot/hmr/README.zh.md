@@ -43,6 +43,7 @@ kind: "package-reference"
 | `root` | `["."]` | 模块监听目录；`[]` 仅保留显式注册的配置监听。 |
 | `ignored` | `["**/node_modules", "**/.*", "cache", "data"]` | 排除的模块路径。 |
 | `debounce` | `100` | 合并模块变化的毫秒数。 |
+| `watchOverlays` | `true` | 是否在 profile 补丁之外同时监听启动覆盖补丁（`--patch` 文件）；为 `false` 时，覆盖补丁的改动在下次重启或下次 profile 重载时生效。 |
 
 Chokidar 选项（包括轮询）保持原有含义。精确配置监听同时观察新增、删除及初始不存在的父目录。它们默认使用 `awaitWriteFinish: true`：编辑后等待 Chokidar 的 2 秒写入稳定窗口，避免其变化事件节流丢失通知。可通过 `awaitWriteFinish` 调整窗口；禁用它可能漏掉快速连续编辑。直接通过 Plugin Manager 发起的操作无需等待文件事件即可应用。
 

@@ -7,6 +7,19 @@
 # A patch target replaces the row's whole `config`. Every deployment-specific
 # value a row needs must therefore be restated here; see FORK_MAINTENANCE.md.
 
+# The launch overlays (this file, the diagnostics overlay and the memory-limit
+# overlay) live in the repository checkout or are fixed for one launch, so the
+# profile HMR does not watch them. When it did, every merge into the checkout
+# that touched this file reconfigured the running Host three seconds later:
+# 2026-11-27 17:48 and 19:26, twelve and nine running Sessions ended their
+# Turns as `aborted / disposed` with "Error: tool call aborted". An overlay edit
+# now applies at the next restart or the next profile patch reload. The row
+# restates the base bundle's `root: []`.
+- id: hmr
+  config:
+    root: []
+    watchOverlays: false
+
 # Production builds never rewrite client bundles, so the 500 ms stat poll over
 # every graph row's bundle only costs file-system work. An hour keeps a manual
 # rebuild of a long-running Host detectable without polling a few dozen files

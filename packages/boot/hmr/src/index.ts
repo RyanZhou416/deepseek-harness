@@ -62,7 +62,15 @@ export interface HmrConfig extends ChokidarOptions {
   debounce: number
   /** Glob patterns excluded from module watching. */
   ignored: string[]
+  /**
+   * Whether the launch overlays (`--patch` files) are watched beside the profile patches. When `false`, an overlay
+   * change applies at the next restart or with the next profile reload.
+   */
+  watchOverlays: boolean
 }
+
+/** HMR configuration as written in a profile; `watchOverlays` defaults to `true`. */
+export type HmrOptions = Omit<HmrConfig, 'watchOverlays'> & Partial<Pick<HmrConfig, 'watchOverlays'>>
 
 /**
  * Recursively collect all module dependencies from a ModuleJob.
@@ -212,7 +220,7 @@ class ReloadModules {
 @Inject('timer')
 class Hmr extends Service {
   /** Cordis-compatible watcher defaults. */
-  static Config: z<HmrConfig> = z.object({
+  static Config: z<HmrOptions, HmrConfig> = z.object({
     base: z.string(),
     root: z.array(String).role('table').default(['.']),
     ignored: z.array(String).role('table').default([
@@ -222,6 +230,7 @@ class Hmr extends Service {
       'data',
     ]),
     debounce: z.natural().role('ms').default(100),
+    watchOverlays: z.boolean().default(true),
   })
 
   /** Absolute base directory used to resolve module watch roots. */
@@ -384,7 +393,8 @@ class Hmr extends Service {
       const manifestPath = join(profile.dir, 'package.json')
       // A file named by several layers or repeated `--patch` options, under any spelling, is watched and compared once.
       const canonicalFiles = new Set<string>()
-      const patchFiles = [profile.patchPath, join(profile.home, PROFILE_PATCH_FILENAME), ...profile.overlayPaths].filter((filename) => {
+      const overlays = this.config.watchOverlays ? profile.overlayPaths : []
+      const patchFiles = [profile.patchPath, join(profile.home, PROFILE_PATCH_FILENAME), ...overlays].filter((filename) => {
         const canonical = canonicalPath(filename)
         if (canonicalFiles.has(canonical)) return false
         canonicalFiles.add(canonical)

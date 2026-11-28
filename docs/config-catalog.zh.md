@@ -1993,6 +1993,11 @@ export interface HmrConfig extends ChokidarOptions {
   debounce: number
   /** Glob patterns excluded from module watching. */
   ignored: string[]
+  /**
+   * Whether the launch overlays (`--patch` files) are watched beside the profile patches. When `false`, an overlay
+   * change applies at the next restart or with the next profile reload.
+   */
+  watchOverlays: boolean
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-hmr -->
