@@ -39,9 +39,15 @@
 # boundaries with the newest message always kept. Unbounded first frames of
 # 40-80 MB took 10-17 s to parse and render in the browser and block remote
 # use on slower links.
+#
+# `historyWindowFirstEvents` starts a stored window read at 1,024 events. At the
+# default 256, every measured opening of a Session over 2 MiB (2.8 to 731 MB
+# logs, whose Turns run hundreds of tool calls) found no Turn boundary and read
+# the same tail again at 1,024: SimCore spent 692 ms + 540 ms in the two reads.
 - id: session-controller
   config:
     historyPageMaxBytes: 2097152
+    historyWindowFirstEvents: 1024
     listProjectionExcludeKeys:
       - contextHeaders
       - turnOutline

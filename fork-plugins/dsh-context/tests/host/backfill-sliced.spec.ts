@@ -885,7 +885,7 @@ describe('Config validator (cordis Standard Schema face)', () => {
     })
     assert.equal(resolveColdFoldMaxLogBytes(undefined), 64 * 1024 * 1024)
     assert.equal(resolveColdFoldMaxLogBytes({ coldFoldMaxLogBytes: 0 }), 0)
-    assert.deepEqual(resolveBackfillDelays(undefined), { startDelayMs: 60_000, refreshDelayMs: 60_000 })
+    assert.deepEqual(resolveBackfillDelays(undefined), { startDelayMs: 180_000, refreshDelayMs: 600_000 })
     assert.deepEqual(resolveBackfillDelays({ backfillStartDelayMs: 0, backfillRefreshDelayMs: 5 }), { startDelayMs: 0, refreshDelayMs: 5 })
     assert.deepEqual(resolveBounds(undefined), DEFAULT_BOUNDS)
     assert.deepEqual(resolveBounds({}), DEFAULT_BOUNDS)

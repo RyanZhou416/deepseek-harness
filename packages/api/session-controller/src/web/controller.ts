@@ -132,7 +132,7 @@ export class WebController {
    * this path; subagent addresses stay on the complete observation because the
    * `subagent` projection is part of address validation. No prepared historical
    * Session is materialized here. A configured byte budget grows the requested
-   * row bound from 256 events until the page is decided and the window still
+   * row bound from `historyWindowFirstEvents` until the page is decided and the window still
    * shows the log's final Turn boundary.
    * @param request - follow request and caller history limits.
    * @param spec - validated history limits.
@@ -146,7 +146,7 @@ export class WebController {
   ): Promise<Extract<SessionFollowFrame, { readonly type: 'snapshot' }> | undefined> {
     const sessionId = windowSessionId(this.ctx, request.address)
     if (sessionId === undefined || await isSmallStoredSource(this.ctx, sessionId, signal)) return undefined
-    const bounds = windowReadBounds(spec, this.maxPageBytes)
+    const bounds = windowReadBounds(spec, this.maxPageBytes, this.historyController.windowFirstEvents)
     // The checkpoint baseline does not depend on the window size, so a retry
     // with a larger bound reuses the first read's baseline at the same cursor.
     let baseline: { readonly cursor: number; readonly read: SessionWindowRead } | undefined

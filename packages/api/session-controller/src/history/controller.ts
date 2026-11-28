@@ -8,7 +8,7 @@ import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import {
   DEFAULT_MAX_MESSAGES, isSmallStoredSource, paginate, paginateSlice, pageRecords, entryFor, addressId,
   readStoredWindow, validateHistoryWindow, validateAddress, validateWindow, windowReadBounds, windowSessionId,
-  rejectNotFound,
+  rejectNotFound, SESSION_WINDOW_FIRST_EVENTS,
 } from '../history.ts'
 import { EventListener, ProjectionListener } from './listener.ts'
 import { SessionAssistantStreamsListener } from './assistant-stream.ts'
@@ -57,8 +57,14 @@ export class HistoryController {
    * @param ctx - Host context carrying Session, query, persistence, and projection services.
    * @param maxPageBytes - history page byte budget; `0` disables it.
    * @param projectionPageFoldConcurrency - log folds paged projection reads may run at once.
+   * @param windowFirstEvents - first event count a budgeted stored window read requests.
    */
-  constructor(private readonly ctx: Context, private readonly maxPageBytes = 0, projectionPageFoldConcurrency = 1) {
+  constructor(
+    private readonly ctx: Context,
+    private readonly maxPageBytes = 0,
+    projectionPageFoldConcurrency = 1,
+    readonly windowFirstEvents = SESSION_WINDOW_FIRST_EVENTS,
+  ) {
     this.foldSlots = new FoldSlots(projectionPageFoldConcurrency)
     this.streamsListener = new SessionAssistantStreamsListener(this.ctx)
   }
@@ -102,7 +108,7 @@ export class HistoryController {
    * by the caller — are never decoded. A window whose tail does not reach that
    * anchor falls back, because an opening balances an interrupted Turn with
    * synthetic closers that the stored window does not contain. A configured
-   * byte budget grows the requested row bound from 256 events until the page is
+   * byte budget grows the requested row bound from `windowFirstEvents` until the page is
    * decided, so a budget-trimmed page does not decode the alignment bound.
    * @param sessionId - non-live Session addressed by the request.
    * @param request - validated page request.
@@ -124,7 +130,7 @@ export class HistoryController {
     }
     const beforeSeq = request.beforeSeq === undefined ? undefined : SessionLogOffset(request.beforeSeq)
     const end = SessionLogOffset(Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1))
-    for (const maxEvents of windowReadBounds(request, this.maxPageBytes)) {
+    for (const maxEvents of windowReadBounds(request, this.maxPageBytes, this.windowFirstEvents)) {
       signal.throwIfAborted()
       // The page cut is the window end: the read decodes exactly the page's own
       // span instead of every stored row between the cut and the cursor.

@@ -294,7 +294,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-session-controller`
 
 - `inject`: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `fs` · `llm` · `remoteAccess` · `sessions` · `sessionProjections` · `sessionQuery` · `typert` · `typertGateway` · `workspaceRegistry`
-- `source`: [`packages/api/session-controller/src/index.ts:86`](../packages/api/session-controller/src/index.ts)
+- `source`: [`packages/api/session-controller/src/index.ts:87`](../packages/api/session-controller/src/index.ts)
 
 ```ts config-catalog
 /** Session Controller deployment policy. */
@@ -322,6 +322,13 @@ export interface Config {
    * frame's client-side decode and parse cost, not a whole Session.
    */
   readonly historyPageMaxBytes?: number
+  /**
+   * Event count the first stored window read of a page or opening requests when
+   * `historyPageMaxBytes` is set; each retry multiplies it by four up to the
+   * alignment bound. A bound too small for the log's final Turn costs one more
+   * read of the same tail.
+   */
+  readonly historyWindowFirstEvents?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-session-controller -->

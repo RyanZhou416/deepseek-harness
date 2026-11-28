@@ -25,6 +25,7 @@ import { SessionCommandController, hasPromptContent } from './commands.ts'
 import { resolveSessionResource } from './session-resource.ts'
 import { SessionControlController } from './control.ts'
 import { HistoryController } from './history/controller.ts'
+import { SESSION_WINDOW_FIRST_EVENTS } from './history.ts'
 import { StateController } from './state/controller.ts'
 import { WebController } from './web/controller.ts'
 import { SessionFileReferences } from './file-references.ts'
@@ -107,6 +108,13 @@ export interface Config {
    * frame's client-side decode and parse cost, not a whole Session.
    */
   readonly historyPageMaxBytes?: number
+  /**
+   * Event count the first stored window read of a page or opening requests when
+   * `historyPageMaxBytes` is set; each retry multiplies it by four up to the
+   * alignment bound. A bound too small for the log's final Turn costs one more
+   * read of the same tail.
+   */
+  readonly historyWindowFirstEvents?: number
 }
 
 /** Deployment policy after schema defaults have been applied. */
@@ -117,6 +125,7 @@ type ResolvedConfig = Config & {
   readonly listCacheReadConcurrency: number
   readonly projectionPageFoldConcurrency: number
   readonly historyPageMaxBytes: number
+  readonly historyWindowFirstEvents: number
 }
 
 /** Host integrations replaceable by direct unit tests. */
@@ -159,6 +168,7 @@ export class SessionController extends TypertRemoteService {
     listCacheReadConcurrency: z.natural().min(1).default(16),
     projectionPageFoldConcurrency: z.natural().min(1).default(1),
     historyPageMaxBytes: z.natural().default(0),
+    historyWindowFirstEvents: z.natural().min(1).default(SESSION_WINDOW_FIRST_EVENTS),
   })
 
   private historyController!: HistoryController
@@ -178,6 +188,7 @@ export class SessionController extends TypertRemoteService {
   private readonly listCacheReadConcurrency: number
   private readonly projectionPageFoldConcurrency: number
   private readonly historyPageMaxBytes: number
+  private readonly historyWindowFirstEvents: number
   private readonly idleSessionRetentionMs: number
   private readonly listProjectionExcludeKeys: ReadonlySet<string>
   private readonly promotions = new Set<Promise<void>>()
@@ -194,6 +205,7 @@ export class SessionController extends TypertRemoteService {
     this.listCacheReadConcurrency = resolved.listCacheReadConcurrency
     this.projectionPageFoldConcurrency = resolved.projectionPageFoldConcurrency
     this.historyPageMaxBytes = resolved.historyPageMaxBytes
+    this.historyWindowFirstEvents = resolved.historyWindowFirstEvents
     this.idleSessionRetentionMs = resolved.idleSessionRetentionMs
     this.listProjectionExcludeKeys = new Set(resolved.listProjectionExcludeKeys ?? [])
     this.fileApplications = internals.fileApplications ?? nativeFileApplications
@@ -223,7 +235,9 @@ export class SessionController extends TypertRemoteService {
     }, 'session-controller.promotions')
     // Assistant-stream observation must be live before the list read yields: an Agent's
     // opening frame arriving during that await would otherwise have no listener.
-    this.historyController = new HistoryController(ctx, this.historyPageMaxBytes, this.projectionPageFoldConcurrency)
+    this.historyController = new HistoryController(
+      ctx, this.historyPageMaxBytes, this.projectionPageFoldConcurrency, this.historyWindowFirstEvents,
+    )
     this.stateController = new StateController(ctx, this.historyController)
     this.webController = new WebController(
       ctx,

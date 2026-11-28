@@ -256,6 +256,13 @@ describe('SessionController subagent catalog', () => {
     expect(observe).toHaveBeenCalledWith(PARENT, expect.objectContaining({ projectionMode: 'all', projectionKeys: ['subagentCatalog'] }))
   })
 
+  it('resolves and validates the first stored window bound', () => {
+    expect(SessionController.Config({}).historyWindowFirstEvents).toBe(256)
+    expect(SessionController.Config({ historyWindowFirstEvents: 1_024 }).historyWindowFirstEvents).toBe(1_024)
+    for (const historyWindowFirstEvents of [0, -1, 1.5]) {
+      expect(() => SessionController.Config({ historyWindowFirstEvents })).toThrow()
+    }
+  })
   it('resolves and validates the projection page fold concurrency', () => {
     expect(SessionController.Config({}).projectionPageFoldConcurrency).toBe(1)
     expect(SessionController.Config({ projectionPageFoldConcurrency: 3 }).projectionPageFoldConcurrency).toBe(3)

@@ -23,14 +23,16 @@ export class SessionHistoryController {
    * @param promote - background activation requested by a follow opening.
    * @param retain - keeps an addressed Agent resident through opening delivery.
    * @param maxPageBytes - serialized-record byte budget for one page; `0` disables the cap.
+   * @param windowFirstEvents - first event count of a budgeted stored window read.
    */
   constructor(
     ctx: Context,
     promote: (observation: SessionObservation) => void,
     retain: (sessionId: SessionId) => () => void = () => () => {},
     maxPageBytes = 0,
+    windowFirstEvents?: number,
   ) {
-    this.pages = new HistoryController(ctx, maxPageBytes)
+    this.pages = new HistoryController(ctx, maxPageBytes, 1, windowFirstEvents)
     this.web = new WebController(ctx, this.pages, promote, maxPageBytes, retain)
   }
 

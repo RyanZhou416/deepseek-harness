@@ -2198,6 +2198,17 @@ The cold opening now takes about 2.0–2.2 s with the main thread mostly idle af
 **Preservation rule.** Keep stored projection pages behind running openings and bounded, keep the selected-key fold, keep the retry baseline reuse, keep the retention delay restated with the base row's values, and keep the Sidebar's own release out of the error log.
 
 **Focused verification.** `node_modules/.bin/vitest run packages/api/session-controller/tests/fold-slots.host.spec.ts`, `packages/api/session-controller/tests/subagent-catalog.host.spec.ts` (`folds only the paged key ...`), `packages/api/session-controller/tests/session-history-paging.host.spec.ts` (`grows a follow opening ...`, `reads the baseline again when the log grows between window reads`), `packages/session-query/session-query/tests/observation.spec.ts` (`computes only the selected keys ...`), `packages/session-query/session-query/tests/window-read.spec.ts`, and `packages/client/ui-sidebar-right/tests/session-views.client.spec.ts` (`does not report its own release ...`).
+### Cold opening without corpus-wide scans in its way
+
+Measured on the real home copy (about 40,000 Sessions) by opening six Sessions of 0.2 to 731 MB with Host CPU sampling. Without interference an opening took 0.6 to 1.9 s, of which the Host main thread was busy 0.17 to 0.9 s. Two corpus-wide listings, each a `readdir` and `stat` of every Session directory (3.5 to 15 s), ran beside openings and roughly doubled them (121 MB Session: 1.9 s alone, 4.1 to 7.3 s overlapped):
+
+- `session/search` listed every stored Session on each query only to check its hits' visibility. `ApiSessionList.search` now checks each hit: an attached Session, or a stored header read through `sessionPersistence.stat`, with a working directory; a header that cannot be read hides the hit, and each Session is decided once per search. An opening 0.8 s after a search now takes as long as one without.
+- The dsh-context activity backfill listed the corpus 60 s after startup and 60 s after any Session disposal; subagents dispose constantly. Its defaults are now 180 s and 600 s (see the plugin's `FORK_MAINTENANCE.md`).
+- A stored window read started at 256 events and every measured opening over 2 MiB had to read the same tail again at 1,024. `session-controller` gained `historyWindowFirstEvents` (default 256); the perf overlay sets 1,024. SimCore opened in 1.3 s instead of 1.7 s.
+
+**Preservation rule.** Keep search visibility per hit and never list the store for it; keep the backfill delays at or above 180 s and 600 s; keep `historyWindowFirstEvents: 1024` in the perf overlay with the `session-controller` row's other keys.
+
+**Focused verification.** `node_modules/.bin/vitest run packages/api/session-controller/tests/session-search.host.spec.ts packages/api/session-controller/tests/session-history-paging.host.spec.ts`, plus `subagent-catalog.host.spec.ts -t "first stored window bound"`; dsh-context `tests/host/backfill-sliced.spec.ts`.
 ### Remote access and mobile Web
 
 Measured against a loopback link emulator at 5 Mbit/s and 60 ms one-way delay with a mobile-emulated browser, on the real home copy:

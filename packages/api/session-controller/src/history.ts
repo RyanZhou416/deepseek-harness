@@ -40,15 +40,15 @@ const SESSION_WINDOW_MAX_EVENTS = 10_000
 /** Smallest event budget one message-aligned page requests beyond its tail alignment span. */
 const SESSION_WINDOW_MIN_EVENTS = 2_000
 /**
- * First event count one stored window read requests when a serialized byte
- * budget is configured.
+ * Default first event count one stored window read requests when a serialized
+ * byte budget is configured (`historyWindowFirstEvents`).
  *
  * That budget trims a page near the caller's cut, so requesting the complete
  * alignment bound first decodes rows the page cannot carry. 256 keeps the first
  * decode to about an eighth of that bound while a typical 500-message opening
  * still resolves inside the growth sequence.
  */
-const SESSION_WINDOW_FIRST_EVENTS = 256
+export const SESSION_WINDOW_FIRST_EVENTS = 256
 /** Factor by which a budgeted window read grows while its page is undecided. */
 const SESSION_WINDOW_GROWTH = 4
 /**
@@ -360,21 +360,23 @@ export function windowEventBound(request: Pick<SessionPageRequest, 'maxMessages'
  * Event counts to try for one stored window read.
  *
  * Without a serialized byte budget the window requests the alignment bound
- * once. With one, the first request uses 256 events and each retry multiplies
+ * once. With one, the first request uses `firstEvents` events and each retry multiplies
  * the bound by four up to the alignment bound: the caller stops at the first
  * bound whose page is decided (alignment resolved, history start reached, or
  * budget exhausted). Every bound stays within the alignment bound, so a window
  * that never decides its page still falls back to the complete read.
  * @param request - caller history limits.
  * @param maxBytes - configured serialized-record byte budget; `0` requests one bounded read.
+ * @param firstEvents - first event count requested under a byte budget.
  * @returns the event counts to request, strictly increasing and ending at the alignment bound.
  */
 export function windowReadBounds(
   request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>,
   maxBytes: number,
+  firstEvents: number,
 ): readonly number[] {
   const bound = windowEventBound(request)
-  let limit = maxBytes > 0 ? Math.min(bound, SESSION_WINDOW_FIRST_EVENTS) : bound
+  let limit = maxBytes > 0 ? Math.min(bound, firstEvents) : bound
   const bounds = [limit]
   while (limit < bound) {
     limit = Math.min(bound, limit * SESSION_WINDOW_GROWTH)

@@ -388,12 +388,7 @@ export class ApiSessionList {
       )
     }
     try {
-      const visible = await provider.listSessions(signal)
-      signal.throwIfAborted()
-      const visibleIds = new Set(visible
-        .filter(record => record.header.cwd !== undefined)
-        .map(record => record.header.id))
-      if (visibleIds.size === 0) return { items: [], hasMore: false }
+      const isVisible = this.searchVisibility(signal)
       const authorized: SessionSearchItem[] = []
       const acceptedIds = new Set<SessionId>()
       const seenCursors = new Set<SessionSearchCursor>()
@@ -445,11 +440,13 @@ export class ApiSessionList {
         }
         for (const hit of page.items) {
           if (authorized.length > SESSION_SEARCH_RESULT_LIMIT) continue
-          if (!visibleIds.has(hit.header.id)
-            || hit.bestMatch.sessionId !== hit.header.id
+          if (hit.bestMatch.sessionId !== hit.header.id
             || hit.bestMatch.surface !== 'current'
             || !MESSAGE_TYPES.has(hit.bestMatch.type)
             || acceptedIds.has(hit.header.id)) continue
+          const visible = await isVisible(hit.header.id)
+          signal.throwIfAborted()
+          if (!visible) continue
           acceptedIds.add(hit.header.id)
           authorized.push({
             sessionId: hit.header.id,
@@ -475,6 +472,35 @@ export class ApiSessionList {
         throw new RemoteError('gateway/cancelled', 'session search was aborted', {})
       }
       throw new RemoteError('gateway/internal', `session search failed: ${String(error)}`, {})
+    }
+  }
+
+  /**
+   * Decide search visibility one hit at a time: a hit is shown when its Session
+   * is attached or stored and its current header names a working directory,
+   * which is the visibility a complete `listSessions` gives. A search returns a
+   * bounded page, so checking its hits reads a few stored headers instead of
+   * listing every stored Session; a stored header that cannot be read hides the hit.
+   * @param signal - cancellation for stored-header reads.
+   * @returns a per-search check that reads each Session at most once.
+   */
+  private searchVisibility(signal: AbortSignal): (sessionId: SessionId) => Promise<boolean> {
+    const decided = new Map<SessionId, boolean>()
+    return async (sessionId) => {
+      const known = decided.get(sessionId)
+      if (known !== undefined) return known
+      let header = this.ctx.sessions.get(sessionId)?.header
+      if (header === undefined) {
+        try {
+          header = (await this.ctx.get('sessionPersistence')?.stat(sessionId, { signal }))?.header
+        } catch (_unreadableStoredHeader) {
+          // The hit stays hidden; cancellation still ends the search.
+          signal.throwIfAborted()
+        }
+      }
+      const visible = header?.cwd !== undefined
+      decided.set(sessionId, visible)
+      return visible
     }
   }
 

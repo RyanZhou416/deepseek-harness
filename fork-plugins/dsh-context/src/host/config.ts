@@ -25,11 +25,19 @@ export type Config = Partial<FoldBounds> & Partial<PluginSettings> & {
 
 export const HISTORY_LIMIT = Number.MAX_SAFE_INTEGER
 
-/** Default wait before the first automatic backfill pass: the Host serves its first list and openings first. */
-export const DEFAULT_BACKFILL_START_DELAY_MS = 60_000
+/**
+ * Default wait before the first automatic backfill pass: the Host serves its first list and the openings that follow a
+ * start first. A pass lists and stats every stored Session, which took 3.5 to 15 s on a home with about 40,000 Sessions.
+ */
+export const DEFAULT_BACKFILL_START_DELAY_MS = 180_000
 
-/** Default wait between a Session disposal and its backfill pass. */
-export const DEFAULT_BACKFILL_REFRESH_DELAY_MS = 60_000
+/**
+ * Default wait between a Session disposal and its backfill pass. Subagent Sessions dispose all the time, so this is how
+ * often the corpus-wide pass runs while Agents work; a Session opening that overlapped one took about twice as long.
+ * An overview request rebuilds the Sessions whose stored identity changed, so the wait delays background warming,
+ * not what the overview shows.
+ */
+export const DEFAULT_BACKFILL_REFRESH_DELAY_MS = 600_000
 
 /** Default cold fold cap: folding a larger stored log took tens of seconds of the Host's main thread. */
 export const DEFAULT_COLD_FOLD_MAX_LOG_BYTES = 64 * 1024 * 1024

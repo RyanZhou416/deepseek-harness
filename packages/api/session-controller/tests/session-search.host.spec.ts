@@ -203,9 +203,9 @@ describe('session.search', () => {
     await ctx.fiber.dispose()
   })
 
-  it('returns an empty page without invoking the index when no session is visible', async () => {
+  it('hides every hit when no session is visible', async () => {
     const ctx = await baseContext()
-    const searchSessions = vi.fn()
+    const searchSessions = vi.fn(() => Promise.resolve({ items: [hit('absent')] }))
     await installSearchQuery(ctx, searchSessions)
     const remote = await createSessionTestRemote(ctx, defaults)
 
@@ -218,7 +218,7 @@ describe('session.search', () => {
       ok: true,
       value: { items: [], hasMore: false },
     })
-    expect(searchSessions).not.toHaveBeenCalled()
+    expect(searchSessions).toHaveBeenCalledOnce()
   })
 
   it('rejects snippets whose recorded provider violates the Host filters', async () => {
@@ -364,7 +364,7 @@ describe('session.search', () => {
     expect(searchSessions).toHaveBeenCalledTimes(100)
   })
 
-  it('restarts a stale continuation with its learned limit and original visibility snapshot', async () => {
+  it('restarts a stale continuation with its learned limit and the first visibility decision of each hit', async () => {
     const ctx = await baseContext()
     const oldOnly = hit('old-only', 0)
     const shared = hit('shared', 1)
@@ -391,8 +391,9 @@ describe('session.search', () => {
         case 2:
           expect(providerRequest).toMatchObject({ limit: 10 })
           expect(providerRequest).not.toHaveProperty('cursor')
+          // `late` is decided hidden here, before its Session exists.
           return Promise.resolve({
-            items: [oldOnly, shared],
+            items: [oldOnly, shared, late],
             nextCursor: 'old-cursor',
           })
         case 3:
@@ -799,24 +800,23 @@ describe('session.search', () => {
     expect(searchSessions.mock.calls[0]?.[0]).not.toHaveProperty('sessionFilters')
   })
 
-  it('propagates cancellation through the lightweight visibility listing', async () => {
+  it('propagates cancellation through the per-hit visibility reads without listing the store', async () => {
     const ctx = await baseContext()
     const controller = new AbortController()
-    const cold = Array.from({ length: 32 }, (_, index) => header(`cold-${index}`, `/cold-${index}`))
-    const list = vi.fn((signal?: AbortSignal) => {
-      expect(signal).toBe(controller.signal)
-      controller.abort()
-      return Promise.resolve(cold)
-    })
+    const cold = Array.from({ length: 4 }, (_, index) => header(`cold-${index}`, `/cold-${index}`))
+    const list = vi.fn(() => Promise.resolve(cold))
     let statCalls = 0
     ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
       list,
       stat: () => {
         statCalls++
+        controller.abort()
         return Promise.resolve(undefined)
       },
     }) as never)
-    const searchSessions = vi.fn()
+    const searchSessions = vi.fn(() => Promise.resolve({
+      items: cold.map((session, index) => ({ ...hit(session.id, index), header: session, live: false, persisted: true })),
+    }))
     await installSearchQuery(ctx, searchSessions)
 
     const response = await (await createSessionTestRemote(ctx, defaults)).search(
@@ -828,9 +828,33 @@ describe('session.search', () => {
       ok: false,
       error: { code: 'gateway/cancelled' },
     })
-    expect(list).toHaveBeenCalledOnce()
-    expect(statCalls).toBe(0)
-    expect(searchSessions).not.toHaveBeenCalled()
+    expect(list).not.toHaveBeenCalled()
+    expect(statCalls).toBe(1)
+  })
+
+  it('reads the stored header of each hit once and hides a hit whose header cannot be read', async () => {
+    const ctx = await baseContext()
+    const readable = header('readable', '/readable')
+    const broken = header('broken', '/broken')
+    const list = vi.fn(() => Promise.resolve([readable, broken]))
+    const stat = vi.fn((sessionId: SessionId) => sessionId === broken.id
+      ? Promise.reject(new Error('unreadable header'))
+      : Promise.resolve({ header: readable, revision: 'r' }))
+    ctx.provide('sessionPersistence', testSessionPersistence(ctx, { list, stat } as never) as never)
+    const coldHit = (session: SessionHeader, index: number): SessionSearchHit =>
+      ({ ...hit(session.id, index), header: session, live: false, persisted: true })
+    await installSearchQuery(ctx, () => Promise.resolve({
+      items: [coldHit(broken, 0), coldHit(readable, 1), coldHit(readable, 2)],
+    }))
+
+    const response = await (await createSessionTestRemote(ctx, defaults)).search(
+      request('per-hit'),
+      new AbortController().signal,
+    )
+
+    expect(response).toEqual({ ok: true, value: { items: [{ sessionId: 'readable', snippet: 'match 1' }], hasMore: false } })
+    expect(list).not.toHaveBeenCalled()
+    expect(stat.mock.calls.map(([id]) => id)).toEqual(['broken', 'readable'])
   })
 
   it('does not stat or open cold artifacts while collecting search visibility', async () => {

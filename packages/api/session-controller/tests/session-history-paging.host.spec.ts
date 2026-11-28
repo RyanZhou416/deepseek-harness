@@ -498,12 +498,13 @@ describe('Session history page byte budget', () => {
   }
 
   /** A history controller over the same backend with one configured page budget. */
-  function budgetedHistory(backend: RealBackend, maxPageBytes: number): SessionHistoryController {
+  function budgetedHistory(backend: RealBackend, maxPageBytes: number, windowFirstEvents?: number): SessionHistoryController {
     return new SessionHistoryController(
       backend.ctx,
       (observation) => { observation[Symbol.dispose]() },
       undefined,
       maxPageBytes,
+      windowFirstEvents,
     )
   }
 
@@ -703,6 +704,17 @@ describe('Session history page byte budget', () => {
     expect(page).toEqual(await loadPage(history, request, LIVE))
   })
 
+  it('starts a follow opening at the configured first window bound', async () => {
+    const backend = await realBackend({ turns: 350, batchSize: 300 })
+    const history = budgetedHistory(backend, 4 * 1024 * 1024, 1_024)
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+
+    const frame = await openSnapshot(history, { maxMessages: 500 })
+
+    // The default first bound needs a second read of the same tail here.
+    expect(readWindow.mock.calls.map(([, read]) => read?.maxEvents)).toEqual([1_024, 2_000])
+    expect(frame.cursor).toBe(backend.events.length - 1)
+  })
   it('reads the baseline again when the log grows between window reads', async () => {
     const backend = await realBackend({ turns: 350, batchSize: 300 })
     const history = budgetedHistory(backend, 4 * 1024 * 1024)
