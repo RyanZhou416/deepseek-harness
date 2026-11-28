@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { describe, test, vi } from 'vitest'
 import { DETAIL_ROUTE, createDetailGate, watchDetailChannel } from '../../src/host/detail'
+import { DetailShadow } from '../../src/host/detailShadow'
 import { resolveBounds } from '../../src/host/config'
 import type { TimelineState } from '../../src/host/fold'
 import { buildTimelineDetail } from '../../src/host/foldWire'
@@ -222,6 +223,35 @@ describe('the detail route', () => {
     assert.equal(served.value?.nodes.length, 2, 'an admitted live seed folds the observed log')
   })
 
+  test('a live session whose log exceeds the fold cap serves the stored tail window instead of folding the log', async () => {
+    const { state } = driveTimeline(liveEvents)
+    let observed = 0
+    const fake = ctxOf({
+      connection: { fetch: { register: () => () => {} } },
+      sessions: sessionsWith(okSession()),
+      stateOf: () => state,
+      sessionPersistence: { stat: () => Promise.resolve({ sizeBytes: 9_000 }) },
+      sessionQuery: {
+        observeSession: () => {
+          observed++
+          return Promise.resolve({ events: liveEvents, [Symbol.dispose]: () => {} })
+        },
+        observeSessionMetadata: () => Promise.resolve({ header: { id: 's1', version: 4, createdAt: 1 } }),
+        readWindow: () => Promise.resolve({ window: { events: liveEvents, hasMore: false } }),
+      },
+    })
+    const coldReads = { admit: <T>(read: () => Promise<T>): Promise<T | undefined> => read() }
+    watchDetailChannel(fake.ctx, BOUNDS, coldReads, undefined, new DetailShadow(fake.ctx, BOUNDS, coldReads, () => (id, options) => {
+      observed++
+      void id
+      void options
+      return Promise.resolve({ events: liveEvents, [Symbol.dispose]: () => {} })
+    }, undefined, undefined, 1_000))
+    const result = await call(fake.captured, { sessionId: 's1' }) as { ok: boolean; value: { nodes: unknown[] } | null }
+    assert.equal(result.ok, true)
+    assert.equal(result.value?.nodes.length, 2, 'the tail window folds')
+    assert.equal(observed, 0, 'the complete log is never observed')
+  })
   test('serves the observed log\'s detail payload for the open session', async () => {
     const { state } = driveTimeline(liveEvents)
     const { ctx, captured } = liveCtx(state, liveEvents)

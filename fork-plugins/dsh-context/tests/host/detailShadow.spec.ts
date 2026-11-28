@@ -19,7 +19,7 @@ interface CtxHarness {
   dispose: () => void
 }
 
-function ctxOf(): CtxHarness {
+function ctxOf(services: Record<string, unknown> = {}): CtxHarness {
   const listeners = new Map<string, ((...args: unknown[]) => void)[]>()
   const disposers: (() => void)[] = []
   const ctx = {
@@ -36,7 +36,7 @@ function ctxOf(): CtxHarness {
       disposers.push(dispose)
       return dispose
     },
-    get: () => undefined,
+    get: (name: string) => services[name],
   }
   return {
     ctx: ctx as unknown as Context,
@@ -116,6 +116,35 @@ describe('DetailShadow', () => {
     assert.equal(second, first)
   })
 
+  test('a log above the size cap is not seeded and reads as unavailable; smaller or unsized logs seed', async () => {
+    const sizes: Record<string, number | undefined> = { big: 9_000, small: 100, unsized: undefined }
+    const harness = ctxOf({
+      sessionPersistence: { stat: (id: string) => Promise.resolve({ sizeBytes: sizes[id] }) },
+    })
+    const reads = { count: 0 }
+    const shadow = new DetailShadow(harness.ctx, BOUNDS, gate(), () => observeOf(log(1, 2), reads), undefined, undefined, 1_000)
+    assert.equal(await shadow.stateOf('big'), null)
+    assert.equal(reads.count, 0, 'a log above the cap is never observed')
+    assert.ok(await shadow.stateOf('small') !== null)
+    assert.ok(await shadow.stateOf('unsized') !== null)
+    assert.equal(reads.count, 2)
+  })
+
+  test('the size check keeps an entry another caller seeded meanwhile', async () => {
+    const pending: (() => void)[] = []
+    const release = (): void => { for (const resolve of pending.splice(0)) resolve() }
+    const stat = vi.fn(() => new Promise<{ sizeBytes: number }>((resolve) => { pending.push(() => { resolve({ sizeBytes: 10 }) }) }))
+    const harness = ctxOf({ sessionPersistence: { stat } })
+    const reads = { count: 0 }
+    const shadow = new DetailShadow(harness.ctx, BOUNDS, gate(), () => observeOf(log(1, 2), reads), undefined, undefined, 1_000)
+    const first = shadow.stateOf('s1')
+    const second = shadow.stateOf('s1')
+    release()
+    const [a, b] = await Promise.all([first, second])
+    assert.ok(a !== null)
+    assert.equal(a, b)
+    assert.equal(reads.count, 1, 'one seed serves both callers')
+  })
   test('committed events advance the state incrementally; stale seqs never double-apply', async () => {
     const harness = ctxOf()
     const reads = { count: 0 }

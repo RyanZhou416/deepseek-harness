@@ -115,6 +115,12 @@ export interface Config {
    * read of the same tail.
    */
   readonly historyWindowFirstEvents?: number
+  /**
+   * Milliseconds a window-first opening of a stored Session must stay followed before its Agent is resumed in the
+   * background, so the first prompt does not wait for the complete log to load. A follower that leaves earlier
+   * resumes nothing; resuming a large log occupies the Host's main thread for seconds.
+   */
+  readonly windowActivationDelayMs?: number
 }
 
 /** Deployment policy after schema defaults have been applied. */
@@ -126,6 +132,7 @@ type ResolvedConfig = Config & {
   readonly projectionPageFoldConcurrency: number
   readonly historyPageMaxBytes: number
   readonly historyWindowFirstEvents: number
+  readonly windowActivationDelayMs: number
 }
 
 /** Host integrations replaceable by direct unit tests. */
@@ -169,6 +176,7 @@ export class SessionController extends TypertRemoteService {
     projectionPageFoldConcurrency: z.natural().min(1).default(1),
     historyPageMaxBytes: z.natural().default(0),
     historyWindowFirstEvents: z.natural().min(1).default(SESSION_WINDOW_FIRST_EVENTS),
+    windowActivationDelayMs: z.natural().default(2000),
   })
 
   private historyController!: HistoryController
@@ -189,9 +197,12 @@ export class SessionController extends TypertRemoteService {
   private readonly projectionPageFoldConcurrency: number
   private readonly historyPageMaxBytes: number
   private readonly historyWindowFirstEvents: number
+  private readonly windowActivationDelayMs: number
   private readonly idleSessionRetentionMs: number
   private readonly listProjectionExcludeKeys: ReadonlySet<string>
   private readonly promotions = new Set<Promise<void>>()
+  /** Pending delayed window activations, cancelled at teardown. */
+  private readonly pendingActivations = new Set<() => void>()
 
   /**
    * @param ctx - Host context containing the Session capability assembly.
@@ -206,6 +217,7 @@ export class SessionController extends TypertRemoteService {
     this.projectionPageFoldConcurrency = resolved.projectionPageFoldConcurrency
     this.historyPageMaxBytes = resolved.historyPageMaxBytes
     this.historyWindowFirstEvents = resolved.historyWindowFirstEvents
+    this.windowActivationDelayMs = resolved.windowActivationDelayMs
     this.idleSessionRetentionMs = resolved.idleSessionRetentionMs
     this.listProjectionExcludeKeys = new Set(resolved.listProjectionExcludeKeys ?? [])
     this.fileApplications = internals.fileApplications ?? nativeFileApplications
@@ -231,6 +243,7 @@ export class SessionController extends TypertRemoteService {
     // Registered before history so reverse-order teardown closes every
     // follower before waiting for already-admitted promotions.
     ctx.effect(() => async () => {
+      for (const cancel of [...this.pendingActivations]) cancel()
       await Promise.allSettled([...this.promotions])
     }, 'session-controller.promotions')
     // Assistant-stream observation must be live before the list read yields: an Agent's
@@ -246,6 +259,7 @@ export class SessionController extends TypertRemoteService {
       this.historyPageMaxBytes,
       sessionId => this.agents.retainForFollower(sessionId),
       values => ctx.sessionProjections.hintValues(values),
+      (sessionId, signal) => { this.activateInBackground(sessionId, signal) },
     )
     this.listState = new ApiSessionList(ctx, this.listWorkSliceMs, this.listProjectionExcludeKeys, this.listCacheReadConcurrency)
     await this.commands.initialize()
@@ -291,10 +305,20 @@ export class SessionController extends TypertRemoteService {
    * @param observation - owned lease disposed by the background task; callers retain their own lease separately.
    */
   private promote(observation: SessionObservation): void {
-    const sessionId = observation.header.id
-    const task = (async () => {
+    this.inBackground(observation.header.id, async () => {
       using ownedObservation = observation
-      const result = await this.agents.resolveObservedAgent(ownedObservation)
+      return await this.agents.resolveObservedAgent(ownedObservation)
+    })
+  }
+
+  /**
+   * Run one background activation; teardown waits for it, and a failure is reported instead of thrown.
+   * @param sessionId - Session being activated.
+   * @param resolve - resumes its Agent.
+   */
+  private inBackground(sessionId: SessionId, resolve: () => Promise<ApiSessionAgentResult>): void {
+    const task = (async () => {
+      const result = await resolve()
       if ('error' in result) this.ctx.emit('api-session/error', sessionId, result.error.message)
     })().catch((error: unknown) => {
       this.ctx.logger.error(`session-controller: background activation for "${sessionId}" failed: ${errorChain(error)}`)
@@ -303,6 +327,25 @@ export class SessionController extends TypertRemoteService {
     void task.finally(() => { this.promotions.delete(task) })
   }
 
+  /**
+   * Resume one Session's Agent in the background once its window-first opening stayed followed for
+   * `windowActivationDelayMs`.
+   * @param sessionId - ordinary Session the opening addressed.
+   * @param signal - the follow's signal; a follower that leaves first resumes nothing.
+   */
+  private activateInBackground(sessionId: SessionId, signal: AbortSignal): void {
+    const settle = (): void => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', settle)
+      this.pendingActivations.delete(settle)
+    }
+    const timer = setTimeout(() => {
+      settle()
+      this.inBackground(sessionId, () => this.agents.resolveAgent(sessionId))
+    }, this.windowActivationDelayMs)
+    signal.addEventListener('abort', settle, { once: true })
+    this.pendingActivations.add(settle)
+  }
   /**
    * Resolve or resume one ordinary Session for another Host API domain.
    * @param sessionId - Session identity whose Agent owns the operation.

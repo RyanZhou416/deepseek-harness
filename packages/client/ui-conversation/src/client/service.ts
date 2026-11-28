@@ -300,11 +300,16 @@ export class ConversationController extends Service implements IConversation {
         else ownership.retiredUnobserved = true
       },
     })
+    // Inline image encoding holds the main thread, so the echo paints first; other content is sent at once instead of
+    // waiting for a frame that a busy conversation render delays.
+    const encodesImages = attachments.some(attachment => attachment.kind === 'image' && !imageReceipts.has(attachment.id))
     let content: Parameters<SessionFace['prompt']>[0]
     try {
-      await nextPaint()
+      if (encodesImages) await nextPaint()
       const uploaded = await serializeAttachments()
       content = [...uploaded, ...(text === '' ? [] : [{ type: 'text' as const, text }])]
+      // A submission withdrawn while its content was prepared retires its echo instead of prompting.
+      signal?.throwIfAborted()
     } catch (error) {
       submission.abandon()
       throw error

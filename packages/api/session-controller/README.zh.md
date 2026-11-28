@@ -86,7 +86,7 @@ Client 的首次 `follow`、重连首屏与 `loadOlder()` 至少请求 50 条以
 
 `follow` 或 `page` 请求带 `elideDetails: true` 时，返回同样的事件，但清空 Chat 视图不渲染的细节字段：`assistant/message` 的 `stream` 变为 `[]` 并移除其 `message.source.replayState`，移除 `request/header` 的 `header.tools`，`llm/request-record` 的 `systemBlocks` 变为 `[]`；每条被改动的记录带 `elided: true`。页切点先按完整记录选定，因此该页覆盖相同的事件；follow 只对其 opening 快照应用。没有消费者持有 `SessionFace.requireEventDetails()` 时，Web Client 在 opening 与更早页上请求该选项；持有者会用完整页读取重新读取窗口中被省略的条目。在真实数据目录的六个会话上测得，0.77 至 1.95 MB 的 opening 帧缩小到 0.30 至 1.37 MB：多数缩小 55% 至 65%，历史以工具结果为主的会话缩小 30%。
 
-打开或分页非实时普通 Session 的历史时，会先向 `sessionQuery.readWindow` 请求一个有界存储窗口，再读取完整日志。在发起该请求之前，它通过 `sessionPersistence.stat` 探测存储来源：报告的 `sizeBytes` 低于 2 MiB 时，Host 跳过窗口并从完整来源服务该页，因为在此类日志上无索引尾部扫描可能比一次完整读取更贵。stat 缺失、无大小或失败时保留窗口路径；实时 Session 与历史缺口修复不进行该探测。follow opening 会为该页请求足够的尾部事件（至少 2,000 个，`maxMessages` 加轮次余量，上限 10,000），窗口携带完整检查点投影块时附带该块（以更大窗口上限重试时，在相同游标下复用首次读取的块），否则省略该块——window-first 打开的首帧不提供精确切点，客户端缓存提示保持非精确，直到按需精确读取完成——像完整观察一样校验窗口 header 与地址，并使用相同的分页规则构建帧；绝不实体化 prepared 历史 Session。历史页只用一个尾部窗口校验空尾部切点，并用结束于该页自身切点的 `beforeSeq` 窗口服务旧页，因此一页只解码自己需要回看的那一段，而不是切点与调用方 cursor 之间的全部存储行；该窗口只读取后端选中的索引段，因此重复 `loadOlder()` 页不会重读完整日志，但第一个向后页会一次性构建 generation 索引：在实测 161 MB Session 上含构建共 2.17 秒，而预热页为 156–183 毫秒、完整读取为 3.20 秒。预热页通过一次批量帧解码器遍历解码所选段：2,000 行页实测 5.2 毫秒，而此前逐帧 await 解码为 111.9 毫秒。窗口校验所选行，而非完整日志的跨事件关系。若窗口不可用、未覆盖所请求切点，或后端无法服务 `beforeSeq`（包括 seeded 与历史日志），Host 会读取完整来源并返回相同结果。实时 Session、subagent 地址以及历史缺口修复保留来源路径，不增加窗口请求。cursor、`hasMore`、页对齐与投影 `asOfSeq` 语义保持不变。
+打开或分页非实时普通 Session 的历史时，会先向 `sessionQuery.readWindow` 请求一个有界存储窗口，再读取完整日志。在发起该请求之前，它通过 `sessionPersistence.stat` 探测存储来源：报告的 `sizeBytes` 低于 2 MiB 时，Host 跳过窗口并从完整来源服务该页，因为在此类日志上无索引尾部扫描可能比一次完整读取更贵。stat 缺失、无大小或失败时保留窗口路径；实时 Session 与历史缺口修复不进行该探测。follow opening 会为该页请求足够的尾部事件（至少 2,000 个，`maxMessages` 加轮次余量，上限 10,000），窗口携带完整检查点投影块时附带该块（以更大窗口上限重试时，在相同游标下复用首次读取的块），否则省略该块——window-first 打开的首帧不提供精确切点，客户端缓存提示保持非精确，直到按需精确读取完成——像完整观察一样校验窗口 header 与地址，并使用相同的分页规则构建帧；绝不实体化 prepared 历史 Session。由于这种打开不加载完整日志，带 `activate` 的 follow 只在首帧送达、且 follow 保持打开 `windowActivationDelayMs`（默认 2,000 毫秒）之后，才在后台恢复该 Session 的 Agent；在此之前离开的读者不会恢复任何东西，因此只是浏览经过某个会话不会加载其日志。第一条提示词因此只需等待恢复的剩余部分：在真实数据副本上，打开 121 MB 会话 4.5 秒后发送的提示词在 1.7 至 2.5 秒内被接收，此前为 3.2 秒；恢复 731 MB 会话仍需约 15 秒。历史页只用一个尾部窗口校验空尾部切点，并用结束于该页自身切点的 `beforeSeq` 窗口服务旧页，因此一页只解码自己需要回看的那一段，而不是切点与调用方 cursor 之间的全部存储行；该窗口只读取后端选中的索引段，因此重复 `loadOlder()` 页不会重读完整日志，但第一个向后页会一次性构建 generation 索引：在实测 161 MB Session 上含构建共 2.17 秒，而预热页为 156–183 毫秒、完整读取为 3.20 秒。预热页通过一次批量帧解码器遍历解码所选段：2,000 行页实测 5.2 毫秒，而此前逐帧 await 解码为 111.9 毫秒。窗口校验所选行，而非完整日志的跨事件关系。若窗口不可用、未覆盖所请求切点，或后端无法服务 `beforeSeq`（包括 seeded 与历史日志），Host 会读取完整来源并返回相同结果。实时 Session、subagent 地址以及历史缺口修复保留来源路径，不增加窗口请求。cursor、`hasMore`、页对齐与投影 `asOfSeq` 语义保持不变。
 
 队列编辑仅允许用非空文本替换待处理内容。
 
@@ -126,6 +126,7 @@ GUI 模型选择要求确切提供方／模型对出现在可用目录中；不�
 | `projectionPageFoldConcurrency` | `1` | `session.projectionPage` 为检查点缺少分页键的 Session 同时进行的存储日志折叠数，取正整数；其余读取排队等待 |
 | `historyPageMaxBytes` | `0` | 一页可携带的记录序列化 UTF-8 字节数，超过即在消息组边界停止；`0` 关闭上限 |
 | `historyWindowFirstEvents` | `256` | 设置了 `historyPageMaxBytes` 时，一页或一次 opening 的首次有界存储窗口读取请求的事件数，取正整数；上界不足以到达日志最后一个轮次分界时，要再读一次同一段尾部 |
+| `windowActivationDelayMs` | `2000` | 带 `activate` 的 window-first 打开在后台恢复 Agent 之前需保持 follow 的毫秒数；`0` 表示首帧送达后立即恢复 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-api-session-controller)是所有受支持字段及其 JSDoc 的完整来源。
 

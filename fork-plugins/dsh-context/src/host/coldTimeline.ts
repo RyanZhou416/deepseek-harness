@@ -10,6 +10,7 @@ import { createContextHeadersDefinition, headerRecordsOf } from './headers'
 import { asRecord } from './record'
 import { leaseOf, observeOf, revisionOf } from './postRoute'
 import { serviceIdentityOf } from './serviceIdentity'
+import { storedSizeOf } from './storedSize'
 
 export interface ColdTimelineStateEntry {
   state: TimelineState
@@ -25,18 +26,6 @@ export interface ColdTimelineStatesOptions {
   maxLogBytes?: number
 }
 
-/** Stored artifact size of one cold Session, or undefined when persistence cannot tell. */
-async function storedSizeOf(ctx: Context, sessionId: string): Promise<number | undefined> {
-  const persistence = asRecord(ctx.get('sessionPersistence'))
-  if (typeof persistence?.stat !== 'function') return undefined
-  try {
-    const size = asRecord(await (persistence.stat as (id: string) => Promise<unknown>).call(persistence, sessionId))?.sizeBytes
-    return typeof size === 'number' && Number.isFinite(size) ? size : undefined
-  } catch {
-    // An unreadable size leaves the read to the fold path, which reports its own failure.
-    return undefined
-  }
-}
 
 export interface ColdTimelineStates {
   touch(): void

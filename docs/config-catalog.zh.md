@@ -329,6 +329,12 @@ export interface Config {
    * read of the same tail.
    */
   readonly historyWindowFirstEvents?: number
+  /**
+   * Milliseconds a window-first opening of a stored Session must stay followed before its Agent is resumed in the
+   * background, so the first prompt does not wait for the complete log to load. A follower that leaves earlier
+   * resumes nothing; resuming a large log occupies the Host's main thread for seconds.
+   */
+  readonly windowActivationDelayMs?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-session-controller -->

@@ -14,6 +14,8 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import SessionController from '../src/index.ts'
 import type { ApiSessionAgentController } from '../src/agent.ts'
 import { createSessionTestController, testSessionPersistence } from './test-remote.ts'
+import type { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionWindowRead } from '@deepseek-ai/dsh-session-query'
 
 const defaults = {
   defaultModelSelection: () => ({ provider: 'fixture', model: 'fixture-model' }),
@@ -282,6 +284,63 @@ describe('SessionController facade', () => {
     },
   )
 
+  /** A large stored Session served by a window-first opening; resuming it opens the stored log, which the probe rejects. */
+  async function windowActivationFixture(windowActivationDelayMs: number) {
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    await mountAgentLoopTestDependencies(ctx)
+    await mountAgentLoopTestHarness(ctx)
+    const sessionId = brandString<SessionId>('window-activation')
+    const open = vi.fn((_id: SessionId, _access: string) => Promise.reject(new Error('activation probe')))
+    const header: SessionHeader = {
+      version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: 1, cwd: '/workspace', isSeeded: false,
+    }
+    ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
+      list: () => Promise.resolve([header]),
+      stat: () => Promise.resolve({
+        header, revision: brandString<SessionPersistenceRevision>('large'), sizeBytes: 8 * 1024 * 1024,
+      }),
+      inspect: () => Promise.resolve({ meta: header, inheritedEventCount: SessionLogOffset(0), events: [] }),
+      open,
+    }) as never)
+    const controller = await createSessionTestController(ctx, {
+      ...defaults, historyPageMaxBytes: 2 * 1024 * 1024, windowActivationDelayMs,
+    })
+    const apiError = vi.fn()
+    ctx.on('api-session/error', apiError)
+    const scratch = ctx.sessions.create(brandString<SessionId>('window-events'), { meta: { cwd: '/workspace' } })
+    const events = [scratch.append('turn/start', { turn: 1 }), scratch.append('turn/end', { turn: 1, reason: { kind: 'completed' } })]
+    const readWindow = vi.spyOn(ctx.sessionQuery, 'readWindow').mockResolvedValue({
+      window: { header, inheritedEventCount: SessionLogOffset(0), events, cursor: 1, hasMore: false },
+    } satisfies SessionWindowRead)
+    const observe = vi.spyOn(ctx.sessionQuery, 'observeSession')
+    const abort = new AbortController()
+    const iterator = controller.follow({ address: { kind: 'session', sessionId }, activate: true }, abort.signal)[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'snapshot' } })
+    expect(readWindow).toHaveBeenCalled()
+    expect(observe).not.toHaveBeenCalled()
+    expect(open).not.toHaveBeenCalled()
+    return { ctx, sessionId, open, apiError, abort, waiting: iterator.next() }
+  }
+
+  it('resumes the Agent after delivering a window-first opening of a large stored Session', async () => {
+    const f = await windowActivationFixture(0)
+    await vi.waitFor(() => { expect(f.apiError).toHaveBeenCalledWith(f.sessionId, expect.stringContaining('activation probe')) })
+    expect(f.open.mock.calls[0]?.[0]).toBe(f.sessionId)
+    f.abort.abort()
+    await expect(f.waiting).resolves.toMatchObject({ done: true })
+  })
+
+  it('resumes nothing when the reader leaves or the controller closes within the activation delay', async () => {
+    const left = await windowActivationFixture(30)
+    left.abort.abort()
+    await expect(left.waiting).resolves.toMatchObject({ done: true })
+    const closed = await windowActivationFixture(30)
+    await closed.ctx.fiber.dispose()
+    await new Promise(resolve => setTimeout(resolve, 80))
+    expect(left.open).not.toHaveBeenCalled()
+    expect(closed.open).not.toHaveBeenCalled()
+  })
   it('waits for an admitted background promotion during teardown', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)

@@ -258,6 +258,9 @@ describe('SessionController subagent catalog', () => {
 
   it('resolves and validates the first stored window bound', () => {
     expect(SessionController.Config({}).historyWindowFirstEvents).toBe(256)
+    expect(SessionController.Config({}).windowActivationDelayMs).toBe(2000)
+    expect(SessionController.Config({ windowActivationDelayMs: 0 }).windowActivationDelayMs).toBe(0)
+    expect(() => SessionController.Config({ windowActivationDelayMs: -1 })).toThrow()
     expect(SessionController.Config({ historyWindowFirstEvents: 1_024 }).historyWindowFirstEvents).toBe(1_024)
     for (const historyWindowFirstEvents of [0, -1, 1.5]) {
       expect(() => SessionController.Config({ historyWindowFirstEvents })).toThrow()

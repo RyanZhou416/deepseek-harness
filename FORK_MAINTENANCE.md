@@ -2198,6 +2198,17 @@ The cold opening now takes about 2.0–2.2 s with the main thread mostly idle af
 **Preservation rule.** Keep stored projection pages behind running openings and bounded, keep the selected-key fold, keep the retry baseline reuse, keep the retention delay restated with the base row's values, and keep the Sidebar's own release out of the error log.
 
 **Focused verification.** `node_modules/.bin/vitest run packages/api/session-controller/tests/fold-slots.host.spec.ts`, `packages/api/session-controller/tests/subagent-catalog.host.spec.ts` (`folds only the paged key ...`), `packages/api/session-controller/tests/session-history-paging.host.spec.ts` (`grows a follow opening ...`, `reads the baseline again when the log grows between window reads`), `packages/session-query/session-query/tests/observation.spec.ts` (`computes only the selected keys ...`), `packages/session-query/session-query/tests/window-read.spec.ts`, and `packages/client/ui-sidebar-right/tests/session-views.client.spec.ts` (`does not report its own release ...`).
+### Prompt latency and Host stalls around large Sessions
+
+Measured on the real home copy with a loopback mock model, opening 0.2 MB, 121 MB and 731 MB Sessions and sending a prompt 4.5 s later, idle and with 12 Sessions streaming. The browser main thread stayed free (no long task in any idle window, under 300 ms during an opening); the stalls were on the Host:
+
+- A window-first opening never resumed the Agent, so the first prompt resumed it and waited for the complete log. `session-controller` now resumes it in the background after the opening frame is delivered and the follow stayed open for `windowActivationDelayMs` (default 2,000 ms); a follower that leaves first resumes nothing. 121 MB Session: prompt admitted in 1.7 to 2.5 s instead of 3.2 s. Resuming a 731 MB Session still takes about 15 s of mostly main-thread work (log decode, checkpoint policy, first tool-history build).
+- Once a large Session became live, dsh-context's detail shadow folded its whole log on the main thread (about 8 s for 121 MB). The shadow now follows `coldFoldMaxLogBytes`; above it the detail route serves the stored tail window.
+- The composer waited for one animation frame before every send; under a busy conversation render that frame took about 300 ms. Only an inline image encoding now waits for it.
+
+**Preservation rule.** Keep the delayed background activation after window-first openings, the shadow cap and the image-only paint yield.
+
+**Focused verification.** `node_modules/.bin/vitest run packages/api/session-controller/tests/controller.host.spec.ts packages/api/session-controller/tests/session-history-paging.host.spec.ts packages/client/ui-conversation/tests/service-orchestration.client.spec.ts`; dsh-context `tests/host/detailShadow.spec.ts tests/host/detail.spec.ts`.
 ### Reading reminders recover from a terminally failed stream
 
 Upstream `ui-session-status` left reading disabled after a terminal reading-stream failure until the page reloaded. A Host profile change that restarts `SessionStatusService` (a settings or plugin change, or a hot reload) ends the stream, and a reconnect that reaches the service while it is closing or not yet registered fails terminally. The green unread dots then stayed frozen: opening a Session sent no acknowledgement and **Mark as read** rejected before sending, while a page reload cleared them. `installReading` now opens a new stream after 1 s, doubling the wait up to 30 s, and resets the wait when a baseline arrives.

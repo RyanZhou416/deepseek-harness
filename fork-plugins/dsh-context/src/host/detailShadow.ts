@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { FoldBounds } from './config'
 import { type ColdReadGate } from './coldRead'
+import { storedSizeOf } from './storedSize'
 import { applyTimeline } from './fold'
 import { createTimelineState, stateBytesOf } from './foldState'
 import { asRecord } from './record'
@@ -68,13 +69,18 @@ export class DetailShadow {
   private ticks = 0
   private sweepTimer: ReturnType<typeof setTimeout> | null = null
 
+  /**
+   * @param maxLogBytes - stored log bytes above which a Session is not seeded and reads as unavailable, as a cold
+   *   Session of that size does; 0 seeds every size.
+   */
   constructor(
-    ctx: Context,
+    private readonly ctx: Context,
     private readonly bounds: FoldBounds,
     private readonly coldReads: ColdReadGate,
     private readonly observeOf: () => ((id: string, options: unknown) => Promise<unknown>) | undefined,
     private readonly sweepMs: number = IDLE_SWEEP_MS,
     private readonly bytesMax: number = SHADOW_BYTES_MAX,
+    private readonly maxLogBytes = 0,
   ) {
     ctx.effect(() => () => {
       this.entries.clear()
@@ -119,6 +125,13 @@ export class DetailShadow {
   async stateOf(id: string): Promise<TimelineState | null> {
     this.touch()
     let entry = this.entries.get(id)
+    if (entry === undefined && this.maxLogBytes > 0) {
+      // Seeding decodes and folds the whole stored log on the Host's main thread: a 121 MB log held it for about
+      // 12 s. Above the cap the routes answer without live detail values, as for a cold Session of that size.
+      const size = await storedSizeOf(this.ctx, id)
+      if (size !== undefined && size > this.maxLogBytes) return null
+      entry = this.entries.get(id)
+    }
     if (entry === undefined) {
       entry = { state: null, buffer: [], seed: null, touched: this.ticks, stateSeq: -1 }
       this.entries.set(id, entry)

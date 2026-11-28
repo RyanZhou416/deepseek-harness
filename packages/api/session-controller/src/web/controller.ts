@@ -27,6 +27,8 @@ export class WebController {
    * @param narrow - narrows one pushed projection block to the values each unit allows in a push. The Session
    *   Controller supplies its registry-backed narrowing; a caller that aggregates raw observations, such as a
    *   focused transport harness, keeps the complete values.
+   * @param activate - background activation requested after a window-first opening is delivered, which carries no
+   *   prepared Session to promote; it receives the follow signal, which aborts when the reader leaves.
    */
   constructor(
     private readonly ctx: Context,
@@ -35,6 +37,7 @@ export class WebController {
     private readonly maxPageBytes = 0,
     private readonly retain: (sessionId: SessionId) => () => void = () => () => {},
     private readonly narrow: <T extends Record<string, unknown>>(values: T) => T = values => values,
+    private readonly activate?: (sessionId: SessionId, signal: AbortSignal) => void,
   ) {}
 
   /**
@@ -120,6 +123,11 @@ export class WebController {
       yield opening
     } finally {
       releaseRetention()
+    }
+    // A window-first opening read no complete log, so the Agent the request asked for is resumed only now: the
+    // opening frame is already delivered, and the first prompt does not wait for the whole log to load.
+    if (observation === undefined && request.activate === true && !signal.aborted && opening.header.origin !== 'subagent') {
+      this.activate?.(sessionId, signal)
     }
     yield* queue.items()
   }

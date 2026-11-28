@@ -186,8 +186,8 @@ export function watchDetailChannel(
             if (state === undefined) return reply({ ok: true, value: null })
             if (headOnly) return reply({ ok: true, value: headPayloadOf(state, cost, headViewsOf(ctx, session)) })
             const detailState = await shadow.stateOf(sessionId)
-            if (detailState === null) return reply({ ok: true, value: null })
-            return reply({ ok: true, value: withDetailCost(cost, buildTimelineDetail(detailState, bounds)) })
+            if (detailState !== null) return reply({ ok: true, value: withDetailCost(cost, buildTimelineDetail(detailState, bounds)) })
+            // Above the fold cap a live Session's detail comes from its stored tail window, as for a cold one.
           }
           const query = c.get('sessionQuery') as SessionQueryFace | undefined
           const value = await serveCold(ctx, query, sessionId, bounds, coldReads, payloads, {

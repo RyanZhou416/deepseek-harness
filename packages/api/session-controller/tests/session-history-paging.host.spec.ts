@@ -704,6 +704,39 @@ describe('Session history page byte budget', () => {
     expect(page).toEqual(await loadPage(history, request, LIVE))
   })
 
+  it('activates a window-first opening in the background only after delivering it and only while it is followed', async () => {
+    const backend = await realBackend({ turns: 350, batchSize: 300 })
+    const activate = vi.fn()
+    const promote = vi.fn()
+    const history = new SessionHistoryController(backend.ctx, promote, undefined, 4 * 1024 * 1024, undefined, activate)
+    const follow = (activateRequested: boolean) => {
+      const abort = new AbortController()
+      const iterator = history.follow(
+        { address: { kind: 'session', sessionId: STORED }, ...activateRequested ? { activate: true } : {} },
+        abort.signal,
+      )[Symbol.asyncIterator]()
+      return { abort, iterator }
+    }
+
+    const requested = follow(true)
+    expect(await requested.iterator.next()).toMatchObject({ value: { type: 'snapshot' } })
+    expect(activate).not.toHaveBeenCalled()
+    const pending = requested.iterator.next()
+    await vi.waitFor(() => { expect(activate).toHaveBeenCalledExactlyOnceWith(STORED, expect.any(AbortSignal)) })
+    requested.abort.abort()
+    await pending
+
+    for (const [activateRequested, leaveFirst] of [[false, false], [true, true]] as const) {
+      const other = follow(activateRequested)
+      expect(await other.iterator.next()).toMatchObject({ value: { type: 'snapshot' } })
+      if (leaveFirst) other.abort.abort()
+      const next = other.iterator.next()
+      if (!leaveFirst) other.abort.abort()
+      await next
+    }
+    expect(activate).toHaveBeenCalledOnce()
+    expect(promote).not.toHaveBeenCalled()
+  })
   it('starts a follow opening at the configured first window bound', async () => {
     const backend = await realBackend({ turns: 350, batchSize: 300 })
     const history = budgetedHistory(backend, 4 * 1024 * 1024, 1_024)

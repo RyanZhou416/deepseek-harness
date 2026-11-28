@@ -927,13 +927,15 @@ describe('sendSession submission echo', () => {
     await b.runtime.dispose()
   })
 
-  it('yields through the macrotask fallback where no frame clock exists', async () => {
+  it('sends text without waiting for a frame', async () => {
     const b = await echoBench()
-    vi.stubGlobal('requestAnimationFrame', undefined)
+    const frame = vi.fn(() => 1)
+    vi.stubGlobal('requestAnimationFrame', frame)
     try {
       const session = b.runtime.sessions.binding('s1')!.session
       await expect(b.root.sendSession(session, '纯文本', [], 'queue')).resolves.toEqual({ kind: 'success' })
       expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: '纯文本' }], 'queue', undefined, 'req-echo')
+      expect(frame).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()
       b.restore()
@@ -941,15 +943,35 @@ describe('sendSession submission echo', () => {
     await b.runtime.dispose()
   })
 
-  it('bounds the paint yield when the frame clock is throttled', async () => {
+  it('yields through the macrotask fallback before encoding an image where no frame clock exists', async () => {
+    const b = await echoBench()
+    vi.stubGlobal('requestAnimationFrame', undefined)
+    try {
+      const session = b.runtime.sessions.binding('s1')!.session
+      const [attachment] = b.root.createDrafts(session.sessionId, [
+        new File([Uint8Array.of(1)], 'fallback.png', { type: 'image/png' }),
+      ], INLINE_IMAGES)
+      await expect(b.root.sendSession(session, '纯文本', [attachment!.id], 'queue')).resolves.toEqual({ kind: 'success' })
+      expect(b.prompt).toHaveBeenCalledWith(expect.arrayContaining([{ type: 'text', text: '纯文本' }]), 'queue', undefined, 'req-echo')
+    } finally {
+      vi.unstubAllGlobals()
+      b.restore()
+    }
+    await b.runtime.dispose()
+  })
+
+  it('bounds the paint yield before encoding an image when the frame clock is throttled', async () => {
     const b = await echoBench()
     vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
     try {
       const session = b.runtime.sessions.binding('s1')!.session
-      const sending = b.root.sendSession(session, '后台标签', [], 'queue')
+      const [attachment] = b.root.createDrafts(session.sessionId, [
+        new File([Uint8Array.of(1)], 'throttled.png', { type: 'image/png' }),
+      ], INLINE_IMAGES)
+      const sending = b.root.sendSession(session, '后台标签', [attachment!.id], 'queue')
       expect(b.prompt).not.toHaveBeenCalled()
       await expect(sending).resolves.toEqual({ kind: 'success' })
-      expect(b.prompt).toHaveBeenCalledWith([{ type: 'text', text: '后台标签' }], 'queue', undefined, 'req-echo')
+      expect(b.prompt).toHaveBeenCalledWith(expect.arrayContaining([{ type: 'text', text: '后台标签' }]), 'queue', undefined, 'req-echo')
     } finally {
       vi.unstubAllGlobals()
       b.restore()
