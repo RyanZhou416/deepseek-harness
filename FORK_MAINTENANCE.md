@@ -2204,7 +2204,7 @@ Measured on the real home copy with a loopback mock model, opening 0.2 MB, 121 M
 
 - A window-first opening never resumed the Agent, so the first prompt resumed it and waited for the complete log. `session-controller` now resumes it in the background after the opening frame is delivered and the follow stayed open for `windowActivationDelayMs` (default 2,000 ms); a follower that leaves first resumes nothing. 121 MB Session: prompt admitted in 1.7 to 2.5 s instead of 3.2 s. Resuming a 731 MB Session still takes about 15 s of mostly main-thread work (log decode, checkpoint policy, first tool-history build).
 - Once a large Session became live, dsh-context's detail shadow folded its whole log on the main thread (about 8 s for 121 MB). The shadow now follows `coldFoldMaxLogBytes`; above it the detail route serves the stored tail window.
-- The composer waited for one animation frame before every send; under a busy conversation render that frame took about 300 ms. Only an inline image encoding now waits for it.
+- The composer waited for one animation frame before every send. Only an inline image encoding now waits for it. This did not measurably change sending: from Enter to the prompt request took 0.32 to 0.35 s before and after on a small Session, a delay not yet attributed.
 
 **Preservation rule.** Keep the delayed background activation after window-first openings, the shadow cap and the image-only paint yield.
 
